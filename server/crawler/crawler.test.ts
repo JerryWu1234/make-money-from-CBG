@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { parseListing, timestamp } from "./listing";
 import { CrawlStore } from "./store";
-import { crawl, locateCheckpoint, type CrawlSource } from "./runner";
+import { crawl } from "./runner";
+import { locateCheckpoint } from "./resume";
+import type { CrawlSource } from "./types";
 import {
   ListingChangedError,
   type Checkpoint,

@@ -26,6 +26,13 @@ export interface ListingPage {
   order: string;
   items: Listing[];
 }
+export interface CrawlSource {
+  prepare: () => Promise<ListingPage>;
+  page: (number: number) => Promise<ListingPage>;
+  onShelf: (item: Listing) => Promise<boolean>;
+  hover: (item: Listing) => Promise<Listing>;
+  detail: (item: Listing) => Promise<RoleDetail>;
+}
 export interface TabSnapshot {
   name: string;
   text: string;

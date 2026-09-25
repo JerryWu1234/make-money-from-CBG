@@ -15,8 +15,10 @@ async function moduleUrl(file, replacements = {}) {
 const listingUrl = await moduleUrl("server/crawler/listing.ts");
 const viewportUrl = await moduleUrl("server/viewport.ts");
 const compactUrl = await moduleUrl("server/crawler/compact.ts");
+const typesUrl = await moduleUrl("server/crawler/types.ts");
 const pageUrl = await moduleUrl("server/crawler/page.ts", {
   "./listing": listingUrl,
+  "./types": typesUrl,
   "../viewport": viewportUrl,
 });
 const petsUrl = await moduleUrl("server/crawler/pets.ts", { "../viewport": viewportUrl });
@@ -33,7 +35,12 @@ const { prepareList, gotoPage, hoverListing, readListings } = await import(pageU
 const { CrawlStore } = await import(
   await moduleUrl("server/crawler/store.ts", { "./compact": compactUrl })
 );
-const { crawl } = await import(await moduleUrl("server/crawler/runner.ts"));
+const { crawl } = await import(
+  await moduleUrl("server/crawler/runner.ts", {
+    "./resume": await moduleUrl("server/crawler/resume.ts"),
+    "./types": typesUrl,
+  })
+);
 const { createHiddenPage } = await import(
   await moduleUrl("server/session.ts", {
     "./chrome": await moduleUrl("server/chrome.ts"),
@@ -209,7 +216,7 @@ try {
       .prepare("SELECT length(source_gzip) AS n FROM role_sources WHERE listing_key=?")
       .get("367:a").n > 0,
   );
-  assert.ok(states.some((state) => state.strategy?.includes("二分")));
+  assert.ok(states.some((state) => state.strategy?.includes("继续补齐后段历史商品")));
   assert.ok(states.some((state) => state.page === 2 && state.itemsOnPage === 2));
   assert.ok(states.some((state) => state.itemIndex === 2));
   assert.ok(MAIN_TABS.every((name) => progress.some((message) => message.endsWith(`：${name}`))));

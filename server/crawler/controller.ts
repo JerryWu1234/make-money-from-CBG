@@ -1,9 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { getBrowser, getCbgPage, createHiddenPage } from "../session";
 import { checkCbgStatus } from "../cbg";
-import { collectDetail, isOnShelf } from "./detail";
-import { gotoPage, hoverListing, pace, prepareList } from "./page";
 import { crawl } from "./runner";
+import { createCrawlSource } from "./source";
 import { CrawlStore } from "./store";
 import type { CrawlStatus } from "./types";
 import { diagnostics, watchWorkPage } from "../diagnostics";
@@ -104,78 +103,26 @@ export async function startCrawl() {
     }
   }, 30000);
   void (async () => {
-    log("page.create_start", { kind: "detail" });
     const detailPage = await createHiddenPage(await getBrowser());
     watchWorkPage(detailPage, "detail");
     log("page.ready", { kind: "detail" });
     detailPage.setDefaultTimeout(15000);
     try {
       await crawl(
-        {
-          prepare: async () => {
-            log("list.prepare_start");
-            const result = await prepareList(page, control.signal, preferredOrder);
-            log("list.prepared", {
-              page: result.page,
-              totalPages: result.totalPages,
-              order: result.order,
-              count: result.items.length,
-            });
-            return result;
+        createCrawlSource({
+          listPage: page,
+          detailPage,
+          signal: control.signal,
+          preferredOrder,
+          onDetailProgress: (message) => {
+            status = { ...status, detailProgress: message };
           },
-          page: async (number) => {
-            log("list.page_start", { requestedPage: number });
-            const result = await gotoPage(page, number, control.signal);
-            log("list.page_ready", {
-              requestedPage: number,
-              actualPage: result.page,
-              totalPages: result.totalPages,
-              count: result.items.length,
-            });
-            return result;
-          },
-          onShelf: async (item) => {
-            log("anchor.check_start", { key: item.key });
-            await pace(control.signal, 600, 400);
-            const onShelf = await isOnShelf(detailPage, item, control.signal);
-            log("anchor.checked", { key: item.key, onShelf });
-            return onShelf;
-          },
-          hover: async (item) => {
-            log("listing.inspect", {
-              key: item.key,
-              page: status.page,
-              itemIndex: status.itemIndex,
-            });
-            return hoverListing(page, item, control.signal);
-          },
-          detail: async (item) => {
-            const detailStarted = Date.now();
-            log("detail.start", { key: item.key });
-            await pace(control.signal, 1800, 1700);
-            const result = await collectDetail(detailPage, item, control.signal, (message) => {
-              status = { ...status, detailProgress: message };
-              log("detail.progress", { key: item.key, message });
-            });
-            log("detail.collected", {
-              key: item.key,
-              durationMs: Date.now() - detailStarted,
-              tabs: result.tabs.map((tab) => ({
-                name: tab.name,
-                petCount: tab.petCount,
-                capturedPets: tab.pets?.length,
-                items: tab.items?.length,
-              })),
-            });
-            return result;
-          },
-        },
+          log,
+        }),
         db,
         control.signal,
         (update) => {
           status = { ...status, ...update };
-          const { current: _current, ...progress } = update;
-          log("crawl.progress", progress);
         },
       );
     } finally {
