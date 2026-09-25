@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { CrawlStatus } from "../server/crawler/types";
 import { RoleDetailDrawer } from "./RoleDetailDrawer";
 import { SavedRoleList, displayTime } from "./SavedRoleList";
+import { ScanSchedulePanel } from "./ScanSchedulePanel";
 import { replaceSavedRecordKey, savedRecordKey } from "./saved-view-state";
 
 type Status = CrawlStatus & {
@@ -96,6 +97,7 @@ export function CrawlPanel({
           暂停采集
         </button>
       </div>
+      <ScanSchedulePanel />
       {error && (
         <p role="alert" className="error-message">
           {error}

@@ -60,7 +60,7 @@ export async function crawl(
     }
   }
   const plan = await prepareCrawlPages(source, store, signal, publish);
-  const { numbers, backfillComplete } = plan;
+  const { numbers, backfillComplete, fullScan } = plan;
   let end = plan.end;
   let previousSignature = "";
   let previousPage = 0;
@@ -85,7 +85,11 @@ export async function crawl(
       itemsOnPage: page.items.length,
       itemIndex: 0,
       detailProgress: undefined,
-      message: backfillComplete ? "正在检查列表新增商品…" : "正在续采断点之后的商品…",
+      message: fullScan
+        ? "正在逐页核对完整列表…"
+        : backfillComplete
+          ? "正在检查列表新增商品…"
+          : "正在续采断点之后的商品…",
     });
     let items = page.items;
     const handled = new Set<string>();

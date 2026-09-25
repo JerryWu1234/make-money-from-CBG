@@ -17,6 +17,16 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   let detailReads = 0;
   let browserStatusReads = 0;
   let browserOpenReads = 0;
+  const schedule = {
+    config: { startTime: "09:00", endTime: "23:00", intervalMinutes: 30 },
+    mode: "disabled",
+    issue: null,
+    nextRunAt: null as number | null,
+    lastRun: null,
+    state: "disabled",
+    message: "定时计划未启用。",
+    timezone: "Asia/Shanghai",
+  };
 
   // 构建产物与接口都由测试本地提供；其他来源一律阻断。
   await page.context().route("**/*", async (route) => {
@@ -32,6 +42,22 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
         body = rolePage(Number(url.searchParams.get("page") || 1), ready);
       } else if (url.pathname === "/api/crawl/status") {
         body = crawlStatus(running, ready);
+      } else if (url.pathname === "/api/scan/status") {
+        body = schedule;
+      } else if (url.pathname === "/api/scan/configure") {
+        schedule.config = route.request().postDataJSON();
+        body = schedule;
+      } else if (url.pathname === "/api/scan/enable") {
+        schedule.mode = "enabled";
+        schedule.state = "waiting_window";
+        schedule.message = "等待下一个运行时段。";
+        schedule.nextRunAt = new Date("2026-09-25T14:00:00Z").getTime();
+        body = schedule;
+      } else if (url.pathname === "/api/scan/disable") {
+        schedule.mode = "disabled";
+        schedule.state = "disabled";
+        schedule.nextRunAt = null;
+        body = schedule;
       } else if (url.pathname === "/api/browser/status") {
         browserStatusReads++;
         body = browserStatus;
@@ -55,6 +81,18 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   });
 
   await page.goto("http://cbg-ui.test");
+  const plan = page.getByRole("region", { name: "定时循环扫描" });
+  await plan.getByLabel("开始时间").fill("22:00");
+  await plan.getByLabel("结束时间").fill("02:00");
+  await plan.getByLabel("每轮间隔（分钟）").fill("10");
+  await plan.getByRole("button", { name: "启用计划" }).click();
+  await expect(plan).toContainText("计划状态：等待时段");
+  await plan.screenshot({ path: testInfo.outputPath("scan-schedule.png") });
+  assert.deepEqual(schedule.config, {
+    startTime: "22:00",
+    endTime: "02:00",
+    intervalMinutes: 10,
+  });
   await page.getByText("正在读取标签 4/7：召唤兽/孩子", { exact: true }).waitFor();
   assert.match(await page.locator(".crawl-panel").innerText(), /本页进度：1 \/ 15/);
   await page.getByRole("button", { name: /角色a ·/ }).click();
@@ -149,6 +187,8 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   const statusReadsBeforeReload = browserStatusReads;
   const openReadsBeforeReload = browserOpenReads;
   await page.reload();
+  await expect(plan.getByLabel("开始时间")).toHaveValue("22:00");
+  await expect(plan.getByLabel("结束时间")).toHaveValue("02:00");
   await page.getByRole("button", { name: /角色k45 ·/ }).waitFor();
   await page.getByRole("dialog").waitFor();
   assert.ok(browserStatusReads > statusReadsBeforeReload, "reload should verify browser status");

@@ -1,6 +1,7 @@
 import { defineConfig } from "vite-plus";
 import react from "@vitejs/plugin-react";
 import { apiMiddleware } from "./server/api";
+import { initializeScanSchedule, shutdownScanSchedule } from "./server/crawler/schedule";
 
 export default defineConfig({
   plugins: [
@@ -9,6 +10,10 @@ export default defineConfig({
       name: "cbg-browser-middleware",
       configureServer(server) {
         server.middlewares.use(apiMiddleware);
+        if (server.httpServer) {
+          initializeScanSchedule();
+          server.httpServer.once("close", () => void shutdownScanSchedule());
+        }
       },
     },
   ],

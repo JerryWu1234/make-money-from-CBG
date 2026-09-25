@@ -21,6 +21,7 @@ let status: CrawlStatus = {
   database: "data/cbg.sqlite",
 };
 let abort: AbortController | null = null;
+let activeRun: Promise<CrawlStatus> | null = null;
 export function crawlStatus() {
   return {
     ...status,
@@ -30,10 +31,13 @@ export function crawlStatus() {
   };
 }
 export function isCrawling() {
-  return status.running;
+  return status.running || activeRun !== null;
+}
+export function crawlCompletion() {
+  return activeRun;
 }
 export function clearCrawl() {
-  if (status.running) throw new Error("请先暂停采集，再清空数据");
+  if (isCrawling()) throw new Error("请先暂停采集，再清空数据");
   store().clear();
   status = {
     running: false,
@@ -55,19 +59,19 @@ export function savedRecords(page: number, pageSize: number) {
   return store().records(page, pageSize);
 }
 export function stopCrawl() {
-  diagnostics.record("crawl.stop_requested", { running: status.running });
+  diagnostics.record("crawl.stop_requested", { running: isCrawling() });
   abort?.abort(new Error("用户暂停采集"));
   if (status.running) status = { ...status, message: "正在暂停，当前已入库数据和断点会保留…" };
   return crawlStatus();
 }
 export async function startCrawl() {
-  if (status.running) return crawlStatus();
+  if (isCrawling()) return crawlStatus();
   const current = await checkCbgStatus();
   const page = getCbgPage();
   if (current.running || !current.isLoggedIn || !page || current.workflowStep !== "completed")
     throw new Error("请先完成登录并进入角色列表，再开始采集");
   // checkCbgStatus 会等待页面，返回后再查一次，防止双击并发启动。
-  if (status.running) return crawlStatus();
+  if (isCrawling()) return crawlStatus();
   const owner = randomUUID();
   const db = store();
   const preferredOrder = db.checkpoint()?.order;
@@ -102,7 +106,7 @@ export async function startCrawl() {
       control.abort(error);
     }
   }, 30000);
-  void (async () => {
+  const runningTask = (async () => {
     const detailPage = await createHiddenPage(await getBrowser());
     watchWorkPage(detailPage, "detail");
     log("page.ready", { kind: "detail" });
@@ -158,6 +162,11 @@ export async function startCrawl() {
         skipped: status.skipped,
         durationMs: Date.now() - started,
       });
+    });
+  activeRun = runningTask
+    .then(() => crawlStatus())
+    .finally(() => {
+      activeRun = null;
     });
   return crawlStatus();
 }

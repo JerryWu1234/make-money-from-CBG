@@ -602,6 +602,38 @@ describe("二分定位与动态翻页", () => {
     ]);
     expect(vi.mocked(src.page).mock.calls.map(([page]) => page)).not.toContain(5);
   });
+  it("历史锚点全部失效时全量核对，但不重开已完整商品详情", async () => {
+    const db = memory();
+    const old = item(3);
+    db.observe(old);
+    db.save(old, detail(old), checkpoint(old, 3));
+    db.markBackfillComplete();
+    const pages = [[item(1)], [item(2)], [old], [item(4)]];
+    const src = source(pages);
+    src.onShelf = vi.fn(async () => false);
+
+    await crawl(src, db, signal(), () => {});
+    expect(vi.mocked(src.page).mock.calls.map(([page]) => page)).toEqual([1, 2, 3, 4]);
+    expect(vi.mocked(src.detail).mock.calls.map(([row]) => row.key)).toEqual([
+      pages[0][0].key,
+      pages[1][0].key,
+      pages[3][0].key,
+    ]);
+  });
+  it("排序不能确认时全量核对，不按旧页码截断", async () => {
+    const db = memory();
+    const old = item(3);
+    db.observe(old);
+    db.save(old, detail(old), checkpoint(old, 3));
+    db.markBackfillComplete();
+    const src = source([[item(1)], [item(2)], [old], [item(4)]]);
+    const originalPrepare = src.prepare;
+    src.prepare = async () => ({ ...(await originalPrepare()), order: "推荐排序" });
+
+    await crawl(src, db, signal(), () => {});
+    expect(vi.mocked(src.page).mock.calls.map(([page]) => page)).toEqual([1, 2, 3, 4]);
+    expect(vi.mocked(src.detail).mock.calls.map(([row]) => row.key)).toContain(item(4).key);
+  });
   it("翻页无变化会停止，不重复循环；暂停不会继续点击", async () => {
     const db = memory(),
       src = source([[item(1)], [item(1)]]);
