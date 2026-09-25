@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ScanScheduleConfig } from "./schedule-time";
+import { ALL_WEEKDAYS, parseScanScheduleConfig, type ScanScheduleConfig } from "./schedule-time";
 
 export type ScheduleMode = "disabled" | "enabled" | "suspended";
 export interface ScanRunSummary {
@@ -23,8 +23,12 @@ export interface StoredSchedule {
 }
 
 const DEFAULT_CONFIG: ScanScheduleConfig = {
-  startTime: "09:00",
-  endTime: "23:00",
+  days: ALL_WEEKDAYS.map((weekday) => ({
+    weekday,
+    enabled: true,
+    startTime: "09:00",
+    endTime: "23:00",
+  })),
   intervalMinutes: 30,
 };
 
@@ -54,8 +58,23 @@ export class ScanScheduleStore {
         "SELECT config_json,mode,issue,next_run_at,last_run_json FROM scan_schedule WHERE id=1",
       )
       .get()!;
+    const saved = JSON.parse(String(row.config_json)) as Record<string, unknown>;
+    const selected = Array.isArray(saved.weekdays) ? saved.weekdays : ALL_WEEKDAYS;
+    const config = parseScanScheduleConfig(
+      Array.isArray(saved.days)
+        ? saved
+        : {
+            days: ALL_WEEKDAYS.map((weekday) => ({
+              weekday,
+              enabled: selected.includes(weekday),
+              startTime: saved.startTime,
+              endTime: saved.endTime,
+            })),
+            intervalMinutes: saved.intervalMinutes,
+          },
+    );
     return {
-      config: JSON.parse(String(row.config_json)) as ScanScheduleConfig,
+      config,
       mode: String(row.mode) as ScheduleMode,
       issue: row.issue == null ? null : String(row.issue),
       nextRunAt: row.next_run_at == null ? null : Number(row.next_run_at),

@@ -1,12 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import type { StoredSchedule } from "../server/crawler/schedule-store";
+import type { ScanDayConfig } from "../server/crawler/schedule-time";
 
 type ScheduleStatus = StoredSchedule & {
   state: string;
   message: string;
   timezone: string;
 };
-type Draft = { startTime: string; endTime: string; intervalMinutes: string };
+type Draft = {
+  days: ScanDayConfig[];
+  intervalMinutes: string;
+};
+
+const WEEKDAYS = [
+  [1, "周一"],
+  [2, "周二"],
+  [3, "周三"],
+  [4, "周四"],
+  [5, "周五"],
+  [6, "周六"],
+  [7, "周日"],
+] as const;
 
 const LABELS: Record<string, string> = {
   disabled: "已关闭",
@@ -26,8 +40,12 @@ function localTime(value: number | string, timezone: string) {
 export function ScanSchedulePanel() {
   const [status, setStatus] = useState<ScheduleStatus | null>(null);
   const [draft, setDraft] = useState<Draft>({
-    startTime: "09:00",
-    endTime: "23:00",
+    days: WEEKDAYS.map(([weekday]) => ({
+      weekday,
+      enabled: true,
+      startTime: "09:00",
+      endTime: "23:00",
+    })),
     intervalMinutes: "30",
   });
   const [busy, setBusy] = useState(false);
@@ -50,8 +68,7 @@ export function ScanSchedulePanel() {
           setStatus(data);
           if (!dirty.current)
             setDraft({
-              startTime: data.config.startTime,
-              endTime: data.config.endTime,
+              days: data.config.days,
               intervalMinutes: String(data.config.intervalMinutes),
             });
           setTransportError("");
@@ -97,8 +114,7 @@ export function ScanSchedulePanel() {
       const updated = await request(command);
       if (command === "configure") dirty.current = false;
       setDraft({
-        startTime: updated.config.startTime,
-        endTime: updated.config.endTime,
+        days: updated.config.days,
         intervalMinutes: String(updated.config.intervalMinutes),
       });
     } catch (cause) {
@@ -108,11 +124,19 @@ export function ScanSchedulePanel() {
     }
   };
 
+  const updateDay = (weekday: number, changes: Partial<ScanDayConfig>) => {
+    dirty.current = true;
+    setDraft((current) => ({
+      ...current,
+      days: current.days.map((day) => (day.weekday === weekday ? { ...day, ...changes } : day)),
+    }));
+  };
+
   return (
     <section className="scan-schedule" aria-label="定时循环扫描">
       <h3>定时循环扫描</h3>
       <p className="status-note">
-        每天在设置的时段内循环扫描；一轮结束后等待指定间隔。到结束时间时，当前轮会完成。
+        勾选每周运行日，并分别设置各天几点开始、几点结束。每轮结束后等待指定间隔；到结束时间时，当前轮会完成。
       </p>
       <form
         className="scan-schedule-form"
@@ -121,30 +145,48 @@ export function ScanSchedulePanel() {
           void action("configure");
         }}
       >
-        <label>
-          开始时间
-          <input
-            type="time"
-            value={draft.startTime}
-            onChange={(event) => {
-              dirty.current = true;
-              setDraft({ ...draft, startTime: event.target.value });
-            }}
-            required
-          />
-        </label>
-        <label>
-          结束时间
-          <input
-            type="time"
-            value={draft.endTime}
-            onChange={(event) => {
-              dirty.current = true;
-              setDraft({ ...draft, endTime: event.target.value });
-            }}
-            required
-          />
-        </label>
+        <fieldset className="scan-schedule-weekdays">
+          <legend>每周运行日（已选 {draft.days.filter((day) => day.enabled).length} 天）</legend>
+          <div className="scan-schedule-day-rows">
+            {WEEKDAYS.map(([weekday, label]) => {
+              const day = draft.days.find((entry) => entry.weekday === weekday)!;
+              return (
+                <div className="scan-schedule-day-row" key={weekday}>
+                  <label className="scan-schedule-day-toggle">
+                    <input
+                      type="checkbox"
+                      checked={day.enabled}
+                      onChange={(event) => updateDay(weekday, { enabled: event.target.checked })}
+                    />
+                    {label}
+                  </label>
+                  <label>
+                    开始时间
+                    <input
+                      type="time"
+                      aria-label={`${label}开始时间`}
+                      value={day.startTime}
+                      disabled={!day.enabled}
+                      onChange={(event) => updateDay(weekday, { startTime: event.target.value })}
+                      required
+                    />
+                  </label>
+                  <label>
+                    结束时间
+                    <input
+                      type="time"
+                      aria-label={`${label}结束时间`}
+                      value={day.endTime}
+                      disabled={!day.enabled}
+                      onChange={(event) => updateDay(weekday, { endTime: event.target.value })}
+                      required
+                    />
+                  </label>
+                </div>
+              );
+            })}
+          </div>
+        </fieldset>
         <label>
           每轮间隔（分钟）
           <input

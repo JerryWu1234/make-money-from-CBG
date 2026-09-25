@@ -8,7 +8,19 @@ import { ScanScheduleStore } from "./schedule-store";
 import { nextScanTime, parseScanScheduleConfig, scanWindow } from "./schedule-time";
 import type { CrawlStatus } from "./types";
 
-const config = { startTime: "22:00", endTime: "02:00", intervalMinutes: 10 };
+const config = {
+  days: [1, 2, 3, 4, 5, 6, 7].map((weekday) => ({
+    weekday,
+    enabled: true,
+    startTime: "22:00",
+    endTime: "02:00",
+  })),
+  intervalMinutes: 10,
+};
+const only = (...weekdays: number[]) => ({
+  ...config,
+  days: config.days.map((day) => ({ ...day, enabled: weekdays.includes(day.weekday) })),
+});
 const local = (day: number, hour: number, minute = 0) =>
   new Date(2026, 8, day, hour, minute).getTime();
 const browser = (ready: boolean): OpenCbgResult => ({
@@ -84,8 +96,22 @@ describe("定时窗口", () => {
   it("验证时间和最短间隔，允许跨午夜", () => {
     expect(parseScanScheduleConfig(config)).toEqual(config);
     expect(() => parseScanScheduleConfig({ ...config, intervalMinutes: 9 })).toThrow("10 分钟");
-    expect(() => parseScanScheduleConfig({ ...config, endTime: "22:00" })).toThrow("不能相同");
-    expect(() => parseScanScheduleConfig({ ...config, startTime: "25:00" })).toThrow("格式错误");
+    expect(() => parseScanScheduleConfig(only())).toThrow("至少选择一天");
+    expect(() =>
+      parseScanScheduleConfig({
+        ...config,
+        days: config.days.map((day) => (day.weekday === 1 ? { ...day, endTime: "22:00" } : day)),
+      }),
+    ).toThrow("周一开始和结束时间不能相同");
+    expect(() =>
+      parseScanScheduleConfig({
+        ...config,
+        days: config.days.map((day) => (day.weekday === 1 ? { ...day, startTime: "25:00" } : day)),
+      }),
+    ).toThrow("周一开始时间格式错误");
+    expect(() => parseScanScheduleConfig({ ...config, days: config.days.slice(1) })).toThrow(
+      "完整设置",
+    );
   });
 
   it("跨午夜窗口在次日 02:00 截止", () => {
@@ -98,6 +124,31 @@ describe("定时窗口", () => {
   it("本轮结束加间隔越过窗口时，排到下次开始", () => {
     expect(nextScanTime(local(26, 1, 45), config)).toBe(local(26, 1, 45));
     expect(nextScanTime(local(26, 2, 5), config)).toBe(local(26, 22));
+  });
+
+  it("只在选中的星期启动，跨午夜时间仍属于开始那天", () => {
+    const weekly = only(1, 3, 5);
+    expect(scanWindow(local(25, 23), weekly).active).toBe(true); // 周五
+    expect(scanWindow(local(26, 1), weekly).active).toBe(true); // 周六凌晨仍是周五窗口
+    expect(scanWindow(local(26, 22), weekly).active).toBe(false);
+    expect(nextScanTime(local(26, 2), weekly)).toBe(local(28, 22)); // 下周一
+    expect(nextScanTime(local(28, 1), only(7))).toBe(local(28, 1));
+  });
+
+  it("各运行日按自己的开始和结束时间执行", () => {
+    const weekly = {
+      ...only(1, 3),
+      days: only(1, 3).days.map((day) =>
+        day.weekday === 1
+          ? { ...day, startTime: "09:00", endTime: "11:00" }
+          : day.weekday === 3
+            ? { ...day, startTime: "13:00", endTime: "15:00" }
+            : day,
+      ),
+    };
+    expect(scanWindow(local(28, 10), weekly).active).toBe(true); // 周一
+    expect(scanWindow(local(30, 10), weekly).active).toBe(false); // 周三尚未开始
+    expect(nextScanTime(local(30, 10), weekly)).toBe(local(30, 13));
   });
 });
 
@@ -133,6 +184,29 @@ describe("计划持久化", () => {
     }
   });
 
+  it("读取旧版每日计划时补齐全部运行日", () => {
+    const store = new ScanScheduleStore(":memory:");
+    created.push(store);
+    store.db
+      .prepare("UPDATE scan_schedule SET config_json=? WHERE id=1")
+      .run(JSON.stringify({ startTime: "09:00", endTime: "23:00", intervalMinutes: 30 }));
+    expect(store.read().config.days.every((day) => day.enabled)).toBe(true);
+    store.db.prepare("UPDATE scan_schedule SET config_json=? WHERE id=1").run(
+      JSON.stringify({
+        weekdays: [1, 3, 5],
+        startTime: "09:00",
+        endTime: "23:00",
+        intervalMinutes: 30,
+      }),
+    );
+    expect(
+      store
+        .read()
+        .config.days.filter((day) => day.enabled)
+        .map((day) => day.weekday),
+    ).toEqual([1, 3, 5]);
+  });
+
   it("两个本地服务只能有一个计划调度者，过期后可接管", () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "cbg-scan-lock-"));
     const filename = path.join(directory, "scan.sqlite");
@@ -154,6 +228,20 @@ describe("计划持久化", () => {
 });
 
 describe("扫描调度", () => {
+  it("未选中日不准备浏览器，到所选日的开始时间才启动", async () => {
+    const store = memoryStore();
+    store.setConfig(only(1));
+    let now = local(25, 22); // 周五
+    const fake = fakeDriver();
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    expect(fake.driver.browserStatus).not.toHaveBeenCalled();
+    expect(store.read().nextRunAt).toBe(local(28, 22));
+    now = local(28, 22); // 下周一
+    await scheduler.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
   it("时段内重启立即运行一轮，完成后按间隔再运行且不重叠", async () => {
     const store = memoryStore();
     store.setNextRunAt(local(26, 1, 30));

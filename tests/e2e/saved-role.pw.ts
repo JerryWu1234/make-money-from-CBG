@@ -18,7 +18,15 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   let browserStatusReads = 0;
   let browserOpenReads = 0;
   const schedule = {
-    config: { startTime: "09:00", endTime: "23:00", intervalMinutes: 30 },
+    config: {
+      days: [1, 2, 3, 4, 5, 6, 7].map((weekday) => ({
+        weekday,
+        enabled: true,
+        startTime: "09:00",
+        endTime: "23:00",
+      })),
+      intervalMinutes: 30,
+    },
     mode: "disabled",
     issue: null,
     nextRunAt: null as number | null,
@@ -82,17 +90,29 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
 
   await page.goto("http://cbg-ui.test");
   const plan = page.getByRole("region", { name: "定时循环扫描" });
-  await plan.getByLabel("开始时间").fill("22:00");
-  await plan.getByLabel("结束时间").fill("02:00");
+  for (const day of ["周二", "周四", "周六", "周日"])
+    await plan.getByRole("checkbox", { name: day }).uncheck();
+  await plan.getByLabel("周一开始时间").fill("22:00");
+  await plan.getByLabel("周一结束时间").fill("02:00");
+  await plan.getByLabel("周三开始时间").fill("10:00");
+  await plan.getByLabel("周三结束时间").fill("12:00");
+  await plan.getByLabel("周五开始时间").fill("15:00");
+  await plan.getByLabel("周五结束时间").fill("18:00");
   await plan.getByLabel("每轮间隔（分钟）").fill("10");
   await plan.getByRole("button", { name: "启用计划" }).click();
   await expect(plan).toContainText("计划状态：等待时段");
   await plan.screenshot({ path: testInfo.outputPath("scan-schedule.png") });
-  assert.deepEqual(schedule.config, {
-    startTime: "22:00",
-    endTime: "02:00",
-    intervalMinutes: 10,
-  });
+  assert.equal(schedule.config.intervalMinutes, 10);
+  assert.deepEqual(
+    schedule.config.days
+      .filter((day) => day.enabled)
+      .map(({ weekday, startTime, endTime }) => ({ weekday, startTime, endTime })),
+    [
+      { weekday: 1, startTime: "22:00", endTime: "02:00" },
+      { weekday: 3, startTime: "10:00", endTime: "12:00" },
+      { weekday: 5, startTime: "15:00", endTime: "18:00" },
+    ],
+  );
   await page.getByText("正在读取标签 4/7：召唤兽/孩子", { exact: true }).waitFor();
   assert.match(await page.locator(".crawl-panel").innerText(), /本页进度：1 \/ 15/);
   await page.getByRole("button", { name: /角色a ·/ }).click();
@@ -187,8 +207,10 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   const statusReadsBeforeReload = browserStatusReads;
   const openReadsBeforeReload = browserOpenReads;
   await page.reload();
-  await expect(plan.getByLabel("开始时间")).toHaveValue("22:00");
-  await expect(plan.getByLabel("结束时间")).toHaveValue("02:00");
+  await expect(plan.getByLabel("周一开始时间")).toHaveValue("22:00");
+  await expect(plan.getByLabel("周一结束时间")).toHaveValue("02:00");
+  await expect(plan.getByLabel("周三开始时间")).toHaveValue("10:00");
+  await expect(plan.getByRole("checkbox", { name: "周二" })).not.toBeChecked();
   await page.getByRole("button", { name: /角色k45 ·/ }).waitFor();
   await page.getByRole("dialog").waitFor();
   assert.ok(browserStatusReads > statusReadsBeforeReload, "reload should verify browser status");

@@ -1167,6 +1167,48 @@ body {
   color: var(--text-primary);
   font: inherit;
 }
+.scan-schedule-weekdays {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.scan-schedule-weekdays legend {
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+}
+.scan-schedule-day-rows {
+  display: grid;
+  gap: 8px;
+}
+.scan-schedule-day-row {
+  display: grid;
+  grid-template-columns: minmax(70px, 0.7fr) repeat(2, minmax(110px, 1fr));
+  gap: 8px;
+  align-items: end;
+}
+.scan-schedule-day-row .scan-schedule-day-toggle {
+  flex-direction: row;
+  align-items: center;
+  padding-bottom: 10px;
+  cursor: pointer;
+}
+.scan-schedule-day-toggle input {
+  width: auto;
+  margin: 0;
+}
+.scan-schedule-day-row input:disabled {
+  opacity: 0.5;
+}
+@media (max-width: 550px) {
+  .scan-schedule-day-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .scan-schedule-day-row .scan-schedule-day-toggle {
+    grid-column: 1 / -1;
+    padding-bottom: 0;
+  }
+}
 .scan-schedule-actions {
   grid-column: 1 / -1;
   display: flex;
