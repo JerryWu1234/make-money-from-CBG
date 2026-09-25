@@ -37,6 +37,7 @@ vp dev
 vp test
 vp check
 vp run build
+vp run test:e2e
 node scripts/browser-regression.mjs
 node scripts/window-regression.mjs
 ```
@@ -80,8 +81,10 @@ node scripts/window-regression.mjs
 ```bash
 vp test
 node scripts/crawl-regression.mjs
-node scripts/crawl-ui-regression.mjs
+vp run test:e2e
 ```
+
+`test:e2e` 使用隔离的 Chrome 和 `tests/fixtures/` 中的固定模拟数据验证已采集角色界面；页面资源来自本地构建产物，所有请求均被测试拦截，不连接真实藏宝阁或本地采集 API。
 
 详情页选择器基于提供的截图、标签名称及公开展示脚本实现。需要在真实已登录页面上确认当前网站版本；标签结构不匹配时会报告缺失并暂停，而非将不完整内容标记成功。
 
@@ -91,4 +94,4 @@ node scripts/crawl-ui-regression.mjs
 - `server/cbg.ts` 管理登录查询任务，`server/workflow.ts` 执行网站页面流程。
 - `server/crawler/controller.ts` 管理采集任务的启动、暂停和状态；`source.ts` 对接真实浏览器页面。
 - `server/crawler/resume.ts` 选择续采锚点和页码；`runner.ts` 负责补采、逐页处理和完成状态；`store.ts` 管理 SQLite 数据与断点。
-- `server/diagnostics.ts` 保存可导出的关键运行日志；`scripts/*-regression.mjs` 用隔离浏览器验证流程。
+- `server/diagnostics.ts` 保存可导出的关键运行日志；`tests/e2e/` 验证角色界面，`tests/fixtures/` 保存模拟数据；`scripts/*-regression.mjs` 用隔离浏览器验证其余流程。
