@@ -1,0 +1,35 @@
+{
+  "name": "make-money-from-cbg",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev",
+    "build": "tsc && vp build",
+    "preview": "vp preview",
+    "check": "vp check",
+    "test:e2e": "vp run build && playwright test"
+  },
+  "dependencies": {
+    "playwright-core": "^1.63.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "^22.13.9",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^6.1.1",
+    "typescript": "~5.7.3",
+    "vite": "catalog:",
+    "vite-plus": "catalog:"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.25.0",
+      "onFail": "download"
+    }
+  }
+}
