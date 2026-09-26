@@ -39,7 +39,7 @@ function localTime(value: number | string, timezone: string) {
   return new Date(value).toLocaleString("zh-CN", { timeZone: timezone, hour12: false });
 }
 
-export function ScanSchedulePanel() {
+export function ScanSchedulePanel({ ready, running }: { ready: boolean; running: boolean }) {
   const [status, setStatus] = useState<ScheduleStatus | null>(null);
   const [draft, setDraft] = useState<Draft>({
     scheduleType: "weekly",
@@ -274,7 +274,7 @@ export function ScanSchedulePanel() {
             <button
               type="button"
               className="btn-primary"
-              disabled={busy || !status}
+              disabled={busy || !status || running || (status.mode === "disabled" && !ready)}
               onClick={() => void action("enable")}
             >
               {status?.mode === "suspended" ? "恢复计划" : "启用计划"}
@@ -282,6 +282,9 @@ export function ScanSchedulePanel() {
           )}
         </div>
       </form>
+      {status?.mode === "disabled" && !ready && (
+        <p className="status-note">请先登录藏宝阁并进入角色列表，再启用计划。</p>
+      )}
       {error && (
         <p role="alert" className="error-message">
           {error}
