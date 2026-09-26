@@ -1,7 +1,13 @@
 import { openCbg, checkCbgStatus } from "../cbg";
 import { diagnostics } from "../diagnostics";
 import type { OpenCbgResult } from "../types";
-import { crawlCompletion, startCrawl, stopCrawl } from "./controller";
+import {
+  crawlActivity,
+  startCrawl,
+  stopCrawl,
+  type ActiveCrawl,
+  type CrawlStartResult,
+} from "./controller";
 import { ScanScheduleStore, type ScanRunSummary } from "./schedule-store";
 import {
   localDateKey,
@@ -25,16 +31,16 @@ type ScheduleState =
 interface ScanDriver {
   browserStatus: () => Promise<OpenCbgResult>;
   openBrowser: () => OpenCbgResult;
-  startCrawl: () => Promise<CrawlStatus>;
-  crawlCompletion: () => Promise<CrawlStatus> | null;
+  startCrawl: (canStart: () => boolean) => Promise<CrawlStartResult>;
+  crawlActivity: () => ActiveCrawl | null;
   stopCrawl: (reason?: "time_limit") => CrawlStatus;
 }
 
 const driver: ScanDriver = {
   browserStatus: checkCbgStatus,
   openBrowser: openCbg,
-  startCrawl,
-  crawlCompletion,
+  startCrawl: (canStart) => startCrawl("scheduled", canStart),
+  crawlActivity,
   stopCrawl,
 };
 
@@ -45,9 +51,9 @@ export class ScanScheduler {
   private pendingTick: Promise<void> | null = null;
   private watchedRun: Promise<CrawlStatus> | null = null;
   private runStartedAt: number | null = null;
-  private runIsScheduled = false;
   private limitStopRequested = false;
   private loginRequested = false;
+  private retryBrowserOnResume = false;
   private closed = false;
 
   constructor(
@@ -86,6 +92,7 @@ export class ScanScheduler {
     const prior = this.store.read();
     if (prior.mode === "suspended" && prior.lastScheduledDate === localDateKey(this.now()))
       this.store.setLastScheduledDate(null);
+    this.retryBrowserOnResume = prior.mode === "suspended";
     this.store.setMode("enabled");
     this.loginRequested = false;
     const row = this.store.read();
@@ -100,6 +107,7 @@ export class ScanScheduler {
     this.state = "disabled";
     this.message = "定时计划已关闭。";
     this.loginRequested = false;
+    this.retryBrowserOnResume = false;
     diagnostics.record("scan.disabled");
     return this.status();
   }
@@ -154,9 +162,13 @@ export class ScanScheduler {
       this.message = row.issue || "定时计划已暂停，请处理后手动恢复。";
       return;
     }
-    const existing = this.scan.crawlCompletion();
+    const existing = this.scan.crawlActivity();
     if (existing) {
-      this.watchRun(existing, now, false);
+      if (existing.origin === "manual") {
+        this.closeForManualCrawl();
+        return;
+      }
+      this.watchRun(existing.completion, existing.startedAt);
       return;
     }
     const due = nextScanTime(now, row.config, row.lastScheduledDate);
@@ -180,6 +192,23 @@ export class ScanScheduler {
       return;
     }
     const ready = !browser.running && browser.isLoggedIn && browser.workflowStep === "completed";
+    const browserIssue =
+      browser.error?.message ||
+      (browser.workflowStep === "error" ||
+      /^(登录已失效|后台工作页已关闭|无法读取后台工作页)/.test(browser.message)
+        ? browser.message
+        : null);
+    if (browserIssue) {
+      if (this.retryBrowserOnResume) {
+        this.retryBrowserOnResume = false;
+        this.loginRequested = true;
+        this.scan.openBrowser();
+        this.state = "waiting_login";
+        this.message = "正在重新准备藏宝阁角色列表…";
+      } else this.suspend(browserIssue);
+      return;
+    }
+    this.retryBrowserOnResume = false;
     if (!ready) {
       this.state = "waiting_login";
       this.message = browser.running
@@ -195,7 +224,16 @@ export class ScanScheduler {
     }
     this.loginRequested = false;
     try {
-      await this.scan.startCrawl();
+      const attempt = await this.scan.startCrawl(() => this.store.read().mode === "enabled");
+      if (!attempt.started) {
+        if (attempt.activity?.origin === "manual") this.closeForManualCrawl();
+        else if (attempt.activity)
+          this.watchRun(attempt.activity.completion, attempt.activity.startedAt);
+        return;
+      }
+      if (!attempt.activity) throw new Error("采集任务未能启动");
+      this.store.setLastScheduledDate(localDateKey(attempt.activity.startedAt));
+      this.watchRun(attempt.activity.completion, attempt.activity.startedAt);
     } catch (error) {
       if (error instanceof Error && /已有另一个本地服务正在采集/.test(error.message)) {
         this.state = "waiting_lock";
@@ -204,20 +242,15 @@ export class ScanScheduler {
       }
       throw error;
     }
-    if (this.store.read().mode !== "enabled") {
-      this.scan.stopCrawl();
-      return;
-    }
-    const run = this.scan.crawlCompletion();
-    if (!run) throw new Error("采集任务未能启动");
-    const started = this.now();
-    this.store.setLastScheduledDate(localDateKey(started));
-    this.watchRun(run, started, true);
+  }
+
+  private closeForManualCrawl() {
+    this.disable();
+    this.message = "手动采集正在运行，定时计划已关闭。";
   }
 
   private checkDuration(now: number, config: ScanScheduleConfig) {
     if (
-      this.runIsScheduled &&
       !this.limitStopRequested &&
       this.runStartedAt !== null &&
       config.maxDurationMinutes !== null &&
@@ -233,10 +266,9 @@ export class ScanScheduler {
       : "正在执行本次扫描。";
   }
 
-  private watchRun(run: Promise<CrawlStatus>, started: number, scheduled: boolean) {
+  private watchRun(run: Promise<CrawlStatus>, started: number) {
     this.watchedRun = run;
     this.runStartedAt = started;
-    this.runIsScheduled = scheduled;
     this.limitStopRequested = false;
     this.setNextRunAt(null);
     this.state = "running";
@@ -248,7 +280,6 @@ export class ScanScheduler {
       .finally(() => {
         this.watchedRun = null;
         this.runStartedAt = null;
-        this.runIsScheduled = false;
         this.limitStopRequested = false;
         if (!this.closed) void this.tick();
       });
@@ -257,8 +288,7 @@ export class ScanScheduler {
   private finishRun(result: CrawlStatus, started: number) {
     if (this.closed) return;
     const ended = this.now();
-    const hitTimeLimit =
-      this.runIsScheduled && this.limitStopRequested && result.phase === "paused";
+    const hitTimeLimit = this.limitStopRequested && result.phase === "paused";
     const summary: ScanRunSummary = {
       startedAt: new Date(started).toISOString(),
       endedAt: new Date(ended).toISOString(),
@@ -283,12 +313,7 @@ export class ScanScheduler {
       return;
     }
     const todayStart = scheduledStartForDay(new Date(ended), row.config);
-    if (
-      this.runIsScheduled &&
-      todayStart !== null &&
-      todayStart <= ended &&
-      row.lastScheduledDate !== localDateKey(ended)
-    )
+    if (todayStart !== null && todayStart <= ended && row.lastScheduledDate !== localDateKey(ended))
       this.store.setLastScheduledDate(localDateKey(ended));
     this.setNextRunAt(nextScanTime(ended, row.config, this.store.read().lastScheduledDate));
     this.state = "waiting_next";

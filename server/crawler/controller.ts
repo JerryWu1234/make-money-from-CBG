@@ -21,7 +21,18 @@ let status: CrawlStatus = {
   database: "data/cbg.sqlite",
 };
 let abort: AbortController | null = null;
-let activeRun: Promise<CrawlStatus> | null = null;
+export type CrawlOrigin = "manual" | "scheduled";
+export interface ActiveCrawl {
+  origin: CrawlOrigin;
+  startedAt: number;
+  completion: Promise<CrawlStatus>;
+}
+export interface CrawlStartResult {
+  status: CrawlStatus;
+  started: boolean;
+  activity: ActiveCrawl | null;
+}
+let activeRun: ActiveCrawl | null = null;
 export function crawlStatus() {
   return {
     ...status,
@@ -33,7 +44,7 @@ export function crawlStatus() {
 export function isCrawling() {
   return status.running || activeRun !== null;
 }
-export function crawlCompletion() {
+export function crawlActivity() {
   return activeRun;
 }
 export function clearCrawl() {
@@ -64,14 +75,19 @@ export function stopCrawl(reason: "manual" | "time_limit" = "manual") {
   if (status.running) status = { ...status, message: "正在暂停，当前已入库数据和断点会保留…" };
   return crawlStatus();
 }
-export async function startCrawl() {
-  if (isCrawling()) return crawlStatus();
+export async function startCrawl(
+  origin: CrawlOrigin = "manual",
+  canStart?: () => boolean,
+): Promise<CrawlStartResult> {
+  if (isCrawling()) return { status: crawlStatus(), started: false, activity: activeRun };
   const current = await checkCbgStatus();
   const page = getCbgPage();
   if (current.running || !current.isLoggedIn || !page || current.workflowStep !== "completed")
     throw new Error("请先完成登录并进入角色列表，再开始采集");
   // checkCbgStatus 会等待页面，返回后再查一次，防止双击并发启动。
-  if (isCrawling()) return crawlStatus();
+  if (isCrawling()) return { status: crawlStatus(), started: false, activity: activeRun };
+  if (origin === "scheduled" && canStart && !canStart())
+    return { status: crawlStatus(), started: false, activity: null };
   const owner = randomUUID();
   const db = store();
   const preferredOrder = db.checkpoint()?.order;
@@ -163,10 +179,12 @@ export async function startCrawl() {
         durationMs: Date.now() - started,
       });
     });
-  activeRun = runningTask
+  const completion = runningTask
     .then(() => crawlStatus())
     .finally(() => {
       activeRun = null;
     });
-  return crawlStatus();
+  const activity = { origin, startedAt: started, completion };
+  activeRun = activity;
+  return { status: crawlStatus(), started: true, activity };
 }

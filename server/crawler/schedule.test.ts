@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { OpenCbgResult } from "../types";
+import type { ActiveCrawl, CrawlOrigin } from "./controller";
 import { ScanScheduler } from "./schedule";
 import { ScanScheduleStore } from "./schedule-store";
 import { localDateKey, nextScanTime, parseScanScheduleConfig } from "./schedule-time";
@@ -69,29 +70,43 @@ function memoryStore(value: ScanScheduleConfig = config) {
   return store;
 }
 
-function fakeDriver() {
-  let active: Promise<CrawlStatus> | null = null;
+function fakeDriver(now: () => number) {
+  let active: ActiveCrawl | null = null;
   let finish: ((value: CrawlStatus) => void) | null = null;
   let ready = true;
+  let browserResult: OpenCbgResult | null = null;
+  const begin = (origin: CrawlOrigin) => {
+    const completion = new Promise<CrawlStatus>((resolve) => {
+      finish = resolve;
+    });
+    const activity: ActiveCrawl = { origin, startedAt: now(), completion };
+    active = activity;
+    void completion.finally(() => {
+      if (active === activity) active = null;
+    });
+    return { status: crawlStatus("collecting"), started: true, activity };
+  };
   const driver = {
-    browserStatus: vi.fn(async () => browser(ready)),
+    browserStatus: vi.fn(async () => browserResult ?? browser(ready)),
     openBrowser: vi.fn(() => browser(false)),
-    startCrawl: vi.fn(async () => {
-      active = new Promise<CrawlStatus>((resolve) => {
-        finish = resolve;
-      });
-      void active.finally(() => {
-        active = null;
-      });
-      return crawlStatus("collecting");
+    startCrawl: vi.fn(async (canStart: () => boolean) => {
+      if (active) return { status: crawlStatus("collecting"), started: false, activity: active };
+      if (!canStart()) return { status: crawlStatus("idle"), started: false, activity: null };
+      return begin("scheduled");
     }),
-    crawlCompletion: vi.fn(() => active),
+    crawlActivity: vi.fn(() => active),
     stopCrawl: vi.fn((_reason?: "time_limit") => crawlStatus("paused")),
   };
   return {
     driver,
+    startManual() {
+      return begin("manual");
+    },
     setReady(value: boolean) {
       ready = value;
+    },
+    setBrowserResult(value: OpenCbgResult | null) {
+      browserResult = value;
     },
     finish(value: CrawlStatus) {
       if (!finish) throw new Error("没有运行中的扫描");
@@ -262,10 +277,94 @@ describe("计划持久化", () => {
 });
 
 describe("扫描调度", () => {
+  it("已有手动采集时关闭计划，不计入定时轮次或执行时长", async () => {
+    const store = memoryStore(daily(1));
+    let now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    fake.startManual();
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    expect(store.read().mode).toBe("disabled");
+    expect(store.read().lastScheduledDate).toBeNull();
+    expect(fake.driver.startCrawl).not.toHaveBeenCalled();
+    now = local(25, 9, 2);
+    await scheduler.tick();
+    expect(fake.driver.stopCrawl).not.toHaveBeenCalled();
+    fake.finish(crawlStatus("error"));
+    await vi.waitFor(() => expect(fake.driver.crawlActivity()).toBeNull());
+    expect(store.read().lastRun).toBeNull();
+  });
+
+  it("检查浏览器期间手动采集启动时，不把手动任务认作定时任务", async () => {
+    const store = memoryStore(daily(1));
+    const now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    fake.driver.browserStatus.mockImplementationOnce(async () => {
+      fake.startManual();
+      return browser(true);
+    });
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+    expect(store.read().mode).toBe("disabled");
+    expect(store.read().lastScheduledDate).toBeNull();
+    expect(fake.driver.stopCrawl).not.toHaveBeenCalled();
+    fake.finish(crawlStatus("error"));
+  });
+
+  it("计划关闭时，尚在检查启动条件的定时任务不会再启动", async () => {
+    const store = memoryStore(daily());
+    const now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    const start = fake.driver.startCrawl;
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    fake.driver.startCrawl = vi.fn(async (canStart) => {
+      scheduler.disable();
+      return start(canStart);
+    });
+    await scheduler.tick();
+    expect(fake.driver.crawlActivity()).toBeNull();
+    expect(store.read().lastScheduledDate).toBeNull();
+    expect(fake.driver.stopCrawl).not.toHaveBeenCalled();
+  });
+
+  it("浏览器流程报错时提示处理，恢复计划会重新准备页面", async () => {
+    const store = memoryStore(daily());
+    const now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    fake.setBrowserResult({
+      ...browser(false),
+      workflowStep: "error",
+      error: { code: "CBG_ROLE_LIST", message: "网站要求安全验证，请完成验证后重试。" },
+    });
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    expect(store.read().mode).toBe("suspended");
+    expect(scheduler.status().state).toBe("needs_action");
+    expect(fake.driver.startCrawl).not.toHaveBeenCalled();
+    scheduler.enable();
+    await scheduler.tick();
+    expect(fake.driver.openBrowser).toHaveBeenCalledTimes(1);
+    fake.setBrowserResult(browser(true));
+    await scheduler.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("登录失效时暂停计划，而不是一直显示等待登录", async () => {
+    const store = memoryStore(daily());
+    const now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    fake.setBrowserResult({ ...browser(false), message: "登录已失效，请重新开始。" });
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    expect(store.read().mode).toBe("suspended");
+    expect(scheduler.status().message).toContain("登录已失效");
+  });
+
   it("每天到点启动一次，完成后同日不再启动，次日继续", async () => {
     const store = memoryStore(daily());
     let now = local(25, 8);
-    const fake = fakeDriver();
+    const fake = fakeDriver(() => now);
     const scheduler = new ScanScheduler(store, fake.driver, () => now);
     await scheduler.tick();
     expect(store.read().nextRunAt).toBe(local(25, 9));
@@ -295,7 +394,7 @@ describe("扫描调度", () => {
   it("每周未选中日不准备浏览器，到选中日才启动", async () => {
     const store = memoryStore(only(1));
     let now = local(25, 22); // 周五
-    const fake = fakeDriver();
+    const fake = fakeDriver(() => now);
     const scheduler = new ScanScheduler(store, fake.driver, () => now);
     await scheduler.tick();
     expect(fake.driver.browserStatus).not.toHaveBeenCalled();
@@ -312,7 +411,7 @@ describe("扫描调度", () => {
   it("时长到期暂停并保留计划，下一运行日再执行", async () => {
     const store = memoryStore(daily(30));
     let now = local(25, 9);
-    const fake = fakeDriver();
+    const fake = fakeDriver(() => now);
     const scheduler = new ScanScheduler(store, fake.driver, () => now);
     await scheduler.tick();
     now = local(25, 9, 29);
@@ -333,7 +432,7 @@ describe("扫描调度", () => {
   it("关闭计划后当前扫描仍遵守已设置的运行时长", async () => {
     const store = memoryStore(daily(30));
     let now = local(25, 9);
-    const fake = fakeDriver();
+    const fake = fakeDriver(() => now);
     const scheduler = new ScanScheduler(store, fake.driver, () => now);
     await scheduler.tick();
     scheduler.disable();
@@ -348,7 +447,7 @@ describe("扫描调度", () => {
   it("时长留空可跨日运行，覆盖期间到点的触发且不补跑", async () => {
     const store = memoryStore(daily());
     let now = local(25, 9);
-    const fake = fakeDriver();
+    const fake = fakeDriver(() => now);
     const scheduler = new ScanScheduler(store, fake.driver, () => now);
     await scheduler.tick();
     now = local(26, 10);
@@ -363,7 +462,7 @@ describe("扫描调度", () => {
 
   it("到点未登录时等待一次，登录后自动启动", async () => {
     const store = memoryStore(daily());
-    const fake = fakeDriver();
+    const fake = fakeDriver(() => local(25, 9));
     fake.setReady(false);
     const scheduler = new ScanScheduler(store, fake.driver, () => local(25, 9));
     await scheduler.tick();
@@ -377,12 +476,12 @@ describe("扫描调度", () => {
 
   it("旧采集锁到期后再尝试本日唯一一次启动", async () => {
     const store = memoryStore(daily());
-    const fake = fakeDriver();
+    const fake = fakeDriver(() => local(25, 9));
     const start = fake.driver.startCrawl;
     fake.driver.startCrawl = vi
       .fn()
       .mockRejectedValueOnce(new Error("已有另一个本地服务正在采集，请先暂停它"))
-      .mockImplementation(() => start());
+      .mockImplementation((canStart) => start(canStart));
     const scheduler = new ScanScheduler(store, fake.driver, () => local(25, 9));
     await scheduler.tick();
     expect(scheduler.status().state).toBe("waiting_lock");
@@ -394,7 +493,7 @@ describe("扫描调度", () => {
 
   it("致命错误暂停计划；手动恢复可重试当日，手动关闭不会自动重启", async () => {
     const store = memoryStore(daily());
-    const fake = fakeDriver();
+    const fake = fakeDriver(() => local(25, 9));
     const scheduler = new ScanScheduler(store, fake.driver, () => local(25, 9));
     await scheduler.tick();
     fake.finish(crawlStatus("error"));

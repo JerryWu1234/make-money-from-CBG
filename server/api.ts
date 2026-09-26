@@ -80,14 +80,26 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
       let result: unknown;
       switch (pathname) {
         case "/api/crawl/start":
-          result = await crawler.startCrawl();
+          {
+            const attempt = await crawler.startCrawl();
+            if (attempt.started) (await import("./crawler/schedule")).disableScanSchedule();
+            result = attempt.status;
+          }
           break;
         case "/api/crawl/stop":
           (await import("./crawler/schedule")).disableScanSchedule();
           result = crawler.stopCrawl();
           break;
         case "/api/crawl/clear":
-          (await import("./crawler/schedule")).disableScanSchedule();
+          {
+            const scan = await import("./crawler/schedule");
+            if (crawler.isCrawling()) {
+              res.statusCode = 409;
+              res.end(JSON.stringify({ error: "请先暂停采集，再清空数据" }));
+              return;
+            }
+            scan.disableScanSchedule();
+          }
           result = crawler.clearCrawl();
           break;
         case "/api/crawl/records":
