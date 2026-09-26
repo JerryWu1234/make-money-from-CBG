@@ -3,7 +3,13 @@ import { diagnostics } from "../diagnostics";
 import type { OpenCbgResult } from "../types";
 import { crawlCompletion, startCrawl, stopCrawl } from "./controller";
 import { ScanScheduleStore, type ScanRunSummary } from "./schedule-store";
-import { nextScanTime, parseScanScheduleConfig, scanWindow } from "./schedule-time";
+import {
+  localDateKey,
+  nextScanTime,
+  parseScanScheduleConfig,
+  scheduledStartForDay,
+  type ScanScheduleConfig,
+} from "./schedule-time";
 import type { CrawlStatus } from "./types";
 
 type ScheduleState =
@@ -21,7 +27,7 @@ interface ScanDriver {
   openBrowser: () => OpenCbgResult;
   startCrawl: () => Promise<CrawlStatus>;
   crawlCompletion: () => Promise<CrawlStatus> | null;
-  stopCrawl: () => CrawlStatus;
+  stopCrawl: (reason?: "time_limit") => CrawlStatus;
 }
 
 const driver: ScanDriver = {
@@ -38,8 +44,10 @@ export class ScanScheduler {
   private timer: ReturnType<typeof setInterval> | null = null;
   private pendingTick: Promise<void> | null = null;
   private watchedRun: Promise<CrawlStatus> | null = null;
+  private runStartedAt: number | null = null;
+  private runIsScheduled = false;
+  private limitStopRequested = false;
   private loginRequested = false;
-  private restartPending = true;
   private closed = false;
 
   constructor(
@@ -67,21 +75,21 @@ export class ScanScheduler {
     const config = parseScanScheduleConfig(input);
     this.store.setConfig(config);
     const row = this.store.read();
-    if (row.mode === "enabled" && !this.watchedRun) {
-      const earliest = row.lastRun
-        ? Math.max(this.now(), Date.parse(row.lastRun.endedAt) + config.intervalMinutes * 60000)
-        : this.now();
-      this.setNextRunAt(nextScanTime(earliest, config));
-    }
+    if (row.mode === "enabled" && !this.watchedRun)
+      this.setNextRunAt(nextScanTime(this.now(), config, row.lastScheduledDate));
     diagnostics.record("scan.configured", { config });
     void this.tick();
     return this.status();
   }
 
   enable() {
+    const prior = this.store.read();
+    if (prior.mode === "suspended" && prior.lastScheduledDate === localDateKey(this.now()))
+      this.store.setLastScheduledDate(null);
     this.store.setMode("enabled");
     this.loginRequested = false;
-    this.setNextRunAt(nextScanTime(this.now(), this.store.read().config));
+    const row = this.store.read();
+    this.setNextRunAt(nextScanTime(this.now(), row.config, row.lastScheduledDate));
     diagnostics.record("scan.enabled");
     void this.tick();
     return this.status();
@@ -127,13 +135,14 @@ export class ScanScheduler {
       this.message = "另一个本地服务正在管理定时计划。";
       return;
     }
-    let row = this.store.read();
-    if (this.restartPending) {
-      this.restartPending = false;
-      if (row.mode === "enabled") {
-        this.setNextRunAt(null);
-        row = this.store.read();
+    const row = this.store.read();
+    if (this.watchedRun) {
+      this.checkDuration(now, row.config);
+      if (row.mode === "disabled") {
+        this.state = "disabled";
+        this.message = "计划已关闭，当前扫描继续执行。";
       }
+      return;
     }
     if (row.mode === "disabled") {
       this.state = "disabled";
@@ -145,37 +154,29 @@ export class ScanScheduler {
       this.message = row.issue || "定时计划已暂停，请处理后手动恢复。";
       return;
     }
-    if (this.watchedRun) {
-      this.state = "running";
-      this.message = "正在执行本轮扫描。";
-      return;
-    }
     const existing = this.scan.crawlCompletion();
     if (existing) {
-      this.watchRun(existing, now);
+      this.watchRun(existing, now, false);
       return;
     }
-    const window = scanWindow(now, row.config);
-    if (!window.active) {
-      this.loginRequested = false;
-      const next = nextScanTime(Math.max(now, row.nextRunAt ?? now), row.config);
-      this.setNextRunAt(next);
-      this.state = "waiting_window";
-      this.message = "等待下一个运行时段。";
-      return;
-    }
-    const due = row.nextRunAt ?? now;
+    const due = nextScanTime(now, row.config, row.lastScheduledDate);
     if (due > now) {
-      this.state = "waiting_next";
-      this.message = "本轮已结束，等待下次扫描。";
+      this.loginRequested = false;
+      this.setNextRunAt(due);
+      this.state = "waiting_window";
+      this.message = "等待下一次计划执行。";
       return;
     }
+    this.setNextRunAt(due);
     const browser = await this.scan.browserStatus();
     if (this.closed || this.store.read().mode !== "enabled") return;
-    if (!scanWindow(this.now(), this.store.read().config).active) {
-      this.setNextRunAt(nextScanTime(this.now(), this.store.read().config));
+    const readyAt = this.now();
+    const current = this.store.read();
+    const currentDue = nextScanTime(readyAt, current.config, current.lastScheduledDate);
+    if (currentDue > readyAt) {
+      this.setNextRunAt(currentDue);
       this.state = "waiting_window";
-      this.message = "等待下一个运行时段。";
+      this.message = "等待下一次计划执行。";
       return;
     }
     const ready = !browser.running && browser.isLoggedIn && browser.workflowStep === "completed";
@@ -209,11 +210,34 @@ export class ScanScheduler {
     }
     const run = this.scan.crawlCompletion();
     if (!run) throw new Error("采集任务未能启动");
-    this.watchRun(run, now);
+    const started = this.now();
+    this.store.setLastScheduledDate(localDateKey(started));
+    this.watchRun(run, started, true);
   }
 
-  private watchRun(run: Promise<CrawlStatus>, started: number) {
+  private checkDuration(now: number, config: ScanScheduleConfig) {
+    if (
+      this.runIsScheduled &&
+      !this.limitStopRequested &&
+      this.runStartedAt !== null &&
+      config.maxDurationMinutes !== null &&
+      now >= this.runStartedAt + config.maxDurationMinutes * 60000
+    ) {
+      this.limitStopRequested = true;
+      this.scan.stopCrawl("time_limit");
+      diagnostics.record("scan.time_limit_reached", { startedAt: this.runStartedAt });
+    }
+    this.state = "running";
+    this.message = this.limitStopRequested
+      ? "已达到最长运行时长，正在暂停并保留断点。"
+      : "正在执行本次扫描。";
+  }
+
+  private watchRun(run: Promise<CrawlStatus>, started: number, scheduled: boolean) {
     this.watchedRun = run;
+    this.runStartedAt = started;
+    this.runIsScheduled = scheduled;
+    this.limitStopRequested = false;
     this.setNextRunAt(null);
     this.state = "running";
     this.message = "正在执行本轮扫描。";
@@ -223,6 +247,9 @@ export class ScanScheduler {
       .catch((error: unknown) => this.suspend(error))
       .finally(() => {
         this.watchedRun = null;
+        this.runStartedAt = null;
+        this.runIsScheduled = false;
+        this.limitStopRequested = false;
         if (!this.closed) void this.tick();
       });
   }
@@ -230,27 +257,42 @@ export class ScanScheduler {
   private finishRun(result: CrawlStatus, started: number) {
     if (this.closed) return;
     const ended = this.now();
+    const hitTimeLimit =
+      this.runIsScheduled && this.limitStopRequested && result.phase === "paused";
     const summary: ScanRunSummary = {
       startedAt: new Date(started).toISOString(),
       endedAt: new Date(ended).toISOString(),
-      outcome:
-        result.phase === "completed" ? "completed" : result.phase === "paused" ? "paused" : "error",
+      outcome: hitTimeLimit
+        ? "time_limit"
+        : result.phase === "completed"
+          ? "completed"
+          : result.phase === "paused"
+            ? "paused"
+            : "error",
       saved: result.saved,
       skipped: result.skipped,
       failed: result.failed || 0,
-      message: result.message,
+      message: hitTimeLimit ? "已达到最长运行时长，断点已保留。" : result.message,
     };
     this.store.recordRun(summary);
     diagnostics.record("scan.run_finished", { ...summary });
     const row = this.store.read();
     if (row.mode !== "enabled") return;
-    if (result.phase !== "completed") {
+    if (result.phase !== "completed" && !hitTimeLimit) {
       this.suspend(result.error || result.message);
       return;
     }
-    this.setNextRunAt(nextScanTime(ended + row.config.intervalMinutes * 60000, row.config));
+    const todayStart = scheduledStartForDay(new Date(ended), row.config);
+    if (
+      this.runIsScheduled &&
+      todayStart !== null &&
+      todayStart <= ended &&
+      row.lastScheduledDate !== localDateKey(ended)
+    )
+      this.store.setLastScheduledDate(localDateKey(ended));
+    this.setNextRunAt(nextScanTime(ended, row.config, this.store.read().lastScheduledDate));
     this.state = "waiting_next";
-    this.message = result.message;
+    this.message = summary.message;
   }
 
   private suspend(error: unknown) {

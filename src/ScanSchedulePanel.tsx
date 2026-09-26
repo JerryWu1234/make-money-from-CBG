@@ -1,10 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { StoredSchedule } from "../server/crawler/schedule-store";
-import type {
-  ScanDayConfig,
-  ScanScheduleConfig,
-  ScanTimeRange,
-} from "../server/crawler/schedule-time";
+import type { ScanDayConfig, ScanScheduleConfig } from "../server/crawler/schedule-time";
 
 type ScheduleStatus = StoredSchedule & {
   state: string;
@@ -13,9 +9,9 @@ type ScheduleStatus = StoredSchedule & {
 };
 type Draft = {
   scheduleType: ScanScheduleConfig["scheduleType"];
-  daily: ScanTimeRange;
+  daily: ScanScheduleConfig["daily"];
   days: ScanDayConfig[];
-  intervalMinutes: string;
+  maxDurationMinutes: string;
 };
 
 const WEEKDAYS = [
@@ -30,10 +26,10 @@ const WEEKDAYS = [
 
 const LABELS: Record<string, string> = {
   disabled: "已关闭",
-  waiting_window: "等待时段",
+  waiting_window: "等待执行",
   waiting_login: "等待登录",
   running: "扫描中",
-  waiting_next: "等待下轮",
+  waiting_next: "等待下次执行",
   waiting_lock: "等待采集锁",
   needs_action: "需要处理",
   other_instance: "其他服务运行中",
@@ -47,14 +43,13 @@ export function ScanSchedulePanel() {
   const [status, setStatus] = useState<ScheduleStatus | null>(null);
   const [draft, setDraft] = useState<Draft>({
     scheduleType: "weekly",
-    daily: { startTime: "09:00", endTime: "23:00" },
+    daily: { startTime: "09:00" },
     days: WEEKDAYS.map(([weekday]) => ({
       weekday,
       enabled: true,
       startTime: "09:00",
-      endTime: "23:00",
     })),
-    intervalMinutes: "30",
+    maxDurationMinutes: "",
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -79,7 +74,7 @@ export function ScanSchedulePanel() {
               scheduleType: data.config.scheduleType,
               daily: data.config.daily,
               days: data.config.days,
-              intervalMinutes: String(data.config.intervalMinutes),
+              maxDurationMinutes: String(data.config.maxDurationMinutes ?? ""),
             });
           setTransportError("");
         }
@@ -103,7 +98,12 @@ export function ScanSchedulePanel() {
       headers: { "Content-Type": "application/json" },
       body:
         command === "configure"
-          ? JSON.stringify({ ...draft, intervalMinutes: Number(draft.intervalMinutes) })
+          ? JSON.stringify({
+              ...draft,
+              maxDurationMinutes: draft.maxDurationMinutes
+                ? Number(draft.maxDurationMinutes)
+                : null,
+            })
           : "{}",
       signal: AbortSignal.timeout(15000),
     });
@@ -127,7 +127,7 @@ export function ScanSchedulePanel() {
         scheduleType: updated.config.scheduleType,
         daily: updated.config.daily,
         days: updated.config.days,
-        intervalMinutes: String(updated.config.intervalMinutes),
+        maxDurationMinutes: String(updated.config.maxDurationMinutes ?? ""),
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "定时计划操作失败");
@@ -144,7 +144,7 @@ export function ScanSchedulePanel() {
     }));
   };
 
-  const updateDaily = (changes: Partial<ScanTimeRange>) => {
+  const updateDaily = (changes: Partial<ScanScheduleConfig["daily"]>) => {
     dirty.current = true;
     setDraft((current) => ({ ...current, daily: { ...current.daily, ...changes } }));
   };
@@ -153,7 +153,7 @@ export function ScanSchedulePanel() {
     <section className="scan-schedule" aria-label="定时循环扫描">
       <h3>定时循环扫描</h3>
       <p className="status-note">
-        选择每天或每周循环，设置运行时段。每轮结束后等待指定间隔；到结束时间时，当前轮会完成。
+        选择每天或每周循环，设置执行时间；每个运行日自动启动一次。可设置本次最长运行时长，留空则运行到本次结束。
       </p>
       <form
         className="scan-schedule-form"
@@ -195,25 +195,15 @@ export function ScanSchedulePanel() {
         </fieldset>
         {draft.scheduleType === "daily" ? (
           <fieldset className="scan-schedule-daily">
-            <legend>每天的运行时段</legend>
+            <legend>每天的执行时间</legend>
             <div>
               <label>
-                开始时间
+                执行时间
                 <input
                   type="time"
-                  aria-label="每天开始时间"
+                  aria-label="每天执行时间"
                   value={draft.daily.startTime}
                   onChange={(event) => updateDaily({ startTime: event.target.value })}
-                  required
-                />
-              </label>
-              <label>
-                结束时间
-                <input
-                  type="time"
-                  aria-label="每天结束时间"
-                  value={draft.daily.endTime}
-                  onChange={(event) => updateDaily({ endTime: event.target.value })}
                   required
                 />
               </label>
@@ -236,24 +226,13 @@ export function ScanSchedulePanel() {
                       {label}
                     </label>
                     <label>
-                      开始时间
+                      执行时间
                       <input
                         type="time"
-                        aria-label={`${label}开始时间`}
+                        aria-label={`${label}执行时间`}
                         value={day.startTime}
                         disabled={!day.enabled}
                         onChange={(event) => updateDay(weekday, { startTime: event.target.value })}
-                        required
-                      />
-                    </label>
-                    <label>
-                      结束时间
-                      <input
-                        type="time"
-                        aria-label={`${label}结束时间`}
-                        value={day.endTime}
-                        disabled={!day.enabled}
-                        onChange={(event) => updateDay(weekday, { endTime: event.target.value })}
                         required
                       />
                     </label>
@@ -263,18 +242,18 @@ export function ScanSchedulePanel() {
             </div>
           </fieldset>
         )}
-        <label>
-          每轮间隔（分钟）
+        <label className="scan-schedule-duration">
+          最长运行时长（分钟，可选）
           <input
             type="number"
-            min="10"
+            min="1"
             step="1"
-            value={draft.intervalMinutes}
+            value={draft.maxDurationMinutes}
+            placeholder="留空则运行到本次结束"
             onChange={(event) => {
               dirty.current = true;
-              setDraft({ ...draft, intervalMinutes: event.target.value });
+              setDraft({ ...draft, maxDurationMinutes: event.target.value });
             }}
-            required
           />
         </label>
         <div className="scan-schedule-actions">
@@ -328,8 +307,12 @@ export function ScanSchedulePanel() {
           {status.lastRun && (
             <p>
               上轮 {localTime(status.lastRun.endedAt, status.timezone)} ·
-              {status.lastRun.outcome === "completed" ? "已完成" : "已中断"} · 保存{" "}
-              {status.lastRun.saved}
+              {status.lastRun.outcome === "completed"
+                ? "已完成"
+                : status.lastRun.outcome === "time_limit"
+                  ? "达到时长，已保留断点"
+                  : "已中断"}{" "}
+              · 保存 {status.lastRun.saved}
               条 · 跳过 {status.lastRun.skipped} 条 · 待重试 {status.lastRun.failed} 条
             </p>
           )}

@@ -58,9 +58,9 @@ export function savedDetail(key: string) {
 export function savedRecords(page: number, pageSize: number) {
   return store().records(page, pageSize);
 }
-export function stopCrawl() {
-  diagnostics.record("crawl.stop_requested", { running: isCrawling() });
-  abort?.abort(new Error("用户暂停采集"));
+export function stopCrawl(reason: "manual" | "time_limit" = "manual") {
+  diagnostics.record("crawl.stop_requested", { running: isCrawling(), reason });
+  abort?.abort(new Error(reason === "time_limit" ? "达到最长运行时长" : "用户暂停采集"));
   if (status.running) status = { ...status, message: "正在暂停，当前已入库数据和断点会保留…" };
   return crawlStatus();
 }

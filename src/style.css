@@ -1193,7 +1193,7 @@ body {
 }
 .scan-schedule-daily > div {
   display: grid;
-  grid-template-columns: repeat(2, minmax(110px, 220px));
+  grid-template-columns: minmax(110px, 220px);
   gap: 8px;
 }
 .scan-schedule-day-rows {
@@ -1202,7 +1202,7 @@ body {
 }
 .scan-schedule-day-row {
   display: grid;
-  grid-template-columns: minmax(70px, 0.7fr) repeat(2, minmax(110px, 1fr));
+  grid-template-columns: 100px minmax(110px, 220px);
   gap: 8px;
   align-items: end;
 }
@@ -1219,16 +1219,22 @@ body {
 .scan-schedule-day-row input:disabled {
   opacity: 0.5;
 }
+.scan-schedule-duration {
+  grid-column: 1 / -1;
+  max-width: 220px;
+}
 @media (max-width: 550px) {
   .scan-schedule-daily > div {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
   .scan-schedule-day-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
   }
   .scan-schedule-day-row .scan-schedule-day-toggle {
-    grid-column: 1 / -1;
     padding-bottom: 0;
+  }
+  .scan-schedule-day-row label:not(.scan-schedule-day-toggle) {
+    max-width: 220px;
   }
 }
 .scan-schedule-actions {

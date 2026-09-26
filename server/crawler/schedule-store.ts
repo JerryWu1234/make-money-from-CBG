@@ -2,13 +2,18 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { ALL_WEEKDAYS, parseScanScheduleConfig, type ScanScheduleConfig } from "./schedule-time";
+import {
+  ALL_WEEKDAYS,
+  localDateKey,
+  parseScanScheduleConfig,
+  type ScanScheduleConfig,
+} from "./schedule-time";
 
 export type ScheduleMode = "disabled" | "enabled" | "suspended";
 export interface ScanRunSummary {
   startedAt: string;
   endedAt: string;
-  outcome: "completed" | "paused" | "error";
+  outcome: "completed" | "time_limit" | "paused" | "error";
   saved: number;
   skipped: number;
   failed: number;
@@ -19,19 +24,19 @@ export interface StoredSchedule {
   mode: ScheduleMode;
   issue: string | null;
   nextRunAt: number | null;
+  lastScheduledDate: string | null;
   lastRun: ScanRunSummary | null;
 }
 
 const DEFAULT_CONFIG: ScanScheduleConfig = {
   scheduleType: "weekly",
-  daily: { startTime: "09:00", endTime: "23:00" },
+  daily: { startTime: "09:00" },
   days: ALL_WEEKDAYS.map((weekday) => ({
     weekday,
     enabled: true,
     startTime: "09:00",
-    endTime: "23:00",
   })),
-  intervalMinutes: 30,
+  maxDurationMinutes: null,
 };
 
 export class ScanScheduleStore {
@@ -44,11 +49,22 @@ export class ScanScheduleStore {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS scan_schedule (
         id INTEGER PRIMARY KEY CHECK(id=1), config_json TEXT NOT NULL,
-        mode TEXT NOT NULL, issue TEXT, next_run_at INTEGER, last_run_json TEXT
+        mode TEXT NOT NULL, issue TEXT, next_run_at INTEGER, last_run_json TEXT,
+        last_scheduled_date TEXT
       );
       CREATE TABLE IF NOT EXISTS scan_schedule_lock (
         id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL
       );`);
+    const columns = this.db.prepare("PRAGMA table_info(scan_schedule)").all();
+    if (!columns.some((column) => column.name === "last_scheduled_date")) {
+      this.db.exec("ALTER TABLE scan_schedule ADD COLUMN last_scheduled_date TEXT");
+      const prior = this.db.prepare("SELECT last_run_json FROM scan_schedule WHERE id=1").get();
+      if (prior?.last_run_json) {
+        const lastRun = JSON.parse(String(prior.last_run_json)) as ScanRunSummary;
+        const started = Date.parse(lastRun.startedAt);
+        if (Number.isFinite(started)) this.setLastScheduledDate(localDateKey(started));
+      }
+    }
     this.db
       .prepare("INSERT OR IGNORE INTO scan_schedule(id,config_json,mode) VALUES(1,?,'disabled')")
       .run(JSON.stringify(DEFAULT_CONFIG));
@@ -57,38 +73,39 @@ export class ScanScheduleStore {
   read(): StoredSchedule {
     const row = this.db
       .prepare(
-        "SELECT config_json,mode,issue,next_run_at,last_run_json FROM scan_schedule WHERE id=1",
+        "SELECT config_json,mode,issue,next_run_at,last_run_json,last_scheduled_date FROM scan_schedule WHERE id=1",
       )
       .get()!;
     const saved = JSON.parse(String(row.config_json)) as Record<string, unknown>;
     const selected = Array.isArray(saved.weekdays) ? saved.weekdays : ALL_WEEKDAYS;
-    const config = parseScanScheduleConfig(
-      saved.scheduleType === "daily" || saved.scheduleType === "weekly"
-        ? saved
-        : {
-            scheduleType:
-              Array.isArray(saved.days) || Array.isArray(saved.weekdays) ? "weekly" : "daily",
-            daily: {
-              startTime: saved.startTime ?? "09:00",
-              endTime: saved.endTime ?? "23:00",
-            },
-            days: Array.isArray(saved.days)
-              ? saved.days
-              : ALL_WEEKDAYS.map((weekday) => ({
-                  weekday,
-                  enabled: selected.includes(weekday),
-                  startTime: saved.startTime,
-                  endTime: saved.endTime,
-                })),
-            intervalMinutes: saved.intervalMinutes,
-          },
-    );
+    const oldDaily = saved.daily as Record<string, unknown> | undefined;
+    const config = parseScanScheduleConfig({
+      scheduleType:
+        saved.scheduleType === "daily" || saved.scheduleType === "weekly"
+          ? saved.scheduleType
+          : Array.isArray(saved.days) || Array.isArray(saved.weekdays)
+            ? "weekly"
+            : "daily",
+      daily: { startTime: oldDaily?.startTime ?? saved.startTime ?? "09:00" },
+      days: Array.isArray(saved.days)
+        ? saved.days
+        : ALL_WEEKDAYS.map((weekday) => ({
+            weekday,
+            enabled: selected.includes(weekday),
+            startTime: saved.startTime ?? "09:00",
+          })),
+      maxDurationMinutes: saved.maxDurationMinutes ?? null,
+    });
+    const lastRun = row.last_run_json
+      ? (JSON.parse(String(row.last_run_json)) as ScanRunSummary)
+      : null;
     return {
       config,
       mode: String(row.mode) as ScheduleMode,
       issue: row.issue == null ? null : String(row.issue),
       nextRunAt: row.next_run_at == null ? null : Number(row.next_run_at),
-      lastRun: row.last_run_json ? (JSON.parse(String(row.last_run_json)) as ScanRunSummary) : null,
+      lastScheduledDate: row.last_scheduled_date == null ? null : String(row.last_scheduled_date),
+      lastRun,
     };
   }
 
@@ -106,6 +123,10 @@ export class ScanScheduleStore {
 
   setNextRunAt(value: number | null) {
     this.db.prepare("UPDATE scan_schedule SET next_run_at=? WHERE id=1").run(value);
+  }
+
+  setLastScheduledDate(value: string | null) {
+    this.db.prepare("UPDATE scan_schedule SET last_scheduled_date=? WHERE id=1").run(value);
   }
 
   recordRun(value: ScanRunSummary) {
