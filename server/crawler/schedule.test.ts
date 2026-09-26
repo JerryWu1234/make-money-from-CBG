@@ -9,6 +9,8 @@ import { nextScanTime, parseScanScheduleConfig, scanWindow } from "./schedule-ti
 import type { CrawlStatus } from "./types";
 
 const config = {
+  scheduleType: "weekly" as const,
+  daily: { startTime: "09:00", endTime: "23:00" },
   days: [1, 2, 3, 4, 5, 6, 7].map((weekday) => ({
     weekday,
     enabled: true,
@@ -100,6 +102,13 @@ describe("定时窗口", () => {
     expect(() =>
       parseScanScheduleConfig({
         ...config,
+        scheduleType: "daily",
+        daily: { startTime: "08:00", endTime: "08:00" },
+      }),
+    ).toThrow("每天开始和结束时间不能相同");
+    expect(() =>
+      parseScanScheduleConfig({
+        ...config,
         days: config.days.map((day) => (day.weekday === 1 ? { ...day, endTime: "22:00" } : day)),
       }),
     ).toThrow("周一开始和结束时间不能相同");
@@ -119,6 +128,19 @@ describe("定时窗口", () => {
     expect(scanWindow(local(26, 1), config).active).toBe(true);
     expect(scanWindow(local(26, 2), config).active).toBe(false);
     expect(nextScanTime(local(26, 2), config)).toBe(local(26, 22));
+  });
+
+  it("每天循环使用同一时段，每天都能启动并支持跨午夜", () => {
+    const daily = {
+      ...only(),
+      scheduleType: "daily" as const,
+      daily: { startTime: "22:00", endTime: "02:00" },
+    };
+    expect(parseScanScheduleConfig(daily)).toEqual(daily);
+    expect(scanWindow(local(25, 23), daily).active).toBe(true); // 周五
+    expect(scanWindow(local(26, 1), daily).active).toBe(true); // 周六凌晨
+    expect(scanWindow(local(26, 22), daily).active).toBe(true); // 周六仍会启动
+    expect(nextScanTime(local(27, 2), daily)).toBe(local(27, 22));
   });
 
   it("本轮结束加间隔越过窗口时，排到下次开始", () => {
@@ -184,12 +206,16 @@ describe("计划持久化", () => {
     }
   });
 
-  it("读取旧版每日计划时补齐全部运行日", () => {
+  it("读取旧版每日和每周计划时保留原来的循环规则", () => {
     const store = new ScanScheduleStore(":memory:");
     created.push(store);
     store.db
       .prepare("UPDATE scan_schedule SET config_json=? WHERE id=1")
       .run(JSON.stringify({ startTime: "09:00", endTime: "23:00", intervalMinutes: 30 }));
+    expect(store.read().config).toMatchObject({
+      scheduleType: "daily",
+      daily: { startTime: "09:00", endTime: "23:00" },
+    });
     expect(store.read().config.days.every((day) => day.enabled)).toBe(true);
     store.db.prepare("UPDATE scan_schedule SET config_json=? WHERE id=1").run(
       JSON.stringify({
@@ -205,6 +231,28 @@ describe("计划持久化", () => {
         .config.days.filter((day) => day.enabled)
         .map((day) => day.weekday),
     ).toEqual([1, 3, 5]);
+    expect(store.read().config.scheduleType).toBe("weekly");
+    store.db
+      .prepare("UPDATE scan_schedule SET config_json=? WHERE id=1")
+      .run(JSON.stringify({ days: config.days, intervalMinutes: 10 }));
+    expect(store.read().config).toMatchObject({
+      scheduleType: "weekly",
+      daily: { startTime: "09:00", endTime: "23:00" },
+      days: config.days,
+    });
+  });
+
+  it("切换循环方式时，两套时段设置都能持久保存", () => {
+    const store = memoryStore();
+    const daily = {
+      ...only(1, 3, 5),
+      scheduleType: "daily" as const,
+      daily: { startTime: "08:30", endTime: "20:30" },
+    };
+    store.setConfig(parseScanScheduleConfig(daily));
+    expect(store.read().config).toEqual(daily);
+    store.setConfig(parseScanScheduleConfig({ ...daily, scheduleType: "weekly" }));
+    expect(store.read().config).toEqual({ ...daily, scheduleType: "weekly" });
   });
 
   it("两个本地服务只能有一个计划调度者，过期后可接管", () => {
@@ -228,6 +276,21 @@ describe("计划持久化", () => {
 });
 
 describe("扫描调度", () => {
+  it("从每周切到每天循环时，当天时段内立即启动", async () => {
+    const store = memoryStore();
+    store.setConfig(only(1));
+    const fake = fakeDriver();
+    const scheduler = new ScanScheduler(store, fake.driver, () => local(25, 22)); // 周五
+    await scheduler.tick();
+    expect(fake.driver.startCrawl).not.toHaveBeenCalled();
+    scheduler.configure({
+      ...only(1),
+      scheduleType: "daily",
+      daily: { startTime: "21:00", endTime: "23:00" },
+    });
+    await vi.waitFor(() => expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1));
+  });
+
   it("未选中日不准备浏览器，到所选日的开始时间才启动", async () => {
     const store = memoryStore();
     store.setConfig(only(1));

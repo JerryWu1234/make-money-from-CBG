@@ -5,7 +5,14 @@ export interface ScanDayConfig {
   endTime: string;
 }
 
+export interface ScanTimeRange {
+  startTime: string;
+  endTime: string;
+}
+
 export interface ScanScheduleConfig {
+  scheduleType: "daily" | "weekly";
+  daily: ScanTimeRange;
   days: ScanDayConfig[];
   intervalMinutes: number;
 }
@@ -18,6 +25,17 @@ export function parseScanScheduleConfig(value: unknown): ScanScheduleConfig {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new ScheduleConfigError("定时计划格式错误");
   const input = value as Record<string, unknown>;
+  if (input.scheduleType !== "daily" && input.scheduleType !== "weekly")
+    throw new ScheduleConfigError("请选择每天循环或每周循环");
+  if (!input.daily || typeof input.daily !== "object" || Array.isArray(input.daily))
+    throw new ScheduleConfigError("每天循环时间设置格式错误");
+  const daily = input.daily as Record<string, unknown>;
+  if (typeof daily.startTime !== "string" || !TIME.test(daily.startTime))
+    throw new ScheduleConfigError("每天开始时间格式错误，请使用 HH:mm");
+  if (typeof daily.endTime !== "string" || !TIME.test(daily.endTime))
+    throw new ScheduleConfigError("每天结束时间格式错误，请使用 HH:mm");
+  if (daily.startTime === daily.endTime)
+    throw new ScheduleConfigError("每天开始和结束时间不能相同");
   if (!Array.isArray(input.days) || input.days.length !== 7)
     throw new ScheduleConfigError("请提供周一至周日的完整设置");
   const days: ScanDayConfig[] = input.days.map((value) => {
@@ -43,7 +61,8 @@ export function parseScanScheduleConfig(value: unknown): ScanScheduleConfig {
   });
   if (new Set(days.map((day) => day.weekday)).size !== 7)
     throw new ScheduleConfigError("周一至周日不能重复或缺失");
-  if (!days.some((day) => day.enabled)) throw new ScheduleConfigError("每周至少选择一天");
+  if (input.scheduleType === "weekly" && !days.some((day) => day.enabled))
+    throw new ScheduleConfigError("每周至少选择一天");
   if (
     typeof input.intervalMinutes !== "number" ||
     !Number.isSafeInteger(input.intervalMinutes) ||
@@ -51,6 +70,8 @@ export function parseScanScheduleConfig(value: unknown): ScanScheduleConfig {
   )
     throw new ScheduleConfigError("轮次间隔至少为 10 分钟");
   return {
+    scheduleType: input.scheduleType,
+    daily: { startTime: daily.startTime, endTime: daily.endTime },
     days: days.sort((a, b) => a.weekday - b.weekday),
     intervalMinutes: input.intervalMinutes,
   };
@@ -71,8 +92,11 @@ function windowsAround(now: number, config: ScanScheduleConfig) {
     const day = new Date(base);
     day.setDate(day.getDate() + offset);
     const weekday = day.getDay() || 7;
-    const schedule = config.days.find((entry) => entry.weekday === weekday);
-    if (!schedule?.enabled) continue;
+    const schedule =
+      config.scheduleType === "daily"
+        ? config.daily
+        : config.days.find((entry) => entry.weekday === weekday && entry.enabled);
+    if (!schedule) continue;
     const start = atLocalTime(day, schedule.startTime);
     const endDay = new Date(day);
     if (schedule.endTime < schedule.startTime) endDay.setDate(endDay.getDate() + 1);

@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import type { StoredSchedule } from "../server/crawler/schedule-store";
-import type { ScanDayConfig } from "../server/crawler/schedule-time";
+import type {
+  ScanDayConfig,
+  ScanScheduleConfig,
+  ScanTimeRange,
+} from "../server/crawler/schedule-time";
 
 type ScheduleStatus = StoredSchedule & {
   state: string;
@@ -8,6 +12,8 @@ type ScheduleStatus = StoredSchedule & {
   timezone: string;
 };
 type Draft = {
+  scheduleType: ScanScheduleConfig["scheduleType"];
+  daily: ScanTimeRange;
   days: ScanDayConfig[];
   intervalMinutes: string;
 };
@@ -40,6 +46,8 @@ function localTime(value: number | string, timezone: string) {
 export function ScanSchedulePanel() {
   const [status, setStatus] = useState<ScheduleStatus | null>(null);
   const [draft, setDraft] = useState<Draft>({
+    scheduleType: "weekly",
+    daily: { startTime: "09:00", endTime: "23:00" },
     days: WEEKDAYS.map(([weekday]) => ({
       weekday,
       enabled: true,
@@ -68,6 +76,8 @@ export function ScanSchedulePanel() {
           setStatus(data);
           if (!dirty.current)
             setDraft({
+              scheduleType: data.config.scheduleType,
+              daily: data.config.daily,
               days: data.config.days,
               intervalMinutes: String(data.config.intervalMinutes),
             });
@@ -114,6 +124,8 @@ export function ScanSchedulePanel() {
       const updated = await request(command);
       if (command === "configure") dirty.current = false;
       setDraft({
+        scheduleType: updated.config.scheduleType,
+        daily: updated.config.daily,
         days: updated.config.days,
         intervalMinutes: String(updated.config.intervalMinutes),
       });
@@ -132,11 +144,16 @@ export function ScanSchedulePanel() {
     }));
   };
 
+  const updateDaily = (changes: Partial<ScanTimeRange>) => {
+    dirty.current = true;
+    setDraft((current) => ({ ...current, daily: { ...current.daily, ...changes } }));
+  };
+
   return (
     <section className="scan-schedule" aria-label="定时循环扫描">
       <h3>定时循环扫描</h3>
       <p className="status-note">
-        勾选每周运行日，并分别设置各天几点开始、几点结束。每轮结束后等待指定间隔；到结束时间时，当前轮会完成。
+        选择每天或每周循环，设置运行时段。每轮结束后等待指定间隔；到结束时间时，当前轮会完成。
       </p>
       <form
         className="scan-schedule-form"
@@ -145,48 +162,107 @@ export function ScanSchedulePanel() {
           void action("configure");
         }}
       >
-        <fieldset className="scan-schedule-weekdays">
-          <legend>每周运行日（已选 {draft.days.filter((day) => day.enabled).length} 天）</legend>
-          <div className="scan-schedule-day-rows">
-            {WEEKDAYS.map(([weekday, label]) => {
-              const day = draft.days.find((entry) => entry.weekday === weekday)!;
-              return (
-                <div className="scan-schedule-day-row" key={weekday}>
-                  <label className="scan-schedule-day-toggle">
-                    <input
-                      type="checkbox"
-                      checked={day.enabled}
-                      onChange={(event) => updateDay(weekday, { enabled: event.target.checked })}
-                    />
-                    {label}
-                  </label>
-                  <label>
-                    开始时间
-                    <input
-                      type="time"
-                      aria-label={`${label}开始时间`}
-                      value={day.startTime}
-                      disabled={!day.enabled}
-                      onChange={(event) => updateDay(weekday, { startTime: event.target.value })}
-                      required
-                    />
-                  </label>
-                  <label>
-                    结束时间
-                    <input
-                      type="time"
-                      aria-label={`${label}结束时间`}
-                      value={day.endTime}
-                      disabled={!day.enabled}
-                      onChange={(event) => updateDay(weekday, { endTime: event.target.value })}
-                      required
-                    />
-                  </label>
-                </div>
-              );
-            })}
+        <fieldset className="scan-schedule-repeat-mode">
+          <legend>循环方式</legend>
+          <div>
+            <label>
+              <input
+                type="radio"
+                name="scan-schedule-type"
+                value="daily"
+                checked={draft.scheduleType === "daily"}
+                onChange={() => {
+                  dirty.current = true;
+                  setDraft((current) => ({ ...current, scheduleType: "daily" }));
+                }}
+              />
+              每天循环
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="scan-schedule-type"
+                value="weekly"
+                checked={draft.scheduleType === "weekly"}
+                onChange={() => {
+                  dirty.current = true;
+                  setDraft((current) => ({ ...current, scheduleType: "weekly" }));
+                }}
+              />
+              每周循环
+            </label>
           </div>
         </fieldset>
+        {draft.scheduleType === "daily" ? (
+          <fieldset className="scan-schedule-daily">
+            <legend>每天的运行时段</legend>
+            <div>
+              <label>
+                开始时间
+                <input
+                  type="time"
+                  aria-label="每天开始时间"
+                  value={draft.daily.startTime}
+                  onChange={(event) => updateDaily({ startTime: event.target.value })}
+                  required
+                />
+              </label>
+              <label>
+                结束时间
+                <input
+                  type="time"
+                  aria-label="每天结束时间"
+                  value={draft.daily.endTime}
+                  onChange={(event) => updateDaily({ endTime: event.target.value })}
+                  required
+                />
+              </label>
+            </div>
+          </fieldset>
+        ) : (
+          <fieldset className="scan-schedule-weekdays">
+            <legend>每周运行日（已选 {draft.days.filter((day) => day.enabled).length} 天）</legend>
+            <div className="scan-schedule-day-rows">
+              {WEEKDAYS.map(([weekday, label]) => {
+                const day = draft.days.find((entry) => entry.weekday === weekday)!;
+                return (
+                  <div className="scan-schedule-day-row" key={weekday}>
+                    <label className="scan-schedule-day-toggle">
+                      <input
+                        type="checkbox"
+                        checked={day.enabled}
+                        onChange={(event) => updateDay(weekday, { enabled: event.target.checked })}
+                      />
+                      {label}
+                    </label>
+                    <label>
+                      开始时间
+                      <input
+                        type="time"
+                        aria-label={`${label}开始时间`}
+                        value={day.startTime}
+                        disabled={!day.enabled}
+                        onChange={(event) => updateDay(weekday, { startTime: event.target.value })}
+                        required
+                      />
+                    </label>
+                    <label>
+                      结束时间
+                      <input
+                        type="time"
+                        aria-label={`${label}结束时间`}
+                        value={day.endTime}
+                        disabled={!day.enabled}
+                        onChange={(event) => updateDay(weekday, { endTime: event.target.value })}
+                        required
+                      />
+                    </label>
+                  </div>
+                );
+              })}
+            </div>
+          </fieldset>
+        )}
         <label>
           每轮间隔（分钟）
           <input

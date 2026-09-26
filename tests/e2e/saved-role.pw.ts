@@ -19,6 +19,8 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   let browserOpenReads = 0;
   const schedule = {
     config: {
+      scheduleType: "weekly",
+      daily: { startTime: "09:00", endTime: "23:00" },
       days: [1, 2, 3, 4, 5, 6, 7].map((weekday) => ({
         weekday,
         enabled: true,
@@ -113,6 +115,18 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
       { weekday: 5, startTime: "15:00", endTime: "18:00" },
     ],
   );
+  await plan.getByRole("radio", { name: "每天循环" }).check();
+  await plan.getByLabel("每天开始时间").fill("08:30");
+  await plan.getByLabel("每天结束时间").fill("20:30");
+  await plan.getByRole("button", { name: "保存设置" }).click();
+  assert.equal(schedule.config.scheduleType, "daily");
+  assert.deepEqual(schedule.config.daily, { startTime: "08:30", endTime: "20:30" });
+  await plan.screenshot({ path: testInfo.outputPath("scan-schedule-daily.png") });
+  await plan.getByRole("radio", { name: "每周循环" }).check();
+  await expect(plan.getByLabel("周一开始时间")).toHaveValue("22:00");
+  await plan.getByRole("button", { name: "保存设置" }).click();
+  assert.equal(schedule.config.scheduleType, "weekly");
+  assert.deepEqual(schedule.config.daily, { startTime: "08:30", endTime: "20:30" });
   await page.getByText("正在读取标签 4/7：召唤兽/孩子", { exact: true }).waitFor();
   assert.match(await page.locator(".crawl-panel").innerText(), /本页进度：1 \/ 15/);
   await page.getByRole("button", { name: /角色a ·/ }).click();

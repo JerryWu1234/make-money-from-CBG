@@ -23,6 +23,8 @@ export interface StoredSchedule {
 }
 
 const DEFAULT_CONFIG: ScanScheduleConfig = {
+  scheduleType: "weekly",
+  daily: { startTime: "09:00", endTime: "23:00" },
   days: ALL_WEEKDAYS.map((weekday) => ({
     weekday,
     enabled: true,
@@ -61,15 +63,23 @@ export class ScanScheduleStore {
     const saved = JSON.parse(String(row.config_json)) as Record<string, unknown>;
     const selected = Array.isArray(saved.weekdays) ? saved.weekdays : ALL_WEEKDAYS;
     const config = parseScanScheduleConfig(
-      Array.isArray(saved.days)
+      saved.scheduleType === "daily" || saved.scheduleType === "weekly"
         ? saved
         : {
-            days: ALL_WEEKDAYS.map((weekday) => ({
-              weekday,
-              enabled: selected.includes(weekday),
-              startTime: saved.startTime,
-              endTime: saved.endTime,
-            })),
+            scheduleType:
+              Array.isArray(saved.days) || Array.isArray(saved.weekdays) ? "weekly" : "daily",
+            daily: {
+              startTime: saved.startTime ?? "09:00",
+              endTime: saved.endTime ?? "23:00",
+            },
+            days: Array.isArray(saved.days)
+              ? saved.days
+              : ALL_WEEKDAYS.map((weekday) => ({
+                  weekday,
+                  enabled: selected.includes(weekday),
+                  startTime: saved.startTime,
+                  endTime: saved.endTime,
+                })),
             intervalMinutes: saved.intervalMinutes,
           },
     );
