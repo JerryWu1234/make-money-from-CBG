@@ -17,6 +17,25 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   let detailReads = 0;
   let browserStatusReads = 0;
   let browserOpenReads = 0;
+  const schedule = {
+    config: {
+      scheduleType: "weekly",
+      daily: { startTime: "09:00" },
+      days: [1, 2, 3, 4, 5, 6, 7].map((weekday) => ({
+        weekday,
+        enabled: true,
+        startTime: "09:00",
+      })),
+      maxDurationMinutes: null as number | null,
+    },
+    mode: "disabled",
+    issue: null,
+    nextRunAt: null as number | null,
+    lastRun: null,
+    state: "disabled",
+    message: "定时计划未启用。",
+    timezone: "Asia/Shanghai",
+  };
 
   // 构建产物与接口都由测试本地提供；其他来源一律阻断。
   await page.context().route("**/*", async (route) => {
@@ -32,6 +51,28 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
         body = rolePage(Number(url.searchParams.get("page") || 1), ready);
       } else if (url.pathname === "/api/crawl/status") {
         body = crawlStatus(running, ready);
+      } else if (url.pathname === "/api/scan/status") {
+        body = schedule;
+      } else if (url.pathname === "/api/scan/configure") {
+        schedule.config = route.request().postDataJSON();
+        if (schedule.mode === "enabled")
+          schedule.nextRunAt = new Date(
+            schedule.config.scheduleType === "daily"
+              ? "2026-09-27T00:30:00Z"
+              : "2026-09-28T14:00:00Z",
+          ).getTime();
+        body = schedule;
+      } else if (url.pathname === "/api/scan/enable") {
+        schedule.mode = "enabled";
+        schedule.state = "waiting_window";
+        schedule.message = "等待下一次计划执行。";
+        schedule.nextRunAt = new Date("2026-09-28T14:00:00Z").getTime();
+        body = schedule;
+      } else if (url.pathname === "/api/scan/disable") {
+        schedule.mode = "disabled";
+        schedule.state = "disabled";
+        schedule.nextRunAt = null;
+        body = schedule;
       } else if (url.pathname === "/api/browser/status") {
         browserStatusReads++;
         body = browserStatus;
@@ -55,6 +96,42 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   });
 
   await page.goto("http://cbg-ui.test");
+  const plan = page.getByRole("region", { name: "定时循环扫描" });
+  for (const day of ["周二", "周四", "周六", "周日"])
+    await plan.getByRole("checkbox", { name: day }).uncheck();
+  await plan.getByLabel("周一执行时间").fill("22:00");
+  await plan.getByLabel("周三执行时间").fill("10:00");
+  await plan.getByLabel("周五执行时间").fill("15:00");
+  await plan.getByLabel("最长运行时长（分钟，可选）").fill("45");
+  await plan.getByRole("button", { name: "启用计划" }).click();
+  await expect(plan).toContainText("计划状态：等待执行");
+  await plan.screenshot({ path: testInfo.outputPath("scan-schedule.png") });
+  assert.equal(schedule.config.maxDurationMinutes, 45);
+  assert.deepEqual(
+    schedule.config.days
+      .filter((day) => day.enabled)
+      .map(({ weekday, startTime }) => ({ weekday, startTime })),
+    [
+      { weekday: 1, startTime: "22:00" },
+      { weekday: 3, startTime: "10:00" },
+      { weekday: 5, startTime: "15:00" },
+    ],
+  );
+  await plan.getByRole("radio", { name: "每天循环" }).check();
+  await plan.getByLabel("每天执行时间").fill("08:30");
+  await plan.getByLabel("最长运行时长（分钟，可选）").fill("");
+  await plan.getByRole("button", { name: "保存设置" }).click();
+  assert.equal(schedule.config.scheduleType, "daily");
+  assert.deepEqual(schedule.config.daily, { startTime: "08:30" });
+  assert.equal(schedule.config.maxDurationMinutes, null);
+  await plan.screenshot({ path: testInfo.outputPath("scan-schedule-daily.png") });
+  await plan.getByRole("radio", { name: "每周循环" }).check();
+  await expect(plan.getByLabel("周一执行时间")).toHaveValue("22:00");
+  await plan.getByLabel("最长运行时长（分钟，可选）").fill("60");
+  await plan.getByRole("button", { name: "保存设置" }).click();
+  assert.equal(schedule.config.scheduleType, "weekly");
+  assert.deepEqual(schedule.config.daily, { startTime: "08:30" });
+  assert.equal(schedule.config.maxDurationMinutes, 60);
   await page.getByText("正在读取标签 4/7：召唤兽/孩子", { exact: true }).waitFor();
   assert.match(await page.locator(".crawl-panel").innerText(), /本页进度：1 \/ 15/);
   await page.getByRole("button", { name: /角色a ·/ }).click();
@@ -149,6 +226,10 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   const statusReadsBeforeReload = browserStatusReads;
   const openReadsBeforeReload = browserOpenReads;
   await page.reload();
+  await expect(plan.getByLabel("周一执行时间")).toHaveValue("22:00");
+  await expect(plan.getByLabel("周三执行时间")).toHaveValue("10:00");
+  await expect(plan.getByLabel("最长运行时长（分钟，可选）")).toHaveValue("60");
+  await expect(plan.getByRole("checkbox", { name: "周二" })).not.toBeChecked();
   await page.getByRole("button", { name: /角色k45 ·/ }).waitFor();
   await page.getByRole("dialog").waitFor();
   assert.ok(browserStatusReads > statusReadsBeforeReload, "reload should verify browser status");

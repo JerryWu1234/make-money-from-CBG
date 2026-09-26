@@ -1136,6 +1136,121 @@ body {
 .crawl-progress {
   color: #67e8f9;
 }
+.scan-schedule {
+  margin: 20px 0;
+  padding: 18px;
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.12);
+}
+.scan-schedule h3 {
+  margin-bottom: 8px;
+}
+.scan-schedule-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+.scan-schedule-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+}
+.scan-schedule-form input {
+  width: 100%;
+  padding: 9px;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  background: #0f172a;
+  color: var(--text-primary);
+  font: inherit;
+}
+.scan-schedule-form fieldset {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.scan-schedule-form legend {
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+}
+.scan-schedule-repeat-mode > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+.scan-schedule-repeat-mode label {
+  flex-direction: row;
+  align-items: center;
+  cursor: pointer;
+}
+.scan-schedule-repeat-mode input {
+  width: auto;
+  margin: 0;
+}
+.scan-schedule-daily > div {
+  display: grid;
+  grid-template-columns: minmax(110px, 220px);
+  gap: 8px;
+}
+.scan-schedule-day-rows {
+  display: grid;
+  gap: 8px;
+}
+.scan-schedule-day-row {
+  display: grid;
+  grid-template-columns: 100px minmax(110px, 220px);
+  gap: 8px;
+  align-items: end;
+}
+.scan-schedule-day-row .scan-schedule-day-toggle {
+  flex-direction: row;
+  align-items: center;
+  padding-bottom: 10px;
+  cursor: pointer;
+}
+.scan-schedule-day-toggle input {
+  width: auto;
+  margin: 0;
+}
+.scan-schedule-day-row input:disabled {
+  opacity: 0.5;
+}
+.scan-schedule-duration {
+  grid-column: 1 / -1;
+  max-width: 220px;
+}
+@media (max-width: 550px) {
+  .scan-schedule-daily > div {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .scan-schedule-day-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .scan-schedule-day-row .scan-schedule-day-toggle {
+    padding-bottom: 0;
+  }
+  .scan-schedule-day-row label:not(.scan-schedule-day-toggle) {
+    max-width: 220px;
+  }
+}
+.scan-schedule-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.scan-schedule-actions .btn-primary {
+  width: auto;
+  padding: 10px 14px;
+}
+.scan-schedule-status p + p {
+  margin-top: 8px;
+}
 .saved-role {
   margin-top: 20px;
   padding-top: 16px;

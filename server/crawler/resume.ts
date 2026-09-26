@@ -57,7 +57,7 @@ export async function prepareCrawlPages(
   const savedPoint = store.checkpoint();
   let anchor: Listing | undefined;
   if (savedPoint) {
-    const candidates = store.anchorItems();
+    const candidates = store.anchorItems().slice(0, 12);
     for (const [index, item] of candidates.entries()) {
       signal.throwIfAborted();
       publish({
@@ -70,7 +70,6 @@ export async function prepareCrawlPages(
         break;
       }
     }
-    if (!anchor) throw new Error("没有仍上架的历史商品可作为续采锚点");
   }
 
   const first = await source.prepare();
@@ -85,10 +84,11 @@ export async function prepareCrawlPages(
     message: "正在核对排序和上次成功入库的断点…",
   });
   const resume = point ? await locateCheckpoint(source, first, point, signal) : null;
-  const backfillComplete = store.backfillComplete();
+  const fullScan = !point || resume === null;
+  const backfillComplete = store.backfillComplete() && !fullScan;
   const end = first.totalPages;
   const anchorPage = point ? Math.min(end, resume ? resume + 1 : Math.max(1, point.page)) : 1;
-  const numbers = !point
+  const numbers = fullScan
     ? Array.from({ length: end }, (_, i) => i + 1)
     : backfillComplete
       ? Array.from({ length: anchorPage }, (_, i) => i + 1)
@@ -97,12 +97,14 @@ export async function prepareCrawlPages(
           (_, i) => Math.max(1, anchorPage - 1) + i,
         );
   publish({
-    strategy: !point
-      ? "首次全量采集：逐页补齐历史商品"
+    strategy: fullScan
+      ? savedPoint
+        ? "续采锚点或排序不可靠：从第 1 页逐页核对完整列表"
+        : "首次全量采集：逐页补齐历史商品"
       : backfillComplete
         ? `已找到仍上架锚点；只检查第 1 至 ${anchorPage} 页的新增商品`
         : `已找到仍上架锚点；从第 ${Math.max(1, anchorPage - 1)} 页继续补齐后段历史商品`,
     message: "逐条悬停核对商品编号，已完整入库的商品跳过详情。",
   });
-  return { numbers, backfillComplete, end };
+  return { numbers, backfillComplete, end, fullScan };
 }
