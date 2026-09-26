@@ -140,6 +140,8 @@ describe("计划时间", () => {
     expect(nextScanTime(local(25, 9), plan, null)).toBe(local(25, 9));
     expect(nextScanTime(local(25, 11), plan, null)).toBe(local(25, 11));
     expect(nextScanTime(local(25, 11), plan, localDateKey(local(25, 9)))).toBe(local(26, 9));
+    expect(nextScanTime(local(25, 11), plan, null, local(25, 10))).toBe(local(26, 9));
+    expect(nextScanTime(local(26, 11), plan, null, local(25, 10))).toBe(local(26, 11));
   });
 
   it("每周只在选中日各执行一次，并采用各自时间", () => {
@@ -155,6 +157,7 @@ describe("计划时间", () => {
     };
     expect(nextScanTime(local(25, 22), plan, null)).toBe(local(28, 9)); // 周五等周一
     expect(nextScanTime(local(28, 10), plan, null)).toBe(local(28, 10));
+    expect(nextScanTime(local(28, 10), plan, null, local(28, 10))).toBe(local(30, 13));
     expect(nextScanTime(local(28, 10), plan, localDateKey(local(28, 9)))).toBe(local(30, 13));
     expect(nextScanTime(local(30, 10), plan, null)).toBe(local(30, 13));
   });
@@ -169,6 +172,7 @@ describe("计划持久化", () => {
       const plan = { ...only(1, 3), daily: { startTime: "08:30" }, maxDurationMinutes: 45 };
       first.setConfig(plan);
       first.setMode("enabled");
+      first.setEnabledAt(local(28, 8));
       first.setLastScheduledDate(localDateKey(local(28, 9)));
       first.setNextRunAt(local(30, 22));
       first.close();
@@ -176,6 +180,7 @@ describe("计划持久化", () => {
       expect(reopened.read()).toMatchObject({
         config: plan,
         mode: "enabled",
+        enabledAt: local(28, 8),
         lastScheduledDate: localDateKey(local(28, 9)),
         nextRunAt: local(30, 22),
       });
@@ -250,6 +255,7 @@ describe("计划持久化", () => {
       db.close();
       const upgraded = new ScanScheduleStore(filename);
       expect(upgraded.read().lastScheduledDate).toBe(localDateKey(local(25, 22)));
+      expect(upgraded.read().enabledAt).toBeNull();
       upgraded.close();
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -277,6 +283,44 @@ describe("计划持久化", () => {
 });
 
 describe("扫描调度", () => {
+  it("过点后启用等待下一运行日，服务重启也不会补跑启用前错过的任务", async () => {
+    const store = memoryStore(daily());
+    store.setMode("disabled");
+    let now = local(25, 11);
+    const fake = fakeDriver(() => now);
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    scheduler.enable();
+    await scheduler.tick();
+    expect(store.read().enabledAt).toBe(now);
+    expect(store.read().lastScheduledDate).toBeNull();
+    expect(store.read().nextRunAt).toBe(local(26, 9));
+    expect(fake.driver.browserStatus).not.toHaveBeenCalled();
+
+    const restarted = new ScanScheduler(store, fake.driver, () => now);
+    await restarted.tick();
+    expect(fake.driver.startCrawl).not.toHaveBeenCalled();
+    now = local(26, 9);
+    await restarted.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("提前启用后服务错过执行时间，恢复时补跑当天一次", async () => {
+    const store = memoryStore(daily());
+    store.setMode("disabled");
+    let now = local(25, 8);
+    const fake = fakeDriver(() => now);
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    scheduler.enable();
+    await scheduler.tick();
+    expect(store.read().nextRunAt).toBe(local(25, 9));
+
+    now = local(25, 11);
+    const restarted = new ScanScheduler(store, fake.driver, () => now);
+    await restarted.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+    expect(store.read().lastScheduledDate).toBe(localDateKey(now));
+  });
+
   it("已有手动采集时关闭计划，不计入定时轮次或执行时长", async () => {
     const store = memoryStore(daily(1));
     let now = local(25, 9);

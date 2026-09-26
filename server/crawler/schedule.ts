@@ -82,21 +82,23 @@ export class ScanScheduler {
     this.store.setConfig(config);
     const row = this.store.read();
     if (row.mode === "enabled" && !this.watchedRun)
-      this.setNextRunAt(nextScanTime(this.now(), config, row.lastScheduledDate));
+      this.setNextRunAt(nextScanTime(this.now(), config, row.lastScheduledDate, row.enabledAt));
     diagnostics.record("scan.configured", { config });
     void this.tick();
     return this.status();
   }
 
   enable() {
+    const now = this.now();
     const prior = this.store.read();
-    if (prior.mode === "suspended" && prior.lastScheduledDate === localDateKey(this.now()))
+    if (prior.mode === "suspended" && prior.lastScheduledDate === localDateKey(now))
       this.store.setLastScheduledDate(null);
     this.retryBrowserOnResume = prior.mode === "suspended";
+    if (prior.mode === "disabled") this.store.setEnabledAt(now);
     this.store.setMode("enabled");
     this.loginRequested = false;
     const row = this.store.read();
-    this.setNextRunAt(nextScanTime(this.now(), row.config, row.lastScheduledDate));
+    this.setNextRunAt(nextScanTime(now, row.config, row.lastScheduledDate, row.enabledAt));
     diagnostics.record("scan.enabled");
     void this.tick();
     return this.status();
@@ -171,7 +173,7 @@ export class ScanScheduler {
       this.watchRun(existing.completion, existing.startedAt);
       return;
     }
-    const due = nextScanTime(now, row.config, row.lastScheduledDate);
+    const due = nextScanTime(now, row.config, row.lastScheduledDate, row.enabledAt);
     if (due > now) {
       this.loginRequested = false;
       this.setNextRunAt(due);
@@ -184,7 +186,12 @@ export class ScanScheduler {
     if (this.closed || this.store.read().mode !== "enabled") return;
     const readyAt = this.now();
     const current = this.store.read();
-    const currentDue = nextScanTime(readyAt, current.config, current.lastScheduledDate);
+    const currentDue = nextScanTime(
+      readyAt,
+      current.config,
+      current.lastScheduledDate,
+      current.enabledAt,
+    );
     if (currentDue > readyAt) {
       this.setNextRunAt(currentDue);
       this.state = "waiting_window";
@@ -315,7 +322,9 @@ export class ScanScheduler {
     const todayStart = scheduledStartForDay(new Date(ended), row.config);
     if (todayStart !== null && todayStart <= ended && row.lastScheduledDate !== localDateKey(ended))
       this.store.setLastScheduledDate(localDateKey(ended));
-    this.setNextRunAt(nextScanTime(ended, row.config, this.store.read().lastScheduledDate));
+    this.setNextRunAt(
+      nextScanTime(ended, row.config, this.store.read().lastScheduledDate, row.enabledAt),
+    );
     this.state = "waiting_next";
     this.message = summary.message;
   }

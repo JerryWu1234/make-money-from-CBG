@@ -25,6 +25,7 @@ export interface StoredSchedule {
   issue: string | null;
   nextRunAt: number | null;
   lastScheduledDate: string | null;
+  enabledAt: number | null;
   lastRun: ScanRunSummary | null;
 }
 
@@ -50,7 +51,7 @@ export class ScanScheduleStore {
       CREATE TABLE IF NOT EXISTS scan_schedule (
         id INTEGER PRIMARY KEY CHECK(id=1), config_json TEXT NOT NULL,
         mode TEXT NOT NULL, issue TEXT, next_run_at INTEGER, last_run_json TEXT,
-        last_scheduled_date TEXT
+        last_scheduled_date TEXT, enabled_at INTEGER
       );
       CREATE TABLE IF NOT EXISTS scan_schedule_lock (
         id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL
@@ -65,6 +66,8 @@ export class ScanScheduleStore {
         if (Number.isFinite(started)) this.setLastScheduledDate(localDateKey(started));
       }
     }
+    if (!columns.some((column) => column.name === "enabled_at"))
+      this.db.exec("ALTER TABLE scan_schedule ADD COLUMN enabled_at INTEGER");
     this.db
       .prepare("INSERT OR IGNORE INTO scan_schedule(id,config_json,mode) VALUES(1,?,'disabled')")
       .run(JSON.stringify(DEFAULT_CONFIG));
@@ -73,7 +76,7 @@ export class ScanScheduleStore {
   read(): StoredSchedule {
     const row = this.db
       .prepare(
-        "SELECT config_json,mode,issue,next_run_at,last_run_json,last_scheduled_date FROM scan_schedule WHERE id=1",
+        "SELECT config_json,mode,issue,next_run_at,last_run_json,last_scheduled_date,enabled_at FROM scan_schedule WHERE id=1",
       )
       .get()!;
     const saved = JSON.parse(String(row.config_json)) as Record<string, unknown>;
@@ -105,6 +108,7 @@ export class ScanScheduleStore {
       issue: row.issue == null ? null : String(row.issue),
       nextRunAt: row.next_run_at == null ? null : Number(row.next_run_at),
       lastScheduledDate: row.last_scheduled_date == null ? null : String(row.last_scheduled_date),
+      enabledAt: row.enabled_at == null ? null : Number(row.enabled_at),
       lastRun,
     };
   }
@@ -127,6 +131,10 @@ export class ScanScheduleStore {
 
   setLastScheduledDate(value: string | null) {
     this.db.prepare("UPDATE scan_schedule SET last_scheduled_date=? WHERE id=1").run(value);
+  }
+
+  setEnabledAt(value: number) {
+    this.db.prepare("UPDATE scan_schedule SET enabled_at=? WHERE id=1").run(value);
   }
 
   recordRun(value: ScanRunSummary) {

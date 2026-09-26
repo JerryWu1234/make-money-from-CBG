@@ -154,6 +154,7 @@ export function ScanSchedulePanel() {
       <h3>定时循环扫描</h3>
       <p className="status-note">
         选择每天或每周循环，设置执行时间；每个运行日自动启动一次。可设置本次最长运行时长，留空则运行到本次结束。
+        启用时若今天的执行时间已过，将等待下一运行日。
       </p>
       <form
         className="scan-schedule-form"
