@@ -1191,10 +1191,24 @@ body {
   width: auto;
   margin: 0;
 }
-.scan-schedule-daily > div {
-  display: grid;
-  grid-template-columns: minmax(110px, 220px);
+.scan-schedule-times {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
   gap: 8px;
+}
+.scan-schedule-time {
+  display: flex;
+  align-items: end;
+  gap: 6px;
+}
+.scan-schedule-time label {
+  min-width: 130px;
+}
+.scan-schedule-time button,
+.scan-schedule-add-time {
+  width: auto;
+  padding: 9px;
 }
 .scan-schedule-day-rows {
   display: grid;
@@ -1202,7 +1216,7 @@ body {
 }
 .scan-schedule-day-row {
   display: grid;
-  grid-template-columns: 100px minmax(110px, 220px);
+  grid-template-columns: 100px minmax(0, 1fr);
   gap: 8px;
   align-items: end;
 }
@@ -1224,17 +1238,11 @@ body {
   max-width: 220px;
 }
 @media (max-width: 550px) {
-  .scan-schedule-daily > div {
-    grid-template-columns: minmax(0, 1fr);
-  }
   .scan-schedule-day-row {
     grid-template-columns: minmax(0, 1fr);
   }
   .scan-schedule-day-row .scan-schedule-day-toggle {
     padding-bottom: 0;
-  }
-  .scan-schedule-day-row label:not(.scan-schedule-day-toggle) {
-    max-width: 220px;
   }
 }
 .scan-schedule-actions {

@@ -35,6 +35,78 @@ const LABELS: Record<string, string> = {
   other_instance: "其他服务运行中",
 };
 
+type TimeSetting = { startTime: string; additionalStartTimes?: string[] };
+
+function timesOf(setting: TimeSetting) {
+  return [setting.startTime, ...(setting.additionalStartTimes ?? [])];
+}
+
+function withTimes(times: string[]): TimeSetting {
+  return times.length === 1
+    ? { startTime: times[0] }
+    : { startTime: times[0], additionalStartTimes: times.slice(1) };
+}
+
+function TimeInputs({
+  label,
+  setting,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  setting: TimeSetting;
+  disabled?: boolean;
+  onChange: (value: TimeSetting) => void;
+}) {
+  const times = timesOf(setting);
+  return (
+    <div className="scan-schedule-times">
+      {times.map((time, index) => (
+        <div className="scan-schedule-time" key={index}>
+          <label>
+            执行时间 {index + 1}
+            <input
+              type="time"
+              aria-label={`${label}执行时间 ${index + 1}`}
+              value={time}
+              disabled={disabled}
+              onChange={(event) =>
+                onChange(
+                  withTimes(
+                    times.map((item, position) => (position === index ? event.target.value : item)),
+                  ),
+                )
+              }
+              required
+            />
+          </label>
+          {times.length > 1 && (
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={disabled}
+              aria-label={`删除${label}执行时间 ${index + 1}`}
+              onClick={() => onChange(withTimes(times.filter((_, position) => position !== index)))}
+            >
+              删除
+            </button>
+          )}
+        </div>
+      ))}
+      {times.length < 5 && (
+        <button
+          type="button"
+          className="btn-secondary scan-schedule-add-time"
+          disabled={disabled}
+          onClick={() => onChange(withTimes([...times, ""]))}
+        >
+          + 添加执行时间
+        </button>
+      )}
+    </div>
+  );
+}
+
 function localTime(value: number | string, timezone: string) {
   return new Date(value).toLocaleString("zh-CN", { timeZone: timezone, hour12: false });
 }
@@ -148,13 +220,18 @@ export function ScanSchedulePanel({ ready, running }: { ready: boolean; running:
     dirty.current = true;
     setDraft((current) => ({ ...current, daily: { ...current.daily, ...changes } }));
   };
+  const hasMultipleTimes =
+    draft.scheduleType === "daily"
+      ? timesOf(draft.daily).length > 1
+      : draft.days.some((day) => day.enabled && timesOf(day).length > 1);
 
   return (
     <section className="scan-schedule" aria-label="定时循环扫描">
       <h3>定时循环扫描</h3>
       <p className="status-note">
-        选择每天或每周循环，设置执行时间；每个运行日自动启动一次。可设置本次最长运行时长，留空则运行到本次结束。
-        启用时若今天的执行时间已过，将等待下一运行日。
+        选择每天或每周循环，每个运行日最多设置 5
+        个执行时间。每个时间点启动一轮；若上一轮仍在运行，则跳过该时间点。
+        多个时间点必须设置最长运行时长，时间间隔不得小于该时长。启用时已过的时间点不会补跑。
       </p>
       <form
         className="scan-schedule-form"
@@ -197,18 +274,7 @@ export function ScanSchedulePanel({ ready, running }: { ready: boolean; running:
         {draft.scheduleType === "daily" ? (
           <fieldset className="scan-schedule-daily">
             <legend>每天的执行时间</legend>
-            <div>
-              <label>
-                执行时间
-                <input
-                  type="time"
-                  aria-label="每天执行时间"
-                  value={draft.daily.startTime}
-                  onChange={(event) => updateDaily({ startTime: event.target.value })}
-                  required
-                />
-              </label>
-            </div>
+            <TimeInputs label="每天" setting={draft.daily} onChange={updateDaily} />
           </fieldset>
         ) : (
           <fieldset className="scan-schedule-weekdays">
@@ -226,17 +292,12 @@ export function ScanSchedulePanel({ ready, running }: { ready: boolean; running:
                       />
                       {label}
                     </label>
-                    <label>
-                      执行时间
-                      <input
-                        type="time"
-                        aria-label={`${label}执行时间`}
-                        value={day.startTime}
-                        disabled={!day.enabled}
-                        onChange={(event) => updateDay(weekday, { startTime: event.target.value })}
-                        required
-                      />
-                    </label>
+                    <TimeInputs
+                      label={label}
+                      setting={day}
+                      disabled={!day.enabled}
+                      onChange={(value) => updateDay(weekday, value)}
+                    />
                   </div>
                 );
               })}
@@ -244,11 +305,12 @@ export function ScanSchedulePanel({ ready, running }: { ready: boolean; running:
           </fieldset>
         )}
         <label className="scan-schedule-duration">
-          最长运行时长（分钟，可选）
+          最长运行时长（分钟{hasMultipleTimes ? "，必填" : "，可选"}）
           <input
             type="number"
             min="1"
             step="1"
+            required={hasMultipleTimes}
             value={draft.maxDurationMinutes}
             placeholder="留空则运行到本次结束"
             onChange={(event) => {
@@ -307,14 +369,16 @@ export function ScanSchedulePanel({ ready, running }: { ready: boolean; running:
           )}
           {status.state === "waiting_login" && (
             <p>
-              {status.pendingLoginDate
-                ? `${status.pendingLoginDate} 这轮等待登录；`
+              {status.pendingLoginAt
+                ? `${localTime(status.pendingLoginAt, status.timezone)} 这轮等待登录；`
                 : "正在等待登录；"}
               请在页面上方扫码，二维码失效时点击“重新尝试”。
-              当天登录成功后会自动扫描，过午夜则跳过这轮。
+              下个执行时间或午夜前登录成功会自动扫描；过时则跳过这轮。
             </p>
           )}
-          {status.lastSkippedDate && <p>最近因未登录跳过的计划日：{status.lastSkippedDate}</p>}
+          {status.lastSkippedAt && (
+            <p>最近跳过的执行时间：{localTime(status.lastSkippedAt, status.timezone)}</p>
+          )}
           {status.lastRun && (
             <p>
               上轮 {localTime(status.lastRun.endedAt, status.timezone)} ·
