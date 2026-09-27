@@ -113,6 +113,9 @@ export function App() {
           <div className="badge">在本页完成 · 复用日常浏览器登录状态</div>
           <h1 className="title">藏宝阁角色查询</h1>
           <p className="subtitle">扫码登录后，自动进入跨服购买，选择3年以上服并加载角色列表。</p>
+          <a className="analysis-preview-entry" href="/analysis-preview">
+            查看入库即分析页面 <span aria-hidden="true">↗</span>
+          </a>
         </header>
         <section className="workflow-stepper" aria-label="角色查询流程">
           {FLOW.map(([key, label]) => {
