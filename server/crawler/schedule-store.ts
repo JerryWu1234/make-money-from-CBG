@@ -25,6 +25,9 @@ export interface StoredSchedule {
   issue: string | null;
   nextRunAt: number | null;
   lastScheduledDate: string | null;
+  pendingLoginDate: string | null;
+  lastLoginNotifiedDate: string | null;
+  lastSkippedDate: string | null;
   enabledAt: number | null;
   lastRun: ScanRunSummary | null;
 }
@@ -51,7 +54,8 @@ export class ScanScheduleStore {
       CREATE TABLE IF NOT EXISTS scan_schedule (
         id INTEGER PRIMARY KEY CHECK(id=1), config_json TEXT NOT NULL,
         mode TEXT NOT NULL, issue TEXT, next_run_at INTEGER, last_run_json TEXT,
-        last_scheduled_date TEXT, enabled_at INTEGER
+        last_scheduled_date TEXT, enabled_at INTEGER,
+        pending_login_date TEXT, last_login_notified_date TEXT, last_skipped_date TEXT
       );
       CREATE TABLE IF NOT EXISTS scan_schedule_lock (
         id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL
@@ -68,6 +72,12 @@ export class ScanScheduleStore {
     }
     if (!columns.some((column) => column.name === "enabled_at"))
       this.db.exec("ALTER TABLE scan_schedule ADD COLUMN enabled_at INTEGER");
+    if (!columns.some((column) => column.name === "pending_login_date"))
+      this.db.exec("ALTER TABLE scan_schedule ADD COLUMN pending_login_date TEXT");
+    if (!columns.some((column) => column.name === "last_login_notified_date"))
+      this.db.exec("ALTER TABLE scan_schedule ADD COLUMN last_login_notified_date TEXT");
+    if (!columns.some((column) => column.name === "last_skipped_date"))
+      this.db.exec("ALTER TABLE scan_schedule ADD COLUMN last_skipped_date TEXT");
     this.db
       .prepare("INSERT OR IGNORE INTO scan_schedule(id,config_json,mode) VALUES(1,?,'disabled')")
       .run(JSON.stringify(DEFAULT_CONFIG));
@@ -76,7 +86,7 @@ export class ScanScheduleStore {
   read(): StoredSchedule {
     const row = this.db
       .prepare(
-        "SELECT config_json,mode,issue,next_run_at,last_run_json,last_scheduled_date,enabled_at FROM scan_schedule WHERE id=1",
+        "SELECT config_json,mode,issue,next_run_at,last_run_json,last_scheduled_date,enabled_at,pending_login_date,last_login_notified_date,last_skipped_date FROM scan_schedule WHERE id=1",
       )
       .get()!;
     const saved = JSON.parse(String(row.config_json)) as Record<string, unknown>;
@@ -108,6 +118,10 @@ export class ScanScheduleStore {
       issue: row.issue == null ? null : String(row.issue),
       nextRunAt: row.next_run_at == null ? null : Number(row.next_run_at),
       lastScheduledDate: row.last_scheduled_date == null ? null : String(row.last_scheduled_date),
+      pendingLoginDate: row.pending_login_date == null ? null : String(row.pending_login_date),
+      lastLoginNotifiedDate:
+        row.last_login_notified_date == null ? null : String(row.last_login_notified_date),
+      lastSkippedDate: row.last_skipped_date == null ? null : String(row.last_skipped_date),
       enabledAt: row.enabled_at == null ? null : Number(row.enabled_at),
       lastRun,
     };
@@ -131,6 +145,18 @@ export class ScanScheduleStore {
 
   setLastScheduledDate(value: string | null) {
     this.db.prepare("UPDATE scan_schedule SET last_scheduled_date=? WHERE id=1").run(value);
+  }
+
+  setPendingLoginDate(value: string | null) {
+    this.db.prepare("UPDATE scan_schedule SET pending_login_date=? WHERE id=1").run(value);
+  }
+
+  setLastLoginNotifiedDate(value: string) {
+    this.db.prepare("UPDATE scan_schedule SET last_login_notified_date=? WHERE id=1").run(value);
+  }
+
+  setLastSkippedDate(value: string) {
+    this.db.prepare("UPDATE scan_schedule SET last_skipped_date=? WHERE id=1").run(value);
   }
 
   setEnabledAt(value: number) {

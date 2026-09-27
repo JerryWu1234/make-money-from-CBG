@@ -306,8 +306,15 @@ export function ScanSchedulePanel({ ready, running }: { ready: boolean; running:
             <p>预计下轮：{localTime(status.nextRunAt, status.timezone)}</p>
           )}
           {status.state === "waiting_login" && (
-            <p>请在页面上方完成登录；二维码失效时点击“重新尝试”获取新二维码。</p>
+            <p>
+              {status.pendingLoginDate
+                ? `${status.pendingLoginDate} 这轮等待登录；`
+                : "正在等待登录；"}
+              请在页面上方扫码，二维码失效时点击“重新尝试”。
+              当天登录成功后会自动扫描，过午夜则跳过这轮。
+            </p>
           )}
+          {status.lastSkippedDate && <p>最近因未登录跳过的计划日：{status.lastSkippedDate}</p>}
           {status.lastRun && (
             <p>
               上轮 {localTime(status.lastRun.endedAt, status.timezone)} ·
