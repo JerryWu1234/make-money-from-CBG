@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import { openCbg, checkCbgStatus } from "../cbg";
 import { diagnostics } from "../diagnostics";
 import type { OpenCbgResult } from "../types";
@@ -31,6 +32,7 @@ type ScheduleState =
 interface ScanDriver {
   browserStatus: () => Promise<OpenCbgResult>;
   openBrowser: () => OpenCbgResult;
+  notifyLogin: () => void;
   startCrawl: (canStart: () => boolean) => Promise<CrawlStartResult>;
   crawlActivity: () => ActiveCrawl | null;
   stopCrawl: (reason?: "time_limit") => CrawlStatus;
@@ -39,6 +41,19 @@ interface ScanDriver {
 const driver: ScanDriver = {
   browserStatus: checkCbgStatus,
   openBrowser: openCbg,
+  notifyLogin: () => {
+    if (process.platform !== "darwin") return;
+    execFile(
+      "osascript",
+      [
+        "-e",
+        'display notification "定时扫描等待登录，请打开本地采集页面扫码。" with title "藏宝阁定时扫描"',
+      ],
+      (error) => {
+        if (error) diagnostics.record("scan.login_notice_error", { error });
+      },
+    );
+  },
   startCrawl: (canStart) => startCrawl("scheduled", canStart),
   crawlActivity,
   stopCrawl,
@@ -80,23 +95,27 @@ export class ScanScheduler {
   configure(input: unknown) {
     const config = parseScanScheduleConfig(input);
     this.store.setConfig(config);
+    this.store.setPendingLoginDate(null);
     const row = this.store.read();
     if (row.mode === "enabled" && !this.watchedRun)
-      this.setNextRunAt(nextScanTime(this.now(), config, row.lastScheduledDate));
+      this.setNextRunAt(nextScanTime(this.now(), config, row.lastScheduledDate, row.enabledAt));
     diagnostics.record("scan.configured", { config });
     void this.tick();
     return this.status();
   }
 
   enable() {
+    const now = this.now();
     const prior = this.store.read();
-    if (prior.mode === "suspended" && prior.lastScheduledDate === localDateKey(this.now()))
+    if (prior.mode === "suspended" && prior.lastScheduledDate === localDateKey(now))
       this.store.setLastScheduledDate(null);
     this.retryBrowserOnResume = prior.mode === "suspended";
+    this.store.setPendingLoginDate(null);
+    if (prior.mode === "disabled") this.store.setEnabledAt(now);
     this.store.setMode("enabled");
     this.loginRequested = false;
     const row = this.store.read();
-    this.setNextRunAt(nextScanTime(this.now(), row.config, row.lastScheduledDate));
+    this.setNextRunAt(nextScanTime(now, row.config, row.lastScheduledDate, row.enabledAt));
     diagnostics.record("scan.enabled");
     void this.tick();
     return this.status();
@@ -104,6 +123,7 @@ export class ScanScheduler {
 
   disable() {
     this.store.setMode("disabled");
+    this.store.setPendingLoginDate(null);
     this.state = "disabled";
     this.message = "定时计划已关闭。";
     this.loginRequested = false;
@@ -136,6 +156,15 @@ export class ScanScheduler {
     if (this.store.read().nextRunAt !== value) this.store.setNextRunAt(value);
   }
 
+  private expirePendingLogin(now: number) {
+    const pending = this.store.read().pendingLoginDate;
+    if (!pending || pending >= localDateKey(now)) return;
+    this.store.setLastSkippedDate(pending);
+    this.store.setPendingLoginDate(null);
+    this.loginRequested = false;
+    diagnostics.record("scan.login_skipped", { date: pending });
+  }
+
   private async check() {
     const now = this.now();
     if (!this.store.acquire(now)) {
@@ -143,7 +172,7 @@ export class ScanScheduler {
       this.message = "另一个本地服务正在管理定时计划。";
       return;
     }
-    const row = this.store.read();
+    let row = this.store.read();
     if (this.watchedRun) {
       this.checkDuration(now, row.config);
       if (row.mode === "disabled") {
@@ -162,6 +191,8 @@ export class ScanScheduler {
       this.message = row.issue || "定时计划已暂停，请处理后手动恢复。";
       return;
     }
+    this.expirePendingLogin(now);
+    row = this.store.read();
     const existing = this.scan.crawlActivity();
     if (existing) {
       if (existing.origin === "manual") {
@@ -171,7 +202,7 @@ export class ScanScheduler {
       this.watchRun(existing.completion, existing.startedAt);
       return;
     }
-    const due = nextScanTime(now, row.config, row.lastScheduledDate);
+    const due = nextScanTime(now, row.config, row.lastScheduledDate, row.enabledAt);
     if (due > now) {
       this.loginRequested = false;
       this.setNextRunAt(due);
@@ -183,8 +214,14 @@ export class ScanScheduler {
     const browser = await this.scan.browserStatus();
     if (this.closed || this.store.read().mode !== "enabled") return;
     const readyAt = this.now();
+    this.expirePendingLogin(readyAt);
     const current = this.store.read();
-    const currentDue = nextScanTime(readyAt, current.config, current.lastScheduledDate);
+    const currentDue = nextScanTime(
+      readyAt,
+      current.config,
+      current.lastScheduledDate,
+      current.enabledAt,
+    );
     if (currentDue > readyAt) {
       this.setNextRunAt(currentDue);
       this.state = "waiting_window";
@@ -198,7 +235,10 @@ export class ScanScheduler {
       /^(登录已失效|后台工作页已关闭|无法读取后台工作页)/.test(browser.message)
         ? browser.message
         : null);
-    if (browserIssue) {
+    const loginIssue = /^(登录已失效|网站登录状态已失效|等待扫码登录超时|二维码.*失效)/.test(
+      browserIssue || "",
+    );
+    if (browserIssue && !loginIssue) {
       if (this.retryBrowserOnResume) {
         this.retryBrowserOnResume = false;
         this.loginRequested = true;
@@ -210,21 +250,36 @@ export class ScanScheduler {
     }
     this.retryBrowserOnResume = false;
     if (!ready) {
+      const date = localDateKey(readyAt);
+      if (current.pendingLoginDate !== date) this.store.setPendingLoginDate(date);
       this.state = "waiting_login";
-      this.message = browser.running
-        ? "正在准备藏宝阁角色列表，请在页面完成登录。"
-        : `${browser.message || "请在页面登录藏宝阁。"} 登录并进入角色列表后会自动扫描。`;
+      this.message = loginIssue
+        ? `${browserIssue} 请在页面扫码或点击“重新尝试”；今天登录成功后会自动扫描。`
+        : browser.running
+          ? "正在准备藏宝阁角色列表；如需扫码，请在页面完成登录。"
+          : `${browser.message || "请在页面登录藏宝阁。"} 今天登录成功后会自动扫描。`;
       this.setNextRunAt(null);
-      if (!this.loginRequested && !browser.running) {
+      if (!this.loginRequested && !browser.running && browser.workflowStep !== "error") {
         this.loginRequested = true;
         this.scan.openBrowser();
         diagnostics.record("scan.login_requested");
+      }
+      if (current.lastLoginNotifiedDate !== date && (loginIssue || browser.needLogin)) {
+        this.store.setLastLoginNotifiedDate(date);
+        try {
+          this.scan.notifyLogin();
+        } catch (error) {
+          diagnostics.record("scan.login_notice_error", { error });
+        }
       }
       return;
     }
     this.loginRequested = false;
     try {
-      const attempt = await this.scan.startCrawl(() => this.store.read().mode === "enabled");
+      const runDate = localDateKey(readyAt);
+      const attempt = await this.scan.startCrawl(
+        () => this.store.read().mode === "enabled" && localDateKey(this.now()) === runDate,
+      );
       if (!attempt.started) {
         if (attempt.activity?.origin === "manual") this.closeForManualCrawl();
         else if (attempt.activity)
@@ -233,6 +288,7 @@ export class ScanScheduler {
       }
       if (!attempt.activity) throw new Error("采集任务未能启动");
       this.store.setLastScheduledDate(localDateKey(attempt.activity.startedAt));
+      this.store.setPendingLoginDate(null);
       this.watchRun(attempt.activity.completion, attempt.activity.startedAt);
     } catch (error) {
       if (error instanceof Error && /已有另一个本地服务正在采集/.test(error.message)) {
@@ -315,7 +371,9 @@ export class ScanScheduler {
     const todayStart = scheduledStartForDay(new Date(ended), row.config);
     if (todayStart !== null && todayStart <= ended && row.lastScheduledDate !== localDateKey(ended))
       this.store.setLastScheduledDate(localDateKey(ended));
-    this.setNextRunAt(nextScanTime(ended, row.config, this.store.read().lastScheduledDate));
+    this.setNextRunAt(
+      nextScanTime(ended, row.config, this.store.read().lastScheduledDate, row.enabledAt),
+    );
     this.state = "waiting_next";
     this.message = summary.message;
   }
@@ -326,6 +384,7 @@ export class ScanScheduler {
     if (row.mode !== "enabled") return;
     const message = error instanceof Error ? error.message : String(error);
     this.store.setMode("suspended", message);
+    this.store.setPendingLoginDate(null);
     this.state = "needs_action";
     this.message = message;
     diagnostics.record("scan.suspended", { reason: message });

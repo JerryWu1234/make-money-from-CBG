@@ -89,6 +89,7 @@ function fakeDriver(now: () => number) {
   const driver = {
     browserStatus: vi.fn(async () => browserResult ?? browser(ready)),
     openBrowser: vi.fn(() => browser(false)),
+    notifyLogin: vi.fn(),
     startCrawl: vi.fn(async (canStart: () => boolean) => {
       if (active) return { status: crawlStatus("collecting"), started: false, activity: active };
       if (!canStart()) return { status: crawlStatus("idle"), started: false, activity: null };
@@ -140,6 +141,8 @@ describe("计划时间", () => {
     expect(nextScanTime(local(25, 9), plan, null)).toBe(local(25, 9));
     expect(nextScanTime(local(25, 11), plan, null)).toBe(local(25, 11));
     expect(nextScanTime(local(25, 11), plan, localDateKey(local(25, 9)))).toBe(local(26, 9));
+    expect(nextScanTime(local(25, 11), plan, null, local(25, 10))).toBe(local(26, 9));
+    expect(nextScanTime(local(26, 11), plan, null, local(25, 10))).toBe(local(26, 11));
   });
 
   it("每周只在选中日各执行一次，并采用各自时间", () => {
@@ -155,6 +158,7 @@ describe("计划时间", () => {
     };
     expect(nextScanTime(local(25, 22), plan, null)).toBe(local(28, 9)); // 周五等周一
     expect(nextScanTime(local(28, 10), plan, null)).toBe(local(28, 10));
+    expect(nextScanTime(local(28, 10), plan, null, local(28, 10))).toBe(local(30, 13));
     expect(nextScanTime(local(28, 10), plan, localDateKey(local(28, 9)))).toBe(local(30, 13));
     expect(nextScanTime(local(30, 10), plan, null)).toBe(local(30, 13));
   });
@@ -169,14 +173,22 @@ describe("计划持久化", () => {
       const plan = { ...only(1, 3), daily: { startTime: "08:30" }, maxDurationMinutes: 45 };
       first.setConfig(plan);
       first.setMode("enabled");
+      first.setEnabledAt(local(28, 8));
       first.setLastScheduledDate(localDateKey(local(28, 9)));
+      first.setPendingLoginDate(localDateKey(local(30, 13)));
+      first.setLastLoginNotifiedDate(localDateKey(local(30, 13)));
+      first.setLastSkippedDate(localDateKey(local(28, 9)));
       first.setNextRunAt(local(30, 22));
       first.close();
       const reopened = new ScanScheduleStore(filename);
       expect(reopened.read()).toMatchObject({
         config: plan,
         mode: "enabled",
+        enabledAt: local(28, 8),
         lastScheduledDate: localDateKey(local(28, 9)),
+        pendingLoginDate: localDateKey(local(30, 13)),
+        lastLoginNotifiedDate: localDateKey(local(30, 13)),
+        lastSkippedDate: localDateKey(local(28, 9)),
         nextRunAt: local(30, 22),
       });
       reopened.close();
@@ -250,6 +262,7 @@ describe("计划持久化", () => {
       db.close();
       const upgraded = new ScanScheduleStore(filename);
       expect(upgraded.read().lastScheduledDate).toBe(localDateKey(local(25, 22)));
+      expect(upgraded.read().enabledAt).toBeNull();
       upgraded.close();
     } finally {
       rmSync(directory, { recursive: true, force: true });
@@ -277,6 +290,44 @@ describe("计划持久化", () => {
 });
 
 describe("扫描调度", () => {
+  it("过点后启用等待下一运行日，服务重启也不会补跑启用前错过的任务", async () => {
+    const store = memoryStore(daily());
+    store.setMode("disabled");
+    let now = local(25, 11);
+    const fake = fakeDriver(() => now);
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    scheduler.enable();
+    await scheduler.tick();
+    expect(store.read().enabledAt).toBe(now);
+    expect(store.read().lastScheduledDate).toBeNull();
+    expect(store.read().nextRunAt).toBe(local(26, 9));
+    expect(fake.driver.browserStatus).not.toHaveBeenCalled();
+
+    const restarted = new ScanScheduler(store, fake.driver, () => now);
+    await restarted.tick();
+    expect(fake.driver.startCrawl).not.toHaveBeenCalled();
+    now = local(26, 9);
+    await restarted.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("提前启用后服务错过执行时间，恢复时补跑当天一次", async () => {
+    const store = memoryStore(daily());
+    store.setMode("disabled");
+    let now = local(25, 8);
+    const fake = fakeDriver(() => now);
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    scheduler.enable();
+    await scheduler.tick();
+    expect(store.read().nextRunAt).toBe(local(25, 9));
+
+    now = local(25, 11);
+    const restarted = new ScanScheduler(store, fake.driver, () => now);
+    await restarted.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+    expect(store.read().lastScheduledDate).toBe(localDateKey(now));
+  });
+
   it("已有手动采集时关闭计划，不计入定时轮次或执行时长", async () => {
     const store = memoryStore(daily(1));
     let now = local(25, 9);
@@ -350,15 +401,163 @@ describe("扫描调度", () => {
     expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
   });
 
-  it("登录失效时暂停计划，而不是一直显示等待登录", async () => {
+  it("登录失效时保留计划，当天扫码完成后自动执行且只通知一次", async () => {
+    const store = memoryStore(daily());
+    let now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    fake.setBrowserResult({ ...browser(false), message: "登录已失效，请重新开始。" });
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    await scheduler.tick();
+    expect(store.read().mode).toBe("enabled");
+    expect(store.read().pendingLoginDate).toBe(localDateKey(now));
+    expect(scheduler.status().state).toBe("waiting_login");
+    expect(fake.driver.openBrowser).toHaveBeenCalledTimes(1);
+    expect(fake.driver.notifyLogin).toHaveBeenCalledTimes(1);
+    expect(fake.driver.startCrawl).not.toHaveBeenCalled();
+
+    now = local(25, 9, 30);
+    fake.setBrowserResult(browser(true));
+    await scheduler.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+    expect(store.read().pendingLoginDate).toBeNull();
+    expect(store.read().lastScheduledDate).toBe(localDateKey(now));
+    now = local(25, 10);
+    fake.finish(crawlStatus("completed"));
+    await vi.waitFor(() => expect(store.read().lastRun?.outcome).toBe("completed"));
+    await scheduler.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("扫码超时不关闭计划，重新扫码成功后仍执行当天一轮", async () => {
     const store = memoryStore(daily());
     const now = local(25, 9);
     const fake = fakeDriver(() => now);
     fake.setBrowserResult({ ...browser(false), message: "登录已失效，请重新开始。" });
     const scheduler = new ScanScheduler(store, fake.driver, () => now);
     await scheduler.tick();
-    expect(store.read().mode).toBe("suspended");
-    expect(scheduler.status().message).toContain("登录已失效");
+    fake.setBrowserResult({
+      ...browser(false),
+      workflowStep: "error",
+      error: {
+        code: "CBG_LOGGING_IN",
+        message: "等待扫码登录超时，请点击重新开始获取当前二维码。",
+      },
+    });
+    await scheduler.tick();
+    expect(store.read().mode).toBe("enabled");
+    expect(scheduler.status().state).toBe("waiting_login");
+    expect(fake.driver.openBrowser).toHaveBeenCalledTimes(1);
+    fake.setBrowserResult(browser(true));
+    await scheduler.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("过午夜仍未登录则跳过该日，登录后等待下一次计划时间", async () => {
+    const store = memoryStore(daily());
+    let now = local(25, 23, 30);
+    const fake = fakeDriver(() => now);
+    fake.setBrowserResult({ ...browser(false), message: "登录已失效，请重新开始。" });
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    const missed = localDateKey(now);
+    now = local(26, 0, 1);
+    fake.setBrowserResult(browser(true));
+    await scheduler.tick();
+    expect(store.read().lastSkippedDate).toBe(missed);
+    expect(store.read().pendingLoginDate).toBeNull();
+    expect(store.read().nextRunAt).toBe(local(26, 9));
+    expect(fake.driver.startCrawl).not.toHaveBeenCalled();
+    now = local(26, 9);
+    await scheduler.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("每周计划错过登录后等待下一个选中的星期", async () => {
+    const store = memoryStore(only(1, 3));
+    let now = local(28, 22); // 周一
+    const fake = fakeDriver(() => now);
+    fake.setBrowserResult({ ...browser(false), message: "登录已失效，请重新开始。" });
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    now = local(29, 0, 1); // 周二
+    fake.setBrowserResult(browser(true));
+    await scheduler.tick();
+    expect(store.read().lastSkippedDate).toBe(localDateKey(local(28, 22)));
+    expect(store.read().nextRunAt).toBe(local(30, 22));
+    expect(fake.driver.startCrawl).not.toHaveBeenCalled();
+    now = local(30, 22); // 周三
+    await scheduler.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("启动前跨过午夜时不启动过期的那一轮", async () => {
+    const store = memoryStore(daily());
+    let now = local(25, 23, 59);
+    const fake = fakeDriver(() => now);
+    fake.setBrowserResult({ ...browser(false), message: "登录已失效，请重新开始。" });
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    fake.setBrowserResult(browser(true));
+    const start = fake.driver.startCrawl;
+    fake.driver.startCrawl = vi.fn(async (canStart) => {
+      now = local(26, 0, 1);
+      return start(canStart);
+    });
+    await scheduler.tick();
+    expect(fake.driver.crawlActivity()).toBeNull();
+    await scheduler.tick();
+    expect(store.read().lastSkippedDate).toBe(localDateKey(local(25, 23)));
+    expect(store.read().nextRunAt).toBe(local(26, 9));
+  });
+
+  it("等待登录期间不计入最长运行时长", async () => {
+    const store = memoryStore(daily(30));
+    let now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    fake.setBrowserResult({ ...browser(false), message: "登录已失效，请重新开始。" });
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    now = local(25, 9, 20);
+    fake.setBrowserResult(browser(true));
+    await scheduler.tick();
+    now = local(25, 9, 49);
+    await scheduler.tick();
+    expect(fake.driver.stopCrawl).not.toHaveBeenCalled();
+    now = local(25, 9, 50);
+    await scheduler.tick();
+    expect(fake.driver.stopCrawl).toHaveBeenCalledWith("time_limit");
+  });
+
+  it("系统通知失败也不暂停计划", async () => {
+    const store = memoryStore(daily());
+    const now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    fake.setBrowserResult({ ...browser(false), message: "登录已失效，请重新开始。" });
+    fake.driver.notifyLogin.mockImplementationOnce(() => {
+      throw new Error("通知不可用");
+    });
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    expect(store.read().mode).toBe("enabled");
+    expect(store.read().pendingLoginDate).toBe(localDateKey(now));
+  });
+
+  it("服务重启后等待状态保留，同一天不重复通知", async () => {
+    const store = memoryStore(daily());
+    let now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    fake.setBrowserResult({ ...browser(false), message: "登录已失效，请重新开始。" });
+    const first = new ScanScheduler(store, fake.driver, () => now);
+    await first.tick();
+    now = local(25, 10);
+    const restarted = new ScanScheduler(store, fake.driver, () => now);
+    await restarted.tick();
+    expect(store.read().pendingLoginDate).toBe(localDateKey(now));
+    expect(fake.driver.notifyLogin).toHaveBeenCalledTimes(1);
+    now = local(26, 0, 1);
+    await restarted.tick();
+    expect(store.read().lastSkippedDate).toBe(localDateKey(local(25, 9)));
   });
 
   it("每天到点启动一次，完成后同日不再启动，次日继续", async () => {

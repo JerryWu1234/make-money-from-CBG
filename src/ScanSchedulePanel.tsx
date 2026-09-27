@@ -39,7 +39,7 @@ function localTime(value: number | string, timezone: string) {
   return new Date(value).toLocaleString("zh-CN", { timeZone: timezone, hour12: false });
 }
 
-export function ScanSchedulePanel() {
+export function ScanSchedulePanel({ ready, running }: { ready: boolean; running: boolean }) {
   const [status, setStatus] = useState<ScheduleStatus | null>(null);
   const [draft, setDraft] = useState<Draft>({
     scheduleType: "weekly",
@@ -154,6 +154,7 @@ export function ScanSchedulePanel() {
       <h3>定时循环扫描</h3>
       <p className="status-note">
         选择每天或每周循环，设置执行时间；每个运行日自动启动一次。可设置本次最长运行时长，留空则运行到本次结束。
+        启用时若今天的执行时间已过，将等待下一运行日。
       </p>
       <form
         className="scan-schedule-form"
@@ -273,7 +274,7 @@ export function ScanSchedulePanel() {
             <button
               type="button"
               className="btn-primary"
-              disabled={busy || !status}
+              disabled={busy || !status || running || (status.mode === "disabled" && !ready)}
               onClick={() => void action("enable")}
             >
               {status?.mode === "suspended" ? "恢复计划" : "启用计划"}
@@ -281,6 +282,9 @@ export function ScanSchedulePanel() {
           )}
         </div>
       </form>
+      {status?.mode === "disabled" && !ready && (
+        <p className="status-note">请先登录藏宝阁并进入角色列表，再启用计划。</p>
+      )}
       {error && (
         <p role="alert" className="error-message">
           {error}
@@ -302,8 +306,15 @@ export function ScanSchedulePanel() {
             <p>预计下轮：{localTime(status.nextRunAt, status.timezone)}</p>
           )}
           {status.state === "waiting_login" && (
-            <p>请在页面上方完成登录；二维码失效时点击“重新尝试”获取新二维码。</p>
+            <p>
+              {status.pendingLoginDate
+                ? `${status.pendingLoginDate} 这轮等待登录；`
+                : "正在等待登录；"}
+              请在页面上方扫码，二维码失效时点击“重新尝试”。
+              当天登录成功后会自动扫描，过午夜则跳过这轮。
+            </p>
           )}
+          {status.lastSkippedDate && <p>最近因未登录跳过的计划日：{status.lastSkippedDate}</p>}
           {status.lastRun && (
             <p>
               上轮 {localTime(status.lastRun.endedAt, status.timezone)} ·

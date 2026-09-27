@@ -62,6 +62,20 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
     const body = req.method === "POST" ? await verifyRequestBody(req) : {};
     if (pathname.startsWith("/api/scan/")) {
       const scan = await import("./crawler/schedule");
+      if (pathname === "/api/scan/enable" && scan.scanScheduleStatus().mode === "disabled") {
+        const crawler = await import("./crawler/controller");
+        if (crawler.isCrawling()) {
+          res.statusCode = 409;
+          res.end(JSON.stringify({ error: "请先暂停采集，再启用计划" }));
+          return;
+        }
+        const browser = await (await import("./browser")).checkCbgStatus();
+        if (browser.running || !browser.isLoggedIn || browser.workflowStep !== "completed") {
+          res.statusCode = 409;
+          res.end(JSON.stringify({ error: "请先完成登录并进入角色列表，再启用计划" }));
+          return;
+        }
+      }
       const result =
         pathname === "/api/scan/configure"
           ? scan.configureScanSchedule(body)

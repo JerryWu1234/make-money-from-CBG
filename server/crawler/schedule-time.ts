@@ -83,6 +83,7 @@ export function nextScanTime(
   now: number,
   config: ScanScheduleConfig,
   lastScheduledDate: string | null,
+  enabledAt: number | null = null,
 ) {
   const base = new Date(now);
   base.setHours(0, 0, 0, 0);
@@ -90,7 +91,12 @@ export function nextScanTime(
     const day = new Date(base);
     day.setDate(day.getDate() + offset);
     const start = scheduledStartForDay(day, config);
-    if (start === null || (offset === 0 && lastScheduledDate === localDateKey(now))) continue;
+    if (start === null) continue;
+    if (
+      offset === 0 &&
+      (lastScheduledDate === localDateKey(now) || (enabledAt !== null && start < enabledAt))
+    )
+      continue;
     return offset === 0 && start <= now ? now : start;
   }
   throw new Error("无法计算下一次定时执行时间");

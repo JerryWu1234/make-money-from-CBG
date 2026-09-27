@@ -98,7 +98,7 @@ export function CrawlPanel({
         </button>
       </div>
       <p className="status-note">手动开始采集会关闭已启用的定时计划。</p>
-      <ScanSchedulePanel />
+      <ScanSchedulePanel ready={ready} running={!!status?.running} />
       {error && (
         <p role="alert" className="error-message">
           {error}
