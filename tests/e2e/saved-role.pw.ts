@@ -103,8 +103,9 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   await plan.getByLabel("周三执行时间").fill("10:00");
   await plan.getByLabel("周五执行时间").fill("15:00");
   await plan.getByLabel("最长运行时长（分钟，可选）").fill("45");
-  await plan.getByRole("button", { name: "启用计划" }).click();
-  await expect(plan).toContainText("计划状态：等待执行");
+  await expect(plan.getByRole("button", { name: "启用计划" })).toBeDisabled();
+  await plan.getByRole("button", { name: "保存设置" }).click();
+  await expect(plan).toContainText("计划状态：已关闭");
   await plan.screenshot({ path: testInfo.outputPath("scan-schedule.png") });
   assert.equal(schedule.config.maxDurationMinutes, 45);
   assert.deepEqual(
@@ -238,4 +239,8 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   assert.match(await results.innerText(), /共 45 条/);
   await results.scrollIntoViewIfNeeded();
   await page.screenshot({ path: testInfo.outputPath("crawl-detail-ui.png") });
+  await page.getByRole("button", { name: "关闭角色详情" }).click();
+  await expect(plan.getByRole("button", { name: "启用计划" })).toBeEnabled();
+  await plan.getByRole("button", { name: "启用计划" }).click();
+  await expect(plan).toContainText("计划状态：等待执行");
 });

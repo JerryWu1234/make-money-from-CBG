@@ -7,7 +7,7 @@ import type { OpenCbgResult } from "../types";
 import type { ActiveCrawl, CrawlOrigin } from "./controller";
 import { ScanScheduler } from "./schedule";
 import { ScanScheduleStore } from "./schedule-store";
-import { localDateKey, nextScanTime, parseScanScheduleConfig } from "./schedule-time";
+import { localDateKey, parseScanScheduleConfig, scheduledStartsForDay } from "./schedule-time";
 import type { ScanScheduleConfig } from "./schedule-time";
 import type { CrawlStatus } from "./types";
 
@@ -29,6 +29,10 @@ const daily = (maxDurationMinutes: number | null = null): ScanScheduleConfig => 
   ...config,
   scheduleType: "daily",
   maxDurationMinutes,
+});
+const multiDaily = (): ScanScheduleConfig => ({
+  ...daily(60),
+  daily: { startTime: "09:00", additionalStartTimes: ["13:00"] },
 });
 const local = (day: number, hour: number, minute = 0) =>
   new Date(2026, 8, day, hour, minute).getTime();
@@ -117,9 +121,80 @@ function fakeDriver(now: () => number) {
 }
 
 describe("计划时间", () => {
+  it("每天及每周各运行日可配置最多五个启动时间", () => {
+    const plan = parseScanScheduleConfig({
+      ...daily(60),
+      daily: { startTime: "18:00", additionalStartTimes: ["09:00", "13:00"] },
+    });
+    expect(plan.daily).toEqual({ startTime: "09:00", additionalStartTimes: ["13:00", "18:00"] });
+    expect(scheduledStartsForDay(new Date(local(25, 0)), plan)).toEqual([
+      local(25, 9),
+      local(25, 13),
+      local(25, 18),
+    ]);
+    expect(() =>
+      parseScanScheduleConfig({
+        ...daily(30),
+        daily: {
+          startTime: "08:00",
+          additionalStartTimes: ["09:00", "10:00", "11:00", "12:00", "13:00"],
+        },
+      }),
+    ).toThrow("最多设置 5 个");
+    expect(() =>
+      parseScanScheduleConfig({
+        ...daily(30),
+        daily: { startTime: "08:00", additionalStartTimes: ["08:00"] },
+      }),
+    ).toThrow("不能重复");
+    const weekly = only(1, 3);
+    const retained = parseScanScheduleConfig({
+      ...weekly,
+      maxDurationMinutes: 60,
+      daily: { startTime: "08:00", additionalStartTimes: ["12:00"] },
+      days: weekly.days.map((day) =>
+        day.weekday === 3 ? { ...day, additionalStartTimes: ["19:00"] } : day,
+      ),
+    });
+    expect(retained.daily.additionalStartTimes).toEqual(["12:00"]);
+    expect(retained.days[2]).toMatchObject({ startTime: "19:00", additionalStartTimes: ["22:00"] });
+  });
+
+  it("同一天多段必须有时长，并校验每日、跨午夜和每周相邻间隔", () => {
+    const two = { ...daily(), daily: { startTime: "09:00", additionalStartTimes: ["13:00"] } };
+    expect(() => parseScanScheduleConfig(two)).toThrow("必须填写最长运行时长");
+    expect(() => parseScanScheduleConfig({ ...two, maxDurationMinutes: 241 })).toThrow("至少间隔");
+    expect(
+      parseScanScheduleConfig({ ...two, maxDurationMinutes: 240 }).daily.additionalStartTimes,
+    ).toEqual(["13:00"]);
+    expect(() =>
+      parseScanScheduleConfig({
+        ...daily(601),
+        daily: { startTime: "09:00", additionalStartTimes: ["23:00"] },
+      }),
+    ).toThrow("至少间隔");
+    const week = only(1, 2);
+    expect(() =>
+      parseScanScheduleConfig({
+        ...week,
+        maxDurationMinutes: 120,
+        days: week.days.map((day) =>
+          day.weekday === 1
+            ? { ...day, startTime: "20:00", additionalStartTimes: ["23:00"] }
+            : day.weekday === 2
+              ? { ...day, startTime: "00:30" }
+              : day,
+        ),
+      }),
+    ).toThrow("至少间隔");
+  });
+
   it("校验执行时间、运行日和可选时长", () => {
     expect(parseScanScheduleConfig(config)).toEqual(config);
     expect(parseScanScheduleConfig(daily())).toEqual(daily());
+    expect(
+      parseScanScheduleConfig({ ...config, maxDurationMinutes: 1500 }).maxDurationMinutes,
+    ).toBe(1500);
     expect(parseScanScheduleConfig({ ...daily(), days: only().days })).toEqual({
       ...daily(),
       days: only().days,
@@ -135,36 +210,47 @@ describe("计划时间", () => {
     );
   });
 
-  it("每天到点只执行一次，过点且当天未执行时补一次", () => {
-    const plan = daily();
-    expect(nextScanTime(local(25, 8), plan, null)).toBe(local(25, 9));
-    expect(nextScanTime(local(25, 9), plan, null)).toBe(local(25, 9));
-    expect(nextScanTime(local(25, 11), plan, null)).toBe(local(25, 11));
-    expect(nextScanTime(local(25, 11), plan, localDateKey(local(25, 9)))).toBe(local(26, 9));
-    expect(nextScanTime(local(25, 11), plan, null, local(25, 10))).toBe(local(26, 9));
-    expect(nextScanTime(local(26, 11), plan, null, local(25, 10))).toBe(local(26, 11));
-  });
-
-  it("每周只在选中日各执行一次，并采用各自时间", () => {
+  it("每周在选中日使用各自的多个时间", () => {
     const plan = {
       ...only(1, 3),
       days: only(1, 3).days.map((day) =>
         day.weekday === 1
-          ? { ...day, startTime: "09:00" }
+          ? { ...day, startTime: "09:00", additionalStartTimes: ["13:00"] }
           : day.weekday === 3
             ? { ...day, startTime: "13:00" }
             : day,
       ),
     };
-    expect(nextScanTime(local(25, 22), plan, null)).toBe(local(28, 9)); // 周五等周一
-    expect(nextScanTime(local(28, 10), plan, null)).toBe(local(28, 10));
-    expect(nextScanTime(local(28, 10), plan, null, local(28, 10))).toBe(local(30, 13));
-    expect(nextScanTime(local(28, 10), plan, localDateKey(local(28, 9)))).toBe(local(30, 13));
-    expect(nextScanTime(local(30, 10), plan, null)).toBe(local(30, 13));
+    expect(scheduledStartsForDay(new Date(local(25, 0)), plan)).toEqual([]);
+    expect(scheduledStartsForDay(new Date(local(28, 0)), plan)).toEqual([
+      local(28, 9),
+      local(28, 13),
+    ]);
+    expect(scheduledStartsForDay(new Date(local(30, 0)), plan)).toEqual([local(30, 13)]);
   });
 });
 
 describe("计划持久化", () => {
+  it("多个时间点的配置、执行状态和待登录时间在服务重启后保留", () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "cbg-scan-multi-"));
+    const filename = path.join(directory, "scan.sqlite");
+    try {
+      const first = new ScanScheduleStore(filename);
+      first.setConfig(multiDaily());
+      first.setMode("enabled");
+      first.recordSlot(local(25, 9), "completed", local(25, 9));
+      first.setPendingLoginAt(local(25, 13));
+      first.close();
+      const reopened = new ScanScheduleStore(filename);
+      expect(reopened.read().config.daily.additionalStartTimes).toEqual(["13:00"]);
+      expect(reopened.slotOutcome(local(25, 9))).toBe("completed");
+      expect(reopened.read().pendingLoginAt).toBe(local(25, 13));
+      reopened.close();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("保存两种执行时间、时长与本日启动记录，重启后不会丢失", () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "cbg-scan-"));
     const filename = path.join(directory, "scan.sqlite");
@@ -187,6 +273,7 @@ describe("计划持久化", () => {
         enabledAt: local(28, 8),
         lastScheduledDate: localDateKey(local(28, 9)),
         pendingLoginDate: localDateKey(local(30, 13)),
+        pendingLoginAt: local(30, 22),
         lastLoginNotifiedDate: localDateKey(local(30, 13)),
         lastSkippedDate: localDateKey(local(28, 9)),
         nextRunAt: local(30, 22),
@@ -262,6 +349,7 @@ describe("计划持久化", () => {
       db.close();
       const upgraded = new ScanScheduleStore(filename);
       expect(upgraded.read().lastScheduledDate).toBe(localDateKey(local(25, 22)));
+      expect(upgraded.slotOutcome(local(25, 22))).toBe("completed");
       expect(upgraded.read().enabledAt).toBeNull();
       upgraded.close();
     } finally {
@@ -290,6 +378,150 @@ describe("计划持久化", () => {
 });
 
 describe("扫描调度", () => {
+  it("一天按两个时间点分别执行，完成后只等待下一段", async () => {
+    const store = memoryStore(multiDaily());
+    let now = local(25, 8);
+    const fake = fakeDriver(() => now);
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    expect(store.read().nextRunAt).toBe(local(25, 9));
+    now = local(25, 9);
+    await scheduler.tick();
+    expect(store.slotOutcome(local(25, 9))).toBe("started");
+    now = local(25, 10);
+    fake.finish(crawlStatus("completed"));
+    await vi.waitFor(() => expect(store.read().nextRunAt).toBe(local(25, 13)));
+    now = local(25, 13);
+    await scheduler.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(2);
+    expect(store.slotOutcome(local(25, 13))).toBe("started");
+    now = local(25, 14);
+    fake.finish(crawlStatus("completed"));
+    await vi.waitFor(() => expect(store.read().nextRunAt).toBe(local(26, 9)));
+  });
+
+  it("登录等待只属于当前时间点，下一时间点到来后跳过旧段", async () => {
+    const store = memoryStore(multiDaily());
+    let now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    fake.setReady(false);
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    expect(store.read().pendingLoginAt).toBe(local(25, 9));
+    now = local(25, 13);
+    fake.setReady(true);
+    await scheduler.tick();
+    expect(store.slotOutcome(local(25, 9))).toBe("skipped");
+    expect(store.read().lastSkippedAt).toBe(local(25, 9));
+    expect(store.slotOutcome(local(25, 13))).toBe("started");
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("前一段仍在扫描时跳过重叠时间点，完成后不补跑", async () => {
+    const store = memoryStore(multiDaily());
+    let now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    now = local(25, 13);
+    await scheduler.tick();
+    expect(store.slotOutcome(local(25, 13))).toBe("skipped");
+    now = local(25, 13, 10);
+    fake.finish(crawlStatus("completed"));
+    await vi.waitFor(() => expect(store.read().nextRunAt).toBe(local(26, 9)));
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("前一段恰好在下个时间点结束时，下一段可以开始", async () => {
+    const store = memoryStore(multiDaily());
+    let now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    now = local(25, 13);
+    fake.finish(crawlStatus("completed"));
+    await vi.waitFor(() => expect(store.slotOutcome(local(25, 9))).toBe("completed"));
+    await scheduler.tick();
+    expect(store.slotOutcome(local(25, 13))).toBe("started");
+  });
+
+  it("重启后只补当前最近的时间点，不补当天更早的段", async () => {
+    const store = memoryStore(multiDaily());
+    const now = local(25, 13, 30);
+    const fake = fakeDriver(() => now);
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    expect(store.slotOutcome(local(25, 9))).toBe("skipped");
+    expect(store.slotOutcome(local(25, 13))).toBe("started");
+    const restarted = new ScanScheduler(store, fake.driver, () => now);
+    await restarted.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("启动检查跨过下一时间点时不再启动旧段", async () => {
+    const store = memoryStore(multiDaily());
+    let now = local(25, 12, 59);
+    const fake = fakeDriver(() => now);
+    const start = fake.driver.startCrawl;
+    fake.driver.startCrawl = vi.fn(async (canStart) => {
+      now = local(25, 13);
+      return start(canStart);
+    });
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    expect(fake.driver.crawlActivity()).toBeNull();
+    await scheduler.tick();
+    expect(store.slotOutcome(local(25, 9))).toBe("skipped");
+    expect(store.slotOutcome(local(25, 13))).toBe("started");
+  });
+
+  it("修改配置只影响后续时间点，运行中修改时长不延长当前轮", async () => {
+    const store = memoryStore(multiDaily());
+    let now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    await scheduler.tick();
+    now = local(25, 9, 30);
+    scheduler.configure({ ...multiDaily(), maxDurationMinutes: 120 });
+    await scheduler.tick();
+    now = local(25, 10);
+    await scheduler.tick();
+    expect(fake.driver.stopCrawl).toHaveBeenCalledWith("time_limit");
+    fake.finish(crawlStatus("paused"));
+    await vi.waitFor(() => expect(store.read().lastRun?.outcome).toBe("time_limit"));
+    scheduler.configure({
+      ...multiDaily(),
+      daily: { startTime: "08:00", additionalStartTimes: ["13:00"] },
+    });
+    await scheduler.tick();
+    expect(store.read().nextRunAt).toBe(local(25, 13));
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(1);
+  });
+
+  it("改配置也不能让同一天实际启动超过五段", async () => {
+    const plan = {
+      ...daily(30),
+      daily: { startTime: "09:00", additionalStartTimes: ["11:00", "13:00", "15:00", "17:00"] },
+    };
+    const store = memoryStore(plan);
+    let now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    for (const hour of [9, 11, 13, 15, 17]) {
+      now = local(25, hour);
+      await scheduler.tick();
+      now = local(25, hour, 10);
+      fake.finish(crawlStatus("completed"));
+      await vi.waitFor(() => expect(store.slotOutcome(local(25, hour))).toBe("completed"));
+    }
+    scheduler.configure({ ...daily(30), daily: { startTime: "19:00" } });
+    await scheduler.tick();
+    now = local(25, 19);
+    await scheduler.tick();
+    expect(fake.driver.startCrawl).toHaveBeenCalledTimes(5);
+    expect(store.slotOutcome(local(25, 19))).toBe("skipped");
+  });
+
   it("过点后启用等待下一运行日，服务重启也不会补跑启用前错过的任务", async () => {
     const store = memoryStore(daily());
     store.setMode("disabled");

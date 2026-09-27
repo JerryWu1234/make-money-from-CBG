@@ -143,6 +143,7 @@ export function crawlStatus(running: boolean, ready: boolean) {
 }
 
 export const browserStatus = {
+  connected: true,
   running: false,
   workflowStep: "completed",
   isLoggedIn: true,
