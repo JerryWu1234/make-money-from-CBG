@@ -117,17 +117,25 @@ export function AnalysisPreview() {
   const [analysisStarted, setAnalysisStarted] = useState(false);
   const [queueStopped, setQueueStopped] = useState(false);
   const [recoveryPreview, setRecoveryPreview] = useState(false);
+  const [authStep, setAuthStep] = useState<"confirm" | "handoff" | null>(null);
+  const [demoEmail, setDemoEmail] = useState<string | null>(null);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!selected && !authStep) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setSelected(null);
+        if (authStep) {
+          setAuthStep(null);
+          setAuthNotice("已取消登录，分析未开始。");
+        } else {
+          setSelected(null);
+        }
       }
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [selected]);
+  }, [selected, authStep]);
 
   const displayItems = !analysisStarted
     ? DEMO_ITEMS.map((item): DemoItem =>
@@ -163,11 +171,24 @@ export function AnalysisPreview() {
       : "停止分析队列";
   const toggleQueue = () => {
     if (!analysisStarted) {
+      if (!demoEmail) {
+        setAuthNotice(null);
+        setAuthStep("confirm");
+        return;
+      }
       setAnalysisStarted(true);
       setFilter("all");
     } else {
       setQueueStopped((current) => !current);
     }
+    setRecoveryPreview(false);
+  };
+  const finishDemoLogin = () => {
+    setDemoEmail("demo@example.com");
+    setAuthStep(null);
+    setAuthNotice(null);
+    setAnalysisStarted(true);
+    setFilter("all");
     setRecoveryPreview(false);
   };
 
@@ -201,6 +222,24 @@ export function AnalysisPreview() {
             <p>
               首次点击“开始分析已有商品”，随后完整入库的商品立即进入队列，结果保存后才处理下一件，无需等到次日。手动停止会保留队列，继续时先处理未完成商品。
             </p>
+            <div className="analysis-agent-control">
+              <div className="analysis-agent-heading">
+                <label htmlFor="analysis-agent-select">分析 Agent</label>
+                <span>{analysisStarted ? "本轮已锁定" : "开始前选择"}</span>
+              </div>
+              <select id="analysis-agent-select" defaultValue="gemini" disabled={analysisStarted}>
+                <option value="gemini">Gemini · 平台提供</option>
+                <option value="future" disabled>更多 Agent · 后续接入</option>
+              </select>
+              <small>Google 登录用于确认平台用户身份；Gemini API 由平台服务调用。</small>
+              <div className="analysis-agent-account" role="status">
+                <span className={`analysis-auto-dot ${demoEmail ? "" : "is-idle"}`} />
+                {demoEmail
+                  ? `演示已登录：${demoEmail} · Gemini 可用（示意）`
+                  : "未登录 · 首次开始时使用 Google 账号登录"}
+              </div>
+              {authNotice && <small className="analysis-auth-notice">{authNotice}</small>}
+            </div>
             <div className="analysis-hero-actions">
               <button
                 type="button"
@@ -661,6 +700,98 @@ export function AnalysisPreview() {
           <a href="/">返回采集工作台 →</a>
         </p>
       </main>
+
+      {authStep && (
+        <div className="analysis-overlay">
+          <section
+            className="analysis-auth-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="analysis-auth-title"
+          >
+            {authStep === "confirm" ? (
+              <>
+                <span className="analysis-kicker">GOOGLE LOGIN / 首次使用</span>
+                <h2 id="analysis-auth-title">先登录，再开始分析</h2>
+                <p>首次使用需登录 Google 账号。分析由平台提供的 Gemini API 完成。</p>
+                <div className="analysis-auth-info">
+                  <span>本轮分析 Agent</span>
+                  <strong>Gemini · 平台提供</strong>
+                </div>
+                <p className="analysis-auth-note">
+                  Google 登录只用于平台识别用户。密码不会交给本地页面，Gemini API key 也不会存放在本机。
+                </p>
+                <p className="analysis-auth-preview-note">
+                  当前是静态交互稿，点击登录只展示后续流程，不会跳转到 Google。
+                </p>
+                <div className="analysis-auth-actions">
+                  <button
+                    type="button"
+                    className="analysis-button analysis-button-quiet"
+                    autoFocus
+                    onClick={() => {
+                      setAuthStep(null);
+                      setAuthNotice("已取消登录，分析未开始。");
+                    }}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="analysis-button analysis-button-primary"
+                    onClick={() => setAuthStep("handoff")}
+                  >
+                    使用 Google 账号登录并开始
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <span className="analysis-kicker">AUTH RETURN / 流程演示</span>
+                <h2 id="analysis-auth-title">登录成功后自动开始</h2>
+                <ol className="analysis-auth-steps">
+                  <li>浏览器进入 Google 官方登录页，用户选择账号并授权。</li>
+                  <li>在线服务验证 Google 回调，签发一次性返回凭证。</li>
+                  <li>本机服务兑换平台登录状态，然后启动当前 Agent 的分析队列。</li>
+                </ol>
+                <p className="analysis-auth-preview-note">
+                  在线服务尚未接入。下方按钮仅模拟返回本地页面，不会创建真实登录状态或分析任务。
+                </p>
+                <div className="analysis-auth-actions">
+                  <button
+                    type="button"
+                    className="analysis-button analysis-button-quiet"
+                    autoFocus
+                    onClick={() => {
+                      setAuthStep(null);
+                      setAuthNotice("已取消登录，分析未开始。");
+                    }}
+                  >
+                    取消登录
+                  </button>
+                  <button
+                    type="button"
+                    className="analysis-button analysis-button-primary"
+                    onClick={finishDemoLogin}
+                  >
+                    预览登录成功并开始
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  className="analysis-auth-failure"
+                  onClick={() => {
+                    setAuthStep(null);
+                    setAuthNotice("登录失败，分析未开始。请重试。");
+                  }}
+                >
+                  预览登录失败
+                </button>
+              </>
+            )}
+          </section>
+        </div>
+      )}
 
       {selected && (
         <div
