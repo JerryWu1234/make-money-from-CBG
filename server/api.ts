@@ -9,6 +9,13 @@ const getRoutes = new Set([
   "/api/crawl/records",
   "/api/scan/status",
   "/api/logs/export",
+  "/api/ai/status",
+  "/api/ai/models",
+  "/api/ai/login/status",
+  "/api/analysis/status",
+  "/api/analysis/detail",
+  "/api/analysis/input",
+  "/api/analysis/settings",
 ]);
 const postRoutes = new Set([
   "/api/browser/open",
@@ -18,15 +25,32 @@ const postRoutes = new Set([
   "/api/scan/configure",
   "/api/scan/enable",
   "/api/scan/disable",
+  "/api/ai/verify",
+  "/api/ai/login/start",
+  "/api/ai/login/cancel",
+  "/api/analysis/start",
+  "/api/analysis/pause",
+  "/api/analysis/resume",
+  "/api/analysis/retry",
+  "/api/analysis/settings/save",
 ]);
 
-async function verifyRequestBody(request: IncomingMessage) {
-  let body = "";
+async function verifyRequestBody(request: IncomingMessage, limit = 4096) {
+  const chunks: Buffer[] = [];
+  let size = 0;
   for await (const chunk of request) {
-    body += String(chunk);
-    if (body.length > 4096) throw new Error("请求体过大");
+    const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+    size += value.byteLength;
+    if (size > limit) throw new Error("请求体过大");
+    chunks.push(value);
   }
-  const parsed: unknown = body ? JSON.parse(body) : {};
+  const body = Buffer.concat(chunks).toString("utf8");
+  let parsed: unknown;
+  try {
+    parsed = body ? JSON.parse(body) : {};
+  } catch {
+    throw new Error("请求格式错误");
+  }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     throw new Error("请求格式错误");
   return parsed;
@@ -59,7 +83,127 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
       return;
     }
 
-    const body = req.method === "POST" ? await verifyRequestBody(req) : {};
+    const body =
+      req.method === "POST"
+        ? await verifyRequestBody(
+            req,
+            pathname === "/api/analysis/settings/save" ? 128 * 1024 : 4096,
+          )
+        : {};
+    if (pathname.startsWith("/api/analysis/")) {
+      const analysis = await import("./analysis/controller");
+      const params = new URL(req.url!, expectedOrigin).searchParams;
+      const input = body as Record<string, unknown>;
+      const runId = typeof input.runId === "string" ? input.runId : "";
+      let result: unknown;
+      switch (pathname) {
+        case "/api/analysis/settings":
+          result = analysis.analysisSettings();
+          break;
+        case "/api/analysis/settings/save":
+          result = analysis.saveAnalysisSettings(input);
+          break;
+        case "/api/analysis/status": {
+          const provider = params.get("provider");
+          result = analysis.analysisOverview({
+            provider: provider ? (await import("./ai-connection")).aiProvider(provider) : undefined,
+            runId: params.get("runId") || undefined,
+            page: Number(params.get("page") || 1),
+            search: params.get("search") || undefined,
+            filter: params.get("filter") || undefined,
+          });
+          break;
+        }
+        case "/api/analysis/detail":
+          result = analysis.analysisDetail(params.get("taskId") || "");
+          break;
+        case "/api/analysis/input": {
+          const detail = analysis.analysisDetail(params.get("taskId") || "");
+          const prompt = params.get("kind") === "prompt";
+          res.setHeader("Content-Type", "text/plain; charset=utf-8");
+          res.setHeader(
+            "Content-Disposition",
+            `attachment; filename="${prompt ? detail.promptHash : detail.inputHash}.txt"`,
+          );
+          res.end(prompt ? detail.promptText : detail.inputText);
+          return;
+        }
+        case "/api/analysis/start":
+          if (
+            input.sampleSize !== undefined &&
+            (input.sample !== true ||
+              typeof input.sampleSize !== "number" ||
+              !Number.isInteger(input.sampleSize) ||
+              input.sampleSize < 1 ||
+              input.sampleSize > 3)
+          )
+            throw new Error("试分析数量请选择 1 到 3 件");
+          if (
+            input.model !== undefined &&
+            (typeof input.model !== "string" || input.model.length > 200)
+          )
+            throw new Error("请选择有效的分析模型");
+          result = await analysis.startAnalysis(
+            (await import("./ai-connection")).aiProvider(input.provider),
+            input.force === true,
+            input.sample === true,
+            (input.model as string | undefined) || undefined,
+            (input.sampleSize as number | undefined) ?? 1,
+          );
+          break;
+        case "/api/analysis/pause":
+          result = await analysis.pauseAnalysis(runId || undefined);
+          break;
+        case "/api/analysis/resume":
+          result = await analysis.resumeAnalysis(runId);
+          break;
+        default:
+          result = await analysis.resumeAnalysis(runId, true);
+      }
+      if (!res.destroyed) res.end(JSON.stringify(result));
+      return;
+    }
+    if (pathname.startsWith("/api/ai/")) {
+      const ai = await import("./ai-connection");
+      const params = new URL(req.url!, expectedOrigin).searchParams;
+      const input = body as Record<string, unknown>;
+      let result: unknown;
+      switch (pathname) {
+        case "/api/ai/status":
+          result = await ai.aiStatus();
+          break;
+        case "/api/ai/models":
+          result = await ai.aiModels(ai.aiProvider(params.get("provider")));
+          break;
+        case "/api/ai/verify":
+          {
+            const controller = new AbortController();
+            const cancel = () => controller.abort();
+            res.once("close", cancel);
+            try {
+              result = await ai.verifyAi(ai.aiProvider(input.provider), input, controller.signal);
+            } finally {
+              res.removeListener("close", cancel);
+            }
+          }
+          break;
+        case "/api/ai/login/start":
+          if (ai.aiProvider(input.provider) !== "codex")
+            throw new Error("DeepSeek 请使用 API Key 连接");
+          result = await ai.startCodexLogin();
+          break;
+        case "/api/ai/login/status":
+          result = ai.codexLoginStatus(params.get("loginId") || "");
+          break;
+        default:
+          result = await ai.cancelCodexLogin(
+            typeof input.loginId === "string" ? input.loginId : "",
+          );
+      }
+      if (res.destroyed) return;
+      res.end(JSON.stringify(result));
+      return;
+    }
     if (pathname.startsWith("/api/scan/")) {
       const scan = await import("./crawler/schedule");
       if (pathname === "/api/scan/enable" && scan.scanScheduleStatus().mode === "disabled") {
@@ -110,6 +254,11 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             if (crawler.isCrawling()) {
               res.statusCode = 409;
               res.end(JSON.stringify({ error: "请先暂停采集，再清空数据" }));
+              return;
+            }
+            if ((await import("./analysis/controller")).isAnalyzing()) {
+              res.statusCode = 409;
+              res.end(JSON.stringify({ error: "请先暂停分析，再清空数据" }));
               return;
             }
             scan.disableScanSchedule();

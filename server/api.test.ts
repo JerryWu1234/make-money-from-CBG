@@ -11,10 +11,12 @@ const mocks = vi.hoisted(() => ({
   enableScanSchedule: vi.fn(),
   checkCbgStatus: vi.fn(),
   record: vi.fn(),
+  isAnalyzing: vi.fn(),
 }));
 vi.mock("./crawler/controller", () => mocks);
 vi.mock("./crawler/schedule", () => mocks);
 vi.mock("./browser", () => mocks);
+vi.mock("./analysis/controller", () => mocks);
 vi.mock("./diagnostics", () => ({ diagnostics: { record: mocks.record } }));
 
 function request(pathname: string) {
@@ -36,6 +38,7 @@ function response() {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.isCrawling.mockReturnValue(false);
+  mocks.isAnalyzing.mockReturnValue(false);
   mocks.scanScheduleStatus.mockReturnValue({ mode: "disabled" });
   mocks.enableScanSchedule.mockReturnValue({ mode: "enabled" });
   mocks.checkCbgStatus.mockResolvedValue({
@@ -112,5 +115,14 @@ describe("采集接口与定时计划", () => {
     mocks.startCrawl.mockResolvedValueOnce({ status: { running: true }, started: true });
     await apiMiddleware(request("/api/crawl/start"), response(), vi.fn());
     expect(mocks.disableScanSchedule).toHaveBeenCalledTimes(1);
+  });
+  it("分析仍在执行时拒绝清空，不删除数据也不关闭计划", async () => {
+    mocks.isAnalyzing.mockReturnValue(true);
+    const { apiMiddleware } = await import("./api");
+    const res = response();
+    await apiMiddleware(request("/api/crawl/clear"), res, vi.fn());
+    expect(res.statusCode).toBe(409);
+    expect(mocks.clearCrawl).not.toHaveBeenCalled();
+    expect(mocks.disableScanSchedule).not.toHaveBeenCalled();
   });
 });

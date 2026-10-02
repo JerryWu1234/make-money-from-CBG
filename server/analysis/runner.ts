@@ -1,0 +1,209 @@
+import { randomUUID } from "node:crypto";
+import type { AiProvider } from "../ai/types";
+import { ANALYSIS_SCHEMA, validateAnalysis } from "./contract";
+import { AnalysisStore } from "./store";
+import { VALUATION_SCHEMA, validateValuation } from "./valuation-contract";
+import type { AnalysisProfile } from "./valuation-types";
+
+export type AnalysisClient = {
+  model: string;
+  analyze: (
+    prompt: string,
+    schema: unknown,
+    signal: AbortSignal,
+  ) => Promise<{ text: string; usage?: unknown; truncated?: boolean }>;
+};
+export class AnalysisRunner {
+  private active: { id: string; controller: AbortController; completion: Promise<void> } | null =
+    null;
+  constructor(
+    readonly store: AnalysisStore,
+    private client: (provider: AiProvider, model?: string) => Promise<AnalysisClient>,
+  ) {}
+  isRunning() {
+    return this.active !== null || this.store.activeRun() !== null;
+  }
+  private currentActivity() {
+    return this.active;
+  }
+  async start(
+    provider: AiProvider,
+    force = false,
+    profile?: AnalysisProfile,
+    sample = false,
+    selectedModel?: string,
+    sampleSize = 1,
+  ) {
+    if (sample && (!Number.isInteger(sampleSize) || sampleSize < 1 || sampleSize > 3))
+      throw new Error("试分析数量请选择 1 到 3 件");
+    const existing = this.currentActivity();
+    if (existing) {
+      const run = this.store.run(existing.id);
+      if (run?.provider !== provider) throw new Error("请先暂停当前分析，再切换 AI");
+      if (selectedModel && run.model !== selectedModel)
+        throw new Error("请先暂停当前分析，再切换模型");
+      return existing.id;
+    }
+    if (!this.store.counts().complete) throw new Error("暂无详情完整的商品，请先采集商品详情");
+    const client = await this.client(provider, selectedModel);
+    // The lease also protects the await above and separate local Node services.
+    const afterConnect = this.currentActivity();
+    if (afterConnect) {
+      const run = this.store.run(afterConnect.id);
+      if (run?.provider !== provider) throw new Error("请先暂停当前分析，再切换 AI");
+      if (selectedModel && run.model !== selectedModel)
+        throw new Error("请先暂停当前分析，再切换模型");
+      return afterConnect.id;
+    }
+    this.store.recover();
+    const owner = randomUUID();
+    if (!this.store.acquire(owner)) {
+      const current = this.store.activeRun();
+      if (current?.provider === provider && (!selectedModel || current.model === selectedModel))
+        return current.id;
+      throw new Error("另一个本机服务正在分析，请先在该服务暂停");
+    }
+    try {
+      const id = this.store.createRun(provider, client.model, force, profile, sample, sampleSize);
+      this.launch(id, owner, client);
+      return id;
+    } catch (error) {
+      this.store.release(owner);
+      throw error;
+    }
+  }
+  async resume(id: string, retryFailed = false) {
+    if (this.active) {
+      if (this.active.id !== id) throw new Error("请先暂停当前分析任务");
+      return id;
+    }
+    const run = this.store.run(id);
+    if (!run) throw new Error("分析任务不存在");
+    if (!run.queued && !run.failed) return id;
+    const client = await this.client(run.provider, run.model);
+    const afterConnect = this.currentActivity();
+    if (afterConnect) {
+      if (afterConnect.id !== id) throw new Error("请先暂停当前分析任务");
+      return afterConnect.id;
+    }
+    this.store.recover();
+    const owner = randomUUID();
+    if (!this.store.acquire(owner)) throw new Error("另一个本机服务正在分析，请先在该服务暂停");
+    try {
+      if (retryFailed) this.store.retry(id);
+      this.store.setRun(id, "running", null, owner);
+      this.launch(id, owner, client);
+      return id;
+    } catch (error) {
+      this.store.release(owner);
+      throw error;
+    }
+  }
+  private launch(id: string, owner: string, client: AnalysisClient) {
+    const controller = new AbortController();
+    const activity = { id, controller, completion: Promise.resolve() };
+    this.active = activity;
+    const heartbeat = setInterval(() => {
+      try {
+        if (!this.store.acquire(owner)) controller.abort(new Error("分析锁已失效，请继续分析"));
+      } catch {
+        controller.abort(new Error("无法续期分析锁，请继续分析"));
+      }
+    }, 30_000);
+    activity.completion = this.process(id, owner, client, controller.signal)
+      .catch((error: unknown) => {
+        if (this.store.owns(owner))
+          this.store.setRun(
+            id,
+            "paused",
+            error instanceof Error ? error.message : "分析已暂停，请重试",
+            owner,
+          );
+      })
+      .finally(() => {
+        clearInterval(heartbeat);
+        this.store.release(owner);
+        if (this.active === activity) this.active = null;
+      });
+  }
+  private async process(id: string, owner: string, client: AnalysisClient, stop: AbortSignal) {
+    while (!stop.aborted) {
+      if (!this.store.owns(owner)) return;
+      const task = this.store.next(id);
+      if (!task) {
+        this.store.setRun(id, "completed", null, owner);
+        return;
+      }
+      const prompt =
+        task.profile && task.lastError && task.attempts > 0
+          ? task.prompt +
+            "\n\n上次输出校验未通过：" +
+            task.lastError.slice(0, 1000) +
+            "。请按原始复算结果修正 JSON，完整保留待确认项。"
+          : task.prompt;
+      const attempt = this.store.begin(task, owner, prompt);
+      const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
+      let raw: string | undefined, usage: unknown;
+      try {
+        if (Buffer.byteLength(task.document.text, "utf8") > 128 * 1024)
+          throw new Error("完整商品原文超过 128 KiB，已保留原文，请先核对资料长度后重试");
+        const response = await client.analyze(
+          prompt,
+          task.profile ? VALUATION_SCHEMA : ANALYSIS_SCHEMA,
+          signal,
+        );
+        raw = response.text;
+        usage = response.usage;
+        if (response.truncated) throw new Error("AI 输出超过长度限制，已保存原始回复，请重试");
+        signal.throwIfAborted();
+        if (!this.store.owns(owner)) throw new Error("分析锁已失效");
+        const result = task.profile
+          ? validateValuation(raw, task.document, task.record, task.profile)
+          : validateAnalysis(raw, task.document, task.record);
+        this.store.finish(task, attempt, owner, { state: "completed", result, raw, usage });
+      } catch (error) {
+        if (!this.store.owns(owner)) return;
+        const message = stop.aborted
+          ? "已暂停，继续时先处理这件商品"
+          : signal.aborted
+            ? "分析超时，请重试"
+            : error instanceof Error
+              ? error.message
+              : "分析失败";
+        const fatal =
+          /401|403|429|unauth|authentication|api.?key|登录|quota|rate.?limit|额度|余额|insufficient|账号已变化|model.*(?:not available|not found|unsupported)/i.test(
+            message,
+          );
+        const retry = !stop.aborted && !fatal && task.attempts < 1 && !message.includes("128 KiB");
+        this.store.finish(task, attempt, owner, {
+          state: stop.aborted ? "interrupted" : "failed",
+          error: message,
+          raw,
+          usage,
+          requeue: stop.aborted || fatal || retry,
+        });
+        if (stop.aborted || fatal) {
+          this.store.setRun(id, "paused", message, owner);
+          return;
+        }
+      }
+    }
+    this.store.setRun(id, "paused", null, owner);
+  }
+  async pause(id?: string) {
+    if (this.active) {
+      if (id && this.active.id !== id) throw new Error("请暂停当前正在执行的分析批次");
+      const activity = this.active;
+      activity.controller.abort();
+      await activity.completion;
+      return;
+    }
+    if (this.store.activeRun()) throw new Error("另一个本机服务正在分析，请在该服务暂停");
+  }
+  async shutdown() {
+    if (this.active) await this.pause(this.active.id);
+  }
+  async settled() {
+    await this.active?.completion;
+  }
+}

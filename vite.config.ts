@@ -12,7 +12,13 @@ export default defineConfig({
         server.middlewares.use(apiMiddleware);
         if (server.httpServer) {
           initializeScanSchedule();
-          server.httpServer.once("close", () => void shutdownScanSchedule());
+          server.httpServer.once("close", () => {
+            void shutdownScanSchedule();
+            void import("./server/analysis/controller").then(async (analysis) => {
+              await analysis.shutdownAnalysis();
+              await (await import("./server/ai-connection")).shutdownAiConnections();
+            });
+          });
         }
       },
     },
@@ -20,8 +26,10 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 5173,
+    strictPort: true,
     watch: { ignored: ["**/.chrome-cbg-profile/**", "**/.git/**", "**/data/**"] },
   },
-  fmt: {},
+  // Preserve the user's prompt bytes and their recorded SHA-256.
+  fmt: { ignorePatterns: ["prompts/role-valuation.md"] },
   lint: { options: { typeAware: true, typeCheck: true } },
 });
