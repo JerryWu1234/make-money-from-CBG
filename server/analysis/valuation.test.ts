@@ -26,7 +26,7 @@ import {
   trainingPrice,
 } from "./valuation-calculator";
 import { buildProductDocument } from "./product-document";
-import { validateValuation, valuationPrompt } from "./valuation-contract";
+import { validateValuation, valuationPrompt, VALUATION_SCHEMA } from "./valuation-contract";
 import { readValuationFact, validateValuationFacts } from "./valuation-facts";
 const template = readFileSync(PROMPT_FILE, "utf8");
 const profile = () =>
@@ -46,6 +46,67 @@ const profile = () =>
     ],
   });
 describe("裸号估值的复算与可追溯输入", () => {
+  it("AI只核对结论，金额和缺项由程序产生；错误买入结论仍拒绝", () => {
+    const record = completeRecord();
+    record.listing.price = "100000";
+    const actual = calculateValuation(record, profile());
+    const output = {
+      decision: "PASS",
+      reason: "挂牌价格超过裸号估值，不建议买入。",
+      extracted_facts: [],
+    };
+    const result = validateValuation(
+      JSON.stringify(output),
+      buildProductDocument(record),
+      record,
+      profile(),
+    );
+    expect(result.valuation?.model_value).toBe(actual.model_value);
+    expect(result.valuation?.items).toEqual(actual.items);
+    expect(result.valuation?.decision).toBe("PASS");
+    expect(() =>
+      validateValuation(
+        JSON.stringify({ ...output, decision: "BUY" }),
+        buildProductDocument(record),
+        record,
+        profile(),
+      ),
+    ).toThrow("购买结论不一致");
+    expect(VALUATION_SCHEMA.required).toEqual(["decision", "reason", "extracted_facts"]);
+  });
+  it("AI重复声明已核对字段时丢弃其引用，不覆盖网页事实、不放宽缺项引用校验", () => {
+    const record = completeRecord();
+    record.detail!.valuation = {
+      version: 1,
+      source: {},
+      issues: [],
+      fields: [{ name: "坐骑总数", value: "0", tab: "坐骑" }],
+    };
+    const duplicate = {
+      name: "坐骑总数",
+      value: "0",
+      path: "/detail/tabs/4/petCount",
+      quote: "AI给出了不真实的引用",
+    };
+    expect(validateValuationFacts([duplicate], record)).toEqual([]);
+    expect(() => validateValuationFacts([{ ...duplicate, value: "1" }], record)).toThrow(
+      "已采集字段冲突",
+    );
+    expect(() =>
+      validateValuationFacts([{ ...duplicate, name: "神器1满槽", value: "是" }], record),
+    ).toThrow("文字字段");
+    const computed = calculateValuation(record, profile());
+    const result = validateValuation(
+      JSON.stringify({ ...computed, extracted_facts: [duplicate] }),
+      buildProductDocument(record),
+      record,
+      profile(),
+    );
+    expect(result.valuation?.extracted_facts).toEqual([]);
+    expect(
+      result.valuation?.items.find((item) => item.name === "坐骑")?.evidence[0].path,
+    ).toContain("/detail/valuation/fields/");
+  });
   it("无土豪金不误加1400，新采财产覆盖旧摘要，金额引用实际字段", () => {
     const record = completeRecord();
     record.listing.summary = { iCash: 999999999, iSaving: 999999999, xianyu: 999999 };

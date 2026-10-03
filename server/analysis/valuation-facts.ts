@@ -128,7 +128,7 @@ export function validateValuationFacts(input: unknown, record: SavedRoleRecord):
   if (input === undefined) return [];
   if (!Array.isArray(input) || input.length > 40) throw new Error("AI 补充资料格式错误");
   const names = new Set<string>();
-  return input.map((entry: unknown) => {
+  return input.flatMap((entry: unknown) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry))
       throw new Error("AI 补充资料格式错误");
     const { name, value, path, quote } = entry as Record<string, unknown>;
@@ -139,7 +139,17 @@ export function validateValuationFacts(input: unknown, record: SavedRoleRecord):
       typeof quote !== "string" ||
       !quote.trim() ||
       quote.length > 1000 ||
-      path.length > 500 ||
+      path.length > 500
+    )
+      throw new Error("AI 补充资料名称或引用无效");
+    // A redundant claim never becomes AI evidence. Keep the website-verified value
+    // and discard the claim, including its unused quote; conflicts still fail.
+    const captured = record.detail?.valuation?.fields.find((field) => field.name === name);
+    if (captured) {
+      if (captured.value !== value) throw new Error("AI 补充资料与已采集字段冲突：" + name);
+      return [];
+    }
+    if (
       !/^(?:神器套数|坐骑总数|进阶状态|主属性百分比|神器[1-3](?:满槽|类型|总分)|坐骑[1-9](?:成长|进阶状态|主属性百分比))$/.test(
         name,
       ) ||
@@ -162,6 +172,6 @@ export function validateValuationFacts(input: unknown, record: SavedRoleRecord):
     const collected = readValuationFact(record, name);
     if (collected && collected.raw !== value)
       throw new Error("AI 补充资料与已采集字段冲突：" + name);
-    return { name, value, path, quote };
+    return [{ name, value, path, quote }];
   });
 }
