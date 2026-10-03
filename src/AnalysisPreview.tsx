@@ -211,7 +211,7 @@ export function AnalysisPreview() {
               <br />
               <em>就更新一次榜单</em>
             </h1>
-            <p>按裸号规则计算参考价值，直接给出买入建议；资料不足时列出补齐办法。</p>
+            <p>按裸号规则计算参考价值，直接给出买入建议；资料或规则有缺项时列出补齐办法。</p>
             <AiConnectionControl
               provider={provider}
               onProviderChange={changeProvider}
@@ -413,7 +413,7 @@ export function AnalysisPreview() {
                 <h2 id="analysis-results-title">分析结果</h2>
                 <p>
                   {valuationMode
-                    ? "推荐榜展示建议买入的商品；等降价、不建议买入和资料不足的商品在全部商品查看。"
+                    ? "推荐榜展示建议买入的商品；等降价、不建议买入和需补齐资料或规则的商品在全部商品查看。"
                     : "本历史批次按配置参考分排序；新批次使用裸号估值规则。"}
                 </p>
               </div>
@@ -578,7 +578,7 @@ export function AnalysisPreview() {
                             <span className={`analysis-state analysis-state-${item.state}`}>
                               {item.state === "completed" &&
                               item.valuation?.decision === "NEED_INFO"
-                                ? "分析完成 · 资料不足"
+                                ? "分析完成 · 待补齐"
                                 : labels[item.state]}
                             </span>
                             {item.error && <small>{item.error}</small>}

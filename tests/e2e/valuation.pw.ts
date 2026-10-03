@@ -159,7 +159,7 @@ test("估值页面：补齐设置，展示可买与不可买结论、金额和�
     await expect(page.getByRole("tabpanel", { name: "全部商品" })).toBeVisible();
     const row = page.getByRole("row").filter({ hasText: "角色a" });
     await expect(row).toContainText("暂不建议买入");
-    await expect(row).toContainText("分析完成 · 资料不足");
+    await expect(row).toContainText("分析完成 · 待补齐");
     await row.getByRole("button", { name: "查看分析", exact: true }).click();
     const result = page.getByRole("dialog", { name: "角色a" });
     await expect(result.getByText("裸号买入建议", { exact: true })).toBeVisible();
