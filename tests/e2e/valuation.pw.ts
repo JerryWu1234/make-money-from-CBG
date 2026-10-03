@@ -12,7 +12,12 @@ import {
   purchase,
 } from "../../server/analysis/valuation-calculator";
 import type { ValuationResult } from "../../server/analysis/valuation-types";
-import { analysisRecord, equipmentPricingFixture, valuationRecord } from "../fixtures/analysis";
+import {
+  analysisRecord,
+  equipmentPricingFixture,
+  petPricingFixture,
+  valuationRecord,
+} from "../fixtures/analysis";
 
 test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购买结果", async ({ page }, testInfo) => {
   const crawl = new CrawlStore(":memory:");
@@ -43,6 +48,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
   );
   let legacyView = false;
   let searchingView = false;
+  let searchPhase: "equipment_search" | "pet_search" = "equipment_search";
   const displayed = (valuation: ValuationResult | undefined, key: string) => {
     if (!valuation) return valuation;
     if (legacyView) {
@@ -62,9 +68,10 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     }
     if (key !== "a" && key !== "b") return valuation;
     const pricing = equipmentPricingFixture(key === "a");
+    const pets = key === "b" ? petPricingFixture() : undefined;
     const value =
       pricing.total !== null && valuation.bare_role_value != null
-        ? valuation.bare_role_value + pricing.total
+        ? valuation.bare_role_value + pricing.total + (pets?.total ?? 0)
         : null;
     return {
       ...valuation,
@@ -72,7 +79,11 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
       model_value: value,
       equipment_value: pricing.total,
       equipment_pricing: pricing,
-      price_comparison_scope: "裸号及已核实装备参考价；召唤兽个体和锦衣未计价",
+      pet_value: pets?.total,
+      pet_pricing: pets,
+      price_comparison_scope: pets
+        ? "裸号、人物装备/灵饰与宝宝；锦衣未计价"
+        : "裸号及已核实装备参考价；召唤兽个体和锦衣未计价",
       reason:
         value === null
           ? "装备或裸号计价尚未完整，暂无法比较完整挂牌差异。"
@@ -144,7 +155,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
                       completed: 2,
                       queued: 1,
                       current: "角色b",
-                      phase: "equipment_search",
+                      phase: searchPhase,
                     },
                   }
                 : {}),
@@ -218,7 +229,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     const settings = page.getByRole("dialog", { name: "估值与挂牌比较设置" });
     await expect(settings.getByLabel("最高买入系数 b", { exact: true })).not.toBeVisible();
     await expect(settings.getByLabel("全部额外成本 F（元）", { exact: true })).not.toBeVisible();
-    await expect(settings).toContainText("先核对装备，再联网查价，比较挂牌差异");
+    await expect(settings).toContainText("先核对装备和宝宝，再联网查价，比较挂牌差异");
     await settings.getByText("全服行情：自动匹配每件商品的区服", { exact: true }).click();
     await expect(settings.getByLabel("热度排名 r", { exact: true })).toHaveValue("13");
     await expect(settings.getByLabel("金价 G（元）", { exact: true })).toHaveValue("218.29");
@@ -281,7 +292,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await expect(page.getByRole("row").filter({ hasText: "角色d" })).toContainText("待分析");
     const buyRow = page.getByRole("row").filter({ hasText: "角色b" });
     await expect(buyRow.getByText("挂牌低于估值", { exact: true })).toBeVisible();
-    await expect(buyRow).toContainText("裸号及已核实装备参考估值");
+    await expect(buyRow).toContainText("裸号、装备和宝宝参考估值");
     await expect(buyRow).toContainText("差额");
     await expect(page.getByRole("row").filter({ hasText: "角色c" })).toContainText("挂牌高于估值");
     await page.screenshot({
@@ -294,14 +305,29 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await expect(buyResult.getByText("裸号参考估值", { exact: true })).toBeVisible();
     await expect(buyResult.getByText("估值与挂牌价差额", { exact: true })).toBeVisible();
     await expect(buyResult.getByText("差异比例（以挂牌价为基准）", { exact: true })).toBeVisible();
+    await expect(
+      buyResult.getByRole("heading", { name: "宝宝联网查价", exact: true }),
+    ).toBeVisible();
+    await expect(buyResult.getByText("宝宝挂牌参考价", { exact: true })).toBeVisible();
+    await buyResult.getByText("模拟测试宝宝挂牌样本 · 已核实", { exact: true }).click();
+    await expect(buyResult).toContainText("【模拟测试宝宝样本】画魂");
+    await expect(buyResult.locator('a[href*="mock-pet-ui"]')).toHaveAttribute(
+      "href",
+      "https://xyq.cbg.163.com/equip?s=367&eid=mock-pet-ui",
+    );
     await expect(buyResult.getByText("建议最高买入价", { exact: true })).not.toBeVisible();
     await expect(buyResult.getByText("暂无法计算", { exact: true })).not.toBeVisible();
     await expect(buyResult.getByText("理想买入价", { exact: true })).not.toBeVisible();
-    await buyResult.getByText("查看搜索关键词", { exact: true }).click();
+    await buyResult
+      .getByRole("region", { name: "装备联网查价", exact: true })
+      .getByText("查看搜索关键词", { exact: true })
+      .click();
     await expect(buyResult).toContainText("梦幻西游 测试铠甲 120级 防御200 挂牌价格");
     await buyResult.getByText("模拟测试装备挂牌样本 · 已核实", { exact: true }).click();
     await expect(
-      buyResult.getByRole("link", { name: "打开来源网页", exact: true }),
+      buyResult
+        .getByRole("region", { name: "装备联网查价", exact: true })
+        .getByRole("link", { name: "打开来源网页", exact: true }),
     ).toHaveAttribute("href", "https://xyq.cbg.163.com/equip?s=367&eid=mock-price-ui");
     await expect(buyResult).toContainText("网页挂牌价");
     await expect(buyResult).toContainText("读取时间");
@@ -362,6 +388,9 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await page.reload();
     await expect(page.getByText("正在联网查装备价格 · 角色b", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "正在查价…", exact: true })).toBeDisabled();
+    searchPhase = "pet_search";
+    await page.reload();
+    await expect(page.getByText("正在联网查宝宝价格 · 角色b", { exact: true })).toBeVisible();
     searchingView = false;
     legacyView = true;
     await page.reload();

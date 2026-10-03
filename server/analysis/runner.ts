@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { AiProvider } from "../ai/types";
 import type { SavedRoleRecord } from "../crawler/types";
 import type { EquipmentPricingSnapshot } from "./equipment-pricing";
+import type { PetPricingSnapshot } from "./pet-pricing";
 import { ANALYSIS_SCHEMA, validateAnalysis } from "./contract";
 import { AnalysisStore } from "./store";
 import { VALUATION_SCHEMA, validateValuation } from "./valuation-contract";
@@ -14,6 +15,7 @@ export type AnalysisClient = {
     record: SavedRoleRecord,
     signal: AbortSignal,
   ) => Promise<EquipmentPricingSnapshot>;
+  searchPets?: (record: SavedRoleRecord, signal: AbortSignal) => Promise<PetPricingSnapshot>;
   analyze: (
     prompt: string,
     schema: unknown,
@@ -168,6 +170,29 @@ export class AnalysisRunner {
           return;
         }
       }
+      if (task.profile?.petSearch && !task.petPricing) {
+        const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
+        try {
+          this.store.beginPetSearch(task, owner);
+          if (!client.searchPets) throw new Error("宝宝联网查价尚未连接");
+          const snapshot = await client.searchPets(task.record, signal);
+          signal.throwIfAborted();
+          if (!this.store.owns(owner)) return;
+          task = this.store.savePetPricing(task, snapshot, owner);
+        } catch (error) {
+          if (!this.store.owns(owner)) return;
+          this.store.abortPetSearch(task, owner);
+          const message = stop.aborted
+            ? "已暂停宝宝查价，继续时先处理这件商品"
+            : signal.aborted
+              ? "宝宝联网查价超时，请重试"
+              : error instanceof Error
+                ? error.message
+                : "宝宝联网查价失败，请重试";
+          this.store.setRun(id, "paused", message, owner);
+          return;
+        }
+      }
       const prompt =
         task.profile && task.lastError && task.attempts > 0
           ? task.prompt +
@@ -192,7 +217,14 @@ export class AnalysisRunner {
         signal.throwIfAborted();
         if (!this.store.owns(owner)) throw new Error("分析锁已失效");
         const result = task.profile
-          ? validateValuation(raw, task.document, task.record, task.profile, task.equipmentPricing)
+          ? validateValuation(
+              raw,
+              task.document,
+              task.record,
+              task.profile,
+              task.equipmentPricing,
+              task.petPricing,
+            )
           : validateAnalysis(raw, task.document, task.record);
         this.store.finish(task, attempt, owner, { state: "completed", result, raw, usage });
       } catch (error) {

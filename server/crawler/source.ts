@@ -71,6 +71,8 @@ export function createCrawlSource({
         durationMs: Date.now() - started,
         equipmentComplete: result.equipmentCapture?.complete,
         equipmentIssues: result.equipmentCapture?.issues,
+        petsComplete: result.petCapture?.complete,
+        petIssues: result.petCapture?.issues,
         tabs: result.tabs.map((tab) => ({
           name: tab.name,
           petCount: tab.petCount,

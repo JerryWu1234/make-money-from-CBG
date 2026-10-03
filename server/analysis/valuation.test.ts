@@ -552,7 +552,8 @@ describe("裸号估值的复算与可追溯输入", () => {
     expect(() => normalizeSettings({ b: 0.8, a: 0.9 })).toThrow("0 < a ≤ b");
     const automatic = createProfile(template);
     expect(automatic.equipmentSearch).toBe(true);
-    expect(automatic.calculationVersion).toBe("price-comparison-v5");
+    expect(automatic.petSearch).toBe(true);
+    expect(automatic.calculationVersion).toBe("price-comparison-v6");
     const ignoredPolicy = createProfile(template, {
       ...DEFAULT_SETTINGS,
       b: 0.3,

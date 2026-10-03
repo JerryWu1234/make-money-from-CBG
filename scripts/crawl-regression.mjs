@@ -125,6 +125,12 @@ try {
           complete: true,
           issues: [],
         },
+        petCapture: {
+          version: 1,
+          collectedAt: new Date().toISOString(),
+          complete: true,
+          issues: [],
+        },
         url: item.url,
         collectedAt: new Date().toISOString(),
         tabs: [],
@@ -156,6 +162,8 @@ try {
   assert.ok(MAIN_TABS.every((name) => saved.detail.tabs.some((tab) => tab.name === name)));
   assert.ok(saved.detail.tabs.some((tab) => tab.text.includes("法术抗性：999")));
   const petTab = saved.detail.tabs.find((t) => t.name === "召唤兽/孩子");
+  assert.equal(saved.detail.petCapture.complete, true);
+  assert.deepEqual(saved.detail.petCapture.issues, []);
   assert.equal(petTab.petCount, 8);
   assert.equal(petTab.pets.length, 8);
   for (let n = 0; n < 8; n++) {

@@ -5,6 +5,7 @@ import type { AnalysisProfile, ValuationResult } from "./valuation-types";
 import { calculateValuation } from "./valuation-calculator";
 import { validateValuationFacts } from "./valuation-facts";
 import { combineEquipmentPricing, type EquipmentPricingSnapshot } from "./equipment-pricing";
+import { combinePetPricing, type PetPricingSnapshot } from "./pet-pricing";
 
 const nullableNumber = { type: ["number", "null"] };
 const strings = { type: "array", items: { type: "string" } };
@@ -88,11 +89,15 @@ export function valuationPrompt(
   record: SavedRoleRecord,
   profile: AnalysisProfile,
   equipmentPricing?: EquipmentPricingSnapshot,
+  petPricing?: PetPricingSnapshot,
 ) {
   const bare = calculateValuation(record, profile);
-  const computed = profile.equipmentSearch
+  const withEquipment = profile.equipmentSearch
     ? combineEquipmentPricing(bare, record, equipmentPricing)
     : bare;
+  const computed = profile.petSearch
+    ? combinePetPricing(withEquipment, record, petPricing)
+    : withEquipment;
   const {
     b: _b,
     a: _a,
@@ -122,7 +127,7 @@ export function valuationPrompt(
     "以下参数是本批次实际使用的计价设置。只比较估值与挂牌价，不考虑费用、预算或买入折扣。null表示尚未提供，不能猜金价或排名。区服数据只匹配当前serverId。",
     JSON.stringify(pricingSettings),
     "自动区服参数的来源与读取时间：" + JSON.stringify(profile.marketSources || []),
-    "detail.valuation.fields 是已经从网页角色数据核对的字段，直接使用，不能重复补提或用标签原文覆盖。只有程序未识别的缺失事实才可补提；缺价表或装备匹配报价属于缺规则和行情，不能靠猜测解决。所有需要的角色事实都已核对时 extracted_facts 必须是空数组。",
+    "detail.valuation.fields 是已经从网页角色数据核对的字段，直接使用，不能重复补提或用标签原文覆盖。只有程序未识别的缺失事实才可补提；装备和宝宝参考价采用下方已核对的联网报价快照，缺规则和行情不能靠猜测解决。所有需要的角色事实都已核对时 extracted_facts 必须是空数组。",
     "下方是初步计算，尚未识别的原文资料可通过 extracted_facts 补提后重新计算；不要仅复述待确认。补提仅支持神器套数、坐骑总数、进阶状态、主属性百分比，以及神器1至3的满槽/类型/总分、坐骑1至9的成长/进阶状态/主属性百分比。",
     "每条补提必须给出原文 JSON Pointer path 和逐字 quote。quote 须包含对应名称及冒号标记的值，或明确“共有N套神器/共有N只坐骑”；分项可引用“第N套神器/第N只坐骑”下的满槽、五行类型、总分、成长、进阶及主属性比例。进阶可引用“坐骑·已进阶”，明确“没有/未开启/未解锁神器”可提为神器套数0。标题空白、未看到、祥瑞数量不能作为不存在或坐骑总数的证据。没有可补提的事实时 extracted_facts 返回空数组。",
     "decision必须符合程序价格关系：BUY表示挂牌低于估值，WATCH表示相等，PASS表示挂牌高于估值，NEED_INFO表示缺完整可靠估值。这里不做购买建议。reason解释价差与估值范围；200字以内。缺资料或报价时明确缺什么，不生成没有依据的完整价格。",
@@ -132,6 +137,17 @@ export function valuationPrompt(
         ? {
             equipment_pricing: {
               ...report.equipment_pricing,
+              rawResponse: undefined,
+              requestText: undefined,
+              searchItems: undefined,
+              usage: undefined,
+            },
+          }
+        : {}),
+      ...(report.pet_pricing
+        ? {
+            pet_pricing: {
+              ...report.pet_pricing,
               rawResponse: undefined,
               requestText: undefined,
               searchItems: undefined,
@@ -152,6 +168,7 @@ export function validateValuation(
   record: SavedRoleRecord,
   profile: AnalysisProfile,
   equipmentPricing?: EquipmentPricingSnapshot,
+  petPricing?: PetPricingSnapshot,
 ): ProductAnalysis {
   let parsed: unknown;
   try {
@@ -169,9 +186,12 @@ export function validateValuation(
   const result = parsed as Record<string, unknown>;
   const facts = validateValuationFacts(result.extracted_facts, record);
   const bare = calculateValuation(record, profile, facts);
-  const expected = profile.equipmentSearch
+  const withEquipment = profile.equipmentSearch
     ? combineEquipmentPricing(bare, record, equipmentPricing)
     : bare;
+  const expected = profile.petSearch
+    ? combinePetPricing(withEquipment, record, petPricing)
+    : withEquipment;
   const money = [
     "asking_price",
     "extra_cost",

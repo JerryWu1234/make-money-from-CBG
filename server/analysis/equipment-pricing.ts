@@ -229,7 +229,7 @@ export function safeEquipmentUrl(value: string) {
     throw new Error("查价链接缺少具体商品ID");
   return url.href;
 }
-function equipmentIdentity(value: string) {
+export function equipmentIdentity(value: string) {
   const url = new URL(value);
   const path = url.pathname.match(/\/equip\/([^/]+)\/([^/]+)\/?$/);
   if (path) return decodeURIComponent(path[1]) + ":" + decodeURIComponent(path[2]);
@@ -244,7 +244,7 @@ function equipmentIdentity(value: string) {
     "";
   return id ? `${server}:${id}` : url.pathname;
 }
-function pageText(html: string) {
+export function pageText(html: string) {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/<style[\s\S]*?<\/style>/gi, "")
@@ -254,12 +254,12 @@ function pageText(html: string) {
     .replace(/&quot;/g, '"')
     .replace(/&amp;/g, "&");
 }
-function productSource(html: string) {
+export function productSource(html: string) {
   // Prefer a single product region; unrelated recommendations cannot supply its price.
   const primary = html.match(/<(main|article)\b[^>]*>([\s\S]*?)<\/\1>/i)?.[2];
   return primary || html.replace(/<(aside|nav|header|footer)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
 }
-function listingPrices(text: string) {
+export function listingPrices(text: string) {
   return [
     ...text.matchAll(
       /(?:[¥￥]\s*|(?:价格|售价|挂牌价)\s*[：:]?\s*[¥￥]?\s*)([\d,]+(?:\.\d{1,2})?)/g,
@@ -395,7 +395,7 @@ export function verifyEquipmentCandidate(
   };
 }
 
-type Search = (
+export type Search = (
   prompt: string,
   schema: unknown,
   signal: AbortSignal,

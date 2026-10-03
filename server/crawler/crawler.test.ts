@@ -41,6 +41,12 @@ const detail = (listing: Listing): RoleDetail => ({
     complete: true,
     issues: [],
   },
+  petCapture: {
+    version: 1,
+    collectedAt: new Date().toISOString(),
+    complete: true,
+    issues: [],
+  },
   url: listing.url,
   collectedAt: new Date().toISOString(),
   tabs: [
@@ -91,6 +97,43 @@ const source = (pages: Listing[][]): CrawlSource => {
   };
 };
 describe("仅补齐估值资料", () => {
+  it("宝宝凭据缺失、未读完整或带异常时都进入补采，补齐后才跳过", () => {
+    const db = memory(),
+      row = item(1);
+    db.observe(row);
+    const missing = detail(row);
+    delete missing.petCapture;
+    for (const incomplete of [
+      missing,
+      {
+        ...detail(row),
+        petCapture: {
+          version: 1 as const,
+          collectedAt: new Date().toISOString(),
+          complete: false,
+          issues: [],
+        },
+      },
+      {
+        ...detail(row),
+        petCapture: {
+          version: 1 as const,
+          collectedAt: new Date().toISOString(),
+          complete: true,
+          issues: ["宝宝技能未完整读取"],
+        },
+      },
+    ]) {
+      db.save(row, incomplete);
+      expect(db.retryItems([row.key])).toHaveLength(1);
+      expect(db.records().items[0].valuationReady).toBe(false);
+      expect(db.observe(row)).toBe(false);
+    }
+    db.save(row, detail(row));
+    expect(db.retryItems([row.key])).toEqual([]);
+    expect(db.records().items[0].valuationReady).toBe(true);
+    expect(db.observe(row)).toBe(true);
+  });
   it("新版资料的装备未采齐仍可补采，补齐后才跳过且断点保持不变", async () => {
     const db = memory(),
       row = item(1),

@@ -18,7 +18,8 @@ import {
 } from "./ai/deepseek";
 import type { AiConnectionStatus, AiModelOptions, AiProvider, AiStatus } from "./ai/types";
 import type { SavedRoleRecord } from "./crawler/types";
-import { searchEquipmentPrices } from "./analysis/equipment-pricing";
+import { searchEquipmentPrices, type Search } from "./analysis/equipment-pricing";
+import { searchPetPricing } from "./analysis/pet-pricing";
 
 export { startCodexLogin, codexLoginStatus, cancelCodexLogin } from "./ai/codex";
 
@@ -196,29 +197,33 @@ export async function shutdownAiConnections() {
   await shutdownCodex();
 }
 
-function equipmentSearcher(
-  selectedModel?: string,
-  initialAccount?: Awaited<ReturnType<typeof codexAccount>>,
+type SearchContext = { model?: string; account?: Awaited<ReturnType<typeof codexAccount>> };
+function assetSearcher<T>(
+  searchPrices: (
+    record: SavedRoleRecord,
+    model: string,
+    signal: AbortSignal,
+    search: Search,
+  ) => Promise<T>,
+  context: SearchContext,
 ) {
-  let account = initialAccount;
-  let model = selectedModel;
   return async (record: SavedRoleRecord, signal: AbortSignal) => {
     try {
       signal.throwIfAborted();
-      model ||= await codexModel();
-      const searchModel = model;
-      return await searchEquipmentPrices(
+      context.model ||= await codexModel();
+      const searchModel = context.model;
+      return await searchPrices(
         record,
         searchModel,
         signal,
         async (prompt, schema, searchSignal) => {
           const before = await codexAccount();
           if (!before)
-            throw new Error("装备联网查价需要先登录 ChatGPT；DeepSeek 本身不提供联网搜索");
-          if (account && before.email !== account.email)
-            throw new Error("装备查价的 ChatGPT 登录账号已变化，请重新连接");
-          account ||= before;
-          const searchAccount = account;
+            throw new Error("资产联网查价需要先登录 ChatGPT；DeepSeek 本身不提供联网搜索");
+          if (context.account && before.email !== context.account.email)
+            throw new Error("查价的 ChatGPT 登录账号已变化，请重新连接");
+          context.account ||= before;
+          const searchAccount = context.account;
           const response = await requestCodexSearch(prompt, searchSignal, {
             model: searchModel,
             outputSchema: schema,
@@ -226,7 +231,7 @@ function equipmentSearcher(
           searchSignal.throwIfAborted();
           const after = await codexAccount();
           if (!after || after.email !== searchAccount.email)
-            throw new Error("装备查价的 ChatGPT 登录账号已变化，请重新连接");
+            throw new Error("查价的 ChatGPT 登录账号已变化，请重新连接");
           return response;
         },
       );
@@ -244,9 +249,11 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
     if (selectedModel && !(await codexModels()).some((item) => item.id === selectedModel))
       throw new Error("Codex 模型不在当前模型列表中，请重新选择或使用默认模型");
     const model = selectedModel || (await codexModel());
+    const searchContext = { model, account };
     return {
       model,
-      searchEquipment: equipmentSearcher(model, account),
+      searchEquipment: assetSearcher(searchEquipmentPrices, searchContext),
+      searchPets: assetSearcher(searchPetPricing, searchContext),
       async analyze(prompt: string, schema: unknown, signal: AbortSignal) {
         const current = await codexAccount();
         if (!current || current.email !== account.email)
@@ -265,9 +272,11 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
   const model = selectedModel || config.model || DEFAULT_DEEPSEEK_MODEL;
   if (!deepseekModels.some((item) => item.id === model))
     throw new Error("DeepSeek 模型不可用，请重新选择");
+  const searchContext: SearchContext = {};
   return {
     model,
-    searchEquipment: equipmentSearcher(),
+    searchEquipment: assetSearcher(searchEquipmentPrices, searchContext),
+    searchPets: assetSearcher(searchPetPricing, searchContext),
     async analyze(prompt: string, _schema: unknown, signal: AbortSignal) {
       try {
         return await requestDeepSeek(key, model, prompt, signal, 8192);

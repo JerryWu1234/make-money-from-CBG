@@ -18,11 +18,19 @@ const safeLink = (value: string) => {
   }
 };
 
-export function EquipmentPricingView({ snapshot }: { snapshot: EquipmentPricingSnapshot }) {
+export function EquipmentPricingView({
+  snapshot,
+  asset = "装备",
+}: {
+  snapshot: EquipmentPricingSnapshot;
+  asset?: "装备" | "宝宝";
+}) {
+  const label = (status: keyof typeof statusLabels) =>
+    asset === "宝宝" ? statusLabels[status].replaceAll("装备", "宝宝") : statusLabels[status];
   const outdated = Date.now() - Date.parse(snapshot.searchedAt) >= 24 * 60 * 60 * 1000;
   return (
-    <section aria-label="装备联网查价">
-      <h3>装备联网查价</h3>
+    <section aria-label={asset + "联网查价"}>
+      <h3>{asset}联网查价</h3>
       <p>相近商品的网页挂牌参考价，不代表实际成交价。</p>
       <p>搜索时间：{readTime(snapshot.searchedAt)}</p>
       {outdated && (
@@ -31,11 +39,13 @@ export function EquipmentPricingView({ snapshot }: { snapshot: EquipmentPricingS
         </p>
       )}
       <p>
-        {snapshot.total !== null ? "装备参考价合计：" : "已核实装备小计（非完整总价）："}
+        {snapshot.total !== null
+          ? asset + "参考价合计："
+          : "已核实" + asset + "小计（非完整总价）："}
         {valuationMoney(snapshot.total ?? snapshot.knownTotal)}
       </p>
       {!snapshot.captureComplete && (
-        <p className="analysis-pending-note">装备资料尚未完整，未采到的部分不会按0计价。</p>
+        <p className="analysis-pending-note">{asset}资料尚未完整，未采到的部分不会按0计价。</p>
       )}
       {!!snapshot.queries.length && (
         <details>
@@ -62,12 +72,10 @@ export function EquipmentPricingView({ snapshot }: { snapshot: EquipmentPricingS
               {item.level !== null ? ` · ${item.level}级` : ""}
             </strong>
             <span>
-              {item.status === "priced"
-                ? valuationMoney(item.referencePrice)
-                : statusLabels[item.status]}
+              {item.status === "priced" ? valuationMoney(item.referencePrice) : label(item.status)}
             </span>
           </header>
-          <p>{statusLabels[item.status]}</p>
+          <p>{label(item.status)}</p>
           <p>
             已核实挂牌样本：{item.candidates.filter((candidate) => candidate.verified).length}条。
           </p>

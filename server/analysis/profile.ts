@@ -8,7 +8,7 @@ import { marketServers } from "./market";
 import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "./valuation-settings";
 
 export const PROMPT_FILE = resolve("prompts/role-valuation.md");
-export const CALCULATION_VERSION = "price-comparison-v5";
+export const CALCULATION_VERSION = "price-comparison-v6";
 // Update alongside the calculator when changing pricing sections III through VIII.
 const PRICING_HASH = "4fe072675806ec5d6fbb3c796eccfcae4bd8eece613c68ec3611209935567928";
 export const DEFAULT_SETTINGS: ValuationSettings = {
@@ -104,6 +104,7 @@ export function createProfile(
   template: string,
   settings: unknown = DEFAULT_SETTINGS,
   equipmentSearch = true,
+  petSearch = equipmentSearch,
 ): AnalysisProfile {
   if (!template.trim() || Buffer.byteLength(template, "utf8") > 64 * 1024)
     throw new Error("Prompt 不能为空或超过 64 KiB");
@@ -120,6 +121,7 @@ export function createProfile(
   return {
     version: "role-valuation-v1",
     equipmentSearch,
+    petSearch,
     template,
     promptHash,
     settings: normalized,
@@ -133,6 +135,7 @@ export function createProfile(
         CALCULATION_VERSION,
         "valuation-schema-v3",
         equipmentSearch,
+        petSearch,
       ]),
     ),
   };

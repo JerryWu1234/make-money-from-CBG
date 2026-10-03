@@ -20,7 +20,7 @@ const labels = {
   running: "分析中",
   completed: "已分析",
   failed: "分析失败",
-  stale: "资料已更新",
+  stale: "需要重新分析",
 };
 const providerNames = { codex: "Codex", deepseek: "DeepSeek" };
 const price = (value: string) => (value ? `¥${value}` : "价格未采集");
@@ -82,7 +82,8 @@ export function AnalysisPreview() {
   const run = data?.run;
   const active = data?.activeRun;
   const running = !!active;
-  const searchingEquipment = active?.phase === "equipment_search";
+  const searchingEquipment = active?.phase === "equipment_search" || active?.phase === "pet_search";
+  const searchAsset = active?.phase === "pet_search" ? "宝宝" : "装备";
   const finished = (run?.completed || 0) + (run?.failed || 0);
   const sameProfile = !data?.profile || run?.profileHash === data.profile.hash;
   const selectedModel = selectedModels[provider];
@@ -221,7 +222,7 @@ export function AnalysisPreview() {
               <em>就更新一次榜单</em>
             </h1>
             <p>
-              先核对装备，再联网查价，直接比较参考估值与挂牌价；缺资料或可靠报价时显示补齐办法。
+              先核对装备和宝宝，再联网查价，直接比较参考估值与挂牌价；缺资料或可靠报价时显示补齐办法。
             </p>
             <AiConnectionControl
               provider={provider}
@@ -326,7 +327,7 @@ export function AnalysisPreview() {
                   ? "尚未采集商品，请先回到采集工作台采集详情。"
                   : active
                     ? searchingEquipment
-                      ? `正在联网查装备价格：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
+                      ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
                       : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
                     : run && !sameProfile
                       ? "所选批次使用旧规则，点击上方按钮按当前 Prompt 开始新分析。"
@@ -739,7 +740,7 @@ export function AnalysisPreview() {
                 <p>
                   {active?.current
                     ? searchingEquipment
-                      ? `正在联网查装备价格 · ${active.current}`
+                      ? `正在联网查${searchAsset}价格 · ${active.current}`
                       : `正在分析 ${active.current}`
                     : running
                       ? "正在准备下一件商品"
@@ -765,8 +766,10 @@ export function AnalysisPreview() {
                   <li>
                     <span>2</span>
                     <div>
-                      <strong>先核对装备，再联网查价</strong>
-                      <p>核对采集属性，搜索相近装备挂牌，保存来源、参考价和未采用原因。</p>
+                      <strong>先核对装备和宝宝，再联网查价</strong>
+                      <p>
+                        按装备属性、宝宝技能与成长查全服同类挂牌，保存来源、参考价和未采用原因。
+                      </p>
                     </div>
                   </li>
                   <li>
@@ -812,7 +815,7 @@ export function AnalysisPreview() {
         </div>
         <div className="analysis-bottom-note">
           <span>
-            资料更新后，旧结论标为“资料已更新”；再次开始只调用新增或变化的商品，其余结果复用。
+            资料变化或行情过期后，旧结论标为“需要重新分析”；新批次重新查询装备和宝宝行情，历史结果保留。
           </span>
           <a href="/">返回采集工作台 →</a>
         </div>

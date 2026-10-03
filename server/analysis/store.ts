@@ -8,6 +8,7 @@ import { valuationPrompt } from "./valuation-contract";
 import type { AnalysisProfile } from "./valuation-types";
 import type { ProductDocument } from "./product-document";
 import { equipmentInventory, type EquipmentPricingSnapshot } from "./equipment-pricing";
+import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
 import type {
   AnalysisDetail,
   AnalysisItem,
@@ -27,12 +28,20 @@ export type AnalysisTask = {
   profile: AnalysisProfile | null;
   lastError: string | null;
   equipmentPricing?: EquipmentPricingSnapshot;
+  petPricing?: PetPricingSnapshot;
 };
 const now = () => new Date().toISOString();
 const nullable = (value: SQLOutputValue | undefined) => (value == null ? null : String(value));
+const expiredPricingSql = ["equipment_pricing", "pet_pricing"]
+  .map((key) => {
+    const time = `julianday(json_extract(t.result_json,'$.valuation.${key}.searchedAt'))`;
+    return `(json_type(t.result_json,'$.valuation.${key}')='object' AND (${time} IS NULL OR ${time}<=julianday('now','-24 hours') OR ${time}>julianday('now','+1 minute')))`;
+  })
+  .join(" OR ");
 const stateSql = `CASE WHEN l.status!='complete' OR l.detail_json IS NULL THEN 'waiting_detail'
   WHEN t.id IS NULL THEN 'ready'
   WHEN t.source_listing_json!=l.listing_json OR t.source_detail_json!=l.detail_json THEN 'stale'
+  WHEN t.status='completed' AND (${expiredPricingSql}) THEN 'stale'
   ELSE t.status END`;
 
 export class AnalysisStore {
@@ -67,6 +76,7 @@ export class AnalysisStore {
       ["analysis_attempts", "request_text"],
       ["analysis_attempts", "request_hash"],
       ["analysis_tasks", "equipment_pricing_json"],
+      ["analysis_tasks", "pet_pricing_json"],
     ]) {
       if (
         !db
@@ -140,7 +150,7 @@ export class AnalysisStore {
       coalesce(sum(t.status='completed'),0) completed,coalesce(sum(t.status='failed'),0) failed,
       coalesce(sum(t.status='queued'),0) queued,coalesce(sum(t.reused),0) reused,
       (SELECT json_extract(source_listing_json,'$.name') FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current,
-      (SELECT CASE WHEN equipment_pricing_json IS NULL AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search' ELSE 'analysis' END FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) phase
+      (SELECT CASE WHEN equipment_pricing_json IS NULL AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search' WHEN pet_pricing_json IS NULL AND json_extract(r.profile_json,'$.petSearch')=1 THEN 'pet_search' ELSE 'analysis' END FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) phase
       FROM analysis_runs r LEFT JOIN analysis_tasks t ON t.run_id=r.id WHERE r.id=? GROUP BY r.id`)
       .get(id);
     return row
@@ -234,7 +244,7 @@ export class AnalysisStore {
           ? valuationPrompt(document, record, profile)
           : analysisPrompt(document);
         const previous =
-          force || profile?.equipmentSearch
+          force || profile?.equipmentSearch || profile?.petSearch
             ? undefined
             : this.db
                 .prepare(
@@ -304,6 +314,7 @@ export class AnalysisStore {
       ...(row.equipment_pricing_json
         ? { equipmentPricing: JSON.parse(String(row.equipment_pricing_json)) }
         : {}),
+      ...(row.pet_pricing_json ? { petPricing: JSON.parse(String(row.pet_pricing_json)) } : {}),
     };
   }
   beginEquipmentSearch(task: AnalysisTask, owner: string) {
@@ -327,7 +338,13 @@ export class AnalysisStore {
       snapshot.inputHash !== equipmentInventory(task.record).inputHash
     )
       throw new Error("装备查价资料与当前任务不匹配");
-    const prompt = valuationPrompt(task.document, task.record, task.profile, snapshot);
+    const prompt = valuationPrompt(
+      task.document,
+      task.record,
+      task.profile,
+      snapshot,
+      task.petPricing,
+    );
     this.db.exec("BEGIN IMMEDIATE");
     try {
       if (!this.owns(owner)) throw new Error("分析锁已失效");
@@ -352,6 +369,54 @@ export class AnalysisStore {
     this.db
       .prepare(
         "UPDATE analysis_tasks SET status='queued' WHERE id=? AND status='running' AND equipment_pricing_json IS NULL AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')",
+      )
+      .run(task.id, task.id);
+  }
+  beginPetSearch(task: AnalysisTask, owner: string) {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    if (
+      this.db
+        .prepare(
+          "UPDATE analysis_tasks SET status='running',error=NULL WHERE id=? AND status='queued' AND pet_pricing_json IS NULL",
+        )
+        .run(task.id).changes !== 1
+    )
+      throw new Error("宝宝查价任务状态已变化");
+  }
+  savePetPricing(task: AnalysisTask, snapshot: PetPricingSnapshot, owner: string): AnalysisTask {
+    if (!task.profile?.petSearch || snapshot.inputHash !== petInventory(task.record).inputHash)
+      throw new Error("宝宝查价资料与当前任务不匹配");
+    const prompt = valuationPrompt(
+      task.document,
+      task.record,
+      task.profile,
+      task.equipmentPricing,
+      snapshot,
+    );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.owns(owner)) throw new Error("分析锁已失效");
+      if (
+        this.db
+          .prepare(
+            "UPDATE analysis_tasks SET pet_pricing_json=?,prompt_text=?,prompt_hash=?,status='queued',error=NULL WHERE id=? AND status='running' AND pet_pricing_json IS NULL",
+          )
+          .run(JSON.stringify(snapshot), prompt, textHash(prompt), task.id).changes !== 1
+      )
+        throw new Error("宝宝查价任务状态已变化");
+      this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
+      this.db.exec("COMMIT");
+      return { ...task, prompt, petPricing: snapshot, lastError: null };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  abortPetSearch(task: AnalysisTask, owner: string) {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    this.db
+      .prepare(
+        "UPDATE analysis_tasks SET status='queued' WHERE id=? AND status='running' AND pet_pricing_json IS NULL AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')",
       )
       .run(task.id, task.id);
   }
@@ -474,6 +539,7 @@ export class AnalysisStore {
       equipmentPricing: row.equipment_pricing_json
         ? JSON.parse(String(row.equipment_pricing_json))
         : null,
+      petPricing: row.pet_pricing_json ? JSON.parse(String(row.pet_pricing_json)) : null,
       attempts,
     };
   }

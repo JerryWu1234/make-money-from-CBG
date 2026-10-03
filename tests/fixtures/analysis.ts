@@ -3,6 +3,7 @@ import type { Dimension, ProductAnalysis } from "../../server/analysis/types";
 import { buildProductDocument } from "../../server/analysis/product-document";
 import { roleRecord } from "./saved-role";
 import type { EquipmentPricingSnapshot } from "../../server/analysis/equipment-pricing";
+import type { PetPricingSnapshot } from "../../server/analysis/pet-pricing";
 import { CAPTURE_VERSION } from "../../server/crawler/compact";
 
 /** Synthetic evidence for UI tests. No browser or search request is sent to this URL. */
@@ -112,8 +113,53 @@ export function analysisRecord(key = "a"): SavedRoleRecord {
         complete: true,
         issues: [],
       },
+      petCapture: {
+        version: 1,
+        collectedAt: record.detail!.collectedAt,
+        complete: true,
+        issues: [],
+      },
     },
   } as SavedRoleRecord;
+}
+/** Synthetic pet quote, kept separate from real search evidence. */
+export function petPricingFixture(): PetPricingSnapshot {
+  const base = equipmentPricingFixture();
+  const quote =
+    "【模拟测试宝宝样本】画魂，119级，成长1.25，技能高级魔之心、须弥真言，无内丹，无装备，挂牌价800元。";
+  return {
+    ...base,
+    inputHash: "fixture-pet-hash",
+    total: 800,
+    knownTotal: 800,
+    queries: ["梦幻西游电脑版 藏宝阁 全服 画魂 须弥真言 成长1.25"],
+    items: [
+      {
+        ...base.items[0],
+        key: "pet-fixture",
+        name: "测试画魂",
+        level: 119,
+        category: "召唤兽（含已核对随身装备）",
+        description: "成长1.25，技能高级魔之心、须弥真言，无内丹，无装备",
+        query: "梦幻西游电脑版 藏宝阁 全服 画魂 须弥真言 成长1.25",
+        referencePrice: 800,
+        fields: [{ name: "类型", value: "画魂" }],
+        skills: ["高级魔之心", "须弥真言"],
+        innerSkills: [],
+        equipment: [],
+        candidates: [
+          {
+            ...base.items[0].candidates[0],
+            url: "https://xyq.cbg.163.com/equip?s=367&eid=mock-pet-ui",
+            title: "模拟测试宝宝挂牌样本",
+            price: 800,
+            quote,
+            differences: [],
+          },
+        ],
+      },
+    ],
+  };
 }
 export function valuationRecord(key = "a"): SavedRoleRecord {
   const record = analysisRecord(key);

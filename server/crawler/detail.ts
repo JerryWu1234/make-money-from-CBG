@@ -3,7 +3,7 @@ import { hoverForInspection } from "../viewport";
 import type { Listing, RoleDetail, TabSnapshot } from "./types";
 import { assertAvailable, checkAborted, pace } from "./page";
 import { CAPTURE_VERSION, itemFromAttributes } from "./compact";
-import { collectPets } from "./pets";
+import { collectPets, petCaptureSummary } from "./pets";
 import { captureValuation } from "./valuation-capture";
 
 export const MAIN_TABS = [
@@ -46,16 +46,23 @@ async function inspectItems(
   report: (message: string) => void,
   issues?: string[],
 ) {
-  const count = await page.locator("[data-cbg-detail-root] img:visible").evaluateAll((elements) => {
-    document
-      .querySelectorAll("[data-cbg-inspect-index]")
-      .forEach((el) => el.removeAttribute("data-cbg-inspect-index"));
-    const icons = elements.filter(
-      (el) => !el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]'),
-    );
-    icons.forEach((el, index) => el.setAttribute("data-cbg-inspect-index", String(index)));
-    return icons.length;
-  });
+  const petItems = /^召唤兽 \d+$/.test(snapshot.name);
+  const count = await page
+    .locator(
+      petItems
+        ? "[data-cbg-detail-root] img[data-cbg-pet-item]:visible"
+        : "[data-cbg-detail-root] img:visible",
+    )
+    .evaluateAll((elements) => {
+      document
+        .querySelectorAll("[data-cbg-inspect-index]")
+        .forEach((el) => el.removeAttribute("data-cbg-inspect-index"));
+      const icons = elements.filter(
+        (el) => !el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]'),
+      );
+      icons.forEach((el, index) => el.setAttribute("data-cbg-inspect-index", String(index)));
+      return icons.length;
+    });
   for (let index = 0; index < count; index++) {
     checkAborted(signal);
     const icon = page.locator(`[data-cbg-inspect-index="${index}"]`);
@@ -155,6 +162,36 @@ async function inspectItems(
     if (item.description || item.attributes || !item.name.startsWith("图标 "))
       snapshot.items!.push(item);
   }
+}
+
+async function inspectPets(
+  page: Page,
+  snapshot: TabSnapshot,
+  signal: AbortSignal,
+  report: (message: string) => void,
+  collectedAt: string,
+) {
+  const readIssues: string[] = [];
+  const result = await collectPets(
+    page,
+    signal,
+    (name) => capture(page, name),
+    (pet) => inspectItems(page, pet, signal, report, readIssues),
+    () => settled(page, signal),
+    report,
+  );
+  snapshot.pets = result.pets;
+  if (result.count !== null) snapshot.petCount = result.count;
+  snapshot.itemsCollectedAt = collectedAt;
+  // 每只详情保存在 pets，概览不重复保留默认宝宝的属性。
+  const info = snapshot.text.lastIndexOf("详细信息");
+  if (info >= 0) snapshot.text = snapshot.text.slice(0, info).trim();
+  snapshot.fields = [];
+  snapshot.tables = [];
+  return petCaptureSummary(result.count, result.pets, collectedAt, [
+    ...result.issues,
+    ...readIssues,
+  ]);
 }
 
 export function equipmentCaptureSummary(
@@ -279,7 +316,7 @@ async function inspectEquipmentTabs(
   return snapshots;
 }
 
-/** Refresh pricing and equipment; retain the previous pet and skill snapshots. */
+/** Refresh pricing, equipment and pets; retain unrelated skill snapshots. */
 export async function collectValuationDetail(
   page: Page,
   item: Listing,
@@ -298,10 +335,14 @@ export async function collectValuationDetail(
     });
   const now = new Date().toISOString();
   const equipmentIssues: string[] = [];
+  let petCapture: RoleDetail["petCapture"];
   const tabs = previous.tabs
-    .filter((tab) => !/^(?:坐骑|道具\/法宝)\s*\//.test(tab.name))
+    .filter(
+      (tab) =>
+        !/^(?:坐骑|道具\/法宝)\s*\//.test(tab.name) && !/^召唤兽\/孩子(?:\s*\/|$)/.test(tab.name),
+    )
     .map((tab) => ({ ...tab, collectedAt: tab.collectedAt || previous.collectedAt }));
-  for (const name of ["人物/修炼", "道具/法宝", "坐骑"]) {
+  for (const name of ["人物/修炼", "道具/法宝", "召唤兽/孩子", "坐骑"]) {
     checkAborted(signal);
     report("正在补采估值资料：" + name);
     await page
@@ -315,6 +356,7 @@ export async function collectValuationDetail(
       const snapshots = await inspectEquipmentTabs(page, snapshot, signal, report, equipmentIssues);
       tabs.push(...snapshots.slice(1).map((tab) => ({ ...tab, collectedAt: now })));
     }
+    if (name === "召唤兽/孩子") petCapture = await inspectPets(page, snapshot, signal, report, now);
     const index = tabs.findIndex((tab) => tab.name === name);
     if (index >= 0 && name !== "道具/法宝")
       tabs[index] = {
@@ -338,8 +380,10 @@ export async function collectValuationDetail(
     captureVersion: CAPTURE_VERSION,
     valuation,
     equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
+    petCapture,
     tabs,
     collectedAt: now,
+    raw: {},
   };
 }
 
@@ -352,6 +396,7 @@ export async function collectDetail(
   await openDetail(page, item, signal, report);
   const tabs: TabSnapshot[] = [];
   const equipmentIssues: string[] = [];
+  let petCapture: RoleDetail["petCapture"];
   for (const name of MAIN_TABS) {
     checkAborted(signal);
     report(`正在读取标签 ${MAIN_TABS.indexOf(name) + 1}/${MAIN_TABS.length}：${name}`);
@@ -370,21 +415,7 @@ export async function collectDetail(
       continue;
     }
     if (name === "召唤兽/孩子") {
-      const result = await collectPets(
-        page,
-        signal,
-        (name) => capture(page, name),
-        (snapshot) => inspectItems(page, snapshot, signal, report),
-        () => settled(page, signal),
-        report,
-      );
-      snapshot.pets = result.pets;
-      snapshot.petCount = result.count;
-      // 默认显示的第一只已保存在 pets，不重复放在总览里。
-      const info = snapshot.text.lastIndexOf("详细信息");
-      if (info >= 0) snapshot.text = snapshot.text.slice(0, info).trim();
-      snapshot.fields = [];
-      snapshot.tables = [];
+      petCapture = await inspectPets(page, snapshot, signal, report, new Date().toISOString());
     } else {
       if (name === "坐骑") tabs.push(...(await captureMountEntries(page, signal, report)));
       await inspectItems(page, snapshot, signal, report);
@@ -464,6 +495,7 @@ export async function collectDetail(
     captureVersion: CAPTURE_VERSION,
     valuation: await captureValuation(page),
     equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
+    petCapture,
     url: item.url,
     collectedAt: now,
     tabs,

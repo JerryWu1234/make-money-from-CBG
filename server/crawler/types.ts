@@ -80,6 +80,12 @@ export interface RoleDetail {
     complete: boolean;
     issues: string[];
   };
+  petCapture?: {
+    version: 1;
+    collectedAt: string;
+    complete: boolean;
+    issues: string[];
+  };
 
   formatVersion?: number;
   captureVersion?: number;

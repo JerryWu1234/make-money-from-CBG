@@ -23,11 +23,20 @@ export const valuationMoney = (value: number | null | undefined) =>
 export function valuationPriceSummary(result: ValuationResult) {
   if (result.model_value != null)
     return {
-      label: result.equipment_pricing ? "裸号及已核实装备参考估值" : "裸号参考估值",
+      label: result.pet_pricing
+        ? "裸号、装备和宝宝参考估值"
+        : result.equipment_pricing
+          ? "裸号及已核实装备参考估值"
+          : "裸号参考估值",
       value: result.model_value,
     };
+  if ((result.equipment_pricing || result.pet_pricing) && result.known_subtotal > 0)
+    return { label: "已算部分（非完整估值）", value: result.known_subtotal };
   if (result.bare_role_value != null)
-    return { label: "裸号参考估值（装备待补齐）", value: result.bare_role_value };
+    return {
+      label: result.pet_pricing ? "裸号参考估值（附带资产待补齐）" : "裸号参考估值（装备待补齐）",
+      value: result.bare_role_value,
+    };
   if (result.body_value != null)
     return { label: "裸号本体（未做区服调整）", value: result.body_value };
   if (result.items.length) return { label: "已算部分（非完整估值）", value: result.known_subtotal };
@@ -51,6 +60,7 @@ export function ValuationResultView({
     if (result.equipment_pricing && result.bare_role_value != null)
       metrics.push(["裸号参考估值", result.bare_role_value]);
     if (result.equipment_value != null) metrics.push(["装备挂牌参考价", result.equipment_value]);
+    if (result.pet_value != null) metrics.push(["宝宝挂牌参考价", result.pet_value]);
     if (result.price_difference != null)
       metrics.push(["估值与挂牌价差额", result.price_difference]);
   } else {
@@ -164,6 +174,7 @@ export function ValuationResultView({
         </section>
       )}
       {result.equipment_pricing && <EquipmentPricingView snapshot={result.equipment_pricing} />}
+      {result.pet_pricing && <EquipmentPricingView snapshot={result.pet_pricing} asset="宝宝" />}
       <h3>估值明细</h3>
       <p>
         已核算分项小计：{valuationMoney(result.known_subtotal)}

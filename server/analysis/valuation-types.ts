@@ -29,6 +29,7 @@ export type ValuationSettings = {
 export type AnalysisProfile = {
   marketSources?: import("./market").MarketServer[];
   equipmentSearch?: boolean;
+  petSearch?: boolean;
   version: "role-valuation-v1";
   template: string;
   promptHash: string;
@@ -77,6 +78,8 @@ export type ValuationResult = {
   bare_role_value?: number | null;
   equipment_value?: number | null;
   equipment_pricing?: import("./equipment-pricing").EquipmentPricingSnapshot;
+  pet_value?: number | null;
+  pet_pricing?: import("./pet-pricing").PetPricingSnapshot;
   suggestions?: string[];
   extracted_facts?: ValuationFact[];
   ai_explanation?: string;

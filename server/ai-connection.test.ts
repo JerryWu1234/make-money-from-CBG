@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import type { Search } from "./analysis/equipment-pricing";
+import { valuationRecord } from "../tests/fixtures/analysis";
 
 const mocks = vi.hoisted(() => ({
   codexAccount: vi.fn(),
@@ -15,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   writeFile: vi.fn(),
   rename: vi.fn(),
   rm: vi.fn(),
+  searchEquipmentPrices: vi.fn(),
+  searchPetPricing: vi.fn(),
 }));
 vi.mock("./ai/codex", () => mocks);
 vi.mock("./ai/deepseek", () => ({
@@ -27,6 +31,10 @@ vi.mock("./ai/deepseek", () => ({
   ],
 }));
 vi.mock("node:fs/promises", () => mocks);
+vi.mock("./analysis/equipment-pricing", () => ({
+  searchEquipmentPrices: mocks.searchEquipmentPrices,
+}));
+vi.mock("./analysis/pet-pricing", () => ({ searchPetPricing: mocks.searchPetPricing }));
 const account = { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" };
 const fakeKey = "test-only-deepseek-key";
 
@@ -50,6 +58,29 @@ beforeEach(() => {
 });
 
 describe("AI 连接验证", () => {
+  it("DeepSeek分析的装备与宝宝查价固定同一Codex模型，账号变化会停止第二阶段", async () => {
+    mocks.readFile.mockResolvedValue(
+      JSON.stringify({ deepseek: { apiKey: fakeKey, model: "deepseek-flash" } }),
+    );
+    const callback = (_record: unknown, _model: string, signal: AbortSignal, search: Search) =>
+      search("公开商品条件", { type: "object" }, signal);
+    mocks.searchEquipmentPrices.mockImplementation(callback);
+    mocks.searchPetPricing.mockImplementation(callback);
+    mocks.requestCodexSearch.mockResolvedValue({ text: "{}", queries: ["实际查询"] });
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    const record = valuationRecord();
+    const signal = new AbortController().signal;
+    await client.searchEquipment(record, signal);
+    mocks.codexModel.mockResolvedValue("changed-default-model");
+    await client.searchPets(record, signal);
+    expect(mocks.codexModel).toHaveBeenCalledOnce();
+    for (const call of mocks.requestCodexSearch.mock.calls)
+      expect(call[2].model).toBe("configured-model");
+    mocks.codexAccount.mockResolvedValue({ ...account, email: "changed@example.invalid" });
+    await expect(client.searchPets(record, signal)).rejects.toThrow("账号已变化");
+    expect(mocks.requestCodexSearch).toHaveBeenCalledTimes(2);
+  });
   it("默认跟随配置，手选模型传到真实调用，未知模型不会发起调用", async () => {
     const { aiModels, prepareAnalysisClient } = await import("./ai-connection");
     expect(await aiModels("codex")).toMatchObject({ defaultModel: "configured-model" });

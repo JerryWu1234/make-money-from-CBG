@@ -162,7 +162,7 @@ export function AnalysisSettings({
       </header>
       <p>
         每次开始分析都会冻结这份 Prompt
-        和参数。新批次使用新设置，历史结果保留。先核对装备，再联网查价，比较挂牌差异；区服金价和热度自动匹配。
+        和参数。新批次使用新设置，历史结果保留。先核对装备和宝宝，再联网查价，比较挂牌差异；区服金价和热度自动匹配。
       </p>
       {error && (
         <p role="alert" className="analysis-pending-note">
@@ -174,7 +174,7 @@ export function AnalysisSettings({
         <>
           <h3>计价方式</h3>
           <p className="analysis-pending-note">
-            分析前自动查找装备的相近挂牌样本。强壮神速按当前等级计价，查价来源和采用的价格会保存在结果里。
+            分析前自动查找装备和宝宝的全服同类挂牌样本。强壮神速按当前等级计价，查价来源和采用的价格会保存在结果里。
           </p>
           <button
             type="button"

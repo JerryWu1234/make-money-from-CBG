@@ -16,7 +16,7 @@ const gear = (name, description) =>
   `<a data_equip_name="${name}" data_equip_desc="${description}" data_tip_box="RoleEquipTipsBox"><img width="30" height="30" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseover="window.gearHovers++;RoleEquipTipsBox.style.display='block';RoleEquipTipsBox.innerText=this.parentElement.getAttribute('data_equip_name')+' '+this.parentElement.getAttribute('data_equip_desc')"></a>`;
 
 export const petBody = (n) =>
-  `<p>详细信息</p><p>类型：测试宝宝${n + 1}\t等级：${100 + n}</p><p>成长：1.${280 + n}\t攻击资质：${1400 + n}</p><p>技能</p><img width="30" height="30" data_equip_name="${primaryPetSkill}" data_skill_type="cifu" data_equip_desc="技能的通用功效不要展示"><img width="30" height="30" data_equip_name="技能${n + 1}" data_skill_type="cifu" data_equip_desc="技能故事"><p>装备</p>${gear("宝宝项圈" + (n + 1), "等级：80#r速度：" + (20 + n))}<img width="30" height="30" data_equip_name="玄武躯" data_skill_type="neidan" data_equip_level="5" data_equip_desc="内丹的通用效果">`;
+  `<p>详细信息</p><p>类型：测试宝宝${n + 1}\t等级：${100 + n}</p><p>成长：1.${280 + n}\t攻击资质：${1400 + n}</p><p>防御资质：1500</p><p>体力资质：4000</p><p>法力资质：2500</p><p>速度资质：1200</p><p>躲闪资质：1300</p><p>技能</p><img width="30" height="30" data_equip_name="${primaryPetSkill}" data_skill_type="cifu" data_equip_desc="技能的通用功效不要展示"><img width="30" height="30" data_equip_name="技能${n + 1}" data_skill_type="cifu" data_equip_desc="技能故事"><p>装备</p>${gear("宝宝项圈" + (n + 1), "等级：80#r速度：" + (20 + n))}<p>内丹</p><img width="30" height="30" data_equip_name="玄武躯" data_skill_type="neidan" data_equip_level="5" data_equip_desc="内丹的通用效果">`;
 
 export const tabContent = {
   "人物/修炼":
