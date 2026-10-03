@@ -4,7 +4,11 @@ import type { AnalysisItem, AnalysisOverview, AnalysisRun } from "../server/anal
 import { AiConnectionControl } from "./AiConnectionControl";
 import { AnalysisResultDrawer } from "./AnalysisResultDrawer";
 import { AnalysisSettings } from "./AnalysisSettings";
-import { decisionLabels, valuationMoney, valuationPriceSummary } from "./ValuationResultView";
+import {
+  valuationDecisionLabel,
+  valuationMoney,
+  valuationPriceSummary,
+} from "./ValuationResultView";
 import { RoleDetailDrawer } from "./RoleDetailDrawer";
 import { displayTime } from "./SavedRoleList";
 import "./analysis-preview.css";
@@ -78,12 +82,15 @@ export function AnalysisPreview() {
   const run = data?.run;
   const active = data?.activeRun;
   const running = !!active;
+  const searchingEquipment = active?.phase === "equipment_search";
   const finished = (run?.completed || 0) + (run?.failed || 0);
   const sameProfile = !data?.profile || run?.profileHash === data.profile.hash;
   const selectedModel = selectedModels[provider];
   const effectiveModel = selectedModel || defaultModels[provider];
   const sameModel = !modelChanged || !effectiveModel || run?.model === effectiveModel;
   const valuationMode = run ? run.ruleVersion === "role-valuation-v1" : !!data?.profile;
+  const listingComparison =
+    valuationMode && (!run || run.calculationVersion?.startsWith("price-comparison-"));
 
   useEffect(() => {
     try {
@@ -179,7 +186,9 @@ export function AnalysisPreview() {
   const startLabel = busy
     ? "正在处理…"
     : running
-      ? "正在分析…"
+      ? searchingEquipment
+        ? "正在查价…"
+        : "正在分析…"
       : run && !sameProfile
         ? "按新规则开始分析"
         : run && !sameModel
@@ -211,7 +220,9 @@ export function AnalysisPreview() {
               <br />
               <em>就更新一次榜单</em>
             </h1>
-            <p>按裸号规则计算参考价值，直接给出买入建议；资料或规则有缺项时列出补齐办法。</p>
+            <p>
+              先核对装备，再联网查价，直接比较参考估值与挂牌价；缺资料或可靠报价时显示补齐办法。
+            </p>
             <AiConnectionControl
               provider={provider}
               onProviderChange={changeProvider}
@@ -314,7 +325,9 @@ export function AnalysisPreview() {
                 : data.counts.total === 0
                   ? "尚未采集商品，请先回到采集工作台采集详情。"
                   : active
-                    ? `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
+                    ? searchingEquipment
+                      ? `正在联网查装备价格：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
+                      : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
                     : run && !sameProfile
                       ? "所选批次使用旧规则，点击上方按钮按当前 Prompt 开始新分析。"
                       : run && !sameModel
@@ -357,7 +370,9 @@ export function AnalysisPreview() {
               <small>当前状态</small>
               <strong>
                 {running
-                  ? "分析中"
+                  ? searchingEquipment
+                    ? "联网查价中"
+                    : "分析中"
                   : run?.status === "paused"
                     ? "已暂停"
                     : run?.status === "completed"
@@ -413,7 +428,9 @@ export function AnalysisPreview() {
                 <h2 id="analysis-results-title">分析结果</h2>
                 <p>
                   {valuationMode
-                    ? "推荐榜展示建议买入的商品；等降价、不建议买入和需补齐资料或规则的商品在全部商品查看。"
+                    ? listingComparison
+                      ? "推荐榜展示挂牌低于完整参考估值的商品；全部商品可查看价格差额、比例和待补齐项。"
+                      : "本历史批次保留当时的买入建议和设置；新批次直接比较估值与挂牌价。"
                     : "本历史批次按配置参考分排序；新批次使用裸号估值规则。"}
                 </p>
               </div>
@@ -473,7 +490,9 @@ export function AnalysisPreview() {
                     <strong>暂无可排序的分析结果</strong>
                     <p>
                       {valuationMode
-                        ? "完成估值并符合购买条件的商品会出现在这里。其他结论可在全部商品查看。"
+                        ? listingComparison
+                          ? "完成完整估值且挂牌低于参考价的商品会出现在这里。其他结果可在全部商品查看。"
+                          : "本历史批次符合当时购买条件的商品会出现在这里。其他结论可在全部商品查看。"
                         : "开始分析后，有完整评分的商品会出现在这里。资料不足的结论可在全部商品查看。"}
                     </p>
                   </div>
@@ -485,7 +504,13 @@ export function AnalysisPreview() {
                   >
                     <div className="analysis-rank-number">
                       {String(index + 1).padStart(2, "0")}
-                      <small>{item.valuation ? "购买参考" : "配置参考"}</small>
+                      <small>
+                        {item.valuation
+                          ? item.valuation.comparison_mode === "listing-only"
+                            ? "价格比较"
+                            : "购买参考"
+                          : "配置参考"}
+                      </small>
                     </div>
                     <div className="analysis-rank-main">
                       <div className="analysis-rank-title">
@@ -504,7 +529,9 @@ export function AnalysisPreview() {
                       <strong>{price(item.price)}</strong>
                       <span>
                         {item.valuation
-                          ? `最高买入 ${valuationMoney(item.valuation.max_listing_price)}`
+                          ? item.valuation.comparison_mode === "listing-only"
+                            ? `估值与挂牌差额 ${valuationMoney(item.valuation.price_difference)}`
+                            : `最高买入 ${valuationMoney(item.valuation.max_listing_price)}`
                           : `配置参考分 ${item.score}`}
                       </span>
                       <button onClick={() => viewItem(item)}>查看分析依据 →</button>
@@ -555,7 +582,13 @@ export function AnalysisPreview() {
                         <th>挂牌价格</th>
                         <th>资料</th>
                         <th>分析状态</th>
-                        <th>{valuationMode ? "估值 / 结论" : "配置分"}</th>
+                        <th>
+                          {valuationMode
+                            ? listingComparison
+                              ? "估值 / 挂牌差异"
+                              : "估值 / 结论"
+                            : "配置分"}
+                        </th>
                         <th>操作</th>
                       </tr>
                     </thead>
@@ -586,16 +619,26 @@ export function AnalysisPreview() {
                           <td>
                             {item.valuation ? (
                               <>
-                                <strong>{decisionLabels[item.valuation.decision]}</strong>
+                                <strong>{valuationDecisionLabel(item.valuation)}</strong>
                                 <small>
                                   {valuationPriceSummary(item.valuation).label}{" "}
                                   {valuationMoney(valuationPriceSummary(item.valuation).value)}
                                 </small>
-                                {item.valuation.max_listing_price !== null && (
-                                  <small>
-                                    最高买入 {valuationMoney(item.valuation.max_listing_price)}
-                                  </small>
-                                )}
+                                {item.valuation.comparison_mode === "listing-only" &&
+                                  item.valuation.price_difference != null && (
+                                    <small>
+                                      差额 {valuationMoney(item.valuation.price_difference)}
+                                      {item.valuation.price_difference_ratio != null
+                                        ? ` · ${(item.valuation.price_difference_ratio * 100).toFixed(2)}%`
+                                        : ""}
+                                    </small>
+                                  )}
+                                {item.valuation.comparison_mode !== "listing-only" &&
+                                  item.valuation.max_listing_price !== null && (
+                                    <small>
+                                      最高买入 {valuationMoney(item.valuation.max_listing_price)}
+                                    </small>
+                                  )}
                                 {item.valuation.decision === "NEED_INFO" && (
                                   <small>查看分析里的补齐建议</small>
                                 )}
@@ -695,7 +738,9 @@ export function AnalysisPreview() {
                 </div>
                 <p>
                   {active?.current
-                    ? `正在分析 ${active.current}`
+                    ? searchingEquipment
+                      ? `正在联网查装备价格 · ${active.current}`
+                      : `正在分析 ${active.current}`
                     : running
                       ? "正在准备下一件商品"
                       : run?.status === "paused"
@@ -707,7 +752,7 @@ export function AnalysisPreview() {
             </section>
             <section className="analysis-flow-card">
               <span className="analysis-kicker">RULES / 分析依据</span>
-              <h2>{valuationMode ? "裸号估值与购买" : "历史配置参考分"}</h2>
+              <h2>{valuationMode ? "估值与挂牌差异" : "历史配置参考分"}</h2>
               {valuationMode ? (
                 <ol>
                   <li>
@@ -720,15 +765,15 @@ export function AnalysisPreview() {
                   <li>
                     <span>2</span>
                     <div>
-                      <strong>先估值，再判断购买</strong>
-                      <p>按定价规则复算分项，结合买入系数、预算和额外成本。</p>
+                      <strong>先核对装备，再联网查价</strong>
+                      <p>核对采集属性，搜索相近装备挂牌，保存来源、参考价和未采用原因。</p>
                     </div>
                   </li>
                   <li>
                     <span>3</span>
                     <div>
-                      <strong>先给建议，再说明依据</strong>
-                      <p>直接展示买入建议和金额；缺资料时说明缺哪项、怎么补。</p>
+                      <strong>比较价格，展示搜索依据</strong>
+                      <p>展示估值与挂牌的差额和比例；资料或报价不足时说明缺什么、怎么补。</p>
                     </div>
                   </li>
                 </ol>

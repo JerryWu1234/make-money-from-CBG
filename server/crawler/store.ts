@@ -63,7 +63,7 @@ export class CrawlStore {
     const now = new Date().toISOString();
     const old = this.db
       .prepare(
-        "SELECT status, selling_time, json_extract(detail_json,'$.captureVersion') AS version,json_array_length(json_extract(detail_json,'$.valuation.issues')) AS valuation_issues FROM listings WHERE key=?",
+        "SELECT status, selling_time, json_extract(detail_json,'$.captureVersion') AS version,json_array_length(json_extract(detail_json,'$.valuation.issues')) AS valuation_issues,json_extract(detail_json,'$.equipmentCapture.complete') AS equipment_complete,json_array_length(json_extract(detail_json,'$.equipmentCapture.issues')) AS equipment_issues FROM listings WHERE key=?",
       )
       .get(item.key);
     // 同一商品重新上架时更新原记录、重采详情，不插入重复商品。
@@ -71,7 +71,9 @@ export class CrawlStore {
       old?.status === "complete" &&
       old.selling_time === item.sellingTime &&
       old.version === CAPTURE_VERSION &&
-      !old.valuation_issues;
+      !old.valuation_issues &&
+      old.equipment_complete === 1 &&
+      !old.equipment_issues;
     this.db
       .prepare(`INSERT INTO listings(key,server_id,eid,ordersn,url,selling_time,created_time,name,price,listing_json,first_seen_at,last_seen_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET ordersn=excluded.ordersn,url=excluded.url,selling_time=excluded.selling_time,
@@ -101,7 +103,7 @@ export class CrawlStore {
   retryItems(keys?: string[]): Listing[] {
     return this.db
       .prepare(
-        `SELECT listing_json FROM listings WHERE (status IN ('pending','failed') OR (status='complete' AND (coalesce(json_extract(detail_json,'$.captureVersion'),0) < ${CAPTURE_VERSION} OR json_array_length(json_extract(detail_json,'$.valuation.issues')) > 0)))
+        `SELECT listing_json FROM listings WHERE (status IN ('pending','failed') OR (status='complete' AND (coalesce(json_extract(detail_json,'$.captureVersion'),0) < ${CAPTURE_VERSION} OR json_array_length(json_extract(detail_json,'$.valuation.issues')) > 0 OR coalesce(json_extract(detail_json,'$.equipmentCapture.complete'),0)!=1 OR json_array_length(json_extract(detail_json,'$.equipmentCapture.issues'))>0)))
         ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,first_seen_at ASC,key ASC`,
       )
       .all()
@@ -214,7 +216,8 @@ export class CrawlStore {
       json_extract(listing_json,'$.serverName') AS server_name,
       json_extract(listing_json,'$.highlights') AS highlights,
       json_extract(listing_json,'$.summary.summary') AS summary,last_attempt_at,attempt_count,
-      json_extract(detail_json,'$.captureVersion') capture_version,json_array_length(json_extract(detail_json,'$.valuation.issues')) valuation_issues
+      json_extract(detail_json,'$.captureVersion') capture_version,json_array_length(json_extract(detail_json,'$.valuation.issues')) valuation_issues,
+      json_extract(detail_json,'$.equipmentCapture.complete') equipment_complete,json_array_length(json_extract(detail_json,'$.equipmentCapture.issues')) equipment_issues
       FROM listings ORDER BY first_seen_at DESC,key ASC LIMIT ? OFFSET ?`)
       .all(pageSize, (page - 1) * pageSize);
     return {
@@ -237,7 +240,11 @@ export class CrawlStore {
           lastSeenAt: String(row.last_seen_at),
           lastAttemptAt: row.last_attempt_at ? String(row.last_attempt_at) : null,
           attemptCount: Number(row.attempt_count || 0),
-          valuationReady: row.capture_version === CAPTURE_VERSION && !row.valuation_issues,
+          valuationReady:
+            row.capture_version === CAPTURE_VERSION &&
+            !row.valuation_issues &&
+            row.equipment_complete === 1 &&
+            !row.equipment_issues,
           status: String(row.status),
           error: row.error ? String(row.error) : null,
         };

@@ -1,4 +1,5 @@
 import type { Decision, ValuationResult } from "../server/analysis/valuation-types";
+import { EquipmentPricingView } from "./EquipmentPricingView";
 export const decisionLabels: Record<Decision, string> = {
   BUY: "建议买入",
   WATCH: "等降价再买",
@@ -6,12 +7,27 @@ export const decisionLabels: Record<Decision, string> = {
   NEED_INFO: "暂不建议买入",
   OUT_OF_SCOPE: "不适用估值规则",
 };
+const comparisonLabels: Record<Decision, string> = {
+  BUY: "挂牌低于估值",
+  WATCH: "挂牌等于估值",
+  PASS: "挂牌高于估值",
+  NEED_INFO: "暂无法比较",
+  OUT_OF_SCOPE: "不适用估值规则",
+};
+export const valuationDecisionLabel = (result: ValuationResult) =>
+  (result.comparison_mode === "listing-only" ? comparisonLabels : decisionLabels)[result.decision];
 export const valuationMoney = (value: number | null | undefined) =>
   value == null
     ? "暂无法计算"
     : "¥" + value.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 export function valuationPriceSummary(result: ValuationResult) {
-  if (result.model_value != null) return { label: "裸号参考估值", value: result.model_value };
+  if (result.model_value != null)
+    return {
+      label: result.equipment_pricing ? "裸号及已核实装备参考估值" : "裸号参考估值",
+      value: result.model_value,
+    };
+  if (result.bare_role_value != null)
+    return { label: "裸号参考估值（装备待补齐）", value: result.bare_role_value };
   if (result.body_value != null)
     return { label: "裸号本体（未做区服调整）", value: result.body_value };
   if (result.items.length) return { label: "已算部分（非完整估值）", value: result.known_subtotal };
@@ -27,14 +43,25 @@ export function ValuationResultView({
   previousSettings?: boolean;
 }) {
   const amount = valuationPriceSummary(result);
+  const comparison = result.comparison_mode === "listing-only";
   const metrics: [string, number][] = [];
   if (amount.value !== null) metrics.push([amount.label, amount.value]);
   if (result.asking_price !== null) metrics.push(["当前挂牌价", result.asking_price]);
-  if (result.max_listing_price !== null) metrics.push(["建议最高买入价", result.max_listing_price]);
-  if (result.max_listing_price === null && result.max_total_cost != null)
-    metrics.push(["建议最高总成本（含费用）", result.max_total_cost]);
-  if (result.ideal_listing_price !== null) metrics.push(["理想买入价", result.ideal_listing_price]);
-  if (result.total_cost !== null) metrics.push(["购买总成本", result.total_cost]);
+  if (comparison) {
+    if (result.equipment_pricing && result.bare_role_value != null)
+      metrics.push(["裸号参考估值", result.bare_role_value]);
+    if (result.equipment_value != null) metrics.push(["装备挂牌参考价", result.equipment_value]);
+    if (result.price_difference != null)
+      metrics.push(["估值与挂牌价差额", result.price_difference]);
+  } else {
+    if (result.max_listing_price !== null)
+      metrics.push(["建议最高买入价", result.max_listing_price]);
+    if (result.max_listing_price === null && result.max_total_cost != null)
+      metrics.push(["建议最高总成本（含费用）", result.max_total_cost]);
+    if (result.ideal_listing_price !== null)
+      metrics.push(["理想买入价", result.ideal_listing_price]);
+    if (result.total_cost !== null) metrics.push(["购买总成本", result.total_cost]);
+  }
   const suggestions = result.suggestions || [];
   return (
     <section className="analysis-valuation-result">
@@ -44,8 +71,8 @@ export function ValuationResultView({
         </p>
       )}
       <div className={"analysis-detail-score analysis-valuation-decision-" + result.decision}>
-        <small>裸号买入建议</small>
-        <strong>{decisionLabels[result.decision]}</strong>
+        <small>{comparison ? "估值与挂牌价比较" : "裸号买入建议"}</small>
+        <strong>{valuationDecisionLabel(result)}</strong>
         <p>{result.reason}</p>
       </div>
       <div className="analysis-valuation-metrics">
@@ -55,17 +82,29 @@ export function ValuationResultView({
             <strong>{valuationMoney(value)}</strong>
           </div>
         ))}
-        {result.margin_of_safety !== null && (
+        {comparison && result.price_difference_ratio != null && (
+          <div>
+            <small>差异比例（以挂牌价为基准）</small>
+            <strong>{(result.price_difference_ratio * 100).toFixed(2) + "%"}</strong>
+          </div>
+        )}
+        {!comparison && result.margin_of_safety !== null && (
           <div>
             <small>相对估值安全边际</small>
             <strong>{(result.margin_of_safety * 100).toFixed(2) + "%"}</strong>
           </div>
         )}
       </div>
-      <p>按裸号规则估值，装备、灵饰、召唤兽个体和锦衣未计价。</p>
+      <p>
+        {comparison
+          ? result.price_comparison_scope || "裸号参考估值，附带资产需另行核实"
+          : "按裸号规则估值，装备、灵饰、召唤兽个体和锦衣未计价。"}
+      </p>
+      {comparison && <p>差额为正表示估值高于挂牌价，为负表示挂牌价更高。</p>}
       {result.model_value === null && (
         <p className="analysis-pending-note">
-          当前金额是已算部分。请按下面的具体缺项补齐资料或定价规则，再判断买入上限。
+          当前金额是已算部分。请按下面的具体缺项补齐资料或定价规则，
+          {comparison ? "再比较挂牌差异。" : "再判断买入上限。"}
         </p>
       )}
       {!!suggestions.length && (
@@ -124,6 +163,7 @@ export function ValuationResultView({
           <p>{result.ai_explanation}</p>
         </section>
       )}
+      {result.equipment_pricing && <EquipmentPricingView snapshot={result.equipment_pricing} />}
       <h3>估值明细</h3>
       <p>
         已核算分项小计：{valuationMoney(result.known_subtotal)}

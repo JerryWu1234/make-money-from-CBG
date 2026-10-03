@@ -2,6 +2,92 @@ import type { SavedRoleRecord } from "../../server/crawler/types";
 import type { Dimension, ProductAnalysis } from "../../server/analysis/types";
 import { buildProductDocument } from "../../server/analysis/product-document";
 import { roleRecord } from "./saved-role";
+import type { EquipmentPricingSnapshot } from "../../server/analysis/equipment-pricing";
+import { CAPTURE_VERSION } from "../../server/crawler/compact";
+
+/** Synthetic evidence for UI tests. No browser or search request is sent to this URL. */
+export function equipmentPricingFixture(incomplete = false): EquipmentPricingSnapshot {
+  const quote = "【模拟测试样本】测试铠甲，120级，防御200，耐久300/500可正常修理，挂牌价300元。";
+  return {
+    version: 1,
+    inputHash: "fixture-input-hash",
+    searchedAt: "2026-10-03T07:00:00.000Z",
+    provider: "codex",
+    model: "fixture-model",
+    queries: ["梦幻西游 测试铠甲 120级 防御200 挂牌价格"],
+    rawResponse: "模拟联网查价结果，仅验证页面，不代表真实市场行情。",
+    captureComplete: !incomplete,
+    total: incomplete ? null : 300,
+    knownTotal: 300,
+    items: [
+      {
+        key: "armor-fixture",
+        name: "测试铠甲",
+        level: 120,
+        category: "装备",
+        description: "防御200",
+        query: "梦幻西游 测试铠甲 120级 防御200 挂牌价格",
+        status: "priced",
+        referencePrice: 300,
+        candidates: [
+          {
+            url: "https://xyq.cbg.163.com/equip?s=367&eid=mock-price-ui",
+            title: "模拟测试装备挂牌样本",
+            price: 300,
+            priceType: "listing",
+            quote,
+            verified: true,
+            reason: "模拟样本的装备类型、等级和属性匹配，用于页面验证。",
+            differences: ["耐久300/500，可正常修理。"],
+            fetchedAt: "2026-10-03T07:01:00.000Z",
+            sourceHash: "fixture-page-hash",
+          },
+          {
+            url: "https://xyq.cbg.163.com/equip?s=367&eid=mock-rejected-ui",
+            title: "未匹配的模拟样本",
+            price: 999,
+            priceType: "listing",
+            quote: "【模拟测试样本】等级不同，不能采用。",
+            verified: false,
+            reason: "装备等级不同，不计入参考价。",
+            fetchedAt: "2026-10-03T07:02:00.000Z",
+            sourceHash: "fixture-unmatched-page-hash",
+          },
+        ],
+        issues: [],
+      },
+      ...(incomplete
+        ? [
+            {
+              key: "missing-fixture",
+              name: "待补采武器",
+              level: null,
+              category: "装备",
+              description: "属性未读取完整",
+              query: "",
+              status: "incomplete" as const,
+              referencePrice: null,
+              candidates: [],
+              issues: ["未采到武器伤害属性，不能匹配报价。"],
+            },
+            {
+              key: "no-match-fixture",
+              name: "测试头盔",
+              level: 120,
+              category: "装备",
+              description: "防御80",
+              query: "梦幻西游 测试头盔 120级 防御80 挂牌价格",
+              status: "no_match" as const,
+              referencePrice: null,
+              candidates: [],
+              issues: ["已搜索，但没有找到属性匹配且有明确挂牌价的网页。"],
+            },
+          ]
+        : []),
+    ],
+    issues: incomplete ? ["装备属性尚未完整，300元只是已核实小计。"] : [],
+  };
+}
 
 export function analysisRecord(key = "a"): SavedRoleRecord {
   const record = roleRecord(key, true);
@@ -15,7 +101,18 @@ export function analysisRecord(key = "a"): SavedRoleRecord {
       orderTime: null,
       attrs: {},
     },
-    detail: { ...record.detail!, url: record.listing.url, formatVersion: 3, captureVersion: 4 },
+    detail: {
+      ...record.detail!,
+      url: record.listing.url,
+      formatVersion: 3,
+      captureVersion: CAPTURE_VERSION,
+      equipmentCapture: {
+        version: 1,
+        collectedAt: record.detail!.collectedAt,
+        complete: true,
+        issues: [],
+      },
+    },
   } as SavedRoleRecord;
 }
 export function valuationRecord(key = "a"): SavedRoleRecord {

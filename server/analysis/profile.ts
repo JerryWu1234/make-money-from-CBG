@@ -8,9 +8,9 @@ import { marketServers } from "./market";
 import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "./valuation-settings";
 
 export const PROMPT_FILE = resolve("prompts/role-valuation.md");
-export const CALCULATION_VERSION = "bare-role-v4";
+export const CALCULATION_VERSION = "price-comparison-v5";
 // Update alongside the calculator when changing pricing sections III through VIII.
-const PRICING_HASH = "0771c64aa63069b2a1c936ad7a3f3727a5e9f0f3e4e60e8b98f8a7cd3238dee1";
+const PRICING_HASH = "4fe072675806ec5d6fbb3c796eccfcae4bd8eece613c68ec3611209935567928";
 export const DEFAULT_SETTINGS: ValuationSettings = {
   b: RECOMMENDED_BUY_FACTOR,
   a: null,
@@ -103,6 +103,7 @@ export function normalizeSettings(input: unknown): ValuationSettings {
 export function createProfile(
   template: string,
   settings: unknown = DEFAULT_SETTINGS,
+  equipmentSearch = true,
 ): AnalysisProfile {
   if (!template.trim() || Buffer.byteLength(template, "utf8") > 64 * 1024)
     throw new Error("Prompt 不能为空或超过 64 KiB");
@@ -113,10 +114,12 @@ export function createProfile(
     start >= 0 &&
     end > start &&
     textHash(template.slice(start, end).replace(/\s/g, "")) === PRICING_HASH;
+  const { b: _b, a: _a, budget: _budget, extraCost: _extraCost, ...pricingSettings } = normalized;
   const promptHash = textHash(template),
-    settingsHash = textHash(JSON.stringify(normalized));
+    settingsHash = textHash(JSON.stringify(pricingSettings));
   return {
     version: "role-valuation-v1",
+    equipmentSearch,
     template,
     promptHash,
     settings: normalized,
@@ -124,7 +127,13 @@ export function createProfile(
     calculationVersion: CALCULATION_VERSION,
     calculationCompatible,
     hash: textHash(
-      JSON.stringify([promptHash, settingsHash, CALCULATION_VERSION, "valuation-schema-v2"]),
+      JSON.stringify([
+        promptHash,
+        settingsHash,
+        CALCULATION_VERSION,
+        "valuation-schema-v3",
+        equipmentSearch,
+      ]),
     ),
   };
 }

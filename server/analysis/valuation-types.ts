@@ -28,6 +28,7 @@ export type ValuationSettings = {
 };
 export type AnalysisProfile = {
   marketSources?: import("./market").MarketServer[];
+  equipmentSearch?: boolean;
   version: "role-valuation-v1";
   template: string;
   promptHash: string;
@@ -53,6 +54,10 @@ export type ValuationFact = {
 };
 export type ValuationResult = {
   decision: Decision;
+  comparison_mode?: "listing-only";
+  price_difference?: number | null;
+  price_difference_ratio?: number | null;
+  price_comparison_scope?: string;
   asking_price: number | null;
   extra_cost: number | null;
   total_cost: number | null;
@@ -69,6 +74,9 @@ export type ValuationResult = {
   known_subtotal: number;
   calculation_version: string;
   body_value?: number | null;
+  bare_role_value?: number | null;
+  equipment_value?: number | null;
+  equipment_pricing?: import("./equipment-pricing").EquipmentPricingSnapshot;
   suggestions?: string[];
   extracted_facts?: ValuationFact[];
   ai_explanation?: string;

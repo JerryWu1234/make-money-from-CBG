@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { AnalysisProfile, ValuationSettings } from "../server/analysis/valuation-types";
-import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "../server/analysis/valuation-settings";
+import { RECOMMENDED_RULES } from "../server/analysis/valuation-settings";
 
 type SettingsResponse = {
   profile: AnalysisProfile;
@@ -53,23 +53,6 @@ export function AnalysisSettings({
   }, []);
   const set = (key: keyof ValuationSettings, value: unknown) =>
     setSettings((current) => (current ? { ...current, [key]: value } : current));
-  const numberInput = (key: "b" | "a" | "budget" | "extraCost", label: string, hint: string) => (
-    <label>
-      {label}
-      <input
-        aria-label={label}
-        type="number"
-        step="any"
-        min="0"
-        max={key === "a" || key === "b" ? 1 : undefined}
-        value={settings?.[key] ?? ""}
-        onChange={(event) =>
-          set(key, event.target.value === "" ? null : Number(event.target.value))
-        }
-      />
-      <small>{hint}</small>
-    </label>
-  );
   const choice = (
     key:
       | "strengthMode"
@@ -165,7 +148,7 @@ export function AnalysisSettings({
       <header className="analysis-modal-header">
         <div>
           <span className="analysis-kicker">PROMPT / 分析设置</span>
-          <h2 id="analysis-settings-title">裸号估值与购买设置</h2>
+          <h2 id="analysis-settings-title">估值与挂牌比较设置</h2>
         </div>
         <button
           autoFocus
@@ -179,7 +162,7 @@ export function AnalysisSettings({
       </header>
       <p>
         每次开始分析都会冻结这份 Prompt
-        和参数。新批次使用新设置，历史结果保留。买入上限默认是估值的八折；区服金价和热度自动匹配，实际交易费用需要填写。
+        和参数。新批次使用新设置，历史结果保留。先核对装备，再联网查价，比较挂牌差异；区服金价和热度自动匹配。
       </p>
       {error && (
         <p role="alert" className="analysis-pending-note">
@@ -189,27 +172,19 @@ export function AnalysisSettings({
       {!source && !error && <p role="status">正在读取设置…</p>}
       {source && settings && (
         <>
-          <h3>购买条件</h3>
+          <h3>计价方式</h3>
           <p className="analysis-pending-note">
-            默认八折买入，强壮神速按当前等级计价。金价自动读取，交易费用按实际填写，确实无费用时填0。
+            分析前自动查找装备的相近挂牌样本。强壮神速按当前等级计价，查价来源和采用的价格会保存在结果里。
           </p>
           <button
             type="button"
             className="analysis-button analysis-button-outline"
             onClick={() =>
-              setSettings((current) =>
-                current ? { ...current, ...RECOMMENDED_RULES, b: RECOMMENDED_BUY_FACTOR } : current,
-              )
+              setSettings((current) => (current ? { ...current, ...RECOMMENDED_RULES } : current))
             }
           >
             使用建议计价方案
           </button>
-          <div className="analysis-settings-grid">
-            {numberInput("b", "最高买入系数 b", "0 < b ≤ 1，例如0.8表示估值的八折。")}
-            {numberInput("a", "理想买入系数 a（可选）", "不大于 b；留空不计算理想买价。")}
-            {numberInput("budget", "总预算 B（元，可选）", "包含挂牌价格和额外成本。")}
-            {numberInput("extraCost", "全部额外成本 F（元）", "无额外费用时明确填0，不默认免费。")}
-          </div>
           <details className="analysis-settings-section">
             <summary>计价方案：已有默认规则，也可修改</summary>
             <p>

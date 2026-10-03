@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   codexModel: vi.fn(),
   codexModels: vi.fn(),
   requestCodex: vi.fn(),
+  requestCodexSearch: vi.fn(),
   probeCodex: vi.fn(),
   shutdownCodex: vi.fn(),
   probeDeepSeek: vi.fn(),

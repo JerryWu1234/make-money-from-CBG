@@ -23,6 +23,7 @@ async function moduleUrl(file, replacements = {}) {
 const listingUrl = await moduleUrl("server/crawler/listing.ts");
 const viewportUrl = await moduleUrl("server/viewport.ts");
 const compactUrl = await moduleUrl("server/crawler/compact.ts");
+const { CAPTURE_VERSION } = await import(compactUrl);
 const typesUrl = await moduleUrl("server/crawler/types.ts");
 const pageUrl = await moduleUrl("server/crawler/page.ts", {
   "./listing": listingUrl,
@@ -117,7 +118,13 @@ try {
     store.save(
       item,
       {
-        captureVersion: 4,
+        captureVersion: CAPTURE_VERSION,
+        equipmentCapture: {
+          version: 1,
+          collectedAt: new Date().toISOString(),
+          complete: true,
+          issues: [],
+        },
         url: item.url,
         collectedAt: new Date().toISOString(),
         tabs: [],

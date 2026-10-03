@@ -7,6 +7,7 @@ import {
   codexModels,
   probeCodex,
   requestCodex,
+  requestCodexSearch,
   shutdownCodex,
 } from "./ai/codex";
 import {
@@ -16,6 +17,8 @@ import {
   requestDeepSeek,
 } from "./ai/deepseek";
 import type { AiConnectionStatus, AiModelOptions, AiProvider, AiStatus } from "./ai/types";
+import type { SavedRoleRecord } from "./crawler/types";
+import { searchEquipmentPrices } from "./analysis/equipment-pricing";
 
 export { startCodexLogin, codexLoginStatus, cancelCodexLogin } from "./ai/codex";
 
@@ -193,6 +196,46 @@ export async function shutdownAiConnections() {
   await shutdownCodex();
 }
 
+function equipmentSearcher(
+  selectedModel?: string,
+  initialAccount?: Awaited<ReturnType<typeof codexAccount>>,
+) {
+  let account = initialAccount;
+  let model = selectedModel;
+  return async (record: SavedRoleRecord, signal: AbortSignal) => {
+    try {
+      signal.throwIfAborted();
+      model ||= await codexModel();
+      const searchModel = model;
+      return await searchEquipmentPrices(
+        record,
+        searchModel,
+        signal,
+        async (prompt, schema, searchSignal) => {
+          const before = await codexAccount();
+          if (!before)
+            throw new Error("装备联网查价需要先登录 ChatGPT；DeepSeek 本身不提供联网搜索");
+          if (account && before.email !== account.email)
+            throw new Error("装备查价的 ChatGPT 登录账号已变化，请重新连接");
+          account ||= before;
+          const searchAccount = account;
+          const response = await requestCodexSearch(prompt, searchSignal, {
+            model: searchModel,
+            outputSchema: schema,
+          });
+          searchSignal.throwIfAborted();
+          const after = await codexAccount();
+          if (!after || after.email !== searchAccount.email)
+            throw new Error("装备查价的 ChatGPT 登录账号已变化，请重新连接");
+          return response;
+        },
+      );
+    } catch (error) {
+      throw new Error(publicError(error));
+    }
+  };
+}
+
 /** Credentials remain inside the Node process; an analysis run fixes its provider and model. */
 export async function prepareAnalysisClient(provider: AiProvider, selectedModel?: string) {
   if (provider === "codex") {
@@ -203,6 +246,7 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
     const model = selectedModel || (await codexModel());
     return {
       model,
+      searchEquipment: equipmentSearcher(model, account),
       async analyze(prompt: string, schema: unknown, signal: AbortSignal) {
         const current = await codexAccount();
         if (!current || current.email !== account.email)
@@ -223,6 +267,7 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
     throw new Error("DeepSeek 模型不可用，请重新选择");
   return {
     model,
+    searchEquipment: equipmentSearcher(),
     async analyze(prompt: string, _schema: unknown, signal: AbortSignal) {
       try {
         return await requestDeepSeek(key, model, prompt, signal, 8192);

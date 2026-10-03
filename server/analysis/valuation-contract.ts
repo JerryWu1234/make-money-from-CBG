@@ -4,6 +4,7 @@ import type { ProductAnalysis } from "./types";
 import type { AnalysisProfile, ValuationResult } from "./valuation-types";
 import { calculateValuation } from "./valuation-calculator";
 import { validateValuationFacts } from "./valuation-facts";
+import { combineEquipmentPricing, type EquipmentPricingSnapshot } from "./equipment-pricing";
 
 const nullableNumber = { type: ["number", "null"] };
 const strings = { type: "array", items: { type: "string" } };
@@ -86,8 +87,19 @@ export function valuationPrompt(
   document: ProductDocument,
   record: SavedRoleRecord,
   profile: AnalysisProfile,
+  equipmentPricing?: EquipmentPricingSnapshot,
 ) {
-  const computed = calculateValuation(record, profile);
+  const bare = calculateValuation(record, profile);
+  const computed = profile.equipmentSearch
+    ? combineEquipmentPricing(bare, record, equipmentPricing)
+    : bare;
+  const {
+    b: _b,
+    a: _a,
+    budget: _budget,
+    extraCost: _extraCost,
+    ...pricingSettings
+  } = profile.settings;
   const {
     max_total_cost: _totalLimit,
     known_subtotal: _subtotal,
@@ -99,7 +111,7 @@ export function valuationPrompt(
   } = computed;
   return [
     profile.template,
-    "【本平台的程序化输出要求】金额、分项明细和买入上限由服务端按上述规则计算。AI只核对资料、判断结论并说明原因，返回下方三个字段的JSON，不返回金额和items，不输出Markdown或代码围栏。此调用结构取代模板中的完整报告格式。",
+    "【本平台的程序化输出要求】金额、明细及挂牌差额由服务端计算。AI只核对资料、解释价格关系，返回三个字段JSON，不返回金额和items，不输出Markdown或代码围栏。此结构取代模板中的完整报告格式。",
     "商品 ID：" +
       document.productKey +
       "。inputHash：" +
@@ -107,15 +119,26 @@ export function valuationPrompt(
       "。本次规则版本：" +
       profile.version +
       "。",
-    "以下参数是本批次实际使用的设置，其中明示了平台建议的计价方案与买入系数。null 仍表示尚未提供，不能猜测费用、金价或排名。区服数据只匹配当前 serverId。",
-    JSON.stringify(profile.settings),
+    "以下参数是本批次实际使用的计价设置。只比较估值与挂牌价，不考虑费用、预算或买入折扣。null表示尚未提供，不能猜金价或排名。区服数据只匹配当前serverId。",
+    JSON.stringify(pricingSettings),
     "自动区服参数的来源与读取时间：" + JSON.stringify(profile.marketSources || []),
-    "detail.valuation.fields 是已经从网页角色数据核对的字段，直接使用，不能重复补提或用标签原文覆盖。只有程序未识别的缺失事实才可补提；缺少费用或价表属于缺参数和规则，不能靠补提解决。所有需要的角色事实都已核对时 extracted_facts 必须是空数组。",
+    "detail.valuation.fields 是已经从网页角色数据核对的字段，直接使用，不能重复补提或用标签原文覆盖。只有程序未识别的缺失事实才可补提；缺价表或装备匹配报价属于缺规则和行情，不能靠猜测解决。所有需要的角色事实都已核对时 extracted_facts 必须是空数组。",
     "下方是初步计算，尚未识别的原文资料可通过 extracted_facts 补提后重新计算；不要仅复述待确认。补提仅支持神器套数、坐骑总数、进阶状态、主属性百分比，以及神器1至3的满槽/类型/总分、坐骑1至9的成长/进阶状态/主属性百分比。",
     "每条补提必须给出原文 JSON Pointer path 和逐字 quote。quote 须包含对应名称及冒号标记的值，或明确“共有N套神器/共有N只坐骑”；分项可引用“第N套神器/第N只坐骑”下的满槽、五行类型、总分、成长、进阶及主属性比例。进阶可引用“坐骑·已进阶”，明确“没有/未开启/未解锁神器”可提为神器套数0。标题空白、未看到、祥瑞数量不能作为不存在或坐骑总数的证据。没有可补提的事实时 extracted_facts 返回空数组。",
-    "decision 必须符合已核对的事实与本批次规则；如有可核实的新增事实，服务端会验证引用并重新计算。不要重算或抄写整份分项报告。reason 先写建议买入、等降价或暂不买以及具体理由；200字以内。关键资料真缺失时明确说缺什么和怎么补，不生成没有依据的完整价格。",
+    "decision必须符合程序价格关系：BUY表示挂牌低于估值，WATCH表示相等，PASS表示挂牌高于估值，NEED_INFO表示缺完整可靠估值。这里不做购买建议。reason解释价差与估值范围；200字以内。缺资料或报价时明确缺什么，不生成没有依据的完整价格。",
     JSON.stringify({
       ...report,
+      ...(report.equipment_pricing
+        ? {
+            equipment_pricing: {
+              ...report.equipment_pricing,
+              rawResponse: undefined,
+              requestText: undefined,
+              searchItems: undefined,
+              usage: undefined,
+            },
+          }
+        : {}),
       items: report.items.map(({ evidence: _evidence, ...item }) => item),
     }),
     "输出结构：" + JSON.stringify(VALUATION_SCHEMA),
@@ -128,6 +151,7 @@ export function validateValuation(
   document: ProductDocument,
   record: SavedRoleRecord,
   profile: AnalysisProfile,
+  equipmentPricing?: EquipmentPricingSnapshot,
 ): ProductAnalysis {
   let parsed: unknown;
   try {
@@ -144,7 +168,10 @@ export function validateValuation(
     throw new Error("估值结果格式错误");
   const result = parsed as Record<string, unknown>;
   const facts = validateValuationFacts(result.extracted_facts, record);
-  const expected = calculateValuation(record, profile, facts);
+  const bare = calculateValuation(record, profile, facts);
+  const expected = profile.equipmentSearch
+    ? combineEquipmentPricing(bare, record, equipmentPricing)
+    : bare;
   const money = [
     "asking_price",
     "extra_cost",
@@ -204,7 +231,7 @@ export function validateValuation(
   )
     throw new Error("AI只需返回结论、核对说明和缺项引用");
   if (result.decision !== expected.decision)
-    throw new Error("购买结论不一致，应为 " + expected.decision);
+    throw new Error("价格比较结论不一致，应为 " + expected.decision);
   if (typeof result.reason !== "string" || !result.reason.trim() || result.reason.length > 2000)
     throw new Error("估值结论说明格式错误");
   const valuation: ValuationResult = {

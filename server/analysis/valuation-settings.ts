@@ -1,6 +1,6 @@
 import type { ValuationSettings } from "./valuation-types";
 
-/** Explicit, editable platform policy. Market prices and transaction fees have no defaults. */
+/** Explicit, editable valuation rules. Market prices have no guessed defaults. */
 export const RECOMMENDED_RULES = {
   strengthMode: "single",
   schoolCapConfirmed: true,
@@ -13,4 +13,5 @@ export const RECOMMENDED_RULES = {
   adjustmentMode: "add",
   adjustmentScope: "body",
 } satisfies Partial<ValuationSettings>;
+/** Retained for historical profiles; listing comparisons do not apply a buying factor. */
 export const RECOMMENDED_BUY_FACTOR = 0.8;

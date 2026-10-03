@@ -63,6 +63,7 @@ export interface DetailItem {
   tooltip?: string;
   kind?: "skill" | "equipment" | "innerSkill";
   category?: string;
+  location?: string;
   level?: string;
 }
 export interface ValuationCapture {
@@ -73,6 +74,12 @@ export interface ValuationCapture {
 }
 export interface RoleDetail {
   valuation?: ValuationCapture;
+  equipmentCapture?: {
+    version: 1;
+    collectedAt: string;
+    complete: boolean;
+    issues: string[];
+  };
 
   formatVersion?: number;
   captureVersion?: number;

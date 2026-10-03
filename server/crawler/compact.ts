@@ -1,9 +1,10 @@
 import type { DetailItem, Listing, RoleDetail } from "./types";
 
-export const CAPTURE_VERSION = 4;
+export const CAPTURE_VERSION = 5;
 export function cleanDescription(value: string) {
   return value
     .replace(/#r/g, "\n")
+    .replace(/<br\s*\/?\s*>/gi, "\n")
     .replace(/#[RGBYWKnbu]|#c[0-9a-f]{6}/gi, "")
     .trim();
 }
@@ -14,7 +15,7 @@ export function coreEquipmentDescription(value: string) {
     .map((line) => line.trim())
     .filter(
       (line) =>
-        /^(?:等级|五行|命中|伤害|防御|气血|魔法|灵力|速度|敏捷|力量|体质|耐力|法术|物理|封印|抗封|治疗|格挡|抵抗|耐久|锻炼|镶嵌|宝石|特技|特效|套装|附加|熔炼|开运|符石|星位|星相|精炼|灵性|成长|修炼|境界|灵气|经验|携带|装备条件|使用条件|门派条件|部位条件|玩家\d+专用|[+−-]\d)/.test(
+        /^(?:等级|五行|命中|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术|物理|封印|抗封|治疗|格挡|抵抗|耐久|修理失败|锻炼|镶嵌|宝石|特技|特效|套装|附加|熔炼|开运|符石|星位|星相|精炼|灵性|成长|修炼|境界|灵气|经验|携带|装备条件|使用条件|门派条件|部位条件|专用|玩家\s*\d+\s*专用|不可交易|不能交易|绑定|[+−-]\d)/.test(
           line,
         ) && !/^(?:物理攻击时|物理攻击有|法术攻击时|使用后|效果|功效|功能|简介)/.test(line),
     )
@@ -58,10 +59,26 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
   const description = coreEquipmentDescription(
     attrs.data_equip_desc || attrs["data-equip-desc"] || attrs.title || "",
   );
+  const location =
+    attrs.data_equip_location || attrs.data_equip_position || attrs.data_item_position;
+  const declaredCategory =
+    attrs.data_equip_category ||
+    attrs.data_equip_type_name ||
+    attrs.data_item_type_name ||
+    attrs.data_equip_type;
+  const category =
+    declaredCategory ||
+    (/灵气|修炼境界/.test(description) || /fabao/i.test(location || "")
+      ? "法宝"
+      : /lingbao/i.test(location || "")
+        ? "灵宝"
+        : undefined);
   return {
     index,
     name,
     kind: "equipment",
+    ...(category ? { category } : {}),
+    ...(location ? { location } : {}),
     ...(description ? { description } : {}),
     ...(Object.keys(attributes).length ? { attributes } : {}),
   };

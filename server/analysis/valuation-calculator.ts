@@ -167,6 +167,32 @@ export function purchase(value: number | null, asking: number | null, settings: 
   };
 }
 
+/** Compare the reference estimate with the listing snapshot; fees and buying policy are ignored. */
+export function compareListingPrice(value: number | null, asking: number | null) {
+  const known =
+    value !== null &&
+    Number.isFinite(value) &&
+    value > 0 &&
+    asking !== null &&
+    Number.isFinite(asking) &&
+    asking > 0;
+  const difference = known ? value - asking : null;
+  const decision: Decision =
+    difference === null ? "NEED_INFO" : difference > 0 ? "BUY" : difference < 0 ? "PASS" : "WATCH";
+  return {
+    comparison_mode: "listing-only" as const,
+    decision,
+    price_difference: round(difference),
+    price_difference_ratio: difference !== null ? difference / asking! : null,
+    extra_cost: null,
+    total_cost: null,
+    max_total_cost: null,
+    max_listing_price: null,
+    ideal_listing_price: null,
+    margin_of_safety: null,
+  };
+}
+
 /** Decode saved, labelled fields, retaining the exact source path and text. */
 export function calculateValuation(
   record: SavedRoleRecord,
@@ -198,9 +224,10 @@ export function calculateValuation(
   const asking = number(record.listing.price.replace(/[¥￥,\s]/g, ""));
   const empty: ValuationResult = {
     asking_price: asking,
-    extra_cost: settings.extraCost,
-    ...purchase(null, asking, settings),
+    ...compareListingPrice(null, asking),
     model_value: null,
+    bare_role_value: null,
+    price_comparison_scope: "裸号参考估值，不含装备、灵饰、召唤兽个体和锦衣",
     items,
     missing_fields: [],
     pending_rules: [],
@@ -683,18 +710,11 @@ export function calculateValuation(
             : null;
     if (value === null) pending.add("确认区服调整只作用于角色本体还是同时作用于附带资产");
   }
-  if (settings.b === null) missing.add("最高买入系数b");
-  if (settings.extraCost === null) missing.add("全部额外购买成本F（明确无费用时填写0）");
-  if (asking === null) missing.add("挂牌价格");
+  if (asking === null || asking <= 0) missing.add("有效挂牌价格");
   if (level === null) missing.add("人物等级");
   if (value !== null && value <= 0) pending.add("完整模型估值不大于0，需要核实数据");
-  const purchased = purchase(value, asking, settings);
-  const decision =
-    purchased.decision === "PASS"
-      ? "PASS"
-      : missing.size || pending.size
-        ? "NEED_INFO"
-        : purchased.decision;
+  const comparison = compareListingPrice(value, asking);
+  const decision = missing.size || pending.size ? "NEED_INFO" : comparison.decision;
   const suggestions: string[] = [];
   if (artifactAmount === null)
     suggestions.push("补采神器资料：确认完整套数、每套是否填满12槽、五行组合和属性总分。");
@@ -704,8 +724,6 @@ export function calculateValuation(
     );
   if (golden?.raw === "是")
     suggestions.push("确认靓号特效的具体类型；只显示“是”不能直接按土豪金加1400元。");
-  if (settings.extraCost === null)
-    suggestions.push("在分析设置填写全部额外费用；确实没有费用时填0。");
   if (
     !server?.age ||
     server.rank === null ||
@@ -716,8 +734,6 @@ export function calculateValuation(
     );
   else if (server.age === "older" && !server.baselineUnitConfirmed)
     suggestions.push("确认金价与210元基准采用相同游戏币数量单位，避免金额被放大。");
-  if (settings.b === null)
-    suggestions.push("建议最高按裸号估值的八折买入；可在分析设置修改买入系数。");
   if (pending.size)
     suggestions.push("核实下方未确定的规则和异常资料；计价方式可在分析设置重新选择。");
   if ([...missing].some((item) => item.includes("1—4级定价")))
@@ -730,26 +746,23 @@ export function calculateValuation(
     amount === null ? "未算出" : "¥" + round(amount)!.toFixed(2);
   const reason =
     decision === "BUY"
-      ? `建议买入。总成本${moneyText(purchased.total_cost)}，在设定的买入上限内；裸号估值${moneyText(value)}。`
+      ? `挂牌低于裸号参考估值。估值${moneyText(value)}，挂牌价${moneyText(asking)}，相差${moneyText(comparison.price_difference)}。`
       : decision === "WATCH"
-        ? `先别买，等降价。总成本${moneyText(purchased.total_cost)}高于买入上限，但没有超过裸号估值${moneyText(value)}。`
+        ? `挂牌与裸号参考估值相同，均为${moneyText(value)}。`
         : decision === "PASS"
-          ? settings.budget !== null && (purchased.total_cost ?? asking ?? 0) > settings.budget
-            ? `不建议买入。当前价格或总成本已超过预算${moneyText(settings.budget)}。`
-            : purchased.total_cost !== null
-              ? `不建议买入，价格偏高。购买总成本${moneyText(purchased.total_cost)}，裸号估值${moneyText(value)}。`
-              : `不建议买入，价格偏高。挂牌价${moneyText(asking)}，裸号估值${moneyText(value)}。`
-          : "暂不建议买入，关键资料或购买条件还不完整。" +
+          ? `挂牌高于裸号参考估值。估值${moneyText(value)}，挂牌价${moneyText(asking)}，高出${moneyText(Math.abs(comparison.price_difference!))}。`
+          : "暂无法比较价格，关键资料或计价规则还不完整。" +
             (value !== null
-              ? `裸号估值${moneyText(value)}；补齐购买条件后再判断是否值得买。`
+              ? `裸号参考估值${moneyText(value)}；补齐挂牌价格后再比较。`
               : body !== null
                 ? `裸号本体已算出${moneyText(body)}，区服调整和附带资产需另行核实。`
-                : "请先补齐下面列出的资料，再判断价格是否合适。");
+                : "请先补齐下面列出的资料，再比较挂牌价格。");
   return {
     ...empty,
-    ...purchased,
+    ...comparison,
     decision,
     model_value: round(value),
+    bare_role_value: round(value),
     body_value: round(body),
     suggestions,
     missing_fields: [...missing],
