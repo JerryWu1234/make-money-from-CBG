@@ -1,300 +1,374 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { AiProvider } from "../server/ai/types";
+import type { AnalysisItem, AnalysisOverview, AnalysisRun } from "../server/analysis/types";
+import { AiConnectionControl } from "./AiConnectionControl";
+import { AnalysisResultDrawer } from "./AnalysisResultDrawer";
+import { AnalysisSettings } from "./AnalysisSettings";
+import { decisionLabels, valuationMoney, valuationPriceSummary } from "./ValuationResultView";
+import { RoleDetailDrawer } from "./RoleDetailDrawer";
+import { displayTime } from "./SavedRoleList";
 import "./analysis-preview.css";
 
-type DemoItem = {
-  id: string;
-  name: string;
-  server: string;
-  level: number;
-  price: number;
-  status: "complete" | "pending";
-  analysisState: "ready" | "analyzed" | "analyzing" | "stopped" | "queued" | "waiting_detail";
-  score?: number;
-  highlights: string[];
-  reason: string;
-};
-
-// 页面演示资料，不对应数据库中的真实商品或真实分析结论。
-const DEMO_ITEMS: DemoItem[] = [
-  {
-    id: "A",
-    name: "示例角色 A",
-    server: "示例服务器 · 甲",
-    level: 129,
-    price: 2850,
-    status: "complete",
-    analysisState: "analyzed",
-    score: 92,
-    highlights: ["修炼较完整", "装备搭配均衡"],
-    reason: "同价位中，角色底子与装备配置比较均衡，值得优先打开详情核对。",
-  },
-  {
-    id: "B",
-    name: "示例角色 B",
-    server: "示例服务器 · 乙",
-    level: 109,
-    price: 1699,
-    status: "complete",
-    analysisState: "analyzed",
-    score: 88,
-    highlights: ["入手门槛低", "召唤兽配置"],
-    reason: "价格较低，已展示的召唤兽与角色基础资料适合进一步比较。",
-  },
-  {
-    id: "C",
-    name: "示例角色 C",
-    server: "示例服务器 · 丙",
-    level: 159,
-    price: 5200,
-    status: "complete",
-    analysisState: "analyzed",
-    score: 84,
-    highlights: ["角色底子", "成长空间"],
-    reason: "角色资料完整，价格与养成程度的关系适合作为候选项核对。",
-  },
-  {
-    id: "D",
-    name: "示例角色 D",
-    server: "示例服务器 · 丁",
-    level: 175,
-    price: 8600,
-    status: "complete",
-    analysisState: "analyzed",
-    score: 76,
-    highlights: ["高等级", "外观收藏"],
-    reason: "资料已完整采集，可以进入分析，但暂未排在本页示例前三。",
-  },
-  {
-    id: "E",
-    name: "示例角色 E",
-    server: "示例服务器 · 戊",
-    level: 69,
-    price: 1150,
-    status: "complete",
-    analysisState: "analyzing",
-    highlights: ["低价格", "基础资料完整"],
-    reason: "详情已完整入库，正在分析这件商品；完成并保存结果后才会处理下一件。",
-  },
-  {
-    id: "F",
-    name: "示例角色 F",
-    server: "示例服务器 · 己",
-    level: 59,
-    price: 360,
-    status: "pending",
-    analysisState: "waiting_detail",
-    highlights: ["详情尚未完成"],
-    reason: "商品仍会出现在全部列表，补齐详情之前不生成推荐结论。",
-  },
-  {
-    id: "G",
-    name: "示例角色 G",
-    server: "示例服务器 · 庚",
-    level: 89,
-    price: 2480,
-    status: "complete",
-    analysisState: "queued",
-    highlights: ["详情已完整入库"],
-    reason: "这件商品已排队，必须等示例角色 E 的分析结果完整保存后才开始。",
-  },
-];
-
-const money = (price: number) => `¥${price.toLocaleString("zh-CN")}`;
-const analysisLabel = {
-  ready: "待开始",
-  analyzed: "已分析",
-  analyzing: "分析中",
-  stopped: "已停止 · 待继续",
-  queued: "等待上一件",
+const labels = {
+  ready: "待分析",
   waiting_detail: "待补采",
+  queued: "排队中",
+  running: "分析中",
+  completed: "已分析",
+  failed: "分析失败",
+  stale: "资料已更新",
 };
+const providerNames = { codex: "Codex", deepseek: "DeepSeek" };
+const price = (value: string) => (value ? `¥${value}` : "价格未采集");
+function savedProvider(): AiProvider {
+  try {
+    return localStorage.getItem("cbg-analysis-provider") === "deepseek" ? "deepseek" : "codex";
+  } catch {
+    return "codex";
+  }
+}
+async function request<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, {
+    cache: "no-store",
+    signal,
+    ...(body === undefined
+      ? {}
+      : {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "请求失败，请重试");
+  return data as T;
+}
 
 export function AnalysisPreview() {
+  const [provider, setProvider] = useState<AiProvider>(savedProvider);
+  const [selectedModels, setSelectedModels] = useState<Record<AiProvider, string>>({
+    codex: "",
+    deepseek: "",
+  });
+  const [modelChanged, setModelChanged] = useState(false);
+  const [sampleSize, setSampleSize] = useState(1);
+  const [defaultModels, setDefaultModels] = useState<Record<AiProvider, string | null>>({
+    codex: null,
+    deepseek: null,
+  });
+  const updateDefaultModel = useCallback((source: AiProvider, model: string | null) => {
+    setDefaultModels((previous) => ({ ...previous, [source]: model }));
+  }, []);
+  const [runId, setRunId] = useState<string | null>(null);
   const [tab, setTab] = useState<"ranking" | "all" | "history">("ranking");
+  const [data, setData] = useState<AnalysisOverview | null>(null);
+  const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<"all" | DemoItem["analysisState"]>("all");
-  const [selected, setSelected] = useState<DemoItem | null>(null);
-  const [analysisStarted, setAnalysisStarted] = useState(false);
-  const [queueStopped, setQueueStopped] = useState(false);
-  const [recoveryPreview, setRecoveryPreview] = useState(false);
-  const [authStep, setAuthStep] = useState<"confirm" | "handoff" | null>(null);
-  const [demoEmail, setDemoEmail] = useState<string | null>(null);
-  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const [filter, setFilter] = useState("all");
+  const [revision, setRevision] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [taskId, setTaskId] = useState<string | null>(null);
+  const [roleKey, setRoleKey] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsNotice, setSettingsNotice] = useState(false);
+  const firstLoad = useRef(true);
+  const operation = useRef(false);
+  const run = data?.run;
+  const active = data?.activeRun;
+  const running = !!active;
+  const finished = (run?.completed || 0) + (run?.failed || 0);
+  const sameProfile = !data?.profile || run?.profileHash === data.profile.hash;
+  const selectedModel = selectedModels[provider];
+  const effectiveModel = selectedModel || defaultModels[provider];
+  const sameModel = !modelChanged || !effectiveModel || run?.model === effectiveModel;
+  const valuationMode = run ? run.ruleVersion === "role-valuation-v1" : !!data?.profile;
 
   useEffect(() => {
-    if (!selected && !authStep) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        if (authStep) {
-          setAuthStep(null);
-          setAuthNotice("已取消登录，分析未开始。");
-        } else {
-          setSelected(null);
-        }
-      }
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [selected, authStep]);
-
-  const displayItems = !analysisStarted
-    ? DEMO_ITEMS.map((item): DemoItem =>
-        item.status === "complete"
-          ? { ...item, analysisState: "ready", score: undefined }
-          : item,
-      )
-    : queueStopped
-      ? DEMO_ITEMS.map((item): DemoItem => {
-          if (item.id === "E") {
-            return {
-              ...item,
-              analysisState: "stopped",
-              reason: "队列已停止；当前结果不算完成。继续时先重新分析这一件。",
-            };
-          }
-          if (item.id === "G") {
-            return { ...item, reason: "队列停止期间继续等待；E 的结果完整保存后才开始。" };
-          }
-          return item;
-        })
-      : DEMO_ITEMS;
-  const filteredItems = displayItems.filter((item) => {
-    const matchesText = `${item.name} ${item.server} ${item.highlights.join(" ")}`
-      .toLowerCase()
-      .includes(search.trim().toLowerCase());
-    return matchesText && (filter === "all" || item.analysisState === filter);
-  });
-  const queueActionLabel = !analysisStarted
-    ? "开始分析已有商品"
-    : queueStopped
-      ? "继续分析队列"
-      : "停止分析队列";
-  const toggleQueue = () => {
-    if (!analysisStarted) {
-      if (!demoEmail) {
-        setAuthNotice(null);
-        setAuthStep("confirm");
-        return;
-      }
-      setAnalysisStarted(true);
-      setFilter("all");
-    } else {
-      setQueueStopped((current) => !current);
+    try {
+      localStorage.setItem("cbg-analysis-provider", provider);
+    } catch {
+      /* Storage is optional. */
     }
-    setRecoveryPreview(false);
+  }, [provider]);
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    async function refresh() {
+      try {
+        const params = new URLSearchParams({ provider, page: String(page), search, filter });
+        if (runId) params.set("runId", runId);
+        const next = await request<AnalysisOverview>(
+          `/api/analysis/status?${params}`,
+          undefined,
+          AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
+        );
+        if (controller.signal.aborted) return;
+        if (firstLoad.current && next.activeRun && !runId) {
+          setProvider(next.activeRun.provider);
+          setRunId(next.activeRun.id);
+          const executing = next.activeRun;
+          setSelectedModels((previous) => ({ ...previous, [executing.provider]: executing.model }));
+        }
+        if (firstLoad.current && next.profile && !next.ranking.length) setTab("all");
+        firstLoad.current = false;
+        if (runId && !next.run) setRunId(null);
+        setData(next);
+        setLoadError(null);
+        if (next.records.page !== page) setPage(next.records.page);
+        timer = setTimeout(refresh, next.activeRun ? 1500 : 5000);
+      } catch (failure) {
+        if (controller.signal.aborted) return;
+        setLoadError(failure instanceof Error ? failure.message : "无法加载分析记录");
+        timer = setTimeout(refresh, 5000);
+      }
+    }
+    void refresh();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [provider, runId, page, search, filter, revision]);
+
+  const mutate = useCallback(async (path: string, body: unknown) => {
+    if (operation.current) return;
+    operation.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await request<AnalysisRun | null>(path, body);
+      if (next) {
+        setRunId(next.id);
+        setProvider(next.provider);
+        setModelChanged(false);
+      }
+      setRevision((value) => value + 1);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "操作失败，请重试");
+    } finally {
+      operation.current = false;
+      setBusy(false);
+    }
+  }, []);
+  const start = useCallback(
+    async (selected: AiProvider) => {
+      if (data?.profile) setTab("all");
+      if (sameProfile && sameModel && run?.provider === selected && run.status === "paused")
+        await mutate("/api/analysis/resume", { runId: run.id });
+      else
+        await mutate("/api/analysis/start", {
+          provider: selected,
+          model: selectedModels[selected] || undefined,
+        });
+    },
+    [run, mutate, sameProfile, sameModel, selectedModels, data?.profile],
+  );
+  const changeProvider = (selected: AiProvider) => {
+    setProvider(selected);
+    setModelChanged(!!selectedModels[selected]);
+    setRunId(null);
+    setData(null);
+    setPage(1);
+    setError(null);
   };
-  const finishDemoLogin = () => {
-    setDemoEmail("demo@example.com");
-    setAuthStep(null);
-    setAuthNotice(null);
-    setAnalysisStarted(true);
-    setFilter("all");
-    setRecoveryPreview(false);
+  const viewItem = (item: AnalysisItem) => {
+    if (item.taskId) setTaskId(item.taskId);
+    else setRoleKey(item.key);
   };
+  const startLabel = busy
+    ? "正在处理…"
+    : running
+      ? "正在分析…"
+      : run && !sameProfile
+        ? "按新规则开始分析"
+        : run && !sameModel
+          ? "按新模型开始分析"
+          : run?.status === "paused"
+            ? "继续分析"
+            : run?.status === "completed"
+              ? "分析新增或已更新商品"
+              : "开始分析已有商品";
 
   return (
     <div className="analysis-page">
       <header className="analysis-topbar">
-        <a className="analysis-brand" href="/" aria-label="返回采集工作台">
-          <span className="analysis-brand-mark" aria-hidden="true">
-            ◇
-          </span>
-          <span>藏宝阁助手</span>
+        <a className="analysis-brand" href="/">
+          <span className="analysis-brand-mark">◇</span> 藏宝阁助手
         </a>
-        <nav className="analysis-nav" aria-label="页面导航">
-          <a href="/">采集与记录</a>
-          <span aria-current="page">性价比分析</span>
+        <nav className="analysis-nav" aria-label="主导航">
+          <a href="/">采集工作台</a>
+          <span aria-current="page">商品分析</span>
         </nav>
-        <span className="analysis-preview-pill">静态交互稿 · 无真实分析</span>
+        <span className="analysis-preview-pill">原文与结果可追溯</span>
       </header>
-
       <main className="analysis-shell">
-        <section className="analysis-hero" aria-labelledby="analysis-title">
+        <section className="analysis-hero">
           <div className="analysis-hero-copy">
-            <span className="analysis-eyebrow">
-              <span aria-hidden="true">✦</span> 入库即分析 · 页面预览
-            </span>
-            <h1 id="analysis-title">
+            <span className="analysis-eyebrow">PRODUCT ANALYSIS / 商品分析</span>
+            <h1>
               每完成一件，
               <br />
-              <em>就更新一次榜单。</em>
+              <em>就更新一次榜单</em>
             </h1>
-            <p>
-              首次点击“开始分析已有商品”，随后完整入库的商品立即进入队列，结果保存后才处理下一件，无需等到次日。手动停止会保留队列，继续时先处理未完成商品。
-            </p>
-            <div className="analysis-agent-control">
-              <div className="analysis-agent-heading">
-                <label htmlFor="analysis-agent-select">分析 Agent</label>
-                <span>{analysisStarted ? "本轮已锁定" : "开始前选择"}</span>
-              </div>
-              <select id="analysis-agent-select" defaultValue="gemini" disabled={analysisStarted}>
-                <option value="gemini">Gemini · 平台提供</option>
-                <option value="future" disabled>更多 Agent · 后续接入</option>
-              </select>
-              <small>Google 登录用于确认平台用户身份；Gemini API 由平台服务调用。</small>
-              <div className="analysis-agent-account" role="status">
-                <span className={`analysis-auto-dot ${demoEmail ? "" : "is-idle"}`} />
-                {demoEmail
-                  ? `演示已登录：${demoEmail} · Gemini 可用（示意）`
-                  : "未登录 · 首次开始时使用 Google 账号登录"}
-              </div>
-              {authNotice && <small className="analysis-auth-notice">{authNotice}</small>}
-            </div>
+            <p>按裸号规则计算参考价值，直接给出买入建议；资料不足时列出补齐办法。</p>
+            <AiConnectionControl
+              provider={provider}
+              onProviderChange={changeProvider}
+              selectedModel={selectedModel}
+              onModelChange={(model) => {
+                setSelectedModels((previous) => ({ ...previous, [provider]: model }));
+                setModelChanged(true);
+                setError(null);
+              }}
+              onDefaultModelChange={updateDefaultModel}
+              onStart={start}
+              startLabel={startLabel}
+              disabled={busy || running || !data || data.counts.complete === 0}
+              locked={busy || running}
+            />
             <div className="analysis-hero-actions">
               <button
-                type="button"
-                className={`analysis-button ${analysisStarted && !queueStopped ? "analysis-button-stop" : "analysis-button-primary"}`}
-                onClick={toggleQueue}
+                className="analysis-button analysis-button-outline"
+                disabled={busy}
+                onClick={() => setSettingsOpen(true)}
               >
-                {queueActionLabel} <span aria-hidden="true">{analysisStarted && !queueStopped ? "■" : "→"}</span>
+                分析设置
               </button>
-              {analysisStarted && (
-                <button
-                  type="button"
-                  className="analysis-button analysis-button-quiet"
-                  onClick={() =>
-                    document.getElementById("analysis-queue")?.scrollIntoView({ behavior: "smooth" })
-                  }
+              <label className="analysis-sample-size">
+                试分析数量
+                <select
+                  value={sampleSize}
+                  disabled={busy || running || !data?.counts.complete}
+                  onChange={(event) => setSampleSize(Number(event.target.value))}
                 >
-                  查看逐件分析队列 <span aria-hidden="true">↗</span>
-                </button>
-              )}
+                  {[1, 2, 3].map((size) => (
+                    <option key={size} value={size}>
+                      {size} 件
+                    </option>
+                  ))}
+                </select>
+              </label>
               <button
-                type="button"
-                className="analysis-button analysis-button-quiet"
+                className="analysis-button analysis-button-outline"
+                disabled={busy || running || !data?.counts.complete}
                 onClick={() => {
-                  setTab("ranking");
-                  document
-                    .getElementById("analysis-results")
-                    ?.scrollIntoView({ behavior: "smooth" });
+                  setTab("all");
+                  void mutate("/api/analysis/start", {
+                    provider,
+                    sample: true,
+                    sampleSize,
+                    model: selectedModel || undefined,
+                  });
                 }}
               >
-                {analysisStarted ? "看推荐结果示例" : "推荐结果显示在哪里"} <span aria-hidden="true">↓</span>
+                先分析 {sampleSize} 件
               </button>
+              {active && (
+                <button
+                  className="analysis-button analysis-button-stop"
+                  disabled={busy}
+                  onClick={() => void mutate("/api/analysis/pause", { runId: active.id })}
+                >
+                  暂停分析
+                </button>
+              )}
+              {!running && !!run?.failed && (
+                <button
+                  className="analysis-button analysis-button-outline"
+                  disabled={busy}
+                  onClick={() => void mutate("/api/analysis/retry", { runId: run.id })}
+                >
+                  重试失败的 {run.failed} 件
+                </button>
+              )}
+              {!running && run && (
+                <button
+                  className="analysis-button analysis-button-quiet"
+                  disabled={busy || !data?.counts.complete}
+                  onClick={() =>
+                    void mutate("/api/analysis/start", {
+                      provider,
+                      force: true,
+                      model: selectedModel || undefined,
+                    })
+                  }
+                >
+                  全部重新分析
+                </button>
+              )}
             </div>
+            {settingsNotice && (
+              <p className="analysis-start-hint" role="status">
+                设置已保存。新批次使用新设置，旧批次仍保留原来的 Prompt 和参数。
+              </p>
+            )}
+            {data?.profile && !data.profile.calculationCompatible && (
+              <p className="analysis-pending-note" role="status">
+                计价 Prompt 已修改，需要同步复算规则；当前结果会标为待确认。
+              </p>
+            )}
             <p className="analysis-start-hint" role="status">
-              {!analysisStarted
-                ? "静态演示：点击只切换页面画面，不会分析真实商品。"
-                : queueStopped
-                  ? "队列已停止：E 未完成，G 暂不开始。继续时先重新分析 E。"
-                  : "演示进度：A–D 已分析，E 正在分析，G 等待上一件。"}
+              {!data
+                ? "正在读取已采集商品…"
+                : data.counts.total === 0
+                  ? "尚未采集商品，请先回到采集工作台采集详情。"
+                  : active
+                    ? `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
+                    : run && !sameProfile
+                      ? "所选批次使用旧规则，点击上方按钮按当前 Prompt 开始新分析。"
+                      : run && !sameModel
+                        ? "模型选择已更改，开始时创建新批次；旧批次保留原来的模型和结果。"
+                        : run?.status === "paused"
+                          ? `已暂停，已完成结果保留；继续时沿用 ${run.model}。选择模型可开始新批次。`
+                          : run?.status === "completed"
+                            ? `本批次完成：${run.completed} 件成功，${run.failed} 件失败，${run.reused} 件复用已有结果。`
+                            : `${data.counts.complete} 件资料完整，可以开始分析；${data.counts.waitingDetail} 件等待补采。`}
             </p>
+            {(error || loadError || run?.error) && (
+              <p className="analysis-auth-notice" role="alert">
+                {error || loadError || run?.error}
+              </p>
+            )}
+            {active && run?.id !== active.id && (
+              <button
+                className="analysis-button analysis-button-quiet"
+                onClick={() => {
+                  setProvider(active.provider);
+                  setRunId(active.id);
+                }}
+              >
+                查看正在执行的批次 →
+              </button>
+            )}
           </div>
           <div className="analysis-hero-visual" aria-hidden="true">
             <div className="analysis-visual-top">
-              <span>逐件处理</span>
-              <span>PREVIEW / 01</span>
+              <span>逐件分析</span>
+              <span>{providerNames[provider]}</span>
             </div>
             <div className="analysis-visual-orbit">
-              <span>完整入库</span>
-              <span>立即分析</span>
-              <span>保存结果</span>
-              <span>更新榜单</span>
+              <span>底子</span>
+              <span>装备</span>
+              <span>召唤兽</span>
+              <span>完整原文</span>
             </div>
             <div className="analysis-visual-focus">
-              <small>当前商品</small>
-              <strong>{!analysisStarted ? "待开始" : queueStopped ? "已停止" : "分析中"}</strong>
-              <span>{!analysisStarted ? "6 件已有商品可分析" : queueStopped ? "E 未完成 · G 等待" : "完成后处理下一件"}</span>
+              <small>当前状态</small>
+              <strong>
+                {running
+                  ? "分析中"
+                  : run?.status === "paused"
+                    ? "已暂停"
+                    : run?.status === "completed"
+                      ? "已完成"
+                      : "待开始"}
+              </strong>
+              <span>
+                {run
+                  ? `${finished} / ${run.total} 件已处理`
+                  : `${data?.counts.complete || 0} 件可分析`}
+              </span>
             </div>
             <div className="analysis-visual-bars">
               <i />
@@ -307,74 +381,80 @@ export function AnalysisPreview() {
             </div>
           </div>
         </section>
-
         <div className="analysis-overview" aria-label="分析页面概览">
           <div>
             <span className="analysis-overview-icon">01</span>
-            <small>全部商品</small>
-            <strong>7 件示意商品</strong>
-            <p>完整与待补采都留在总列表</p>
+            <small>已采集商品</small>
+            <strong>{data?.counts.total || 0} 件</strong>
+            <p>
+              {data?.counts.complete || 0} 件详情完整 · {data?.counts.waitingDetail || 0} 件待补采
+            </p>
           </div>
           <div>
             <span className="analysis-overview-icon">02</span>
-            <small>当前进度</small>
-            <strong>
-              {!analysisStarted
-                ? "6 件待首次分析"
-                : queueStopped
-                  ? "4 件已分析 · 队列已停止"
-                  : "4 件已分析 · 1 件分析中"}
-            </strong>
+            <small>当前批次</small>
+            <strong>{run ? `${run.completed} / ${run.total} 件已分析` : "等待首次分析"}</strong>
             <p>
-              {!analysisStarted
-                ? "点击上方按钮开始处理已有商品"
-                : queueStopped
-                  ? "已完成结果保留，当前 E 未计完成"
-                  : "每件结果保存后立即更新推荐榜"}
+              {run ? `${run.failed} 件失败 · ${run.queued} 件排队中` : "选择 AI 后点击开始分析"}
             </p>
           </div>
           <div>
             <span className="analysis-overview-icon">03</span>
-            <small>中断恢复</small>
-            <strong>{analysisStarted ? "先完成当前商品" : "启动后逐件处理"}</strong>
-            <p>{analysisStarted ? "继续时先分析 E，完整保存后再处理 G" : "中断后先恢复当前商品，再处理下一件"}</p>
+            <small>原文留档</small>
+            <strong>一件商品，一份原文</strong>
+            <p>保留输入、完整请求与每次调用回复</p>
           </div>
         </div>
-
         <div className="analysis-workspace">
-          <section
-            id="analysis-results"
-            className="analysis-results"
-            aria-labelledby="analysis-results-title"
-          >
+          <section className="analysis-results" aria-labelledby="analysis-results-title">
             <div className="analysis-section-heading">
               <div>
                 <span className="analysis-kicker">RESULTS / 结果区</span>
                 <h2 id="analysis-results-title">分析结果</h2>
-                <p>推荐榜随单件完成更新；全部商品保留每个 item 的分析状态。</p>
+                <p>
+                  {valuationMode
+                    ? "推荐榜展示建议买入的商品；等降价、不建议买入和资料不足的商品在全部商品查看。"
+                    : "本历史批次按配置参考分排序；新批次使用裸号估值规则。"}
+                </p>
               </div>
-              <span className="analysis-demo-label">以下数据仅供页面演示</span>
             </div>
-
+            {!!data?.runs.length && (
+              <label className="analysis-run-selector">
+                分析批次
+                <select
+                  aria-label="分析批次"
+                  value={run?.id || ""}
+                  onChange={(event) => {
+                    setRunId(event.target.value);
+                    setPage(1);
+                  }}
+                >
+                  <option value="">最新批次</option>
+                  {data.runs.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      {displayTime(entry.createdAt)} · {entry.completed}/{entry.total} 件 ·{" "}
+                      {entry.status === "running"
+                        ? "分析中"
+                        : entry.status === "paused"
+                          ? "已暂停"
+                          : "已完成"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <div className="analysis-tabbar" role="tablist" aria-label="分析结果视图">
               <button
-                type="button"
                 role="tab"
                 aria-selected={tab === "ranking"}
                 onClick={() => setTab("ranking")}
               >
-                推荐榜 <span>{analysisStarted ? "03" : "00"}</span>
+                推荐榜 <span>{data?.ranking.length || 0}</span>
+              </button>
+              <button role="tab" aria-selected={tab === "all"} onClick={() => setTab("all")}>
+                全部商品 <span>{data?.counts.total || 0}</span>
               </button>
               <button
-                type="button"
-                role="tab"
-                aria-selected={tab === "all"}
-                onClick={() => setTab("all")}
-              >
-                全部商品 <span>07</span>
-              </button>
-              <button
-                type="button"
                 role="tab"
                 aria-selected={tab === "history"}
                 onClick={() => setTab("history")}
@@ -382,91 +462,87 @@ export function AnalysisPreview() {
                 分析记录
               </button>
             </div>
-
             {tab === "ranking" ? (
-              <div className="analysis-rank-list" role="tabpanel" aria-label="推荐榜示例">
+              <div className="analysis-rank-list" role="tabpanel" aria-label="推荐榜">
                 <div className="analysis-list-intro">
-                  <span>{analysisStarted ? "当前已分析 4 件 · 展示前 3 名" : "尚未开始分析 · 暂无推荐结果"}</span>
-                  <span>新商品完成分析后，榜单会重新排序</span>
+                  <span>当前批次前 10 名</span>
+                  <span>完整保存后更新榜单</span>
                 </div>
-                {!analysisStarted && (
+                {!data?.ranking.length && (
                   <div className="analysis-start-empty">
-                    <strong>推荐榜等待首次分析</strong>
-                    <p>点击页面顶部“开始分析已有商品”，查看逐件处理与榜单更新的演示画面。</p>
+                    <strong>暂无可排序的分析结果</strong>
+                    <p>
+                      {valuationMode
+                        ? "完成估值并符合购买条件的商品会出现在这里。其他结论可在全部商品查看。"
+                        : "开始分析后，有完整评分的商品会出现在这里。资料不足的结论可在全部商品查看。"}
+                    </p>
                   </div>
                 )}
-                {(analysisStarted ? DEMO_ITEMS.slice(0, 3) : []).map((item, index) => (
+                {data?.ranking.map((item, index) => (
                   <article
                     className={`analysis-rank-card ${index === 0 ? "analysis-rank-first" : ""}`}
-                    key={item.id}
+                    key={item.key}
                   >
                     <div className="analysis-rank-number">
                       {String(index + 1).padStart(2, "0")}
-                      <small>TOP PICK</small>
+                      <small>{item.valuation ? "购买参考" : "配置参考"}</small>
                     </div>
                     <div className="analysis-rank-main">
                       <div className="analysis-rank-title">
                         <h3>{item.name}</h3>
-                        <span>
-                          {item.level} 级 · {item.server}
-                        </span>
+                        <span>{item.server}</span>
                       </div>
-                      <p>{item.reason}</p>
+                      <p>{item.summary}</p>
                       <div className="analysis-tags">
-                        {item.highlights.map((highlight) => (
-                          <span key={highlight}>{highlight}</span>
+                        {item.highlights.map((item, index) => (
+                          <span key={index}>{item}</span>
                         ))}
                       </div>
                     </div>
                     <div className="analysis-rank-side">
                       <small>挂牌价格</small>
-                      <strong>{money(item.price)}</strong>
-                      <span>演示评分 {item.score}</span>
-                      <button type="button" onClick={() => setSelected(item)}>
-                        查看分析依据 <span aria-hidden="true">→</span>
-                      </button>
+                      <strong>{price(item.price)}</strong>
+                      <span>
+                        {item.valuation
+                          ? `最高买入 ${valuationMoney(item.valuation.max_listing_price)}`
+                          : `配置参考分 ${item.score}`}
+                      </span>
+                      <button onClick={() => viewItem(item)}>查看分析依据 →</button>
                     </div>
                   </article>
                 ))}
-                {analysisStarted && <div className="analysis-more">
-                  <span>想看未进入推荐榜的商品？</span>
-                  <button type="button" onClick={() => setTab("all")}>
-                    查看全部商品 <span aria-hidden="true">→</span>
-                  </button>
-                </div>}
               </div>
             ) : tab === "all" ? (
-              <div className="analysis-all-list" role="tabpanel" aria-label="全部商品列表示例">
-                <div className="analysis-list-intro">
-                  <span>
-                    全部商品 · {filteredItems.length} / {displayItems.length} 条示意
-                  </span>
-                  <span>正式版将显示所有已采集 item</span>
-                </div>
+              <div role="tabpanel" aria-label="全部商品">
                 <div className="analysis-filterbar">
                   <label className="analysis-search">
                     <span aria-hidden="true">⌕</span>
                     <input
                       type="search"
+                      aria-label="搜索商品"
+                      placeholder="搜索角色、服务器、资料"
                       value={search}
-                      onChange={(event) => setSearch(event.target.value)}
-                      placeholder="搜索角色、服务器、亮点"
-                      aria-label="搜索示意商品"
+                      onChange={(event) => {
+                        setSearch(event.target.value);
+                        setPage(1);
+                      }}
                     />
                   </label>
                   <label className="analysis-filter">
-                    <span>分析状态</span>
+                    分析状态
                     <select
                       value={filter}
-                      onChange={(event) => setFilter(event.target.value as typeof filter)}
+                      onChange={(event) => {
+                        setFilter(event.target.value);
+                        setPage(1);
+                      }}
                     >
                       <option value="all">全部状态</option>
-                      <option value="ready">待开始</option>
-                      <option value="analyzed">已分析</option>
-                      <option value="analyzing">分析中</option>
-                      <option value="stopped">已停止 · 待继续</option>
-                      <option value="queued">等待上一件</option>
-                      <option value="waiting_detail">待补采</option>
+                      {Object.entries(labels).map(([id, label]) => (
+                        <option key={id} value={id}>
+                          {label}
+                        </option>
+                      ))}
                     </select>
                   </label>
                 </div>
@@ -475,49 +551,64 @@ export function AnalysisPreview() {
                   <table className="analysis-table">
                     <thead>
                       <tr>
-                        <th>商品</th>
+                        <th>商品 / 服务器</th>
                         <th>挂牌价格</th>
-                        <th>服务器</th>
-                        <th>资料亮点</th>
-                        <th>详情状态</th>
-                        <th>分析状态 / 结果</th>
-                        <th>
-                          <span className="sr-only">操作</span>
-                        </th>
+                        <th>资料</th>
+                        <th>分析状态</th>
+                        <th>{valuationMode ? "估值 / 结论" : "配置分"}</th>
+                        <th>操作</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredItems.map((item) => (
-                        <tr key={item.id}>
+                      {data?.records.items.map((item) => (
+                        <tr key={item.key}>
                           <td>
                             <strong>{item.name}</strong>
-                            <small>
-                              {item.level} 级 · item {item.id}
-                            </small>
+                            <small>{item.server}</small>
                           </td>
-                          <td className="analysis-table-price">{money(item.price)}</td>
-                          <td>{item.server}</td>
-                          <td>{item.highlights.join(" · ")}</td>
+                          <td className="analysis-table-price">{price(item.price)}</td>
                           <td>
                             <span
-                              className={`analysis-status ${item.status === "complete" ? "is-complete" : "is-pending"}`}
+                              className={`analysis-status ${item.collectionStatus === "complete" ? "is-complete" : "is-pending"}`}
                             >
-                              {item.status === "complete" ? "详情完整" : "待补采"}
+                              {item.collectionStatus === "complete" ? "详情完整" : "待补采"}
                             </span>
                           </td>
                           <td>
-                            <span className={`analysis-state analysis-state-${item.analysisState}`}>
-                              {analysisLabel[item.analysisState]}
+                            <span className={`analysis-state analysis-state-${item.state}`}>
+                              {item.state === "completed" &&
+                              item.valuation?.decision === "NEED_INFO"
+                                ? "分析完成 · 资料不足"
+                                : labels[item.state]}
                             </span>
-                            <small>{item.score ? `演示评分 ${item.score}` : "暂无评分"}</small>
+                            {item.error && <small>{item.error}</small>}
                           </td>
                           <td>
-                            <button
-                              type="button"
-                              onClick={() => setSelected(item)}
-                              aria-label={`查看${item.name}的展示详情`}
-                            >
-                              查看 <span aria-hidden="true">→</span>
+                            {item.valuation ? (
+                              <>
+                                <strong>{decisionLabels[item.valuation.decision]}</strong>
+                                <small>
+                                  {valuationPriceSummary(item.valuation).label}{" "}
+                                  {valuationMoney(valuationPriceSummary(item.valuation).value)}
+                                </small>
+                                {item.valuation.max_listing_price !== null && (
+                                  <small>
+                                    最高买入 {valuationMoney(item.valuation.max_listing_price)}
+                                  </small>
+                                )}
+                                {item.valuation.decision === "NEED_INFO" && (
+                                  <small>查看分析里的补齐建议</small>
+                                )}
+                              </>
+                            ) : item.state === "completed" ? (
+                              (item.score ?? "资料不足")
+                            ) : (
+                              "—"
+                            )}
+                          </td>
+                          <td>
+                            <button onClick={() => viewItem(item)}>
+                              {item.taskId ? "查看分析" : "查看资料"}
                             </button>
                           </td>
                         </tr>
@@ -525,362 +616,189 @@ export function AnalysisPreview() {
                     </tbody>
                   </table>
                 </div>
-                {filteredItems.length === 0 && (
-                  <div className="analysis-empty">没有符合当前筛选的示意商品。</div>
+                {!data?.records.items.length && (
+                  <p className="analysis-empty">没有符合条件的商品</p>
                 )}
-                <div className="analysis-list-footer">
-                  正式版会显示全部已采集 item；详情未完成的商品不参与推荐。
+                <div className="analysis-pagination">
+                  <span>
+                    共 {data?.records.total || 0} 件 · 第 {page} / {data?.records.totalPages || 1}{" "}
+                    页
+                  </span>
+                  <button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>
+                    上一页
+                  </button>
+                  <button
+                    disabled={page >= (data?.records.totalPages || 1)}
+                    onClick={() => setPage((value) => value + 1)}
+                  >
+                    下一页
+                  </button>
                 </div>
               </div>
             ) : (
-              <div className="analysis-history" role="tabpanel" aria-label="分析记录示例">
-                <div className="analysis-list-intro">
-                  <span>逐件处理记录</span>
-                  <span>以下顺序演示停止与中断恢复</span>
-                </div>
-                {analysisStarted ? <ol>
-                  <li>
-                    <span className="analysis-history-dot is-done" />
-                    <div>
-                      <strong>示例角色 D · 已分析</strong>
-                      <p>结果已完整保存，榜单完成上一次更新。</p>
-                    </div>
-                    <small>上一件</small>
-                  </li>
-                  <li>
-                    <span className={`analysis-history-dot ${queueStopped ? "is-stopped" : "is-current"}`} />
-                    <div>
-                      <strong>示例角色 E · {queueStopped ? "已停止 · 未完成" : recoveryPreview ? "恢复分析" : "分析中"}</strong>
-                      <p>
-                        {queueStopped
-                          ? "当前结果不计完成；继续后先重新分析 E。"
-                          : recoveryPreview
-                          ? "重新打开后先处理这一件，不使用上次中断的半成品。"
-                          : "详情已完整入库，当前只处理这一件。"}
-                      </p>
-                    </div>
-                    <small>{queueStopped ? "已停止" : "当前"}</small>
-                  </li>
-                  <li>
-                    <span className="analysis-history-dot" />
-                    <div>
-                      <strong>示例角色 G · 等待上一件</strong>
-                      <p>{queueStopped ? "队列停止期间等待；E 完成并保存后才会开始。" : "只有 E 的结果完整保存，G 才会开始。"}</p>
-                    </div>
-                    <small>下一件</small>
-                  </li>
-                </ol> : (
-                  <div className="analysis-start-empty">
-                    <strong>暂无分析记录</strong>
-                    <p>首次启动后，这里会展示当前商品、完成记录和等待顺序。</p>
-                  </div>
+              <div className="analysis-history" role="tabpanel" aria-label="分析记录">
+                <p className="analysis-list-intro">
+                  当前批次最近 30 次调用；失败与中断记录也会保留。
+                </p>
+                {!data?.history.length && (
+                  <p className="analysis-empty">
+                    暂无调用记录。复用的结果可打开商品分析查看原始记录。
+                  </p>
                 )}
+                <ol>
+                  {data?.history.map((entry) => (
+                    <li key={entry.id}>
+                      <span
+                        className={`analysis-history-dot ${entry.state === "completed" ? "is-done" : "is-current"}`}
+                      />
+                      <div>
+                        <strong>
+                          {entry.name} ·{" "}
+                          {entry.state === "completed"
+                            ? "已完成"
+                            : entry.state === "failed"
+                              ? "调用失败"
+                              : entry.state === "interrupted"
+                                ? "已中断"
+                                : "分析中"}
+                        </strong>
+                        <p>{entry.error || displayTime(entry.finishedAt || entry.createdAt)}</p>
+                        <button
+                          className="analysis-button analysis-button-quiet"
+                          onClick={() => setTaskId(entry.taskId)}
+                        >
+                          查看原文与调用记录 →
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
               </div>
             )}
           </section>
-
-          <aside className="analysis-aside" aria-label="逐件分析状态">
-            <section id="analysis-queue" className="analysis-plan-card">
-              <div className="analysis-aside-icon" aria-hidden="true">
-                ↻
-              </div>
-              <span className="analysis-kicker">LIVE QUEUE / 逐件队列</span>
-              <h2>{!analysisStarted ? "先启动已有商品分析" : queueStopped ? "分析队列已停止" : "入库后自动分析"}</h2>
+          <aside className="analysis-aside">
+            <section className="analysis-plan-card">
+              <span className="analysis-kicker">QUEUE / 顺序执行</span>
+              <h2>当前分析队列</h2>
               <p>
-                {queueStopped
-                  ? "停止期间不分析新商品，待处理商品留在队列。继续后先处理当前未完成的 E。"
-                  : "首次启动会处理已有的完整商品；之后每件详情完整入库就进入队列。同一时间只处理一件。"}
+                {run
+                  ? `${providerNames[run.provider]} · ${run.model}`
+                  : "选择 AI 后开始分析已有商品"}
               </p>
-              <div className="analysis-auto-row">
-                <span className={`analysis-auto-dot ${analysisStarted && !queueStopped ? "" : "is-idle"}`} />
-                <strong>
-                  {!analysisStarted
-                    ? "未启动 · 6 件已有商品待分析"
-                    : queueStopped
-                      ? "已停止 · 队列保留"
-                      : "自动分析 · 示例状态"}
-                </strong>
-              </div>
               <div className="analysis-current">
-                <small>
-                  {!analysisStarted
-                    ? "首次启动前"
-                    : queueStopped
-                      ? "已停止 · 当前商品未完成"
-                      : recoveryPreview
-                        ? "重新打开后 · 优先恢复"
-                        : "当前正在分析"}
-                </small>
-                <strong>{analysisStarted ? "示例角色 E" : "等待开始"}</strong>
+                <small>处理进度</small>
+                <strong>
+                  {finished} / {run?.total || 0}
+                </strong>
+                <div className="analysis-progress-track">
+                  <span style={{ width: `${run?.total ? (finished / run.total) * 100 : 0}%` }} />
+                </div>
                 <p>
-                  {!analysisStarted
-                    ? "已有 6 件完整商品会按顺序进入分析，待补采的 F 暂不参与。"
-                    : queueStopped
-                      ? "E 的半成品不保存为结果；继续时重新分析 E，完成后才轮到 G。"
-                    : recoveryPreview
-                    ? "上次中断的结果未保存；先重新分析 E，完成后才会轮到 G。"
-                    : "详情已完整入库。分析结果保存前，不推进到下一件。"}
+                  {active?.current
+                    ? `正在分析 ${active.current}`
+                    : running
+                      ? "正在准备下一件商品"
+                      : run?.status === "paused"
+                        ? "已暂停，等待继续"
+                        : "暂无正在执行的商品"}
                 </p>
               </div>
-              <ol className="analysis-queue-list">
-                <li>
-                  <span className="analysis-queue-index is-current">01</span>
-                  <div>
-                    <strong>{analysisStarted ? "示例角色 E" : "示例角色 A"}</strong>
-                    <small>{!analysisStarted ? "待开始" : queueStopped ? "未完成 · 待继续" : recoveryPreview ? "恢复当前商品" : "分析中"}</small>
-                  </div>
-                </li>
-                <li>
-                  <span className="analysis-queue-index">02</span>
-                  <div>
-                    <strong>{analysisStarted ? "示例角色 G" : "示例角色 B"}</strong>
-                    <small>{!analysisStarted ? "等待 A 完成 · 另有 4 件" : queueStopped ? "队列已停止 · 等待 E" : "等待 E 完成"}</small>
-                  </div>
-                </li>
-              </ol>
-              {analysisStarted && (
-                <button
-                  type="button"
-                  className={`analysis-button ${queueStopped ? "analysis-button-primary" : "analysis-button-stop"}`}
-                  onClick={toggleQueue}
-                >
-                  {queueActionLabel} <span aria-hidden="true">{queueStopped ? "→" : "■"}</span>
-                </button>
-              )}
-              {analysisStarted && !queueStopped && (
-                <button
-                  type="button"
-                  className="analysis-button analysis-button-outline"
-                  aria-pressed={recoveryPreview}
-                  onClick={() => setRecoveryPreview((current) => !current)}
-                >
-                  {recoveryPreview ? "返回分析中画面" : "查看关闭后重开的画面"}{" "}
-                  <span aria-hidden="true">→</span>
-                </button>
-              )}
-              <small className="analysis-draft-note">
-                {!analysisStarted
-                  ? "点击页面顶部按钮可查看启动后的示例进度。"
-                  : queueStopped
-                    ? "停止不会删除商品或已完成的结果；点击继续仅切换演示画面。"
-                    : "按钮只切换展示状态；不会真正启动、停止或恢复分析。"}
-              </small>
+              <p>关闭页面后，本机服务会继续处理。服务关闭后，重新打开页面可继续未完成的批次。</p>
             </section>
             <section className="analysis-flow-card">
-              <span className="analysis-kicker">RESUME / 恢复规则</span>
-              <h2>关掉后怎么继续</h2>
-              <ol>
-                <li>
-                  <span>01</span>
-                  <div>
-                    <strong>只关网页</strong>
-                    <p>本地服务仍在时继续处理，重开页面同步进度。</p>
-                  </div>
-                </li>
-                <li>
-                  <span>02</span>
-                  <div>
-                    <strong>服务或电脑停止</strong>
-                    <p>重新启动后先恢复未完成的 E，再处理 G。</p>
-                  </div>
-                </li>
-                <li>
-                  <span>03</span>
-                  <div>
-                    <strong>结果完整保存才前进</strong>
-                    <p>中断半成品不计完成；失败停在当前商品。</p>
-                  </div>
-                </li>
-              </ol>
+              <span className="analysis-kicker">RULES / 分析依据</span>
+              <h2>{valuationMode ? "裸号估值与购买" : "历史配置参考分"}</h2>
+              {valuationMode ? (
+                <ol>
+                  <li>
+                    <span>1</span>
+                    <div>
+                      <strong>完整商品 + 你的 Prompt</strong>
+                      <p>每件角色的全部数据库字段一次提交，保留当时的原文和规则。</p>
+                    </div>
+                  </li>
+                  <li>
+                    <span>2</span>
+                    <div>
+                      <strong>先估值，再判断购买</strong>
+                      <p>按定价规则复算分项，结合买入系数、预算和额外成本。</p>
+                    </div>
+                  </li>
+                  <li>
+                    <span>3</span>
+                    <div>
+                      <strong>先给建议，再说明依据</strong>
+                      <p>直接展示买入建议和金额；缺资料时说明缺哪项、怎么补。</p>
+                    </div>
+                  </li>
+                </ol>
+              ) : (
+                <ol>
+                  <li>
+                    <span>1</span>
+                    <div>
+                      <strong>角色底子 · 40%</strong>
+                      <p>根据已采集的修炼、技能等资料判断。</p>
+                    </div>
+                  </li>
+                  <li>
+                    <span>2</span>
+                    <div>
+                      <strong>装备 · 35%</strong>
+                      <p>引用实际装备字段，不补写未采集的属性。</p>
+                    </div>
+                  </li>
+                  <li>
+                    <span>3</span>
+                    <div>
+                      <strong>召唤兽 · 25%</strong>
+                      <p>整份原文包含全部已保存的召唤兽资料。</p>
+                    </div>
+                  </li>
+                </ol>
+              )}
+              <p>
+                {valuationMode
+                  ? "从“分析设置”调整 Prompt 和参数。修改后创建新批次，保留历史结果及其依据。"
+                  : "任一维度缺少必要资料时，总分显示“资料不足”，仍保存分析说明。分数用于配置比较。"}
+              </p>
             </section>
           </aside>
         </div>
-        <p className="analysis-bottom-note">
-          页面预览 · 队列、中断恢复、评分和推荐结果均为示意，尚未连接真实服务。
+        <div className="analysis-bottom-note">
+          <span>
+            资料更新后，旧结论标为“资料已更新”；再次开始只调用新增或变化的商品，其余结果复用。
+          </span>
           <a href="/">返回采集工作台 →</a>
-        </p>
+        </div>
       </main>
-
-      {authStep && (
-        <div className="analysis-overlay">
-          <section
-            className="analysis-auth-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="analysis-auth-title"
-          >
-            {authStep === "confirm" ? (
-              <>
-                <span className="analysis-kicker">GOOGLE LOGIN / 首次使用</span>
-                <h2 id="analysis-auth-title">先登录，再开始分析</h2>
-                <p>首次使用需登录 Google 账号。分析由平台提供的 Gemini API 完成。</p>
-                <div className="analysis-auth-info">
-                  <span>本轮分析 Agent</span>
-                  <strong>Gemini · 平台提供</strong>
-                </div>
-                <p className="analysis-auth-note">
-                  Google 登录只用于平台识别用户。密码不会交给本地页面，Gemini API key 也不会存放在本机。
-                </p>
-                <p className="analysis-auth-preview-note">
-                  当前是静态交互稿，点击登录只展示后续流程，不会跳转到 Google。
-                </p>
-                <div className="analysis-auth-actions">
-                  <button
-                    type="button"
-                    className="analysis-button analysis-button-quiet"
-                    autoFocus
-                    onClick={() => {
-                      setAuthStep(null);
-                      setAuthNotice("已取消登录，分析未开始。");
-                    }}
-                  >
-                    取消
-                  </button>
-                  <button
-                    type="button"
-                    className="analysis-button analysis-button-primary"
-                    onClick={() => setAuthStep("handoff")}
-                  >
-                    使用 Google 账号登录并开始
-                  </button>
-                </div>
-              </>
-            ) : (
-              <>
-                <span className="analysis-kicker">AUTH RETURN / 流程演示</span>
-                <h2 id="analysis-auth-title">登录成功后自动开始</h2>
-                <ol className="analysis-auth-steps">
-                  <li>浏览器进入 Google 官方登录页，用户选择账号并授权。</li>
-                  <li>在线服务验证 Google 回调，签发一次性返回凭证。</li>
-                  <li>本机服务兑换平台登录状态，然后启动当前 Agent 的分析队列。</li>
-                </ol>
-                <p className="analysis-auth-preview-note">
-                  在线服务尚未接入。下方按钮仅模拟返回本地页面，不会创建真实登录状态或分析任务。
-                </p>
-                <div className="analysis-auth-actions">
-                  <button
-                    type="button"
-                    className="analysis-button analysis-button-quiet"
-                    autoFocus
-                    onClick={() => {
-                      setAuthStep(null);
-                      setAuthNotice("已取消登录，分析未开始。");
-                    }}
-                  >
-                    取消登录
-                  </button>
-                  <button
-                    type="button"
-                    className="analysis-button analysis-button-primary"
-                    onClick={finishDemoLogin}
-                  >
-                    预览登录成功并开始
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  className="analysis-auth-failure"
-                  onClick={() => {
-                    setAuthStep(null);
-                    setAuthNotice("登录失败，分析未开始。请重试。");
-                  }}
-                >
-                  预览登录失败
-                </button>
-              </>
-            )}
-          </section>
-        </div>
-      )}
-
-      {selected && (
-        <div
-          className="analysis-overlay"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setSelected(null);
+      {settingsOpen && (
+        <AnalysisSettings
+          onClose={() => setSettingsOpen(false)}
+          onSaved={() => {
+            setSettingsOpen(false);
+            setSettingsNotice(true);
+            setRevision((value) => value + 1);
           }}
-        >
-          <section
-            className="analysis-detail-panel"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="analysis-detail-title"
-          >
-            <div className="analysis-modal-header">
-              <div>
-                <span className="analysis-kicker">ITEM / 商品分析示例</span>
-                <h2 id="analysis-detail-title">{selected.name}</h2>
-              </div>
-              <button
-                type="button"
-                className="analysis-close"
-                onClick={() => setSelected(null)}
-                aria-label="关闭商品分析详情"
-              >
-                ×
-              </button>
-            </div>
-            <div className="analysis-detail-price">
-              <div>
-                <small>
-                  {selected.server} · {selected.level} 级
-                </small>
-                <strong>{money(selected.price)}</strong>
-              </div>
-              <span
-                className={`analysis-status ${selected.status === "complete" ? "is-complete" : "is-pending"}`}
-              >
-                {selected.status === "complete" ? "详情完整" : "待补采"}
-              </span>
-            </div>
-            {selected.analysisState === "analyzed" ? (
-              <>
-                <div className="analysis-detail-score">
-                  <div>
-                    <small>演示评分</small>
-                    <strong>
-                      {selected.score ?? "—"}
-                      <span>/ 100</span>
-                    </strong>
-                  </div>
-                  <p>仅演示未来的结果样式，并非实际计算。</p>
-                </div>
-                <h3>为什么值得关注</h3>
-                <p className="analysis-detail-reason">{selected.reason}</p>
-                <h3>分析依据会展开在这里</h3>
-                <div className="analysis-factor-list">
-                  <div>
-                    <span>挂牌价格</span>
-                    <strong>与同等级商品比较</strong>
-                  </div>
-                  <div>
-                    <span>角色底子</span>
-                    <strong>等级、修炼、技能等</strong>
-                  </div>
-                  <div>
-                    <span>随身资产</span>
-                    <strong>装备、召唤兽等</strong>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="analysis-pending-note">
-                <strong>{analysisLabel[selected.analysisState]}</strong>
-                <p>{selected.reason}</p>
-              </div>
-            )}
-            <div className="analysis-detail-bottom">
-              <button
-                type="button"
-                className="analysis-button analysis-button-outline"
-                onClick={() => setSelected(null)}
-              >
-                返回列表
-              </button>
-              <small>演示商品无真实原页链接</small>
-            </div>
-          </section>
-        </div>
+        />
+      )}
+      {taskId && (
+        <AnalysisResultDrawer
+          taskId={taskId}
+          onClose={() => setTaskId(null)}
+          previousSettings={!sameProfile}
+          onConfigure={() => {
+            setTaskId(null);
+            setSettingsOpen(true);
+          }}
+          onShowRole={(key) => {
+            setTaskId(null);
+            setRoleKey(key);
+          }}
+        />
+      )}
+      {roleKey && (
+        <RoleDetailDrawer recordKey={roleKey} running={false} onClose={() => setRoleKey(null)} />
       )}
     </div>
   );

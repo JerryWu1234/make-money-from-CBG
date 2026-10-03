@@ -8,9 +8,13 @@
     "build": "tsc && vp build",
     "preview": "vp preview",
     "check": "vp check",
+    "analysis:prepare": "node scripts/prepare-analysis-inputs.mjs",
     "test:e2e": "vp run build && playwright test"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.99.1",
+    "@earendil-works/pi-ai": "0.99.1",
+    "@openai/codex-sdk": "0.159.3",
     "playwright-core": "^1.63.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

@@ -66,6 +66,9 @@ export function clearCrawl() {
 export function savedDetail(key: string) {
   return store().detail(key);
 }
+export function crawlDatabase() {
+  return store().db;
+}
 export function savedRecords(page: number, pageSize: number) {
   return store().records(page, pageSize);
 }
