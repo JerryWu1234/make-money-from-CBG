@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { AnalysisProfile, ValuationSettings } from "../server/analysis/valuation-types";
+import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "../server/analysis/valuation-settings";
 
 type SettingsResponse = {
   profile: AnalysisProfile;
@@ -176,7 +177,7 @@ export function AnalysisSettings({
       </header>
       <p>
         每次开始分析都会冻结这份 Prompt
-        和参数。保存修改后，新批次采用新设置；继续旧批次仍使用当时的设置。留空的必需参数会在结果中显示“待确认”。
+        和参数。新批次使用新设置，历史结果保留。买入上限默认是估值的八折；实际费用、金价和排名需要填写。
       </p>
       {error && (
         <p role="alert" className="analysis-pending-note">
@@ -187,6 +188,20 @@ export function AnalysisSettings({
       {source && settings && (
         <>
           <h3>购买条件</h3>
+          <p className="analysis-pending-note">
+            建议先用八折买入、强壮神速按当前等级计价的方案。金价和交易费用按实际填写，确实无费用时填0。
+          </p>
+          <button
+            type="button"
+            className="analysis-button analysis-button-outline"
+            onClick={() =>
+              setSettings((current) =>
+                current ? { ...current, ...RECOMMENDED_RULES, b: RECOMMENDED_BUY_FACTOR } : current,
+              )
+            }
+          >
+            使用建议计价方案
+          </button>
           <div className="analysis-settings-grid">
             {numberInput("b", "最高买入系数 b", "0 < b ≤ 1，例如0.8表示估值的八折。")}
             {numberInput("a", "理想买入系数 a（可选）", "不大于 b；留空不计算理想买价。")}
@@ -194,7 +209,10 @@ export function AnalysisSettings({
             {numberInput("extraCost", "全部额外成本 F（元）", "无额外费用时明确填0，不默认免费。")}
           </div>
           <details className="analysis-settings-section">
-            <summary>公式口径：有分歧时由你确认</summary>
+            <summary>计价方案：已有默认规则，也可修改</summary>
+            <p>
+              建议方案：强壮神速计算一次；攻法上限取有效项，同级选攻击；化圣不叠加等级溢价；69级机缘用公式；坐骑边界取下档、多只分别求和；区服比例相加，只调整角色本体。20及以下修炼上限没有额外溢价。
+            </p>
             <div className="analysis-settings-grid">
               {choice("strengthMode", "强壮、神速", [
                 ["single", "按当前等级计算一次"],

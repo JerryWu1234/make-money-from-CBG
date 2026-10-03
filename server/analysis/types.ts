@@ -32,6 +32,7 @@ export type AnalysisRun = {
   reused: number;
   current: string | null;
   profileHash?: string;
+  calculationVersion?: string;
 };
 export type AnalysisItemState =
   | "ready"

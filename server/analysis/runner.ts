@@ -4,6 +4,7 @@ import { ANALYSIS_SCHEMA, validateAnalysis } from "./contract";
 import { AnalysisStore } from "./store";
 import { VALUATION_SCHEMA, validateValuation } from "./valuation-contract";
 import type { AnalysisProfile } from "./valuation-types";
+import { CALCULATION_VERSION } from "./profile";
 
 export type AnalysisClient = {
   model: string;
@@ -36,6 +37,8 @@ export class AnalysisRunner {
   ) {
     if (sample && (!Number.isInteger(sampleSize) || sampleSize < 1 || sampleSize > 3))
       throw new Error("试分析数量请选择 1 到 3 件");
+    if (profile && profile.calculationVersion !== CALCULATION_VERSION)
+      throw new Error("估值规则已更新，请按新规则开始分析；旧结果仍可查看");
     const existing = this.currentActivity();
     if (existing) {
       const run = this.store.run(existing.id);
@@ -80,6 +83,8 @@ export class AnalysisRunner {
     const run = this.store.run(id);
     if (!run) throw new Error("分析任务不存在");
     if (!run.queued && !run.failed) return id;
+    if (run.calculationVersion && run.calculationVersion !== CALCULATION_VERSION)
+      throw new Error("估值规则已更新，请按新规则开始分析；旧结果仍可查看");
     const client = await this.client(run.provider, run.model);
     const afterConnect = this.currentActivity();
     if (afterConnect) {
@@ -139,7 +144,7 @@ export class AnalysisRunner {
           ? task.prompt +
             "\n\n上次输出校验未通过：" +
             task.lastError.slice(0, 1000) +
-            "。请按原始复算结果修正 JSON，完整保留待确认项。"
+            "。请复核原文引用与本批次计价规则后修正 JSON，不得补造缺失资料。"
           : task.prompt;
       const attempt = this.store.begin(task, owner, prompt);
       const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);

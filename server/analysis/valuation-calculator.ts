@@ -6,7 +6,9 @@ import type {
   ValuationItem,
   ValuationResult,
   ValuationSettings,
+  ValuationFact,
 } from "./valuation-types";
+import { numericFact as number, readValuationFact, type Fact } from "./valuation-facts";
 
 const TRAINING = [
   30, 50, 70, 95, 120, 140, 160, 185, 210, 240, 275, 310, 350, 400, 460, 500, 550, 610, 680, 760,
@@ -98,7 +100,11 @@ export function artifactPrice(
     sets.some(
       (set) =>
         set.full === null ||
-        (set.full && (set.score === null || !Number.isFinite(set.score) || set.score < 0)),
+        (set.full &&
+          (!["十二水", "十二火", "十二金", "十二木", "十二土", "混合"].includes(set.type) ||
+            set.score === null ||
+            !Number.isFinite(set.score) ||
+            set.score < 0)),
     )
   )
     return null;
@@ -136,14 +142,19 @@ export function purchase(value: number | null, asking: number | null, settings: 
     value !== null && value > 0 && settings.a !== null
       ? Math.min(value * settings.a, settings.budget ?? Infinity)
       : null;
+  const overBudget =
+    (cost ?? asking) !== null && settings.budget !== null && (cost ?? asking)! > settings.budget;
+  const overValue = value !== null && value > 0 && asking !== null && asking > value;
   const decision: Decision =
-    value === null || value <= 0 || cost === null || limit === null
-      ? "NEED_INFO"
-      : cost <= limit
-        ? "BUY"
-        : cost <= value
-          ? "WATCH"
-          : "PASS";
+    overBudget || overValue
+      ? "PASS"
+      : value === null || value <= 0 || cost === null || limit === null
+        ? "NEED_INFO"
+        : cost <= limit
+          ? "BUY"
+          : cost <= value
+            ? "WATCH"
+            : "PASS";
   return {
     decision,
     total_cost: round(cost),
@@ -155,70 +166,19 @@ export function purchase(value: number | null, asking: number | null, settings: 
   };
 }
 
-type Fact = { raw: string; evidence: Evidence[] };
-function number(raw: string | undefined): number | null {
-  if (raw === undefined || !/^\d+(?:\.\d+)?$/.test(raw.trim())) return null;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : null;
-}
 /** Decode saved, labelled fields, retaining the exact source path and text. */
 export function calculateValuation(
   record: SavedRoleRecord,
   profile: AnalysisProfile,
+  supplements: ValuationFact[] = [],
 ): ValuationResult {
   const items: ValuationItem[] = [],
     missing = new Set<string>(),
     pending = new Set<string>();
   const settings = profile.settings,
     tabs = record.detail?.tabs || [];
-  const fact = (label: string, tabName?: string): Fact | null => {
-    for (const [ti, tab] of tabs.entries()) {
-      if (tabName && tab.name !== tabName) continue;
-      const fieldIndex = tab.fields.findIndex((field) => field.name === label);
-      if (fieldIndex >= 0) {
-        const raw = tab.fields[fieldIndex].value;
-        return {
-          raw,
-          evidence: [
-            {
-              path: "/detail/tabs/" + ti + "/fields/" + fieldIndex + "/value",
-              value: raw,
-              reason: "原始采集字段：" + label,
-            },
-          ],
-        };
-      }
-      for (const [tableIndex, table] of tab.tables.entries())
-        for (const [rowIndex, row] of table.entries())
-          for (const [cellIndex, cell] of row.entries()) {
-            if (
-              cell.replace(/[：:]\s*$/, "").trim() === label &&
-              row[cellIndex + 1] !== undefined
-            ) {
-              const raw = row[cellIndex + 1];
-              return {
-                raw,
-                evidence: [
-                  {
-                    path:
-                      "/detail/tabs/" +
-                      ti +
-                      "/tables/" +
-                      tableIndex +
-                      "/" +
-                      rowIndex +
-                      "/" +
-                      (cellIndex + 1),
-                    value: raw,
-                    reason: "原始采集字段：" + label,
-                  },
-                ],
-              };
-            }
-          }
-    }
-    return null;
-  };
+  const fact = (label: string, tabName?: string) =>
+    readValuationFact(record, label, tabName, supplements);
   const add = (
     name: string,
     input: string,
@@ -247,6 +207,9 @@ export function calculateValuation(
     next_action: "",
     known_subtotal: 0,
     calculation_version: profile.calculationVersion,
+    body_value: null,
+    suggestions: [],
+    extracted_facts: supplements,
   };
   if (
     (record.listing.serverName || "").includes("时光") &&
@@ -399,36 +362,104 @@ export function calculateValuation(
     if (n !== null && n > 0 && !settings.strengthMode)
       pending.add("确认强壮、神速按当前等级一次计价还是逐级累加");
   }
-  const artifacts = fact("神器套数");
+  const artifacts = fact("神器套数"),
+    artifactCount = number(artifacts?.raw);
+  const artifactSets = Array.from(
+    { length: artifactCount !== null && artifactCount <= 3 ? artifactCount : 0 },
+    (_, i) => {
+      const slot = fact(`神器${i + 1}满槽`),
+        type = fact(`神器${i + 1}类型`),
+        score = fact(`神器${i + 1}总分`);
+      return {
+        full: ["是", "已满槽", "12/12"].includes(slot?.raw || "")
+          ? true
+          : ["否", "未满槽"].includes(slot?.raw || "")
+            ? false
+            : null,
+        type: type?.raw || "",
+        score: number(score?.raw),
+        evidence: [slot, type, score].flatMap((field) => field?.evidence || []),
+      };
+    },
+  );
+  const artifactAmount =
+    artifactCount !== null && Number.isInteger(artifactCount) && artifactCount <= 3
+      ? artifactPrice(artifactSets)
+      : null;
   add(
     "神器",
     artifacts?.raw || "完整套数、满槽状态和属性分值未知",
     "先核对12槽填满；最高一套全价，其余两套各半价",
-    number(artifacts?.raw) === 0 ? 0 : null,
-    artifacts?.evidence,
+    artifactAmount,
+    [...(artifacts?.evidence || []), ...artifactSets.flatMap((set) => set.evidence)],
+    "神器完整套数、每套12槽状态、五行组合及属性总分",
   );
   const mountCount = fact("坐骑总数"),
-    mountGrowth = fact("成长", "坐骑"),
-    advanced = fact("进阶状态", "坐骑"),
-    percentage = fact("主属性百分比", "坐骑");
-  const growth = number(mountGrowth?.raw),
-    percent = number(percentage?.raw.replace("%", ""));
+    count = number(mountCount?.raw);
+  const mountTabs = tabs.filter((tab) => /^坐骑\s*\//.test(tab.name));
+  const mountSources = mountTabs.length ? mountTabs.map((tab) => tab.name) : ["坐骑"];
+  const mounts = Array.from({ length: count !== null && count <= 9 ? count : 0 }, (_, i) => {
+    const source = mountSources[i];
+    const growthFact = fact(`坐骑${i + 1}成长`) || (source ? fact("成长", source) : null);
+    const advanced = fact(`坐骑${i + 1}进阶状态`) || (source ? fact("进阶状态", source) : null);
+    let percentage =
+      fact(`坐骑${i + 1}主属性百分比`) || (source ? fact("主属性百分比", source) : null);
+    if (!percentage && source) {
+      const primary = fact("主属性", source),
+        attribute = primary ? fact(primary.raw, source) : null;
+      const percent = attribute?.raw.match(/\((\d+(?:\.\d+)?)%\)/)?.[1];
+      if (percent)
+        percentage = {
+          raw: percent,
+          evidence: [...(primary?.evidence || []), ...(attribute?.evidence || [])],
+        };
+    }
+    const growth = number(growthFact?.raw),
+      percent = number(percentage?.raw.replace("%", ""));
+    const isAdvanced =
+      advanced?.raw === "已进阶" ? true : advanced?.raw === "未进阶" ? false : null;
+    const amount =
+      growth === null
+        ? null
+        : isAdvanced === null
+          ? growth !== 2.343 && growth !== 2.35
+            ? 0
+            : null
+          : mountPrice(growth, isAdvanced, percent, settings.mountBoundary);
+    return {
+      growth: growthFact?.raw,
+      advanced: advanced?.raw,
+      percent: percentage?.raw,
+      amount,
+      isAdvanced,
+      evidence: [growthFact, advanced, percentage].flatMap((value) => value?.evidence || []),
+    };
+  });
+  const advancedMounts = mounts.filter((mount) => mount.isAdvanced === true);
+  const mountComplete =
+    count !== null &&
+    Number.isInteger(count) &&
+    count <= 9 &&
+    mounts.every((mount) => mount.amount !== null);
+  if (advancedMounts.length > 1 && !settings.sumAdvancedMounts)
+    pending.add("多只进阶坐骑的累计方式尚未设置");
   const mountAmount =
-    number(mountCount?.raw) === 0
-      ? 0
-      : number(mountCount?.raw) === 1 &&
-          growth !== null &&
-          ["已进阶", "未进阶"].includes(advanced?.raw || "")
-        ? mountPrice(growth, advanced!.raw === "已进阶", percent, settings.mountBoundary)
-        : null;
+    mountComplete && (advancedMounts.length <= 1 || settings.sumAdvancedMounts)
+      ? mounts.reduce((sum, mount) => sum + mount.amount!, 0)
+      : null;
   add(
     "坐骑",
-    [mountCount?.raw, mountGrowth?.raw, advanced?.raw, percentage?.raw]
-      .map((value) => value || "未知")
-      .join(" / "),
+    `${mountCount?.raw || "数量未知"}；` +
+      mounts
+        .map(
+          (mount, i) =>
+            `第${i + 1}只：${mount.growth || "成长未知"} / ${mount.advanced || "进阶状态未知"} / ${mount.percent || "主属性比例未知"}`,
+        )
+        .join("；"),
     "按成长、进阶和主属性百分比定价，核对完整坐骑数量",
     mountAmount,
-    [mountCount, mountGrowth, advanced, percentage].flatMap((value) => value?.evidence || []),
+    [...(mountCount?.evidence || []), ...mounts.flatMap((mount) => mount.evidence)],
+    "所有坐骑的数量、成长、进阶状态及主属性百分比",
   );
   const levelPrices: Record<number, number> = {
     170: 100,
@@ -453,6 +484,12 @@ export function calculateValuation(
   );
   const capAttack: Record<number, number> = { 21: 30, 22: 60, 23: 100, 24: 140, 25: 200 },
     capDefense: Record<number, number> = { 21: 20, 22: 40, 23: 65, 24: 90, 25: 130 };
+  const capPrice = (cap: number | null, prices: Record<number, number>) =>
+    cap === null || !Number.isInteger(cap)
+      ? null
+      : cap >= 0 && cap <= 20
+        ? 0
+        : (prices[cap] ?? null);
   const selectedCap =
     human[0] !== null && human[1] !== null
       ? human[0] > human[1]
@@ -466,30 +503,37 @@ export function calculateValuation(
               : null
       : null;
   const attackCap =
-    settings.capMode === "both" && caps[0] !== null && caps[1] !== null
-      ? capAttack[caps[0]] !== undefined && capAttack[caps[1]] !== undefined
-        ? capAttack[caps[0]] + capAttack[caps[1]]
-        : null
-      : settings.capMode === "effective" && selectedCap !== null && caps[selectedCap] !== null
-        ? (capAttack[caps[selectedCap]!] ?? null)
-        : null;
+    caps[0] !== null &&
+    caps[1] !== null &&
+    Number.isInteger(caps[0]) &&
+    Number.isInteger(caps[1]) &&
+    caps[0] <= 20 &&
+    caps[1] <= 20
+      ? 0
+      : settings.capMode === "both" && caps[0] !== null && caps[1] !== null
+        ? capPrice(caps[0], capAttack) !== null && capPrice(caps[1], capAttack) !== null
+          ? capPrice(caps[0], capAttack)! + capPrice(caps[1], capAttack)!
+          : null
+        : settings.capMode === "effective" && selectedCap !== null && caps[selectedCap] !== null
+          ? capPrice(caps[selectedCap], capAttack)
+          : null;
   add(
     "攻法修炼上限",
     caps
       .slice(0, 2)
       .map((value) => value ?? "未知")
       .join(" / "),
-    "分别计价或有效攻法项，按确认口径查21—25上限价表",
+    "20及以下无额外溢价；21—25按设置查上限价表",
     attackCap,
     humanFacts.slice(0, 2).flatMap((value) => value?.evidence || []),
   );
-  if (!settings.capMode) pending.add("确认攻法上限分别计价还是只算有效攻法项");
+  if (attackCap === null && !settings.capMode) pending.add("攻法上限计价方式尚未设置");
   for (const index of [2, 3])
     add(
       humanLabels[index] + "上限",
       String(caps[index] ?? "未知"),
-      "查21—25上限价表",
-      caps[index] === null ? null : (capDefense[caps[index]!] ?? null),
+      "20及以下无额外溢价；21—25查上限价表",
+      capPrice(caps[index], capDefense),
       humanFacts[index]?.evidence,
     );
   const golden = fact("靓号特效", "人物/修炼");
@@ -516,6 +560,13 @@ export function calculateValuation(
       : "按人物等级及机缘公式或已确认69级报价",
     op,
     opportunity?.evidence,
+    points === null
+      ? "机缘点数缺失"
+      : level === null
+        ? "人物等级缺失"
+        : points < 40 && base === null
+          ? "负向机缘调整依赖完整本体小计，需先补齐其他本体项目"
+          : "机缘计价方式或档位未确定",
   );
   if (level === 69 && points !== null && points > 40 && op === null)
     pending.add("确认69级机缘使用公式还是离散报价");
@@ -619,21 +670,71 @@ export function calculateValuation(
   if (level === null) missing.add("人物等级");
   if (value !== null && value <= 0) pending.add("完整模型估值不大于0，需要核实数据");
   const purchased = purchase(value, asking, settings);
-  const decision = missing.size || pending.size ? "NEED_INFO" : purchased.decision;
+  const decision =
+    purchased.decision === "PASS"
+      ? "PASS"
+      : missing.size || pending.size
+        ? "NEED_INFO"
+        : purchased.decision;
+  const suggestions: string[] = [];
+  if (artifactAmount === null)
+    suggestions.push("补采神器资料：确认完整套数、每套是否填满12槽、五行组合和属性总分。");
+  if (mountAmount === null)
+    suggestions.push(
+      "补采全部坐骑：确认总数，每只的成长、进阶状态和主属性百分比；不要把祥瑞数量当坐骑数量。",
+    );
+  if (golden?.raw === "是")
+    suggestions.push("确认靓号特效的具体类型；只显示“是”不能直接按土豪金加1400元。");
+  if (settings.extraCost === null)
+    suggestions.push("在分析设置填写全部额外费用；确实没有费用时填0。");
+  if (
+    !server?.age ||
+    server.rank === null ||
+    (server.age === "older" && (server.goldPrice === null || server.goldUnit === null))
+  )
+    suggestions.push(
+      `在分析设置补充${record.listing.serverName || record.listing.serverId}的区服年代、热度排名、实际金价和报价单位，保存后同服商品共用。`,
+    );
+  else if (server.age === "older" && !server.baselineUnitConfirmed)
+    suggestions.push("确认金价与210元基准采用相同游戏币数量单位，避免金额被放大。");
+  if (settings.b === null)
+    suggestions.push("建议最高按裸号估值的八折买入；可在分析设置修改买入系数。");
+  if (pending.size)
+    suggestions.push("核实下方未确定的规则和异常资料；计价方式可在分析设置重新选择。");
+  if (!suggestions.length && missing.size)
+    suggestions.push("补采或核实：" + [...missing][0] + "。");
+  const moneyText = (amount: number | null) =>
+    amount === null ? "未算出" : "¥" + round(amount)!.toFixed(2);
+  const reason =
+    decision === "BUY"
+      ? `建议买入。总成本${moneyText(purchased.total_cost)}，在设定的买入上限内；裸号估值${moneyText(value)}。`
+      : decision === "WATCH"
+        ? `先别买，等降价。总成本${moneyText(purchased.total_cost)}高于买入上限，但没有超过裸号估值${moneyText(value)}。`
+        : decision === "PASS"
+          ? settings.budget !== null && (purchased.total_cost ?? asking ?? 0) > settings.budget
+            ? `不建议买入。当前价格或总成本已超过预算${moneyText(settings.budget)}。`
+            : purchased.total_cost !== null
+              ? `不建议买入，价格偏高。购买总成本${moneyText(purchased.total_cost)}，裸号估值${moneyText(value)}。`
+              : `不建议买入，价格偏高。挂牌价${moneyText(asking)}，裸号估值${moneyText(value)}。`
+          : "暂不建议买入，关键资料或购买条件还不完整。" +
+            (value !== null
+              ? `裸号估值${moneyText(value)}；补齐购买条件后再判断是否值得买。`
+              : body !== null
+                ? `裸号本体已算出${moneyText(body)}，区服调整和附带资产需另行核实。`
+                : "请先补齐下面列出的资料，再判断价格是否合适。");
   return {
     ...empty,
     ...purchased,
     decision,
     model_value: round(value),
+    body_value: round(body),
+    suggestions,
     missing_fields: [...missing],
     pending_rules: [...pending],
     known_subtotal: round(
       items.reduce((sum, item) => sum + (item.confirmed ? item.amount! : 0), 0),
     )!,
-    reason:
-      decision === "NEED_INFO"
-        ? "已完成独立分项计算，完整估值或购买条件仍有待确认项。"
-        : "已按确认的估值规则与购买条件核算。",
-    next_action: [...pending, ...missing][0] ? "请补充或确认：" + [...pending, ...missing][0] : "",
+    reason,
+    next_action: decision === "NEED_INFO" ? suggestions[0] || "" : "",
   };
 }

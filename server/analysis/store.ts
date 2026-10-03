@@ -156,7 +156,11 @@ export class AnalysisStore {
           reused: Number(row.reused),
           current: nullable(row.current),
           ...(row.profile_json
-            ? { profileHash: (JSON.parse(String(row.profile_json)) as AnalysisProfile).hash }
+            ? {
+                profileHash: (JSON.parse(String(row.profile_json)) as AnalysisProfile).hash,
+                calculationVersion: (JSON.parse(String(row.profile_json)) as AnalysisProfile)
+                  .calculationVersion,
+              }
             : {}),
         }
       : null;

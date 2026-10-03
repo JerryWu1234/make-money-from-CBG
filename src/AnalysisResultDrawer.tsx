@@ -13,10 +13,14 @@ export function AnalysisResultDrawer({
   taskId,
   onClose,
   onShowRole,
+  onConfigure,
+  previousSettings,
 }: {
   taskId: string;
   onClose: () => void;
   onShowRole: (key: string) => void;
+  onConfigure?: () => void;
+  previousSettings?: boolean;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [detail, setDetail] = useState<AnalysisDetail | null>(null);
@@ -112,7 +116,11 @@ export function AnalysisResultDrawer({
             </p>
           )}
           {detail.result?.valuation ? (
-            <ValuationResultView result={detail.result.valuation} />
+            <ValuationResultView
+              result={detail.result.valuation}
+              onConfigure={onConfigure}
+              previousSettings={previousSettings}
+            />
           ) : detail.result ? (
             <>
               <div className="analysis-detail-score">

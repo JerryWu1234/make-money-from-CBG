@@ -4,7 +4,7 @@ import type { AnalysisItem, AnalysisOverview, AnalysisRun } from "../server/anal
 import { AiConnectionControl } from "./AiConnectionControl";
 import { AnalysisResultDrawer } from "./AnalysisResultDrawer";
 import { AnalysisSettings } from "./AnalysisSettings";
-import { decisionLabels, valuationMoney } from "./ValuationResultView";
+import { decisionLabels, valuationMoney, valuationPriceSummary } from "./ValuationResultView";
 import { RoleDetailDrawer } from "./RoleDetailDrawer";
 import { displayTime } from "./SavedRoleList";
 import "./analysis-preview.css";
@@ -211,7 +211,7 @@ export function AnalysisPreview() {
               <br />
               <em>就更新一次榜单</em>
             </h1>
-            <p>用你提供的裸号估值 Prompt 分析完整商品原文。逐件保存估值、购买结论和待确认项。</p>
+            <p>按裸号规则计算参考价值，直接给出买入建议；资料不足时列出补齐办法。</p>
             <AiConnectionControl
               provider={provider}
               onProviderChange={changeProvider}
@@ -413,7 +413,7 @@ export function AnalysisPreview() {
                 <h2 id="analysis-results-title">分析结果</h2>
                 <p>
                   {valuationMode
-                    ? "推荐榜只展示符合已确认购买条件的商品；待确认、观察和不购买的结论在全部商品查看。"
+                    ? "推荐榜展示建议买入的商品；等降价、不建议买入和资料不足的商品在全部商品查看。"
                     : "本历史批次按配置参考分排序；新批次使用裸号估值规则。"}
                 </p>
               </div>
@@ -473,7 +473,7 @@ export function AnalysisPreview() {
                     <strong>暂无可排序的分析结果</strong>
                     <p>
                       {valuationMode
-                        ? "完成估值并符合购买条件的商品会出现在这里。待确认结论可在全部商品查看。"
+                        ? "完成估值并符合购买条件的商品会出现在这里。其他结论可在全部商品查看。"
                         : "开始分析后，有完整评分的商品会出现在这里。资料不足的结论可在全部商品查看。"}
                     </p>
                   </div>
@@ -576,7 +576,10 @@ export function AnalysisPreview() {
                           </td>
                           <td>
                             <span className={`analysis-state analysis-state-${item.state}`}>
-                              {labels[item.state]}
+                              {item.state === "completed" &&
+                              item.valuation?.decision === "NEED_INFO"
+                                ? "分析完成 · 资料不足"
+                                : labels[item.state]}
                             </span>
                             {item.error && <small>{item.error}</small>}
                           </td>
@@ -584,10 +587,18 @@ export function AnalysisPreview() {
                             {item.valuation ? (
                               <>
                                 <strong>{decisionLabels[item.valuation.decision]}</strong>
-                                <small>估值 {valuationMoney(item.valuation.model_value)}</small>
                                 <small>
-                                  最高买入 {valuationMoney(item.valuation.max_listing_price)}
+                                  {valuationPriceSummary(item.valuation).label}{" "}
+                                  {valuationMoney(valuationPriceSummary(item.valuation).value)}
                                 </small>
+                                {item.valuation.max_listing_price !== null && (
+                                  <small>
+                                    最高买入 {valuationMoney(item.valuation.max_listing_price)}
+                                  </small>
+                                )}
+                                {item.valuation.decision === "NEED_INFO" && (
+                                  <small>查看分析里的补齐建议</small>
+                                )}
                               </>
                             ) : item.state === "completed" ? (
                               (item.score ?? "资料不足")
@@ -716,8 +727,8 @@ export function AnalysisPreview() {
                   <li>
                     <span>3</span>
                     <div>
-                      <strong>未知保留待确认</strong>
-                      <p>不以部分小计代替完整估值，不自动填写交易条件。</p>
+                      <strong>先给建议，再说明依据</strong>
+                      <p>直接展示买入建议和金额；缺资料时说明缺哪项、怎么补。</p>
                     </div>
                   </li>
                 </ol>
@@ -775,6 +786,11 @@ export function AnalysisPreview() {
         <AnalysisResultDrawer
           taskId={taskId}
           onClose={() => setTaskId(null)}
+          previousSettings={!sameProfile}
+          onConfigure={() => {
+            setTaskId(null);
+            setSettingsOpen(true);
+          }}
           onShowRole={(key) => {
             setTaskId(null);
             setRoleKey(key);

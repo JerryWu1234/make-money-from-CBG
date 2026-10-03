@@ -3,6 +3,7 @@ import type { ProductDocument } from "./product-document";
 import type { ProductAnalysis } from "./types";
 import type { AnalysisProfile, ValuationResult } from "./valuation-types";
 import { calculateValuation } from "./valuation-calculator";
+import { validateValuationFacts } from "./valuation-facts";
 
 const nullableNumber = { type: ["number", "null"] };
 const strings = { type: "array", items: { type: "string" } };
@@ -23,6 +24,7 @@ export const VALUATION_SCHEMA = {
     "pending_rules",
     "reason",
     "next_action",
+    "extracted_facts",
   ],
   properties: {
     decision: { type: "string", enum: ["BUY", "WATCH", "PASS", "NEED_INFO", "OUT_OF_SCOPE"] },
@@ -52,6 +54,21 @@ export const VALUATION_SCHEMA = {
     pending_rules: strings,
     reason: { type: "string" },
     next_action: { type: "string" },
+    extracted_facts: {
+      type: "array",
+      maxItems: 40,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["name", "value", "path", "quote"],
+        properties: {
+          name: { type: "string" },
+          value: { type: "string" },
+          path: { type: "string" },
+          quote: { type: "string" },
+        },
+      },
+    },
   },
 };
 export function valuationPrompt(
@@ -60,7 +77,14 @@ export function valuationPrompt(
   profile: AnalysisProfile,
 ) {
   const computed = calculateValuation(record, profile);
-  const { known_subtotal: _subtotal, calculation_version: _version, ...report } = computed;
+  const {
+    known_subtotal: _subtotal,
+    calculation_version: _version,
+    body_value: _body,
+    suggestions: _suggestions,
+    extracted_facts: _facts,
+    ...report
+  } = computed;
   return [
     profile.template,
     "【本平台的程序化输出要求】使用上述 Prompt 的 JSON 模式，只返回指定 JSON，不输出 Markdown 或代码围栏。",
@@ -71,10 +95,11 @@ export function valuationPrompt(
       "。本次规则版本：" +
       profile.version +
       "。",
-    "以下参数中的 null 表示用户尚未提供，不能自行填写或改变计算口径。区服数据只匹配当前 serverId。",
+    "以下参数是本批次实际使用的设置，其中明示了平台建议的计价方案与买入系数。null 仍表示尚未提供，不能猜测费用、金价或排名。区服数据只匹配当前 serverId。",
     JSON.stringify(profile.settings),
-    "服务端已从原始字段按已确认规则完成可独立计算的分项。请依据全文核对并解释。原文存在但尚无法可靠识别的字段保留待确认；不得把未知设为0。",
-    "输出的金额、confirmed 和 decision 必须与下方复算结果一致。items 逐项按原名返回，可简洁解释 input 和 formula；missing_fields 与 pending_rules 保留全部待确认内容。reason 使用中文短句解释估值或购买判断，200字以内，详细依据留在items；next_action 只提出最影响结果的一项具体动作，无阻塞时为空字符串。",
+    "下方是初步计算，尚未识别的原文资料可通过 extracted_facts 补提后重新计算；不要仅复述待确认。补提仅支持神器套数、坐骑总数、进阶状态、主属性百分比，以及神器1至3的满槽/类型/总分、坐骑1至9的成长/进阶状态/主属性百分比。",
+    "每条补提必须给出原文 JSON Pointer path 和逐字 quote。quote 须包含对应名称及冒号标记的值，或明确“共有N套神器/共有N只坐骑”；分项可引用“第N套神器/第N只坐骑”下的满槽、五行类型、总分、成长、进阶及主属性比例。进阶可引用“坐骑·已进阶”，明确“没有/未开启/未解锁神器”可提为神器套数0。标题空白、未看到、祥瑞数量不能作为不存在或坐骑总数的证据。没有可补提的事实时 extracted_facts 返回空数组。",
+    "金额、confirmed 和 decision 必须符合补提后的事实与本批次规则，服务端会复核来源并重算。items 逐项按原名返回，不得添加商品原文没有的事实。reason 先写建议买入、等降价或暂不买以及具体理由；200字以内。关键资料真缺失时明确说缺什么和怎么补，不生成没有依据的完整价格。",
     JSON.stringify({
       ...report,
       items: report.items.map(({ evidence: _evidence, ...item }) => item),
@@ -103,8 +128,9 @@ export function validateValuation(
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     throw new Error("估值结果格式错误");
-  const result = parsed as Record<string, unknown>,
-    expected = calculateValuation(record, profile);
+  const result = parsed as Record<string, unknown>;
+  const facts = validateValuationFacts(result.extracted_facts, record);
+  const expected = calculateValuation(record, profile, facts);
   const money = [
     "asking_price",
     "extra_cost",
@@ -168,9 +194,9 @@ export function validateValuation(
   const valuation: ValuationResult = {
     // Keep every authoritative blocker even when AI rephrases or omits its wording.
     ...expected,
-    reason: result.reason,
-    next_action:
-      expected.decision === "NEED_INFO" ? result.next_action || expected.next_action : "",
+    reason: expected.reason,
+    ai_explanation: result.reason === expected.reason ? undefined : result.reason,
+    next_action: expected.next_action,
   };
   const emptyDimension = { score: null, reason: "本批次按裸号估值规则分析", evidence: [] };
   return {

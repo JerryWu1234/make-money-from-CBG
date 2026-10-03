@@ -43,6 +43,12 @@ export type ValuationItem = {
   confirmed: boolean;
   evidence: Evidence[];
 };
+export type ValuationFact = {
+  name: string;
+  value: string;
+  path: string;
+  quote: string;
+};
 export type ValuationResult = {
   decision: Decision;
   asking_price: number | null;
@@ -59,4 +65,8 @@ export type ValuationResult = {
   next_action: string;
   known_subtotal: number;
   calculation_version: string;
+  body_value?: number | null;
+  suggestions?: string[];
+  extracted_facts?: ValuationFact[];
+  ai_explanation?: string;
 };

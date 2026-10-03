@@ -4,48 +4,41 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { textHash } from "./contract";
 import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
+import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "./valuation-settings";
 
 export const PROMPT_FILE = resolve("prompts/role-valuation.md");
-export const CALCULATION_VERSION = "bare-role-v2";
+export const CALCULATION_VERSION = "bare-role-v3";
 // Update alongside the calculator when changing pricing sections III through VIII.
-const PRICING_HASH = "5b1cafe85105292b985c2076dfcaf30eb72ba7bf247a45ba71efacf4ac7dbf11";
+const PRICING_HASH = "99c77c3c580a9c9e5f735dfb1a7185f1532020dd66b1356ec5b71e2c1f279e23";
 export const DEFAULT_SETTINGS: ValuationSettings = {
-  b: null,
+  b: RECOMMENDED_BUY_FACTOR,
   a: null,
   budget: null,
   extraCost: null,
-  strengthMode: null,
-  schoolCapConfirmed: false,
-  capMode: null,
-  capTie: null,
-  holyLevelPremium: null,
-  opportunityMode: null,
-  mountBoundary: null,
-  sumAdvancedMounts: false,
-  adjustmentMode: null,
-  adjustmentScope: null,
+  ...RECOMMENDED_RULES,
   servers: [],
 };
 export function normalizeSettings(input: unknown): ValuationSettings {
   if (!input || typeof input !== "object" || Array.isArray(input))
     throw new Error("分析参数格式错误");
   const value = input as Record<string, unknown>;
+  const defaults = DEFAULT_SETTINGS as unknown as Record<string, unknown>;
   const number = (key: string, min = 0, max = Number.MAX_SAFE_INTEGER) => {
-    const raw = value[key];
+    const raw = value[key] === undefined ? defaults[key] : value[key];
     if (raw === null || raw === undefined || raw === "") return null;
     if (typeof raw !== "number" || !Number.isFinite(raw) || raw < min || raw > max)
       throw new Error("分析参数 " + key + " 超出范围");
     return raw;
   };
   const choice = <T extends string>(key: string, choices: readonly T[]): T | null => {
-    const raw = value[key];
+    const raw = value[key] === undefined ? defaults[key] : value[key];
     if (raw === null || raw === undefined || raw === "") return null;
     if (typeof raw !== "string" || !choices.includes(raw as T))
       throw new Error("计算口径 " + key + " 无效");
     return raw as T;
   };
   const boolean = (key: string, nullable = false) => {
-    const raw = value[key];
+    const raw = value[key] === undefined ? defaults[key] : value[key];
     if (raw == null) return nullable ? null : false;
     if (typeof raw !== "boolean") throw new Error("分析参数 " + key + " 无效");
     return raw;
@@ -129,7 +122,7 @@ export function createProfile(
     calculationVersion: CALCULATION_VERSION,
     calculationCompatible,
     hash: textHash(
-      JSON.stringify([promptHash, settingsHash, CALCULATION_VERSION, "valuation-schema-v1"]),
+      JSON.stringify([promptHash, settingsHash, CALCULATION_VERSION, "valuation-schema-v2"]),
     ),
   };
 }
@@ -141,10 +134,22 @@ function initialize(db: DatabaseSync) {
 export function loadProfile(db: DatabaseSync, file = PROMPT_FILE) {
   initialize(db);
   const row = db.prepare("SELECT settings_json FROM analysis_settings WHERE id=1").get();
-  return createProfile(
-    readFileSync(file, "utf8"),
-    row ? JSON.parse(String(row.settings_json)) : DEFAULT_SETTINGS,
-  );
+  const stored = row ? (JSON.parse(String(row.settings_json)) as Record<string, unknown>) : null;
+  // Legacy null choices and unchecked confirmation flags meant "not configured".
+  // Apply the displayed policy; explicit null/false values from the new editor survive.
+  const settings =
+    stored && stored.settingsVersion !== 2
+      ? {
+          ...stored,
+          b: stored.b ?? RECOMMENDED_BUY_FACTOR,
+          ...Object.fromEntries(
+            Object.entries(RECOMMENDED_RULES).map(([key, value]) => [key, stored[key] ?? value]),
+          ),
+          schoolCapConfirmed: RECOMMENDED_RULES.schoolCapConfirmed,
+          sumAdvancedMounts: RECOMMENDED_RULES.sumAdvancedMounts,
+        }
+      : stored || DEFAULT_SETTINGS;
+  return createProfile(readFileSync(file, "utf8"), settings);
 }
 export function saveProfile(db: DatabaseSync, input: unknown, file = PROMPT_FILE) {
   if (!input || typeof input !== "object" || Array.isArray(input))
@@ -168,7 +173,7 @@ export function saveProfile(db: DatabaseSync, input: unknown, file = PROMPT_FILE
     replaced = true;
     db.prepare(
       "INSERT INTO analysis_settings VALUES(1,?) ON CONFLICT(id) DO UPDATE SET settings_json=excluded.settings_json",
-    ).run(JSON.stringify(next.settings));
+    ).run(JSON.stringify({ ...next.settings, settingsVersion: 2 }));
     db.exec("COMMIT");
     return next;
   } catch (error) {

@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { analysisRecord } from "../../tests/fixtures/analysis";
+import { analysisRecord, valuationRecord as completeRecord } from "../../tests/fixtures/analysis";
 import { CrawlStore } from "../crawler/store";
 import { AnalysisStore } from "./store";
 import { AnalysisRunner } from "./runner";
@@ -27,59 +27,8 @@ import {
 } from "./valuation-calculator";
 import { buildProductDocument } from "./product-document";
 import { validateValuation, valuationPrompt } from "./valuation-contract";
+import { readValuationFact, validateValuationFacts } from "./valuation-facts";
 const template = readFileSync(PROMPT_FILE, "utf8");
-function completeRecord() {
-  const record = analysisRecord("a");
-  record.listing.price = "500.00";
-  record.listing.summary = { iCash: 0, iSaving: 0, xianyu: 0 };
-  const fields = {
-    "飞升/渡劫/化圣": "未飞升",
-    级别: "109",
-    攻击修炼: "20/25",
-    法术修炼: "0/25",
-    防御修炼: "17/25",
-    抗法修炼: "10/25",
-    攻击控制力: "20",
-    法术控制力: "20",
-    防御控制力: "20",
-    抗法控制力: "20",
-    靓号特效: "否",
-    月饼粽子机缘: "40/69",
-    神器套数: "0",
-    坐骑总数: "0",
-    储备金: "0",
-  };
-  record.detail!.tabs = [
-    {
-      name: "人物/修炼",
-      text: "",
-      fields: Object.entries(fields).map(([name, value]) => ({ name, value })),
-      tables: [],
-      elements: [],
-      tooltips: [],
-    },
-    {
-      name: "技能",
-      text: "",
-      fields: [],
-      tables: [],
-      elements: [],
-      tooltips: [],
-      items: [
-        ...Array.from({ length: 7 }, (_, i) => ({
-          index: i,
-          kind: "skill" as const,
-          category: "师门技能",
-          name: "师门" + i,
-          level: "119",
-        })),
-        { index: 7, kind: "skill", category: "技能", name: "强壮", level: "0" },
-        { index: 8, kind: "skill", category: "技能", name: "神速", level: "0" },
-      ],
-    },
-  ];
-  return record;
-}
 const profile = () =>
   createProfile(template, {
     ...DEFAULT_SETTINGS,
@@ -139,7 +88,7 @@ describe("裸号估值的复算与可追溯输入", () => {
       "PASS",
     );
   });
-  it("完整条件可BUY；原文缺失、未覆盖上限和未知费用保留待确认", () => {
+  it("完整条件可BUY；20级上限无溢价，未覆盖上限和未知费用阻止买入", () => {
     const record = completeRecord(),
       configured = profile();
     const full = calculateValuation(record, configured);
@@ -147,6 +96,10 @@ describe("裸号估值的复算与可追溯输入", () => {
     expect(full.model_value).toBeGreaterThan(4000);
     const field = record.detail!.tabs[0].fields.find((item) => item.name === "防御修炼")!;
     field.value = "17/20";
+    const basicCap = calculateValuation(record, configured);
+    expect(basicCap.decision).toBe("BUY");
+    expect(basicCap.items.find((item) => item.name === "防御修炼上限")?.amount).toBe(0);
+    field.value = "17/26";
     const partial = calculateValuation(record, configured);
     expect(partial.decision).toBe("NEED_INFO");
     expect(partial.model_value).toBeNull();
@@ -171,6 +124,130 @@ describe("裸号估值的复算与可追溯输入", () => {
     expect(asset.input).toBe("1947803");
     expect(asset.amount).toBeNull();
     expect(asset.evidence[0].value).toBe("1947803");
+    expect(result.body_value).toBeGreaterThan(0);
+    expect(result.model_value).toBeNull();
+    expect(result.decision).toBe("NEED_INFO");
+  });
+  it("读取真实页面的相邻单元格、内嵌标签和进阶文字，祥瑞不当坐骑", () => {
+    const record = completeRecord();
+    record.detail!.tabs[0].fields = record.detail!.tabs[0].fields.filter(
+      (field) => !["神器套数", "坐骑总数"].includes(field.name),
+    );
+    record.detail!.tabs.push({
+      name: "坐骑",
+      text: "坐骑·已进阶\n祥瑞总数：5",
+      fields: [],
+      elements: [],
+      tooltips: [],
+      tables: [[["成长：2.3500"], ["主属性：", "敏捷"], ["敏捷：", "68+3(63%)"]]],
+    });
+    expect(readValuationFact(record, "成长", "坐骑")?.raw).toBe("2.3500");
+    expect(readValuationFact(record, "主属性", "坐骑")?.raw).toBe("敏捷");
+    expect(readValuationFact(record, "进阶状态", "坐骑")?.raw).toBe("已进阶");
+    expect(readValuationFact(record, "坐骑总数")).toBeNull();
+    record.detail!.tabs[0].text = "神器";
+    const missing = calculateValuation(record, profile());
+    expect(missing.model_value).toBeNull();
+    expect(missing.suggestions).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("补采神器"),
+        expect.stringContaining("补采全部坐骑"),
+      ]),
+    );
+    record.detail!.tabs[0].fields.push({ name: "坐骑总数", value: "1" });
+    const mount = calculateValuation(record, profile()).items.find((item) => item.name === "坐骑")!;
+    expect(mount.amount).toBe(100);
+    expect(mount.evidence.some((proof) => proof.value === "68+3(63%)")).toBe(true);
+  });
+  it("非零神器与多只坐骑接入完整核算，单套神器未满槽不估作满槽", () => {
+    const record = completeRecord(),
+      fields = record.detail!.tabs[0].fields;
+    fields.find((field) => field.name === "神器套数")!.value = "2";
+    fields.find((field) => field.name === "坐骑总数")!.value = "2";
+    for (const [name, value] of Object.entries({
+      神器1满槽: "是",
+      神器1类型: "十二水",
+      神器1总分: "91",
+      神器2满槽: "是",
+      神器2类型: "十二火",
+      神器2总分: "91",
+    }))
+      fields.push({ name, value });
+    for (const [i, percent] of [63, 75].entries())
+      record.detail!.tabs.push({
+        name: `坐骑 / ${i + 1}`,
+        text: "坐骑·已进阶",
+        fields: [],
+        elements: [],
+        tooltips: [],
+        tables: [[["成长：2.3500", "主属性百分比：" + percent + "%"]]],
+      });
+    const result = calculateValuation(record, profile());
+    expect(result.items.find((item) => item.name === "神器")?.amount).toBe(1900);
+    expect(result.items.find((item) => item.name === "坐骑")?.amount).toBe(300);
+    expect(result.decision).toBe("BUY");
+    expect(result.model_value).toBeGreaterThan(
+      calculateValuation(completeRecord(), profile()).model_value!,
+    );
+    fields.find((field) => field.name === "神器2满槽")!.value = "否";
+    expect(
+      calculateValuation(record, profile()).items.find((item) => item.name === "神器")?.amount,
+    ).toBe(1400);
+    expect(artifactPrice([{ full: true, type: "未知", score: 91 }])).toBeNull();
+  });
+  it("AI补提必须引用真实原文，补提后重新核算并生成结论", () => {
+    const record = completeRecord();
+    record.detail!.tabs[0].fields = record.detail!.tabs[0].fields.filter(
+      (field) => field.name !== "神器套数",
+    );
+    const quote = "共有1套神器；第1套神器：十二水，总分：91，12/12。";
+    record.detail!.tabs[0].text = quote;
+    const facts = [
+      { name: "神器套数", value: "1" },
+      { name: "神器1满槽", value: "是" },
+      { name: "神器1类型", value: "十二水" },
+      { name: "神器1总分", value: "91" },
+    ].map((entry) => ({ ...entry, path: "/detail/tabs/0/text", quote }));
+    expect(calculateValuation(record, profile()).decision).toBe("NEED_INFO");
+    expect(validateValuationFacts(facts, record)).toEqual(facts);
+    const full = calculateValuation(record, profile(), facts);
+    const result = validateValuation(
+      JSON.stringify({ ...full, reason: "建议买入，已核对神器资料。" }),
+      buildProductDocument(record),
+      record,
+      profile(),
+    );
+    expect(result.valuation?.decision).toBe("BUY");
+    expect(result.valuation?.items.find((item) => item.name === "神器")?.amount).toBe(1400);
+    expect(result.valuation?.ai_explanation).toContain("已核对神器");
+    expect(() =>
+      validateValuationFacts([{ ...facts[0], quote: "共有0套神器", value: "0" }], record),
+    ).toThrow("原文不一致");
+    expect(() => validateValuationFacts([{ ...facts[0], value: "0" }], record)).toThrow(
+      "无法从引用中复核",
+    );
+    expect(() => validateValuationFacts([facts[0], facts[0]], record)).toThrow("名称或引用无效");
+    record.detail!.tabs[0].fields.push({ name: "神器套数", value: "0" });
+    expect(() => validateValuationFacts(facts, record)).toThrow("已采集字段冲突");
+  });
+  it("已经超预算或完整估值时直接拒绝买入，缺费用不伪造可买结论", () => {
+    expect(purchase(1000, 1001, { ...DEFAULT_SETTINGS, b: null }).decision).toBe("PASS");
+    expect(purchase(null, 1001, { ...DEFAULT_SETTINGS, budget: 1000 }).decision).toBe("PASS");
+    expect(purchase(1000, 500, DEFAULT_SETTINGS).decision).toBe("NEED_INFO");
+    const record = completeRecord();
+    record.listing.price = "100000";
+    expect(
+      calculateValuation(
+        record,
+        createProfile(template, { ...profile().settings, extraCost: null }),
+      ).decision,
+    ).toBe("PASS");
+    const overBudget = calculateValuation(
+      analysisRecord(),
+      createProfile(template, { ...DEFAULT_SETTINGS, budget: 1 }),
+    );
+    expect(overBudget.decision).toBe("PASS");
+    expect(overBudget.reason).toContain("超过预算");
   });
   it("执行中参数修改不影响已冻结批次，校验重试保存实际请求", async () => {
     const crawl = new CrawlStore(":memory:"),
@@ -243,19 +320,28 @@ describe("裸号估值的复算与可追溯输入", () => {
         pendingProfile,
       );
       expect(preserved.valuation?.decision).toBe("NEED_INFO");
-      expect(preserved.valuation?.model_value).toBeNull();
+      expect(preserved.valuation?.body_value).toBeGreaterThan(0);
       expect(preserved.valuation?.missing_fields).toEqual(pending.missing_fields);
       expect(preserved.valuation?.pending_rules).toEqual(pending.pending_rules);
       expect(preserved.missingData).toEqual([...pending.missing_fields, ...pending.pending_rules]);
     }
   });
-  it("修改价格会停用旧算法，说明修改可直接生效；参数不偷设默认值", () => {
+  it("修改价格会停用旧算法；建议规则默认可算，实际费用仍需填写", () => {
     expect(createProfile(template).calculationCompatible).toBe(true);
     expect(createProfile(template + "\n请简洁解释。").calculationCompatible).toBe(true);
     const changed = createProfile(template.replace("| 未飞升 | 0 元 |", "| 未飞升 | 10 元 |"));
     expect(changed.calculationCompatible).toBe(false);
     expect(calculateValuation(completeRecord(), changed).model_value).toBeNull();
-    expect(normalizeSettings({})).toMatchObject({ b: null, extraCost: null });
+    expect(normalizeSettings({})).toMatchObject({
+      b: 0.8,
+      extraCost: null,
+      strengthMode: "single",
+      capMode: "effective",
+    });
+    expect(normalizeSettings({ b: null, strengthMode: null })).toMatchObject({
+      b: null,
+      strengthMode: null,
+    });
     expect(normalizeSettings({ extraCost: 0, budget: 0 })).toMatchObject({
       extraCost: 0,
       budget: 0,
@@ -280,6 +366,22 @@ describe("裸号估值的复算与可追溯输入", () => {
       );
       expect(readFileSync(file, "utf8")).toBe(template);
       expect(loadProfile(crawl.db, file).hash).toBe(saved.hash);
+      const cleared = saveProfile(
+        crawl.db,
+        {
+          template,
+          settings: { ...saved.settings, b: null, strengthMode: null, schoolCapConfirmed: false },
+          baseHash: saved.hash,
+        },
+        file,
+      );
+      expect(loadProfile(crawl.db, file).settings).toMatchObject({
+        b: null,
+        strengthMode: null,
+        schoolCapConfirmed: false,
+        extraCost: 0,
+      });
+      expect(cleared.hash).not.toBe(saved.hash);
       expect(() =>
         saveProfile(
           crawl.db,
@@ -291,6 +393,64 @@ describe("裸号估值的复算与可追溯输入", () => {
     } finally {
       crawl.db.close();
       rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  it("旧的未设置规则改用建议方案，但不填造金价和额外费用", () => {
+    const crawl = new CrawlStore(":memory:");
+    try {
+      loadProfile(crawl.db);
+      crawl.db.prepare("INSERT INTO analysis_settings VALUES(1,?)").run(
+        JSON.stringify({
+          ...DEFAULT_SETTINGS,
+          b: null,
+          strengthMode: null,
+          capMode: null,
+          holyLevelPremium: null,
+          opportunityMode: null,
+          mountBoundary: null,
+          adjustmentMode: null,
+          adjustmentScope: null,
+          schoolCapConfirmed: false,
+          sumAdvancedMounts: false,
+        }),
+      );
+      const migrated = loadProfile(crawl.db);
+      expect(migrated.settings).toMatchObject({
+        b: 0.8,
+        strengthMode: "single",
+        capMode: "effective",
+        holyLevelPremium: false,
+        opportunityMode: "formula",
+        mountBoundary: "lower",
+        adjustmentMode: "add",
+        adjustmentScope: "body",
+        schoolCapConfirmed: true,
+        sumAdvancedMounts: true,
+        extraCost: null,
+        servers: [],
+      });
+    } finally {
+      crawl.db.close();
+    }
+  });
+  it("算法升级后旧批次不能续算混入新价格，也不会调用AI", async () => {
+    const crawl = new CrawlStore(":memory:"),
+      record = completeRecord();
+    crawl.observe(record.listing);
+    crawl.save(record.listing, record.detail!);
+    const store = new AnalysisStore(crawl.db),
+      client = vi.fn();
+    const runner = new AnalysisRunner(store, client);
+    try {
+      const old = { ...profile(), calculationVersion: "bare-role-v2" };
+      const id = store.createRun("codex", "fixture-model", true, old);
+      expect(store.run(id)?.calculationVersion).toBe("bare-role-v2");
+      await expect(runner.resume(id)).rejects.toThrow("按新规则开始分析");
+      await expect(runner.start("codex", true, old)).rejects.toThrow("按新规则开始分析");
+      expect(client).not.toHaveBeenCalled();
+    } finally {
+      await runner.shutdown();
+      crawl.db.close();
     }
   });
   it("只分析1件，缓存区分Prompt和参数，调用和批次冻结输入", async () => {

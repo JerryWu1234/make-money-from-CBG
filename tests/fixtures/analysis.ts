@@ -18,6 +18,58 @@ export function analysisRecord(key = "a"): SavedRoleRecord {
     detail: { ...record.detail!, url: record.listing.url, formatVersion: 3 },
   } as SavedRoleRecord;
 }
+export function valuationRecord(key = "a"): SavedRoleRecord {
+  const record = analysisRecord(key);
+  record.listing.price = "500.00";
+  record.listing.summary = { iCash: 0, iSaving: 0, xianyu: 0 };
+  const fields = {
+    "飞升/渡劫/化圣": "未飞升",
+    级别: "109",
+    攻击修炼: "20/25",
+    法术修炼: "0/25",
+    防御修炼: "17/25",
+    抗法修炼: "10/25",
+    攻击控制力: "20",
+    法术控制力: "20",
+    防御控制力: "20",
+    抗法控制力: "20",
+    靓号特效: "否",
+    月饼粽子机缘: "40/69",
+    神器套数: "0",
+    坐骑总数: "0",
+    储备金: "0",
+  };
+  record.detail!.tabs = [
+    {
+      name: "人物/修炼",
+      text: "",
+      fields: Object.entries(fields).map(([name, value]) => ({ name, value })),
+      tables: [],
+      elements: [],
+      tooltips: [],
+    },
+    {
+      name: "技能",
+      text: "",
+      fields: [],
+      tables: [],
+      elements: [],
+      tooltips: [],
+      items: [
+        ...Array.from({ length: 7 }, (_, i) => ({
+          index: i,
+          kind: "skill" as const,
+          category: "师门技能",
+          name: "师门" + i,
+          level: "119",
+        })),
+        { index: 7, kind: "skill", category: "技能", name: "强壮", level: "0" },
+        { index: 8, kind: "skill", category: "技能", name: "神速", level: "0" },
+      ],
+    },
+  ];
+  return record;
+}
 export function analysisResponse(
   record: SavedRoleRecord,
   score = 80,

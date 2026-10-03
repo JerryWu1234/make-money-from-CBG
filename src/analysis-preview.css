@@ -1500,6 +1500,24 @@ body:has(.analysis-page) #root {
   max-width: none;
   margin-bottom: 0;
 }
+.analysis-valuation-result .analysis-valuation-decision-WATCH,
+.analysis-valuation-result .analysis-valuation-decision-NEED_INFO,
+.analysis-valuation-result .analysis-valuation-decision-OUT_OF_SCOPE {
+  border-color: rgba(245, 201, 108, 0.35);
+  background: rgba(245, 201, 108, 0.08);
+}
+.analysis-valuation-result .analysis-valuation-decision-WATCH strong,
+.analysis-valuation-result .analysis-valuation-decision-NEED_INFO strong,
+.analysis-valuation-result .analysis-valuation-decision-OUT_OF_SCOPE strong {
+  color: #f5c96c;
+}
+.analysis-valuation-result .analysis-valuation-decision-PASS {
+  border-color: rgba(248, 155, 155, 0.35);
+  background: rgba(248, 155, 155, 0.08);
+}
+.analysis-valuation-result .analysis-valuation-decision-PASS strong {
+  color: #f89b9b;
+}
 .analysis-result-dialog button {
   cursor: pointer;
   font: inherit;
