@@ -4,6 +4,7 @@ import type { Listing, RoleDetail, TabSnapshot } from "./types";
 import { assertAvailable, checkAborted, pace } from "./page";
 import { CAPTURE_VERSION, coreEquipmentDescription, itemFromAttributes } from "./compact";
 import { collectPets } from "./pets";
+import { captureValuation } from "./valuation-capture";
 
 export const MAIN_TABS = [
   "人物/修炼",
@@ -142,12 +143,12 @@ async function settled(page: Page, signal: AbortSignal) {
   await pace(signal, 600, 500);
   await assertAvailable(page);
 }
-export async function collectDetail(
+async function openDetail(
   page: Page,
   item: Listing,
   signal: AbortSignal,
-  report: (message: string) => void = () => {},
-): Promise<RoleDetail> {
+  report: (message: string) => void,
+) {
   checkAborted(signal);
   report("正在打开商品详情页…");
   await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 45000 });
@@ -164,6 +165,83 @@ export async function collectDetail(
     while (root.parentElement && root.innerText.trim().length < 160) root = root.parentElement;
     root.setAttribute("data-cbg-detail-root", "true");
   });
+}
+
+async function captureMountEntries(
+  page: Page,
+  signal: AbortSignal,
+  report: (message: string) => void,
+) {
+  const tabs: TabSnapshot[] = [];
+  const entries = page.locator("#RoleRiders img[data_idx]:visible");
+  for (let index = 0; index < (await entries.count()); index++) {
+    checkAborted(signal);
+    report(`正在读取第 ${index + 1} 只坐骑…`);
+    await entries.nth(index).evaluate((el) => (el as HTMLElement).click());
+    await pace(signal, 250, 150);
+    tabs.push(await capture(page, `坐骑 / 第${index + 1}只`));
+  }
+  return tabs;
+}
+
+/** Backfill only pricing sections; retain the previous pet, equipment and skill snapshots. */
+export async function collectValuationDetail(
+  page: Page,
+  item: Listing,
+  previous: RoleDetail,
+  signal: AbortSignal,
+  report: (message: string) => void = () => {},
+) {
+  await openDetail(page, item, signal, report);
+  const valuation = await captureValuation(page);
+  if (
+    valuation.source.eid &&
+    (valuation.source.eid !== item.eid || valuation.source.serverId !== item.serverId)
+  )
+    throw Object.assign(new Error("详情商品身份不一致，已停止补采"), {
+      name: "IncompleteDetailError",
+    });
+  const now = new Date().toISOString();
+  const tabs = previous.tabs
+    .filter((tab) => !/^坐骑\s*\//.test(tab.name))
+    .map((tab) => ({ ...tab, collectedAt: tab.collectedAt || previous.collectedAt }));
+  for (const name of ["人物/修炼", "道具/法宝", "坐骑"]) {
+    checkAborted(signal);
+    report("正在补采估值资料：" + name);
+    await page
+      .getByText(name, { exact: true })
+      .filter({ visible: true })
+      .first()
+      .evaluate((el) => (el as HTMLElement).click());
+    await settled(page, signal);
+    const snapshot = { ...(await capture(page, name)), collectedAt: now };
+    const index = tabs.findIndex((tab) => tab.name === name);
+    if (index >= 0)
+      tabs[index] = {
+        ...snapshot,
+        items: tabs[index].items,
+        itemsCollectedAt:
+          tabs[index].itemsCollectedAt || tabs[index].collectedAt || previous.collectedAt,
+      };
+    else tabs.push(snapshot);
+    if (name === "坐骑")
+      tabs.push(
+        ...(await captureMountEntries(page, signal, report)).map((tab) => ({
+          ...tab,
+          collectedAt: now,
+        })),
+      );
+  }
+  return { ...previous, captureVersion: CAPTURE_VERSION, valuation, tabs, collectedAt: now };
+}
+
+export async function collectDetail(
+  page: Page,
+  item: Listing,
+  signal: AbortSignal,
+  report: (message: string) => void = () => {},
+): Promise<RoleDetail> {
+  await openDetail(page, item, signal, report);
   const tabs: TabSnapshot[] = [];
   for (const name of MAIN_TABS) {
     checkAborted(signal);
@@ -194,6 +272,7 @@ export async function collectDetail(
       snapshot.fields = [];
       snapshot.tables = [];
     } else {
+      if (name === "坐骑") tabs.push(...(await captureMountEntries(page, signal, report)));
       await inspectItems(page, snapshot, signal, report);
     }
     const nested = page.locator(
@@ -268,6 +347,7 @@ export async function collectDetail(
   report("全部标签读取完成，正在保存详情…");
   return {
     captureVersion: CAPTURE_VERSION,
+    valuation: await captureValuation(page),
     url: item.url,
     collectedAt: new Date().toISOString(),
     tabs,

@@ -125,7 +125,9 @@ export function SavedRoleList({
                       </td>
                       <td>
                         {item.status === "complete"
-                          ? "已采集"
+                          ? item.valuationReady === false
+                            ? "估值资料待补齐"
+                            : "已采集"
                           : item.status === "failed"
                             ? "待重试"
                             : running

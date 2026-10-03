@@ -4,12 +4,13 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { textHash } from "./contract";
 import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
+import { marketServers } from "./market";
 import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "./valuation-settings";
 
 export const PROMPT_FILE = resolve("prompts/role-valuation.md");
-export const CALCULATION_VERSION = "bare-role-v3";
+export const CALCULATION_VERSION = "bare-role-v4";
 // Update alongside the calculator when changing pricing sections III through VIII.
-const PRICING_HASH = "99c77c3c580a9c9e5f735dfb1a7185f1532020dd66b1356ec5b71e2c1f279e23";
+const PRICING_HASH = "0771c64aa63069b2a1c936ad7a3f3727a5e9f0f3e4e60e8b98f8a7cd3238dee1";
 export const DEFAULT_SETTINGS: ValuationSettings = {
   b: RECOMMENDED_BUY_FACTOR,
   a: null,
@@ -49,7 +50,7 @@ export function normalizeSettings(input: unknown): ValuationSettings {
   if (value.servers !== undefined && (!Array.isArray(value.servers) || value.servers.length > 200))
     throw new Error("区服参数格式错误");
   const servers = ((value.servers || []) as unknown[])
-    .map((entry) => {
+    .map((entry): ValuationSettings["servers"][number] => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry))
         throw new Error("区服参数格式错误");
       const row = entry as Record<string, unknown>;
@@ -70,6 +71,7 @@ export function normalizeSettings(input: unknown): ValuationSettings {
         throw new Error("基准报价单位确认无效");
       return {
         serverId: row.serverId,
+        ...(row.source === "auto" || row.source === "manual" ? { source: row.source } : {}),
         age: age as ValuationSettings["servers"][number]["age"],
         rank: positive("rank"),
         goldPrice: positive("goldPrice"),
@@ -149,7 +151,28 @@ export function loadProfile(db: DatabaseSync, file = PROMPT_FILE) {
           sumAdvancedMounts: RECOMMENDED_RULES.sumAdvancedMounts,
         }
       : stored || DEFAULT_SETTINGS;
-  return createProfile(readFileSync(file, "utf8"), settings);
+  const market = marketServers(db);
+  const manual = normalizeSettings(settings).servers.filter(
+    (row: ValuationSettings["servers"][number]) => row.source !== "auto",
+  );
+  const listed = new Set(
+    db.prepare("SELECT 1 FROM sqlite_master WHERE name='listings'").get()
+      ? db
+          .prepare("SELECT server_id FROM listings GROUP BY server_id")
+          .all()
+          .map((row) => String(row.server_id))
+      : [],
+  );
+  const available = market.filter(
+    (row) =>
+      listed.has(row.serverId) &&
+      !manual.some((item: ValuationSettings["servers"][number]) => item.serverId === row.serverId),
+  );
+  const profile = createProfile(readFileSync(file, "utf8"), {
+    ...settings,
+    servers: [...manual, ...available],
+  });
+  return { ...profile, marketSources: available };
 }
 export function saveProfile(db: DatabaseSync, input: unknown, file = PROMPT_FILE) {
   if (!input || typeof input !== "object" || Array.isArray(input))
@@ -173,7 +196,13 @@ export function saveProfile(db: DatabaseSync, input: unknown, file = PROMPT_FILE
     replaced = true;
     db.prepare(
       "INSERT INTO analysis_settings VALUES(1,?) ON CONFLICT(id) DO UPDATE SET settings_json=excluded.settings_json",
-    ).run(JSON.stringify({ ...next.settings, settingsVersion: 2 }));
+    ).run(
+      JSON.stringify({
+        ...next.settings,
+        servers: next.settings.servers.filter((row) => row.source !== "auto"),
+        settingsVersion: 2,
+      }),
+    );
     db.exec("COMMIT");
     return next;
   } catch (error) {

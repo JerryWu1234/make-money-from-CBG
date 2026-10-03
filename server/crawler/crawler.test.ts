@@ -29,7 +29,7 @@ const item = (id: number, time = 10000 - id): Listing => ({
   orderTime: new Date(time * 1000).toISOString(),
 });
 const detail = (listing: Listing): RoleDetail => ({
-  captureVersion: 3,
+  captureVersion: 4,
   url: listing.url,
   collectedAt: new Date().toISOString(),
   tabs: [
@@ -79,6 +79,60 @@ const source = (pages: Listing[][]): CrawlSource => {
     detail: vi.fn(async (row) => detail(row)),
   };
 };
+describe("仅补齐估值资料", () => {
+  it("旧完整记录和漏采资料可重试，补采不扫列表、不推进断点并更新实际售价", async () => {
+    const db = memory(),
+      row = item(1),
+      anchor = item(2);
+    db.observe(row);
+    db.observe(anchor);
+    db.save(anchor, detail(anchor), checkpoint(anchor));
+    db.save(row, { ...detail(row), captureVersion: 3 });
+    const before = db.checkpoint();
+    const collector = source([]);
+    collector.prepare = vi.fn();
+    collector.detail = vi.fn(async (listing) => ({
+      ...detail(listing),
+      valuation: {
+        version: 1 as const,
+        fields: [],
+        issues: [],
+        source: { askingPrice: "16888.00" },
+      },
+    }));
+    await crawl(collector, db, signal(), () => {}, { backfillOnly: true, keys: [row.key] });
+    expect(collector.prepare).not.toHaveBeenCalled();
+    expect(collector.page).not.toHaveBeenCalled();
+    expect(db.checkpoint()).toEqual(before);
+    expect((db.detail(row.key) as { listing: Listing }).listing.price).toBe("16888.00");
+    expect(db.retryItems()).toEqual([]);
+    const incomplete = {
+      ...detail(row),
+      valuation: { version: 1 as const, fields: [], issues: ["坐骑成长缺失"], source: {} },
+    };
+    db.save(row, incomplete);
+    expect(db.retryItems([row.key])).toHaveLength(1);
+    expect(db.records().items.find((record) => record.key === row.key)?.valuationReady).toBe(false);
+  });
+  it("补采保留原始压缩来源，失败后旧详情仍可查看和重试", () => {
+    const db = memory(),
+      row = item(1);
+    db.observe(row);
+    const previous = { ...detail(row), captureVersion: 3 };
+    db.save(row, previous);
+    db.beginRetry(row.key);
+    db.fail(row.key, "网页资料未完整读取");
+    expect((db.detail(row.key) as { detail: RoleDetail }).detail.tabs).toHaveLength(
+      previous.tabs.length,
+    );
+    expect(db.retryItems()).toHaveLength(1);
+    db.save(row, detail(row));
+    const archived = db.db
+      .prepare("SELECT source_gzip FROM role_source_history WHERE listing_key=?")
+      .get(row.key)!;
+    expect(JSON.parse(gunzipSync(archived.source_gzip as Uint8Array).toString())).toEqual(previous);
+  });
+});
 describe("商品身份和时间", () => {
   it("仅将明确显示已上架的商品作为续采锚点", () => {
     expect(onShelfFromText("是否上架：已上架")).toBe(true);

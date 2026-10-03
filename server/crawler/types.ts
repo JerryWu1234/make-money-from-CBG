@@ -2,6 +2,7 @@ export interface Listing {
   key: string;
   serverId: string;
   serverName?: string;
+  serverAge?: "one" | "three" | "older";
   highlights?: string[];
   eid: string;
   ordersn: string;
@@ -34,6 +35,8 @@ export interface CrawlSource {
   detail: (item: Listing) => Promise<RoleDetail>;
 }
 export interface TabSnapshot {
+  collectedAt?: string;
+  itemsCollectedAt?: string;
   name: string;
   text: string;
   fields: { name: string; value: string }[];
@@ -62,7 +65,15 @@ export interface DetailItem {
   category?: string;
   level?: string;
 }
+export interface ValuationCapture {
+  version: 1;
+  fields: { name: string; value: string; tab: string }[];
+  issues: string[];
+  source: Record<string, unknown>;
+}
 export interface RoleDetail {
+  valuation?: ValuationCapture;
+
   formatVersion?: number;
   captureVersion?: number;
   url: string;
@@ -125,6 +136,7 @@ export interface SavedListingPage {
     lastAttemptAt: string | null;
     attemptCount: number;
     status: string;
+    valuationReady?: boolean;
     error: string | null;
   }[];
 }

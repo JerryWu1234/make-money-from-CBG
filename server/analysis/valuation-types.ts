@@ -18,6 +18,7 @@ export type ValuationSettings = {
   adjustmentScope: "body" | "all" | null;
   servers: {
     serverId: string;
+    source?: "auto" | "manual";
     age: "one" | "three" | "older" | null;
     rank: number | null;
     goldPrice: number | null;
@@ -26,6 +27,7 @@ export type ValuationSettings = {
   }[];
 };
 export type AnalysisProfile = {
+  marketSources?: import("./market").MarketServer[];
   version: "role-valuation-v1";
   template: string;
   promptHash: string;
@@ -55,6 +57,7 @@ export type ValuationResult = {
   extra_cost: number | null;
   total_cost: number | null;
   model_value: number | null;
+  max_total_cost?: number | null;
   max_listing_price: number | null;
   ideal_listing_price: number | null;
   margin_of_safety: number | null;

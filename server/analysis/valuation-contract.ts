@@ -78,6 +78,7 @@ export function valuationPrompt(
 ) {
   const computed = calculateValuation(record, profile);
   const {
+    max_total_cost: _totalLimit,
     known_subtotal: _subtotal,
     calculation_version: _version,
     body_value: _body,
@@ -97,6 +98,7 @@ export function valuationPrompt(
       "。",
     "以下参数是本批次实际使用的设置，其中明示了平台建议的计价方案与买入系数。null 仍表示尚未提供，不能猜测费用、金价或排名。区服数据只匹配当前 serverId。",
     JSON.stringify(profile.settings),
+    "自动区服参数的来源与读取时间：" + JSON.stringify(profile.marketSources || []),
     "下方是初步计算，尚未识别的原文资料可通过 extracted_facts 补提后重新计算；不要仅复述待确认。补提仅支持神器套数、坐骑总数、进阶状态、主属性百分比，以及神器1至3的满槽/类型/总分、坐骑1至9的成长/进阶状态/主属性百分比。",
     "每条补提必须给出原文 JSON Pointer path 和逐字 quote。quote 须包含对应名称及冒号标记的值，或明确“共有N套神器/共有N只坐骑”；分项可引用“第N套神器/第N只坐骑”下的满槽、五行类型、总分、成长、进阶及主属性比例。进阶可引用“坐骑·已进阶”，明确“没有/未开启/未解锁神器”可提为神器套数0。标题空白、未看到、祥瑞数量不能作为不存在或坐骑总数的证据。没有可补提的事实时 extracted_facts 返回空数组。",
     "金额、confirmed 和 decision 必须符合补提后的事实与本批次规则，服务端会复核来源并重算。items 逐项按原名返回，不得添加商品原文没有的事实。reason 先写建议买入、等降价或暂不买以及具体理由；200字以内。关键资料真缺失时明确说缺什么和怎么补，不生成没有依据的完整价格。",

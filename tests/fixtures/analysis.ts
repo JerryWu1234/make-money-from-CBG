@@ -15,7 +15,7 @@ export function analysisRecord(key = "a"): SavedRoleRecord {
       orderTime: null,
       attrs: {},
     },
-    detail: { ...record.detail!, url: record.listing.url, formatVersion: 3 },
+    detail: { ...record.detail!, url: record.listing.url, formatVersion: 3, captureVersion: 4 },
   } as SavedRoleRecord;
 }
 export function valuationRecord(key = "a"): SavedRoleRecord {

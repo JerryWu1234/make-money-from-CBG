@@ -20,6 +20,7 @@ const getRoutes = new Set([
 const postRoutes = new Set([
   "/api/browser/open",
   "/api/crawl/start",
+  "/api/crawl/backfill",
   "/api/crawl/stop",
   "/api/crawl/clear",
   "/api/scan/configure",
@@ -98,7 +99,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
       let result: unknown;
       switch (pathname) {
         case "/api/analysis/settings":
-          result = analysis.analysisSettings();
+          result = await analysis.analysisSettings();
           break;
         case "/api/analysis/settings/save":
           result = analysis.saveAnalysisSettings(input);
@@ -238,8 +239,20 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
       let result: unknown;
       switch (pathname) {
         case "/api/crawl/start":
+        case "/api/crawl/backfill":
           {
-            const attempt = await crawler.startCrawl();
+            const keys = (body as Record<string, unknown>).keys;
+            if (
+              keys !== undefined &&
+              (!Array.isArray(keys) ||
+                keys.length > 100 ||
+                keys.some((key) => typeof key !== "string" || key.length > 100))
+            )
+              throw new Error("补采商品列表无效");
+            const attempt = await crawler.startCrawl("manual", undefined, {
+              backfillOnly: pathname === "/api/crawl/backfill",
+              keys: keys as string[] | undefined,
+            });
             if (attempt.started) (await import("./crawler/schedule")).disableScanSchedule();
             result = attempt.status;
           }

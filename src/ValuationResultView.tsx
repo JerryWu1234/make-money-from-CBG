@@ -31,6 +31,8 @@ export function ValuationResultView({
   if (amount.value !== null) metrics.push([amount.label, amount.value]);
   if (result.asking_price !== null) metrics.push(["当前挂牌价", result.asking_price]);
   if (result.max_listing_price !== null) metrics.push(["建议最高买入价", result.max_listing_price]);
+  if (result.max_listing_price === null && result.max_total_cost != null)
+    metrics.push(["建议最高总成本（含费用）", result.max_total_cost]);
   if (result.ideal_listing_price !== null) metrics.push(["理想买入价", result.ideal_listing_price]);
   if (result.total_cost !== null) metrics.push(["购买总成本", result.total_cost]);
   const suggestions = result.suggestions || [];
@@ -63,7 +65,7 @@ export function ValuationResultView({
       <p>按裸号规则估值，装备、灵饰、召唤兽个体和锦衣未计价。</p>
       {result.model_value === null && (
         <p className="analysis-pending-note">
-          当前金额不代表完整商品价值。补齐关键资料和区服参数后，再判断买入上限。
+          当前金额是已算部分。请按下面的具体缺项补齐资料或定价规则，再判断买入上限。
         </p>
       )}
       {!!suggestions.length && (

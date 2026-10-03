@@ -74,6 +74,22 @@ export function readValuationFact(
   supplements: ValuationFact[] = [],
 ): Fact | null {
   const labels = aliases[name] || [name];
+  const captured = record.detail?.valuation;
+  const index =
+    captured?.fields.findIndex(
+      (field) => labels.includes(field.name) && (!tabName || field.tab === tabName),
+    ) ?? -1;
+  if (captured && index >= 0)
+    return {
+      raw: captured.fields[index].value,
+      evidence: [
+        {
+          path: `/detail/valuation/fields/${index}/value`,
+          value: captured.fields[index].value,
+          reason: "网页角色数据：" + name,
+        },
+      ],
+    };
   for (const [ti, tab] of (record.detail?.tabs || []).entries()) {
     if (tabName && tab.name !== tabName) continue;
     const proof = (raw: string, path: string, value = raw): Fact => ({

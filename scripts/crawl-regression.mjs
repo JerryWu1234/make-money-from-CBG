@@ -37,6 +37,7 @@ const { collectDetail, MAIN_TABS } = await import(
     "../viewport": viewportUrl,
     "./compact": compactUrl,
     "./pets": petsUrl,
+    "./valuation-capture": await moduleUrl("server/crawler/valuation-capture.ts"),
   })
 );
 const { prepareList, gotoPage, hoverListing, readListings } = await import(pageUrl);
@@ -116,7 +117,7 @@ try {
     store.save(
       item,
       {
-        captureVersion: 3,
+        captureVersion: 4,
         url: item.url,
         collectedAt: new Date().toISOString(),
         tabs: [],

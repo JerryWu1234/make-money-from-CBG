@@ -19,7 +19,19 @@ test("估值页面：补齐设置，展示可买与不可买结论、金额和�
     crawl.save(record.listing, record.detail!);
   }
   const store = new AnalysisStore(crawl.db);
-  let profile = createProfile(await readFile(PROMPT_FILE, "utf8"));
+  const automaticServer = {
+    serverId: analysisRecord().listing.serverId,
+    serverName: "测试服",
+    age: "older" as const,
+    rank: 13,
+    goldPrice: 218.29,
+    goldUnit: 30000000,
+    baselineUnitConfirmed: true,
+    source: "auto" as const,
+    fetchedAt: new Date().toISOString(),
+    sources: ["https://www.aimhxy.com/hot", "https://www.aimhxy.com/mhb"],
+  };
+  let profile = createProfile(await readFile(PROMPT_FILE, "utf8"), { servers: [automaticServer] });
   let calls = 0;
   const runner = new AnalysisRunner(store, async (_provider, model) => ({
     model: model || "fixture-model",
@@ -61,6 +73,7 @@ test("估值页面：补齐设置，展示可买与不可买结论、金额和�
               profile,
               promptFile: PROMPT_FILE,
               servers: [{ serverId: analysisRecord().listing.serverId, serverName: "测试服" }],
+              market: [automaticServer],
             };
             break;
           case "/api/analysis/settings/save":
@@ -122,7 +135,12 @@ test("估值页面：补齐设置，展示可买与不可买结论、金额和�
     const settings = page.getByRole("dialog", { name: "裸号估值与购买设置" });
     await settings.getByLabel("最高买入系数 b", { exact: true }).fill("0.8");
     await settings.getByLabel("全部额外成本 F（元）", { exact: true }).fill("0");
-    await settings.getByText("区服参数：按服务器分别设置", { exact: true }).click();
+    await settings.getByText("全服行情：自动匹配每件商品的区服", { exact: true }).click();
+    await expect(settings.getByLabel("热度排名 r", { exact: true })).toHaveValue("13");
+    await expect(settings.getByLabel("金价 G（元）", { exact: true })).toHaveValue("218.29");
+    await expect(settings.getByLabel("报价单位 U（游戏币数）", { exact: true })).toHaveValue(
+      "30000000",
+    );
     await settings.getByRole("combobox", { name: "区服年代", exact: true }).selectOption("three");
     await settings.getByLabel("热度排名 r", { exact: true }).fill("10");
     await settings.getByText("编辑完整 Prompt", { exact: true }).click();
@@ -199,6 +217,26 @@ test("估值页面：补齐设置，展示可买与不可买结论、金额和�
       fullPage: true,
     });
     await settings.getByRole("button", { name: "关闭分析设置" }).click();
+    await page.setViewportSize({ width: 1100, height: 1000 });
+    await page.getByRole("button", { name: "分析设置", exact: true }).click();
+    await settings.getByText("全服行情：自动匹配每件商品的区服", { exact: true }).click();
+    await settings.getByRole("button", { name: "恢复本服自动行情" }).click();
+    await expect(settings.getByRole("combobox", { name: "区服年代", exact: true })).toHaveValue(
+      "older",
+    );
+    await expect(settings.getByLabel("热度排名 r", { exact: true })).toHaveValue("13");
+    await settings.getByLabel("全部额外成本 F（元）", { exact: true }).fill("");
+    await settings.getByRole("button", { name: "保存设置", exact: true }).click();
+    await page.getByRole("button", { name: "先分析 3 件", exact: true }).click();
+    await expect(
+      page.getByText("本批次完成：3 件成功，0 件失败，0 件复用已有结果。", { exact: true }),
+    ).toBeVisible();
+    const pricedWithoutFees = page.getByRole("row").filter({ hasText: "角色b" });
+    await pricedWithoutFees.getByRole("button", { name: "查看分析", exact: true }).click();
+    await expect(buyResult.getByText("裸号参考估值", { exact: true })).toBeVisible();
+    await expect(buyResult.getByText("建议最高总成本（含费用）", { exact: true })).toBeVisible();
+    await expect(buyResult.getByText("建议最高买入价", { exact: true })).not.toBeVisible();
+    await expect(buyResult.getByText("暂无法计算", { exact: true })).not.toBeVisible();
   } finally {
     await runner.shutdown();
     crawl.db.close();

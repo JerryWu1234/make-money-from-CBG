@@ -6,6 +6,8 @@ import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "../server/analysis/va
 type SettingsResponse = {
   profile: AnalysisProfile;
   promptFile: string;
+  marketError?: string;
+  market?: import("../server/analysis/market").MarketServer[];
   servers: { serverId: string; serverName: string }[];
 };
 export function AnalysisSettings({
@@ -126,7 +128,7 @@ export function AnalysisSettings({
             ...current,
             servers: [
               ...current.servers.filter((row) => row.serverId !== id),
-              { ...server(id), [key]: value },
+              { ...server(id), [key]: value, source: "manual" },
             ],
           }
         : current,
@@ -177,7 +179,7 @@ export function AnalysisSettings({
       </header>
       <p>
         每次开始分析都会冻结这份 Prompt
-        和参数。新批次使用新设置，历史结果保留。买入上限默认是估值的八折；实际费用、金价和排名需要填写。
+        和参数。新批次使用新设置，历史结果保留。买入上限默认是估值的八折；区服金价和热度自动匹配，实际交易费用需要填写。
       </p>
       {error && (
         <p role="alert" className="analysis-pending-note">
@@ -189,7 +191,7 @@ export function AnalysisSettings({
         <>
           <h3>购买条件</h3>
           <p className="analysis-pending-note">
-            建议先用八折买入、强壮神速按当前等级计价的方案。金价和交易费用按实际填写，确实无费用时填0。
+            默认八折买入，强壮神速按当前等级计价。金价自动读取，交易费用按实际填写，确实无费用时填0。
           </p>
           <button
             type="button"
@@ -279,9 +281,20 @@ export function AnalysisSettings({
             </label>
           </details>
           <details className="analysis-settings-section">
-            <summary>区服参数：按服务器分别设置</summary>
+            <summary>全服行情：自动匹配每件商品的区服</summary>
             <p>
-              金价 G 是每 U 个游戏币的人民币价。三年外还需确认 G 与 Prompt 基准210的报价单位一致。
+              按商品已有服务器 ID
+              匹配全服金价与热度榜，默认报价和基准210元都按3000万游戏币计算。修改某个区服后，该服使用手动参数。
+            </p>
+            {source.marketError && <p role="status">{source.marketError}；可手动填写所需参数。</p>}
+            <p>
+              <a href="https://www.aimhxy.com/mhb" target="_blank" rel="noreferrer">
+                金价来源：梦幻天眼
+              </a>{" "}
+              ·{" "}
+              <a href="https://www.aimhxy.com/hot" target="_blank" rel="noreferrer">
+                热度来源：梦幻天眼
+              </a>
             </p>
             {serverRows.map((row) => {
               const value = server(row.serverId);
@@ -290,6 +303,36 @@ export function AnalysisSettings({
                   <legend>
                     {row.serverName} · {row.serverId}
                   </legend>
+                  <p>{value.source === "auto" ? "已按本商品区服自动匹配" : "手动参数"}</p>
+                  {source.market?.find((item) => item.serverId === row.serverId) &&
+                    value.source !== "auto" && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSettings((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  servers: [
+                                    ...current.servers.filter(
+                                      (item) => item.serverId !== row.serverId,
+                                    ),
+                                    source.market!.find((item) => item.serverId === row.serverId)!,
+                                  ],
+                                }
+                              : current,
+                          )
+                        }
+                      >
+                        恢复本服自动行情
+                      </button>
+                    )}
+                  {value.source === "auto" && (
+                    <small>
+                      行情读取时间：
+                      {source.market?.find((item) => item.serverId === row.serverId)?.fetchedAt}
+                    </small>
+                  )}
                   <div className="analysis-settings-grid">
                     <label>
                       区服年代

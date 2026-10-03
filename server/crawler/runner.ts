@@ -12,12 +12,13 @@ export async function crawl(
   store: CrawlStore,
   signal: AbortSignal,
   publish: (state: Partial<CrawlStatus>) => void,
+  options: { backfillOnly?: boolean; keys?: string[] } = {},
 ) {
   signal.throwIfAborted();
   let saved = 0,
     skipped = 0,
     failed = 0;
-  const retries = store.retryItems();
+  const retries = store.retryItems(options.keys);
   const retryFailed = new Set<string>();
   if (retries.length) {
     publish({
@@ -40,7 +41,11 @@ export async function crawl(
         const detail = await source.detail(item);
         signal.throwIfAborted();
         // 补采旧记录只补详情，不改变正常列表续采的成功断点。
-        store.save(item, detail);
+        const price = detail.valuation?.source.askingPrice;
+        store.save(
+          typeof price === "string" && /^\d+(?:\.\d+)?$/.test(price) ? { ...item, price } : item,
+          detail,
+        );
         saved++;
         publish({ saved, retryCompleted: index + 1, totalSaved: store.count() });
       } catch (error) {
@@ -58,6 +63,19 @@ export async function crawl(
         if (!(error instanceof Error && error.name === "IncompleteDetailError")) throw error;
       }
     }
+  }
+  if (options.backfillOnly) {
+    publish({
+      phase: "completed",
+      running: false,
+      current: undefined,
+      detailProgress: undefined,
+      saved,
+      failed,
+      totalSaved: store.count(),
+      message: `估值资料补采完成：更新 ${saved} 件，${failed} 件待重试。`,
+    });
+    return;
   }
   const plan = await prepareCrawlPages(source, store, signal, publish);
   const { numbers, backfillComplete, fullScan } = plan;

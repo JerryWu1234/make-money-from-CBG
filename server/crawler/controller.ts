@@ -4,7 +4,7 @@ import { checkCbgStatus } from "../cbg";
 import { crawl } from "./runner";
 import { createCrawlSource } from "./source";
 import { CrawlStore } from "./store";
-import type { CrawlStatus } from "./types";
+import type { CrawlStatus, SavedRoleRecord } from "./types";
 import { diagnostics, watchWorkPage } from "../diagnostics";
 
 let storage: CrawlStore | undefined;
@@ -81,6 +81,7 @@ export function stopCrawl(reason: "manual" | "time_limit" = "manual") {
 export async function startCrawl(
   origin: CrawlOrigin = "manual",
   canStart?: () => boolean,
+  options: { backfillOnly?: boolean; keys?: string[] } = {},
 ): Promise<CrawlStartResult> {
   if (isCrawling()) return { status: crawlStatus(), started: false, activity: activeRun };
   const current = await checkCbgStatus();
@@ -137,6 +138,9 @@ export async function startCrawl(
           detailPage,
           signal: control.signal,
           preferredOrder,
+          savedRecord: options.backfillOnly
+            ? (key) => db.detail(key) as SavedRoleRecord | null
+            : undefined,
           onDetailProgress: (message) => {
             status = { ...status, detailProgress: message };
           },
@@ -147,6 +151,7 @@ export async function startCrawl(
         (update) => {
           status = { ...status, ...update };
         },
+        options,
       );
     } finally {
       await detailPage.close().catch(() => {});

@@ -46,6 +46,53 @@ const profile = () =>
     ],
   });
 describe("裸号估值的复算与可追溯输入", () => {
+  it("无土豪金不误加1400，新采财产覆盖旧摘要，金额引用实际字段", () => {
+    const record = completeRecord();
+    record.listing.summary = { iCash: 999999999, iSaving: 999999999, xianyu: 999999 };
+    record.detail!.valuation = {
+      version: 1,
+      source: {},
+      issues: [],
+      fields: [
+        { name: "靓号特效", value: "无土豪金", tab: "人物/修炼" },
+        ...["现金", "存银", "仙玉", "储备金"].map((name) => ({
+          name,
+          value: "0",
+          tab: "道具/法宝",
+        })),
+      ],
+    };
+    const result = calculateValuation(record, profile());
+    expect(result.items.find((item) => item.name === "土豪金ID")?.amount).toBe(0);
+    expect(result.model_value).toBe(calculateValuation(completeRecord(), profile()).model_value);
+    expect(result.items.find((item) => item.name === "土豪金ID")?.evidence[0].path).toContain(
+      "/detail/valuation/fields/",
+    );
+  });
+  it("资料漏采不能输出完整估值，费用未知仍有总成本上限且高价明确不买", () => {
+    const configured = createProfile(template, { ...profile().settings, extraCost: null });
+    const record = completeRecord();
+    record.listing.price = "100000";
+    const result = calculateValuation(record, configured);
+    expect(result.decision).toBe("PASS");
+    expect(result.max_total_cost).toBeGreaterThan(0);
+    expect(Math.abs(result.max_total_cost! - result.model_value! * 0.8)).toBeLessThan(0.02);
+    expect(
+      purchase(1000, 1001, { ...DEFAULT_SETTINGS, b: 0.8, extraCost: null }).max_total_cost,
+    ).toBe(800);
+    expect(result.max_listing_price).toBeNull();
+    expect(result.total_cost).toBeNull();
+    record.detail!.valuation = {
+      version: 1,
+      source: {},
+      fields: [],
+      issues: ["神器1槽位状态或五行未完整读取"],
+    };
+    const incomplete = calculateValuation(record, configured);
+    expect(incomplete.model_value).toBeNull();
+    expect(incomplete.decision).toBe("NEED_INFO");
+    expect(incomplete.missing_fields).toContain("神器1槽位状态或五行未完整读取");
+  });
   it("不提前舍入、不给1—4级插值、强壮口径分别计算", () => {
     expect(trainingPrice(6, "defense")).toBe(50 / 1.5);
     expect(trainingPrice(17, "defense")).toBe(230);
@@ -56,6 +103,9 @@ describe("裸号估值的复算与可追溯输入", () => {
     expect(schoolPrice([180, 180, 180, 180, 180, 180, 180], "已化圣", false)).toBeCloseTo(
       4814.86,
       2,
+    );
+    expect(schoolPrice([180, 180, 186, 180, 180, 180, 180], "已化圣", false)).toBe(
+      schoolPrice([180, 180, 180, 180, 180, 180, 180], "已化圣", false),
     );
     expect(schoolPrice([160, 130, 130, 130, 130, 130, 130], "未飞升", false)).toBeNull();
     expect(schoolPrice([160, 160, 160, 160, 160, 160, 160], "已飞升", false)).toBeGreaterThan(250);
