@@ -9,14 +9,46 @@ import { CAPTURE_VERSION } from "../../server/crawler/compact";
 /** Synthetic evidence for UI tests. No browser or search request is sent to this URL. */
 export function equipmentPricingFixture(incomplete = false): EquipmentPricingSnapshot {
   const quote = "【模拟测试样本】测试铠甲，120级，防御200，耐久300/500可正常修理，挂牌价300元。";
+  const query = '【模拟测试筛选】全服 / 综合排序 / 测试铠甲 / {"level_min":120,"level_max":120}';
+  const helmetQuery =
+    '【模拟测试筛选】全服 / 综合排序 / 测试头盔 / {"level_min":120,"level_max":120}';
+  const searchItems = [
+    {
+      key: "armor-fixture",
+      act: "overall_search_equip",
+      args: { level_min: 120, level_max: 120 },
+      pages: 1,
+      rows: 2,
+      details: 2,
+      exhausted: true,
+    },
+    ...(incomplete
+      ? [
+          {
+            key: "no-match-fixture",
+            act: "overall_search_equip",
+            args: { level_min: 120, level_max: 120 },
+            pages: 1,
+            rows: 0,
+            details: 0,
+            exhausted: true,
+          },
+        ]
+      : []),
+  ];
   return {
     version: 1,
     inputHash: "fixture-input-hash",
     searchedAt: "2026-10-03T07:00:00.000Z",
-    provider: "codex",
-    model: "fixture-model",
-    queries: ["梦幻西游 测试铠甲 120级 防御200 挂牌价格"],
-    rawResponse: "模拟联网查价结果，仅验证页面，不代表真实市场行情。",
+    provider: "browser",
+    model: "browser",
+    queries: [query, ...(incomplete ? [helmetQuery] : [])],
+    rawResponse: JSON.stringify(
+      { note: "【模拟测试查询记录】仅验证页面，不代表真实市场行情。", searchItems },
+      null,
+      2,
+    ),
+    searchItems,
     captureComplete: !incomplete,
     total: incomplete ? null : 300,
     knownTotal: 300,
@@ -27,7 +59,7 @@ export function equipmentPricingFixture(incomplete = false): EquipmentPricingSna
         level: 120,
         category: "装备",
         description: "防御200",
-        query: "梦幻西游 测试铠甲 120级 防御200 挂牌价格",
+        query,
         status: "priced",
         referencePrice: 300,
         candidates: [
@@ -77,7 +109,7 @@ export function equipmentPricingFixture(incomplete = false): EquipmentPricingSna
               level: 120,
               category: "装备",
               description: "防御80",
-              query: "梦幻西游 测试头盔 120级 防御80 挂牌价格",
+              query: helmetQuery,
               status: "no_match" as const,
               referencePrice: null,
               candidates: [],
@@ -129,10 +161,20 @@ export function petPricingFixture(): PetPricingSnapshot {
     "【模拟测试宝宝样本】画魂，119级，成长1.25，技能高级魔之心、须弥真言，无内丹，无装备，挂牌价800元。";
   return {
     ...base,
+    provider: "codex",
+    model: "fixture-pet-model",
     inputHash: "fixture-pet-hash",
     total: 800,
     knownTotal: 800,
     queries: ["梦幻西游电脑版 藏宝阁 全服 画魂 须弥真言 成长1.25"],
+    rawResponse: "【模拟测试宝宝搜索回复】仅验证页面，不代表真实市场行情。",
+    searchItems: [
+      {
+        type: "web_search",
+        query: "梦幻西游电脑版 藏宝阁 全服 画魂 须弥真言 成长1.25",
+        simulated: true,
+      },
+    ],
     items: [
       {
         ...base.items[0],

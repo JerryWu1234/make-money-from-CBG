@@ -73,11 +73,14 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
       : /lingbao/i.test(location || "")
         ? "灵宝"
         : undefined);
+  // 官方图标明确给出的分类 ID；不从名字、data_type 或 data_equip_type 推算。
+  const kindId = attrs.data_kindid || attrs["data-kindid"];
   return {
     index,
     name,
     kind: "equipment",
     ...(category ? { category } : {}),
+    ...(kindId ? { kindId } : {}),
     ...(location ? { location } : {}),
     ...(description ? { description } : {}),
     ...(Object.keys(attributes).length ? { attributes } : {}),

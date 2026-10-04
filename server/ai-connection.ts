@@ -18,7 +18,12 @@ import {
 } from "./ai/deepseek";
 import type { AiConnectionStatus, AiModelOptions, AiProvider, AiStatus } from "./ai/types";
 import type { SavedRoleRecord } from "./crawler/types";
-import { searchEquipmentPrices, type Search } from "./analysis/equipment-pricing";
+import {
+  equipmentInventory,
+  searchEquipmentPrices,
+  type Search,
+} from "./analysis/equipment-pricing";
+import { createEquipmentSource } from "./analysis/browser-equipment-source";
 import { searchPetPricing } from "./analysis/pet-pricing";
 
 export { startCodexLogin, codexLoginStatus, cancelCodexLogin } from "./ai/codex";
@@ -198,6 +203,31 @@ export async function shutdownAiConnections() {
 }
 
 type SearchContext = { model?: string; account?: Awaited<ReturnType<typeof codexAccount>> };
+const unusedEquipmentSource = {
+  async findCandidates() {
+    throw new Error("装备资料不足或无需查价，不应发起浏览器查询");
+  },
+  async readSource() {
+    throw new Error("装备资料不足或无需查价，不应读取报价网页");
+  },
+};
+async function searchEquipment(record: SavedRoleRecord, signal: AbortSignal) {
+  try {
+    signal.throwIfAborted();
+    const inventory = equipmentInventory(record);
+    if (!inventory.captureComplete || !inventory.items.some((item) => item.status === "no_match"))
+      return await searchEquipmentPrices(record, signal, unusedEquipmentSource);
+    const source = await createEquipmentSource(signal);
+    try {
+      signal.throwIfAborted();
+      return await searchEquipmentPrices(record, signal, source);
+    } finally {
+      await source.close();
+    }
+  } catch (error) {
+    throw new Error(publicError(error));
+  }
+}
 function assetSearcher<T>(
   searchPrices: (
     record: SavedRoleRecord,
@@ -252,7 +282,7 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
     const searchContext = { model, account };
     return {
       model,
-      searchEquipment: assetSearcher(searchEquipmentPrices, searchContext),
+      searchEquipment,
       searchPets: assetSearcher(searchPetPricing, searchContext),
       async analyze(prompt: string, schema: unknown, signal: AbortSignal) {
         const current = await codexAccount();
@@ -275,7 +305,7 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
   const searchContext: SearchContext = {};
   return {
     model,
-    searchEquipment: assetSearcher(searchEquipmentPrices, searchContext),
+    searchEquipment,
     searchPets: assetSearcher(searchPetPricing, searchContext),
     async analyze(prompt: string, _schema: unknown, signal: AbortSignal) {
       try {

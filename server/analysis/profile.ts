@@ -8,7 +8,7 @@ import { marketServers } from "./market";
 import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "./valuation-settings";
 
 export const PROMPT_FILE = resolve("prompts/role-valuation.md");
-export const CALCULATION_VERSION = "price-comparison-v6";
+export const CALCULATION_VERSION = "price-comparison-v7";
 // Update alongside the calculator when changing pricing sections III through VIII.
 const PRICING_HASH = "4fe072675806ec5d6fbb3c796eccfcae4bd8eece613c68ec3611209935567928";
 export const DEFAULT_SETTINGS: ValuationSettings = {

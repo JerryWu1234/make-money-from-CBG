@@ -63,6 +63,7 @@ export interface DetailItem {
   tooltip?: string;
   kind?: "skill" | "equipment" | "innerSkill";
   category?: string;
+  kindId?: string;
   location?: string;
   level?: string;
 }

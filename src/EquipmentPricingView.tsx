@@ -27,12 +27,16 @@ export function EquipmentPricingView({
 }) {
   const label = (status: keyof typeof statusLabels) =>
     asset === "宝宝" ? statusLabels[status].replaceAll("装备", "宝宝") : statusLabels[status];
+  const browserQuery = snapshot.provider === "browser";
   const outdated = Date.now() - Date.parse(snapshot.searchedAt) >= 24 * 60 * 60 * 1000;
   return (
     <section aria-label={asset + "联网查价"}>
       <h3>{asset}联网查价</h3>
+      {browserQuery && <p>查价方式：程序通过已登录藏宝阁查询，AI只接收核实后的结果。</p>}
       <p>相近商品的网页挂牌参考价，不代表实际成交价。</p>
-      <p>搜索时间：{readTime(snapshot.searchedAt)}</p>
+      <p>
+        {browserQuery ? "查询时间" : "搜索时间"}：{readTime(snapshot.searchedAt)}
+      </p>
       {outdated && (
         <p className="analysis-pending-note">
           这是超过24小时的历史报价。请开始新批次重新查价；继续旧批次保留当时快照。
@@ -49,7 +53,7 @@ export function EquipmentPricingView({
       )}
       {!!snapshot.queries.length && (
         <details>
-          <summary>查看搜索关键词</summary>
+          <summary>{browserQuery ? "查看实际筛选条件" : "查看搜索关键词"}</summary>
           <ul>
             {snapshot.queries.map((query, index) => (
               <li key={index}>{query}</li>
@@ -86,7 +90,9 @@ export function EquipmentPricingView({
           <p>
             {item.category} · {item.description}
           </p>
-          <p>搜索关键词：{item.query || "资料不足，未发起查价"}</p>
+          <p>
+            {browserQuery ? "筛选条件" : "搜索关键词"}：{item.query || "资料不足，未发起查价"}
+          </p>
           {!!item.issues.length && (
             <ul>
               {item.issues.map((issue, index) => (
@@ -133,7 +139,7 @@ export function EquipmentPricingView({
       ))}
       {snapshot.rawResponse && (
         <details>
-          <summary>查看完整搜索回复</summary>
+          <summary>{browserQuery ? "查看原始查询记录" : "查看完整搜索回复"}</summary>
           <pre>{snapshot.rawResponse}</pre>
         </details>
       )}

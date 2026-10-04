@@ -75,14 +75,13 @@ function candidate(
 }
 function searchResponse(candidates: EquipmentCandidate[], queries = ["测试腰带 100级 愤怒 8锻"]) {
   return {
-    text: JSON.stringify({ items: [{ key: "道具/法宝:0", candidates, note: "" }] }),
+    items: [{ key: "道具/法宝:0", candidates, note: "", query: queries[0] || "" }],
     queries,
     searchItems: queries.map((query, index) => ({
       id: "search-" + index,
-      type: "web_search",
+      type: "browser_search",
       query,
     })),
-    usage: { input_tokens: 100, output_tokens: 30 },
   };
 }
 async function matchedPricing(record = recordWithEquipment()) {
@@ -93,17 +92,26 @@ async function matchedPricing(record = recordWithEquipment()) {
   const pages = new Map(candidates.map((item) => [item.url, sourcePage(item.price!)]));
   const search = vi.fn().mockResolvedValue(searchResponse(candidates));
   const read = vi.fn(async (url: string) => pages.get(url)!);
-  const pricing = await searchEquipmentPrices(
-    record,
-    "test-model",
-    new AbortController().signal,
-    search,
-    read,
-  );
+  const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+    findCandidates: search,
+    readSource: read,
+  });
   return { pricing, search, read };
 }
 
 describe("装备联网查价的来源核对", () => {
+  it("官方kindid原值进入结构化查价且改变输入快照，不从物品类别推算", async () => {
+    const record = recordWithEquipment();
+    const item = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
+    const oldHash = equipmentInventory(record).inputHash;
+    expect(equipmentInventory(record).items[0].kindId).toBeUndefined();
+    item.kindId = "025";
+    expect(equipmentInventory(record).inputHash).not.toBe(oldHash);
+    const { search, pricing } = await matchedPricing(record);
+    expect(search.mock.calls[0][0][0].kindId).toBe("025");
+    expect(pricing.items[0].kindId).toBe("025");
+    expect(JSON.parse(pricing.requestText!)[0].kindId).toBe("025");
+  });
   it("只有attributes的装备仍识别并查价，不误认为空装备", async () => {
     const record = recordWithEquipment();
     const item = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
@@ -158,13 +166,10 @@ describe("装备联网查价的来源核对", () => {
     });
     const search = vi.fn(),
       read = vi.fn();
-    const pricing = await searchEquipmentPrices(
-      record,
-      "test-model",
-      new AbortController().signal,
-      search,
-      read,
-    );
+    const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+      findCandidates: search,
+      readSource: read,
+    });
     expect(pricing.captureComplete).toBe(false);
     expect(pricing.total).toBeNull();
     expect(pricing.issues.join(" ")).toContain("多页重复");
@@ -202,13 +207,10 @@ describe("装备联网查价的来源核对", () => {
       else record.detail!.equipmentCapture!.complete = false;
       const search = vi.fn(),
         read = vi.fn();
-      const pricing = await searchEquipmentPrices(
-        record,
-        "test-model",
-        new AbortController().signal,
-        search,
-        read,
-      );
+      const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+        findCandidates: search,
+        readSource: read,
+      });
       expect(pricing).toMatchObject({ captureComplete: false, total: null });
       expect(search).not.toHaveBeenCalled();
       expect(read).not.toHaveBeenCalled();
@@ -219,22 +221,16 @@ describe("装备联网查价的来源核对", () => {
     const record = recordWithEquipment(true);
     const search = vi.fn(),
       read = vi.fn();
-    const pricing = await searchEquipmentPrices(
-      record,
-      "test-model",
-      new AbortController().signal,
-      search,
-      read,
-    );
+    const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+      findCandidates: search,
+      readSource: read,
+    });
     expect(pricing).toMatchObject({ captureComplete: true, total: 0, knownTotal: 0, items: [] });
     record.detail!.tabs.pop();
-    const missingTab = await searchEquipmentPrices(
-      record,
-      "test-model",
-      new AbortController().signal,
-      search,
-      read,
-    );
+    const missingTab = await searchEquipmentPrices(record, new AbortController().signal, {
+      findCandidates: search,
+      readSource: read,
+    });
     expect(missingTab).toMatchObject({ captureComplete: false, total: null });
     record.detail!.tabs.push({
       name: "道具/法宝",
@@ -246,19 +242,16 @@ describe("装备联网查价的来源核对", () => {
       items: [],
     });
     record.detail!.equipmentCapture!.issues = ["装备图标数量未核对"];
-    const inconsistent = await searchEquipmentPrices(
-      record,
-      "test-model",
-      new AbortController().signal,
-      search,
-      read,
-    );
+    const inconsistent = await searchEquipmentPrices(record, new AbortController().signal, {
+      findCandidates: search,
+      readSource: read,
+    });
     expect(inconsistent).toMatchObject({ captureComplete: false, total: null });
     expect(search).not.toHaveBeenCalled();
     expect(read).not.toHaveBeenCalled();
   });
 
-  it("3条独立可信挂牌取中位数，保留实际查询、原回复及逐条网页证据", async () => {
+  it("3条独立可信挂牌取中位数，保留程序查询、结构化候选及逐条网页证据", async () => {
     const record = recordWithEquipment();
     record.detail!.raw = { privateContent: "must-not-send-raw" };
     record.listing.attrs = { login: "must-not-send-login" };
@@ -276,28 +269,30 @@ describe("装备联网查价的来源核对", () => {
       expect(source.sourceHash).toHaveLength(64);
     }
     expect(pricing.queries).toEqual(["测试腰带 100级 愤怒 8锻"]);
-    expect(pricing.rawResponse).toBe((await search.mock.results[0].value).text);
-    expect(pricing.searchItems).toMatchObject([{ type: "web_search" }]);
+    expect(pricing.items[0].query).toBe("测试腰带 100级 愤怒 8锻");
+    expect(pricing.rawResponse).toBe(JSON.stringify(await search.mock.results[0].value));
+    expect(pricing).toMatchObject({ provider: "browser", model: "browser" });
+    expect(pricing.usage).toBeUndefined();
+    expect(pricing.searchItems).toMatchObject([{ type: "browser_search" }]);
     expect(pricing.requestHash).toHaveLength(64);
-    expect(pricing.requestText).toBe(search.mock.calls[0][0]);
+    expect(pricing.requestText).toBe(JSON.stringify(search.mock.calls[0][0]));
+    expect(search.mock.calls[0][0]).toMatchObject([{ name: equipmentName, description }]);
     expect(pricing.requestText).not.toContain("must-not-send-raw");
     expect(pricing.requestText).not.toContain("must-not-send-login");
     expect(read).toHaveBeenCalledTimes(3);
   });
 
-  it("AI声称有价格但没有真实搜索查询时，不读取网页、不采纳金额", async () => {
+  it("程序候选没有实际查询记录时，不读取网页、不采纳金额", async () => {
     const search = vi.fn().mockResolvedValue(searchResponse([candidate()], []));
     const read = vi.fn();
     const pricing = await searchEquipmentPrices(
       recordWithEquipment(),
-      "test-model",
       new AbortController().signal,
-      search,
-      read,
+      { findCandidates: search, readSource: read },
     );
     expect(pricing.total).toBeNull();
     expect(pricing.items[0].referencePrice).toBeNull();
-    expect(pricing.issues.join(" ")).toContain("没有实际搜索记录");
+    expect(pricing.issues.join(" ")).toContain("没有实际查询记录");
     expect(pricing.rawResponse).toContain("100");
     expect(read).not.toHaveBeenCalled();
   });
@@ -308,10 +303,8 @@ describe("装备联网查价的来源核对", () => {
     const read = vi.fn().mockResolvedValue(sourcePage(100));
     const pricing = await searchEquipmentPrices(
       recordWithEquipment(),
-      "test-model",
       new AbortController().signal,
-      search,
-      read,
+      { findCandidates: search, readSource: read },
     );
     expect(pricing).toMatchObject({ total: 100, knownTotal: 100 });
     expect(pricing.items[0]).toMatchObject({ status: "priced", referencePrice: 100 });
@@ -321,13 +314,120 @@ describe("装备联网查价的来源核对", () => {
     search.mockResolvedValueOnce(searchResponse([]));
     const absent = await searchEquipmentPrices(
       recordWithEquipment(),
-      "test-model",
       new AbortController().signal,
-      search,
-      read,
+      { findCandidates: search, readSource: read },
     );
     expect(absent.total).toBeNull();
     expect(absent.items[0].referencePrice).toBeNull();
+  });
+
+  it("程序查价的分页限制说明在定价后仍保留，不伪造AI搜索或用量", async () => {
+    const response = searchResponse([candidate()]);
+    response.items[0].note = "只读取前2页，已达到本次检索上限";
+    const findCandidates = vi.fn().mockResolvedValue(response);
+    const pricing = await searchEquipmentPrices(
+      recordWithEquipment(),
+      new AbortController().signal,
+      {
+        findCandidates,
+        readSource: vi.fn().mockResolvedValue(sourcePage(100)),
+      },
+    );
+    expect(pricing.items[0]).toMatchObject({ status: "priced", referencePrice: 100 });
+    expect(pricing.items[0].issues.join("；")).toContain("前2页");
+    expect(pricing.items[0].issues.join("；")).toContain("仅1条");
+    expect(pricing.usage).toBeUndefined();
+    expect(pricing.rawResponse).not.toContain("web_search");
+  });
+
+  it("装备角色及条件按已有attributes补入，不丢失性别限制也不推算属性", () => {
+    const record = recordWithEquipment();
+    const saved = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
+    saved.attributes = { 装备角色: "女", 装备条件: "等级100" };
+    const item = equipmentInventory(record).items[0];
+    expect(item.description).toContain("装备角色：女");
+    expect(item.description).toContain("装备条件：等级100");
+    const compatible = description + "\n装备角色：女\n装备条件：等级100";
+    expect(
+      verifyEquipmentCandidate(
+        item,
+        { ...candidate(), quote: quote(100, compatible) },
+        sourcePage(100, compatible),
+        new Date().toISOString(),
+      ).verified,
+    ).toBe(true);
+    const other = compatible.replace("装备角色：女", "装备角色：男");
+    expect(
+      verifyEquipmentCandidate(
+        item,
+        { ...candidate(), quote: quote(100, other) },
+        sourcePage(100, other),
+        new Date().toISOString(),
+      ).verified,
+    ).toBe(false);
+  });
+
+  it("描述和相同提示框不重复制造灵饰词条", () => {
+    const record = recordWithEquipment();
+    const saved = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
+    saved.tooltip = description;
+    expect(equipmentInventory(record).items[0].description).toBe(description);
+  });
+
+  it.each(["专用", "玩家 123 专用", "绑定", "不可交易", "不能交易"])(
+    "%s装备保留未定价，不查询可交易装备来套价",
+    async (restriction) => {
+      const record = recordWithEquipment();
+      record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description +=
+        "\n" + restriction;
+      const findCandidates = vi.fn(),
+        readSource = vi.fn();
+      const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+        findCandidates,
+        readSource,
+      });
+      expect(pricing.items[0]).toMatchObject({ status: "untradable", referencePrice: null });
+      expect(pricing.total).toBeNull();
+      expect(findCandidates).not.toHaveBeenCalled();
+      expect(readSource).not.toHaveBeenCalled();
+    },
+  );
+
+  it("程序未给单件实际筛选条件时留空，不把建议关键词冒充实际查询", async () => {
+    const response = searchResponse([candidate()]);
+    response.items[0].query = "";
+    const pricing = await searchEquipmentPrices(
+      recordWithEquipment(),
+      new AbortController().signal,
+      {
+        findCandidates: vi.fn().mockResolvedValue(response),
+        readSource: vi.fn().mockResolvedValue(sourcePage(100)),
+      },
+    );
+    expect(pricing.items[0].query).toBe("");
+    expect(pricing.queries).toEqual(response.queries);
+  });
+
+  it("字段顺序与格式变化不阻断同配置装备的实际来源核验", () => {
+    const item = equipmentInventory(recordWithEquipment()).items[0];
+    const rearranged = "敏捷：0";
+    const sourceDescription =
+      "宝石 黑宝石 锻炼等级8\n修理失败0次\n等级100级 防御+50\n耐久度250\n【特效】愤怒";
+    const result = verifyEquipmentCandidate(
+      item,
+      { ...candidate(), quote: quote(100, sourceDescription) },
+      sourcePage(100, sourceDescription),
+      new Date().toISOString(),
+    );
+    expect(result.verified).toBe(true);
+    expect(
+      verifyEquipmentCandidate(
+        item,
+        { ...candidate(), quote: quote(100, sourceDescription + "\n" + rearranged) },
+        sourcePage(100, sourceDescription + "\n" + rearranged),
+        new Date().toISOString(),
+      ).verified,
+    ).toBe(false);
   });
 
   it("同一官方商品的不同跟踪参数不能凑成3条独立报价", async () => {
@@ -338,10 +438,8 @@ describe("装备联网查价的来源核对", () => {
     const read = vi.fn().mockResolvedValue(sourcePage(100));
     const pricing = await searchEquipmentPrices(
       recordWithEquipment(),
-      "test-model",
       new AbortController().signal,
-      search,
-      read,
+      { findCandidates: search, readSource: read },
     );
     expect(pricing.total).toBe(100);
     expect(pricing.items[0].referencePrice).toBe(100);
@@ -362,10 +460,8 @@ describe("装备联网查价的来源核对", () => {
     const read = vi.fn().mockResolvedValue(sourcePage(100));
     const pricing = await searchEquipmentPrices(
       recordWithEquipment(),
-      "test-model",
       new AbortController().signal,
-      search,
-      read,
+      { findCandidates: search, readSource: read },
     );
     expect(pricing.total).toBe(100);
     expect(pricing.items[0].candidates).toHaveLength(1);
@@ -385,10 +481,8 @@ describe("装备联网查价的来源核对", () => {
     const read = vi.fn();
     const pricing = await searchEquipmentPrices(
       recordWithEquipment(),
-      "test-model",
       new AbortController().signal,
-      search,
-      read,
+      { findCandidates: search, readSource: read },
     );
     expect(pricing.total).toBeNull();
     expect(pricing.items[0].candidates[0].verified).toBe(false);
@@ -483,13 +577,10 @@ describe("装备联网查价的来源核对", () => {
       record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description = broken;
       const search = vi.fn(),
         read = vi.fn();
-      const pricing = await searchEquipmentPrices(
-        record,
-        "test-model",
-        new AbortController().signal,
-        search,
-        read,
-      );
+      const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+        findCandidates: search,
+        readSource: read,
+      });
       expect(pricing.total).toBeNull();
       expect(pricing.items[0]).toMatchObject({ status: "incomplete", referencePrice: null });
       expect(search).not.toHaveBeenCalled();
@@ -583,7 +674,10 @@ describe("装备联网查价的来源核对", () => {
       throw controller.signal.reason;
     });
     await expect(
-      searchEquipmentPrices(recordWithEquipment(), "test-model", controller.signal, search, read),
+      searchEquipmentPrices(recordWithEquipment(), controller.signal, {
+        findCandidates: search,
+        readSource: read,
+      }),
     ).rejects.toThrow("fixture canceled");
     expect(read).toHaveBeenCalledOnce();
   });

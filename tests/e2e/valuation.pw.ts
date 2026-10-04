@@ -309,6 +309,10 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
       buyResult.getByRole("heading", { name: "宝宝联网查价", exact: true }),
     ).toBeVisible();
     await expect(buyResult.getByText("宝宝挂牌参考价", { exact: true })).toBeVisible();
+    const petPricing = buyResult.getByRole("region", { name: "宝宝联网查价", exact: true });
+    await expect(petPricing.getByText("查看搜索关键词", { exact: true })).toBeVisible();
+    await expect(petPricing.getByText("查看完整搜索回复", { exact: true })).toBeVisible();
+    await expect(petPricing).not.toContainText("程序通过已登录藏宝阁查询");
     await buyResult.getByText("模拟测试宝宝挂牌样本 · 已核实", { exact: true }).click();
     await expect(buyResult).toContainText("【模拟测试宝宝样本】画魂");
     await expect(buyResult.locator('a[href*="mock-pet-ui"]')).toHaveAttribute(
@@ -318,11 +322,19 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await expect(buyResult.getByText("建议最高买入价", { exact: true })).not.toBeVisible();
     await expect(buyResult.getByText("暂无法计算", { exact: true })).not.toBeVisible();
     await expect(buyResult.getByText("理想买入价", { exact: true })).not.toBeVisible();
-    await buyResult
-      .getByRole("region", { name: "装备联网查价", exact: true })
-      .getByText("查看搜索关键词", { exact: true })
-      .click();
-    await expect(buyResult).toContainText("梦幻西游 测试铠甲 120级 防御200 挂牌价格");
+    const equipmentPricing = buyResult.getByRole("region", { name: "装备联网查价", exact: true });
+    await expect(equipmentPricing).toContainText("程序通过已登录藏宝阁查询，AI只接收核实后的结果");
+    await expect(equipmentPricing.getByText("查看搜索关键词", { exact: true })).not.toBeVisible();
+    await equipmentPricing.getByText("查看实际筛选条件", { exact: true }).click();
+    await expect(equipmentPricing).toContainText(
+      '【模拟测试筛选】全服 / 综合排序 / 测试铠甲 / {"level_min":120,"level_max":120}',
+    );
+    await equipmentPricing.getByText("查看原始查询记录", { exact: true }).click();
+    await expect(equipmentPricing).toContainText(
+      "【模拟测试查询记录】仅验证页面，不代表真实市场行情",
+    );
+    await expect(equipmentPricing).toContainText('"act": "overall_search_equip"');
+    await expect(equipmentPricing).toContainText('"details": 2');
     await buyResult.getByText("模拟测试装备挂牌样本 · 已核实", { exact: true }).click();
     await expect(
       buyResult

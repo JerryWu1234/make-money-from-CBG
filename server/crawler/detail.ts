@@ -80,6 +80,7 @@ async function inspectItems(
         ancestors.unshift(parent);
       for (const node of ancestors)
         for (const a of node.attributes) {
+          if (node !== el && /^(?:data_kindid|data-kindid)$/.test(a.name)) continue;
           if (/^(data[-_]|alt$|title$)/.test(a.name) && !a.name.startsWith("data-cbg-"))
             attrs[a.name.replace(/^data-/, "data_")] = a.value;
         }

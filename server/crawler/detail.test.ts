@@ -49,8 +49,8 @@ const previous = (): RoleDetail => ({
         : [],
   })),
 });
-const fixture = (missingTooltip: boolean, petHtml = "<p>召唤兽(0/10)</p>") => {
-  const gear = `<p>道具和法宝</p><div id="RoleEquip"><a data_equip_name="新武器" data_equip_desc="" data_equip_category="武器" data_tip_box="RoleEquipTipsBox"><img width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseover="${missingTooltip ? "" : "document.getElementById('RoleEquipTipsBox').style.display='block';document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'"}"></a></div>`;
+const fixture = (missingTooltip: boolean, petHtml = "<p>召唤兽(0/10)</p>", iconKindId?: string) => {
+  const gear = `<p>道具和法宝</p><div id="RoleEquip"><a data_kindid="999" data_equip_name="新武器" data_equip_desc="" data_equip_category="武器" data_tip_box="RoleEquipTipsBox"><img ${iconKindId ? `data_kindid="${iconKindId}"` : ""} width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseover="${missingTooltip ? "" : "document.getElementById('RoleEquipTipsBox').style.display='block';document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'"}"></a></div>`;
   return `<meta charset="utf-8"><section><nav>${MAIN_TABS.map(
     (name) =>
       `<button onclick="show(${JSON.stringify(name).replaceAll('"', "&quot;")})">${name}</button>`,
@@ -97,6 +97,7 @@ describe("装备局部补采", () => {
       expect(equipment.items![0].description).toContain("伤害 +420");
       expect(equipment.items![0].description).toContain("魔力 +20");
       expect(equipment.items![0].category).toBe("武器");
+      expect(equipment.items![0].kindId).toBeUndefined();
       expect(equipment.items![0].location).toBe("RoleEquip");
       expect(equipment.itemsCollectedAt).not.toBe(saved.collectedAt);
       expect(detail.equipmentCapture?.complete).toBe(true);
@@ -110,6 +111,23 @@ describe("装备局部补采", () => {
       expect(detail.tabs.some((tab) => tab.name === "召唤兽/孩子 / 旧子页")).toBe(false);
       expect(pets.pets[0].name).toBe("旧宝宝");
       expect(saved.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].name).toBe("旧武器");
+    } finally {
+      await page.close();
+    }
+  }, 15000);
+  it("kindid仅读取装备图标自身原值，父节点的编号不覆盖图标", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ contentType: "text/html", body: fixture(false, undefined, "025") }),
+      );
+      const detail = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(detail.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].kindId).toBe("025");
     } finally {
       await page.close();
     }

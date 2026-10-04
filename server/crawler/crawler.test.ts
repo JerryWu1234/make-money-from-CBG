@@ -222,6 +222,15 @@ describe("仅补齐估值资料", () => {
   });
 });
 describe("商品身份和时间", () => {
+  it("仅保留明确提供的官方kindid字符串，不用装备名或其他类型编号推算", () => {
+    const attrs = { data_equip_name: "测试武器", data_type: "19", data_equip_type: "20" };
+    expect(itemFromAttributes({ ...attrs, data_kindid: "025" }, 0).kindId).toBe("025");
+    expect(itemFromAttributes({ ...attrs, "data-kindid": "31" }, 0).kindId).toBe("31");
+    expect(itemFromAttributes(attrs, 0).kindId).toBeUndefined();
+    expect(
+      itemFromAttributes({ ...attrs, data_kindid: "025", data_skill_type: "cifu" }, 0).kindId,
+    ).toBeUndefined();
+  });
   it("仅将明确显示已上架的商品作为续采锚点", () => {
     expect(onShelfFromText("是否上架：已上架")).toBe(true);
     expect(onShelfFromText("是否上架：已下架")).toBe(false);

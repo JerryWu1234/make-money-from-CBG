@@ -91,12 +91,10 @@ async function valuationSetup() {
     servers: [{ serverId: record.listing.serverId, age: "three", rank: 10 }],
   });
   const noNetwork = vi.fn().mockRejectedValue(new Error("empty equipment must not search"));
-  const pricing = await searchEquipmentPrices(
-    record,
-    "test-model",
-    new AbortController().signal,
-    noNetwork,
-  );
+  const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+    findCandidates: noNetwork,
+    readSource: noNetwork,
+  });
   expect(noNetwork).not.toHaveBeenCalled();
   const searchEquipment = vi
     .fn<NonNullable<AnalysisClient["searchEquipment"]>>()
