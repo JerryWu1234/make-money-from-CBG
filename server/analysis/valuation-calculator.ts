@@ -357,7 +357,11 @@ export function calculateValuation(
     pending.add("化圣状态与七项180级技能存在冲突");
   if (
     state === "已飞升" &&
-    schoolLevels.some((value) => value !== null && (value > 150 || value < 56))
+    schoolLevels
+      .filter((value): value is number => value !== null)
+      .sort((a, b) => b - a)
+      .slice(0, 5)
+      .some((value) => value > 150 || value < 56)
   )
     pending.add("飞升师门技能公式出现反常溢价，需核实适用范围");
   if (!skillTab || !Array.isArray(skillTab.items))

@@ -6,8 +6,8 @@ import { assertAvailable, pace } from "../crawler/page";
 import { hoverForInspection } from "../viewport";
 import { buildPageState } from "../page-state";
 import { readStableSnapshot } from "../workflow";
-import { cleanDescription } from "../crawler/compact";
-import { parseEquipmentAttributes } from "./equip-attributes";
+import { cleanDescription, jewelryDescriptionSections } from "../crawler/compact";
+import { compareEquipmentAttributes, parseEquipmentAttributes } from "./equip-attributes";
 import {
   equipmentIdentity,
   safeEquipmentUrl,
@@ -30,6 +30,8 @@ export type EquipmentSearchConfig = {
   effects: Choices;
   skills: Choices;
   gems: Choices;
+  namedKinds?: Choices;
+  addedAttrs?: Choices;
 };
 type Query = Record<string, string | number>;
 const isJewelry = (item: EquipmentPricingItem) =>
@@ -50,7 +52,8 @@ export function equipmentQuery(item: EquipmentPricingItem, config: EquipmentSear
     config.kinds.find(([id]) => item.kindId !== undefined && Number(id) === Number(item.kindId)) ||
     [...config.kinds]
       .sort((a, b) => b[1].length - a[1].length)
-      .find(([, label]) => category.includes(label));
+      .find(([, label]) => category.includes(label)) ||
+    (config.namedKinds?.length === 1 ? config.namedKinds[0] : undefined);
   if (kind) args.kindid = String(kind[0]);
   const integer = (field: string, parameter: string) => {
     const values = fields[field];
@@ -58,8 +61,61 @@ export function equipmentQuery(item: EquipmentPricingItem, config: EquipmentSear
     args[parameter] = Number(values[0].replace("+", ""));
   };
   integer("修理失败", "repair_fail");
-  if (jewelry) integer("精炼等级", "jinglian_level");
-  else {
+  if (jewelry) {
+    integer("精炼等级", "jinglian_level");
+    if (Number(args.jinglian_level) > 16) delete args.jinglian_level;
+    const sections = jewelryDescriptionSections(item.description);
+    if (sections) {
+      const primary = parseEquipmentAttributes(sections.main).fields;
+      const primaryParameters: Record<string, Array<[string, string]>> = {
+        戒指: [
+          ["伤害", "damage"],
+          ["防御", "defense"],
+        ],
+        耳饰: [
+          ["法术伤害", "magic_damage"],
+          ["法术防御", "magic_defense"],
+        ],
+        手镯: [
+          ["封印命中等级", "fengyin"],
+          ["抵抗封印等级", "anti_fengyin"],
+          ["抗封印等级", "anti_fengyin"],
+        ],
+        佩饰: [["速度", "speed"]],
+      };
+      for (const [field, parameter] of primaryParameters[kind?.[1] || ""] || []) {
+        const values = primary[field];
+        if (values?.length === 1 && /^\+?\d+$/.test(values[0])) {
+          const value = Number(values[0]);
+          if (value > 0 && value <= 10000) args[parameter] = value;
+        }
+      }
+      const aliases: Record<string, string> = {
+        固定伤害: "固伤",
+        法术伤害: "法伤",
+        法术伤害结果: "法伤结果",
+        法术防御: "法防",
+        封印命中: "封印",
+        抵抗封印: "抗封",
+        抗封印: "抗封",
+        治疗能力: "治疗",
+        格挡值: "格挡",
+        气血回复效果: "回复",
+      };
+      const added = sections.added.map((line) => {
+        const name = line.match(/^(.+?)[：:\s]*[+＋]?\d/)?.[1]?.replace(/等级$/, "");
+        return config.addedAttrs?.find(([, label]) => label === (aliases[name || ""] || name));
+      });
+      if (added.every((choice) => choice !== undefined)) {
+        args.added_attr_logic = "detail";
+        args.added_attr_num = String(added.length);
+        for (const choice of added) {
+          const key = "added_attr." + choice![0];
+          args[key] = Number(args[key] || 0) + 1;
+        }
+      }
+    }
+  } else {
     integer("伤害", "damage");
     integer("灵力", "all_wakan");
     integer("锻炼等级", "gem_level");
@@ -99,6 +155,44 @@ export function equipmentQuery(item: EquipmentPricingItem, config: EquipmentSear
     if (args.special_effect) args.special_mode = "and";
   }
   return { jewelry, args };
+}
+
+/** A partial list description may rule an item out, but never establishes a valid quotation. */
+export function equipmentListingMismatch(
+  item: EquipmentPricingItem,
+  row: { kindId?: string; level?: string; description?: string },
+  args: Query,
+) {
+  if (args.kindid && /^\d+$/.test(row.kindId || "") && Number(row.kindId) !== Number(args.kindid))
+    return "装备分类不匹配";
+  if (/^\d+$/.test(row.level || "") && Number(row.level) !== item.level) return "装备等级不匹配";
+  if (!row.description?.trim()) return null;
+  const target = parseEquipmentAttributes(item.description);
+  const source = parseEquipmentAttributes(
+    row.description.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]+>/g, ""),
+  );
+  const empty = { level: null, fields: {}, restrictions: [], unknownLines: [] };
+  for (const [name, values] of Object.entries(source.fields)) {
+    if (name === "耐久") continue;
+    const remaining = (target.fields[name] || []).flatMap((value) =>
+      value.split(/[、，,；;]/).filter(Boolean),
+    );
+    if (!remaining.length) return "报价多出价格相关属性“" + name + "”";
+    for (const value of values.flatMap((value) => value.split(/[、，,；;]/).filter(Boolean))) {
+      const index = remaining.findIndex(
+        (expected) =>
+          !compareEquipmentAttributes(
+            { ...empty, fields: { [name]: [expected] } },
+            { ...empty, fields: { [name]: [value] } },
+          ),
+      );
+      if (index < 0) return "关键属性“" + name + "”不匹配";
+      remaining.splice(index, 1);
+    }
+  }
+  const restriction = source.restrictions.find((value) => !target.restrictions.includes(value));
+  if (restriction) return "专用、绑定或修理限制不匹配";
+  return null;
 }
 
 /** Read only the principal equipment description and price, never recommendations. */
@@ -406,21 +500,48 @@ export function equipmentSourceFromPages(
           jewelry,
           { timeout: 15000 },
         );
-        const config = await searchPage.evaluate(() => {
-          const g = window as unknown as {
-            EquipKinds?: Choices;
-            Kinds?: Choices;
-            SpecialEffects?: Choices;
-            SpecialSkills?: Choices;
-            Gems?: Choices;
-          };
-          return {
-            kinds: g.EquipKinds || g.Kinds || [],
-            effects: g.SpecialEffects || [],
-            skills: g.SpecialSkills || [],
-            gems: g.Gems || [],
-          };
-        });
+        const config = await searchPage.evaluate(
+          ({ jewelry, name, level }) => {
+            const g = window as unknown as {
+              EquipKinds?: Choices;
+              Kinds?: Choices;
+              SpecialEffects?: Choices;
+              SpecialSkills?: Choices;
+              Gems?: Choices;
+              AddedAttr1?: Choices;
+              AddedAttr2?: Choices;
+              AUTO_SEARCH_CONFIG?: {
+                wjd_equip_equip_type?: Record<string, Array<{ label: string }>>;
+              };
+            };
+            const namedIds = new Set<string>();
+            if (!jewelry) {
+              for (const [key, models] of Object.entries(
+                g.AUTO_SEARCH_CONFIG?.wjd_equip_equip_type || {},
+              )) {
+                const parts = key.match(/^(\d+)_(\d+)$/);
+                if (
+                  parts &&
+                  Number(parts[1]) === level &&
+                  models.some((model) => model.label === name)
+                )
+                  namedIds.add(parts[2]);
+              }
+            }
+            return {
+              kinds: (jewelry ? g.Kinds : g.EquipKinds) || [],
+              effects: g.SpecialEffects || [],
+              skills: g.SpecialSkills || [],
+              gems: g.Gems || [],
+              namedKinds:
+                namedIds.size === 1
+                  ? (g.EquipKinds || []).filter(([id]) => namedIds.has(String(id)))
+                  : [],
+              addedAttrs: [...(g.AddedAttr1 || []), ...(g.AddedAttr2 || [])],
+            };
+          },
+          { jewelry, name: item.name, level: item.level },
+        );
         const { args } = equipmentQuery(item, config);
         const act = jewelry ? "overall_search_lingshi" : "overall_search_equip";
         const query = "全服 / 综合排序 / " + item.name + " / " + JSON.stringify(args);
@@ -429,6 +550,7 @@ export function equipmentSourceFromPages(
         const candidates: EquipmentCandidate[] = [],
           rejected: EquipmentCandidate[] = [];
         const seen = new Set<string>();
+        const listingRejected: Array<{ url: string; reason: string }> = [];
         let count = 0,
           details = 0,
           lastPage = 0,
@@ -536,10 +658,24 @@ export function equipmentSourceFromPages(
             if (!root?.checkVisibility()) throw new Error("装备列表尚未加载");
             const rows = Array.from(root.querySelectorAll<HTMLAnchorElement>("a.soldImg[href]"))
               .filter((a) => a.checkVisibility())
-              .map((a) => ({
-                url: canonicalEquipmentUrl(a.href),
-                name: a.querySelector("img")?.getAttribute("data_equip_name") || "",
-              }));
+              .map((a) => {
+                const image = a.querySelector("img");
+                const row = a.closest("tr");
+                const ordersn = image?.getAttribute("data_equipid");
+                const descriptions = Array.from(
+                  row?.querySelectorAll<HTMLTextAreaElement>('textarea[id^="equip_desc_"]') || [],
+                );
+                const description =
+                  descriptions.find((node) => ordersn && node.id === "equip_desc_" + ordersn) ||
+                  (!ordersn && descriptions.length === 1 ? descriptions[0] : undefined);
+                return {
+                  url: canonicalEquipmentUrl(a.href),
+                  name: image?.getAttribute("data_equip_name") || "",
+                  kindId: image?.getAttribute("data_kindid") || "",
+                  level: image?.getAttribute("data_equip_level") || "",
+                  description: description?.value || image?.getAttribute("data_equip_desc") || "",
+                };
+              });
             const empty = result.count === 0 && /没有符合|没有找到|暂无/.test(root.innerText);
             if (!rows.length && !empty) throw new Error("装备列表为空但未确认没有匹配商品");
             const hasNext = Array.from(
@@ -567,6 +703,15 @@ export function equipmentSourceFromPages(
             added++;
             count++;
             if (row.name !== item.name) {
+              if (count >= MAX_ROWS) {
+                pageFullyRead = rowIndex === listing.rows.length - 1;
+                break;
+              }
+              continue;
+            }
+            const mismatch = equipmentListingMismatch(item, row, args);
+            if (mismatch) {
+              listingRejected.push({ url: row.url, reason: mismatch });
               if (count >= MAX_ROWS) {
                 pageFullyRead = rowIndex === listing.rows.length - 1;
                 break;
@@ -628,6 +773,7 @@ export function equipmentSourceFromPages(
         }
         const note =
           `已查询${lastPage}页、${count}个列表候选、${details}个详情；` +
+          (listingRejected.length ? `列表已排除${listingRejected.length}个配置不符商品；` : "") +
           (exhausted ? "本次筛选结果已读完" : "有限样本查询，未遍历全部在售商品") +
           "。";
         records.push({
@@ -638,6 +784,7 @@ export function equipmentSourceFromPages(
           rows: count,
           details,
           exhausted,
+          listingRejected,
         });
         results.push({
           key: item.key,

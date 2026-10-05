@@ -47,6 +47,7 @@ const attributes = await moduleUrl("server/analysis/equip-attributes.ts", {
   "../crawler/compact": compact,
 });
 const pricing = await moduleUrl("server/analysis/equipment-pricing.ts", {
+  "../crawler/compact": compact,
   "./equip-attributes": attributes,
   "./valuation-calculator": await moduleUrl("server/analysis/valuation-calculator.ts", {
     "./valuation-facts": await moduleUrl("server/analysis/valuation-facts.ts"),
@@ -248,6 +249,167 @@ try {
         assert.equal(query.hp, undefined);
         assert.equal(query.defense, undefined);
         assert.equal(result.items[0].candidates[0].verified, true);
+      },
+    );
+  });
+
+  await check("列表先排除十个明确不同配置，后续有效报价只读取一个详情", () => {
+    const description = "等级 100\n气血 +176 防御 +50\n耐久度 435";
+    const wrong = Array.from({ length: 10 }, (_, i) => ({
+      eid: "wrong-list-" + i,
+      name: equipmentName,
+      kindId: "20",
+      level: "100",
+      description:
+        i % 2
+          ? description + "\n锻炼等级 7 镶嵌宝石 光芒石"
+          : description.replace("气血 +176", "气血 +475"),
+    }));
+    return withSource(
+      {
+        pages: [
+          [
+            ...wrong,
+            { eid: "matching", name: equipmentName, kindId: "20", level: "100", description },
+          ],
+        ],
+      },
+      { renderedPanel: true, selling: 1, description },
+      async ({ source, control }) => {
+        const result = await source.findCandidates([item({ description })], control.signal);
+        assert.equal(result.items[0].candidates[0].verified, true);
+        assert.deepEqual(detailVisits, ["matching"]);
+        assert.equal(result.searchItems[0].details, 1);
+        assert.equal(result.searchItems[0].listingRejected.length, 10);
+        assert.match(result.items[0].note, /列表已排除10/);
+        assert.equal(result.searchItems[0].exhausted, true);
+      },
+    );
+  });
+
+  await check("带宝石目标在列表排除不同锻炼等级，不把总属性套成初值", () =>
+    withSource(
+      {
+        pages: [
+          [
+            {
+              eid: "other-gem",
+              name: equipmentName,
+              description: equipmentDescription.replace("锻炼等级：8", "锻炼等级：7"),
+            },
+            { eid: "matching", name: equipmentName, description: equipmentDescription },
+          ],
+        ],
+      },
+      {},
+      async ({ source, searchPage, control }) => {
+        const result = await source.findCandidates([item()], control.signal);
+        assert.deepEqual(detailVisits, ["matching"]);
+        assert.equal(result.items[0].candidates[0].verified, true);
+        const [query] = await searchPage.evaluate(() => window.calls);
+        assert.equal(query.gem_level, 8);
+        assert.equal(query.init_defense, undefined);
+      },
+    ),
+  );
+
+  await check("列表属性残缺或原文身份未绑定时仍读取详情，不把缺失当不匹配", () =>
+    withSource(
+      {
+        pages: [
+          [
+            {
+              eid: "matching",
+              name: equipmentName,
+              description: "等级100\n防御99",
+              descriptionOrdersn: "another-product",
+            },
+          ],
+        ],
+      },
+      {},
+      async ({ source, control }) => {
+        const result = await source.findCandidates([item()], control.signal);
+        assert.deepEqual(detailVisits, ["matching"]);
+        assert.equal(result.items[0].candidates[0].verified, true);
+      },
+    ),
+  );
+
+  await check("灵饰使用独立分类、主属性和双法伤组合筛选，列表排除不同词条", () => {
+    const name = "测试耳饰";
+    const description =
+      "等级 80\n法术伤害 +16\n精炼等级 7\n附加属性：\n法术伤害 +8[+28]\n法术伤害 +9[+28]\n速度 +8[+21]";
+    return withSource(
+      {
+        jewelry: true,
+        pages: [
+          [
+            {
+              eid: "wrong-list",
+              name,
+              kindId: "62",
+              description: description.replace("法术伤害 +9[+28]", "法术伤害 +10[+28]"),
+            },
+            { eid: "matching", name, kindId: "62", description },
+          ],
+        ],
+      },
+      { renderedPanel: true, selling: 1, name, description },
+      async ({ source, searchPage, control }) => {
+        const result = await source.findCandidates(
+          [item({ name, category: "灵饰 · 耳饰", level: 80, kindId: "62", description })],
+          control.signal,
+        );
+        const [query] = await searchPage.evaluate(() => window.calls);
+        assert.equal(query.act, "overall_search_lingshi");
+        assert.equal(query.kindid, "62");
+        assert.equal(query.magic_damage, 16);
+        assert.equal(query["added_attr.4"], 2);
+        assert.equal(query["added_attr.3"], 1);
+        assert.equal(query.added_attr_num, "3");
+        assert.deepEqual(detailVisits, ["matching"]);
+        assert.equal(result.items[0].candidates[0].verified, true);
+      },
+    );
+  });
+
+  await check("从官网唯一武器名称配置补搜索分类，不把模型编号当kind", () => {
+    const name = "鱼肠",
+      description = "等级 90\n伤害 +300";
+    return withSource(
+      {
+        namedModels: { "90_6": [{ label: name, value: 1050 }] },
+        pages: [[{ eid: "matching", name }]],
+      },
+      { renderedPanel: true, selling: 1, name, description },
+      async ({ source, searchPage, control }) => {
+        await source.findCandidates(
+          [item({ name, category: "人物装备", level: 90, description })],
+          control.signal,
+        );
+        const [query] = await searchPage.evaluate(() => window.calls);
+        assert.equal(query.kindid, "6");
+      },
+    );
+  });
+
+  await check("官网名称同时对应多个武器分类时不取第一个猜kind", () => {
+    const name = "月光",
+      description = "等级 90\n伤害 +300";
+    return withSource(
+      {
+        namedModels: { "90_6": [{ label: name }], "90_13": [{ label: name }] },
+        pages: [[{ eid: "matching", name }]],
+      },
+      { renderedPanel: true, selling: 1, name, description },
+      async ({ source, searchPage, control }) => {
+        await source.findCandidates(
+          [item({ name, category: "人物装备", level: 90, description })],
+          control.signal,
+        );
+        const [query] = await searchPage.evaluate(() => window.calls);
+        assert.equal(query.kindid, undefined);
       },
     );
   });

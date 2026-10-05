@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import type { Search } from "./analysis/equipment-pricing";
 import { valuationRecord } from "../tests/fixtures/analysis";
-import { equipmentPricingFixture } from "../tests/fixtures/analysis";
+import { equipmentPricingFixture, petPricingFixture } from "../tests/fixtures/analysis";
 
 const mocks = vi.hoisted(() => ({
   codexAccount: vi.fn(),
@@ -19,11 +18,16 @@ const mocks = vi.hoisted(() => ({
   rename: vi.fn(),
   rm: vi.fn(),
   searchEquipmentPrices: vi.fn(),
+  petInventory: vi.fn(),
   searchPetPricing: vi.fn(),
   createEquipmentSource: vi.fn(),
+  createPetSource: vi.fn(),
   findCandidates: vi.fn(),
   readSource: vi.fn(),
   closeSource: vi.fn(),
+  findPetCandidates: vi.fn(),
+  readPetSource: vi.fn(),
+  closePetSource: vi.fn(),
 }));
 vi.mock("./ai/codex", () => mocks);
 vi.mock("./ai/deepseek", () => ({
@@ -43,7 +47,13 @@ vi.mock("./analysis/equipment-pricing", async (importOriginal) => ({
 vi.mock("./analysis/browser-equipment-source", () => ({
   createEquipmentSource: mocks.createEquipmentSource,
 }));
-vi.mock("./analysis/pet-pricing", () => ({ searchPetPricing: mocks.searchPetPricing }));
+vi.mock("./analysis/browser-pet-source", () => ({
+  createPetSource: mocks.createPetSource,
+}));
+vi.mock("./analysis/pet-pricing", () => ({
+  petInventory: mocks.petInventory,
+  searchPetPricing: mocks.searchPetPricing,
+}));
 const account = { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" };
 const fakeKey = "test-only-deepseek-key";
 
@@ -74,6 +84,17 @@ beforeEach(() => {
     ...equipmentPricingFixture(),
     provider: "browser",
   });
+  mocks.petInventory.mockReturnValue({
+    captureComplete: true,
+    items: [{ status: "no_match" }],
+  });
+  mocks.createPetSource.mockResolvedValue({
+    findCandidates: mocks.findPetCandidates,
+    readSource: mocks.readPetSource,
+    close: mocks.closePetSource,
+  });
+  mocks.closePetSource.mockResolvedValue(undefined);
+  mocks.searchPetPricing.mockResolvedValue({ ...petPricingFixture(), provider: "browser" });
 });
 
 function equipmentRecord(empty = false) {
@@ -110,27 +131,134 @@ function equipmentRecord(empty = false) {
 }
 
 describe("AI 连接验证", () => {
-  it("DeepSeek的宝宝搜索保持原Codex模型与账号约束，装备不参与其模型选择", async () => {
-    mocks.readFile.mockResolvedValue(
-      JSON.stringify({ deepseek: { apiKey: fakeKey, model: "deepseek-flash" } }),
-    );
-    const callback = (_record: unknown, _model: string, signal: AbortSignal, search: Search) =>
-      search("公开商品条件", { type: "object" }, signal);
-    mocks.searchPetPricing.mockImplementation(callback);
-    mocks.requestCodexSearch.mockResolvedValue({ text: "{}", queries: ["实际查询"] });
+  it("DeepSeek宝宝查询使用浏览器source，不准备Codex搜索模型或账号，结束关闭source", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    mocks.codexAccount.mockResolvedValue(null);
+    mocks.codexModel.mockRejectedValue(new Error("ChatGPT未登录"));
     const { prepareAnalysisClient } = await import("./ai-connection");
     const client = await prepareAnalysisClient("deepseek");
-    const record = valuationRecord();
-    const signal = new AbortController().signal;
-    await client.searchPets(record, signal);
-    mocks.codexModel.mockResolvedValue("changed-default-model");
-    await client.searchPets(record, signal);
-    expect(mocks.codexModel).toHaveBeenCalledOnce();
-    for (const call of mocks.requestCodexSearch.mock.calls)
-      expect(call[2].model).toBe("configured-model");
-    mocks.codexAccount.mockResolvedValue({ ...account, email: "changed@example.invalid" });
-    await expect(client.searchPets(record, signal)).rejects.toThrow("账号已变化");
-    expect(mocks.requestCodexSearch).toHaveBeenCalledTimes(2);
+    const record = valuationRecord(),
+      signal = new AbortController().signal;
+    const snapshot = await client.searchPets(record, signal);
+    expect(snapshot.provider).toBe("browser");
+    expect(mocks.petInventory).toHaveBeenCalledWith(record);
+    expect(mocks.createPetSource).toHaveBeenCalledWith(signal);
+    expect(mocks.searchPetPricing).toHaveBeenCalledWith(record, signal, {
+      findCandidates: mocks.findPetCandidates,
+      readSource: mocks.readPetSource,
+      close: mocks.closePetSource,
+    });
+    expect(mocks.closePetSource).toHaveBeenCalledOnce();
+    expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
+    expect(mocks.codexAccount).not.toHaveBeenCalled();
+    expect(mocks.codexModel).not.toHaveBeenCalled();
+    expect(mocks.codexModels).not.toHaveBeenCalled();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+    expect(mocks.requestCodex).not.toHaveBeenCalled();
+    expect(mocks.requestDeepSeek).not.toHaveBeenCalled();
+  });
+
+  it("Codex宝宝查询也不重新访问账号、模型或AI搜索", async () => {
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("codex", "other-model");
+    const accountCalls = mocks.codexAccount.mock.calls.length,
+      modelCalls = mocks.codexModel.mock.calls.length,
+      modelsCalls = mocks.codexModels.mock.calls.length;
+    mocks.codexAccount.mockResolvedValue(null);
+    mocks.codexModel.mockRejectedValue(new Error("默认模型不可用"));
+    await client.searchPets(valuationRecord(), new AbortController().signal);
+    expect(mocks.codexAccount).toHaveBeenCalledTimes(accountCalls);
+    expect(mocks.codexModel).toHaveBeenCalledTimes(modelCalls);
+    expect(mocks.codexModels).toHaveBeenCalledTimes(modelsCalls);
+    expect(mocks.createPetSource).toHaveBeenCalledOnce();
+    expect(mocks.closePetSource).toHaveBeenCalledOnce();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+    expect(mocks.requestCodex).not.toHaveBeenCalled();
+    expect(mocks.requestDeepSeek).not.toHaveBeenCalled();
+  });
+
+  it("宝宝采集未完成、明确空列表或没有待查宝宝时不创建工作页", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    for (const inventory of [
+      { captureComplete: false, items: [{ status: "no_match" }] },
+      { captureComplete: true, items: [] },
+      { captureComplete: true, items: [{ status: "untradable" }, { status: "incomplete" }] },
+      { captureComplete: true, items: [{ status: "priced" }] },
+    ]) {
+      mocks.petInventory.mockReturnValueOnce(inventory);
+      await client.searchPets(valuationRecord(), new AbortController().signal);
+    }
+    expect(mocks.searchPetPricing).toHaveBeenCalledTimes(4);
+    expect(mocks.createPetSource).not.toHaveBeenCalled();
+    expect(mocks.closePetSource).not.toHaveBeenCalled();
+    expect(mocks.findPetCandidates).not.toHaveBeenCalled();
+    expect(mocks.readPetSource).not.toHaveBeenCalled();
+    expect(mocks.codexAccount).not.toHaveBeenCalled();
+    expect(mocks.codexModel).not.toHaveBeenCalled();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+  });
+
+  it("完整宝宝清单混有不可交易或资料不足项时仍查询待查宝宝", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    mocks.petInventory.mockReturnValueOnce({
+      captureComplete: true,
+      items: [{ status: "untradable" }, { status: "incomplete" }, { status: "no_match" }],
+    });
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    await client.searchPets(valuationRecord(), new AbortController().signal);
+    expect(mocks.createPetSource).toHaveBeenCalledOnce();
+    expect(mocks.searchPetPricing).toHaveBeenCalledOnce();
+    expect(mocks.closePetSource).toHaveBeenCalledOnce();
+  });
+
+  it("宝宝查价失败或source创建后取消仍关闭工作页，并隐藏失败凭据", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    mocks.searchPetPricing.mockRejectedValueOnce(
+      new Error("query error sk-mock-secret Bearer mock-secret"),
+    );
+    await expect(
+      client.searchPets(valuationRecord(), new AbortController().signal),
+    ).rejects.toThrow("query error [凭证已隐藏] Bearer [凭证已隐藏]");
+    expect(mocks.closePetSource).toHaveBeenCalledOnce();
+    const controller = new AbortController();
+    mocks.createPetSource.mockImplementationOnce(async () => {
+      controller.abort(new Error("已暂停"));
+      return {
+        findCandidates: mocks.findPetCandidates,
+        readSource: mocks.readPetSource,
+        close: mocks.closePetSource,
+      };
+    });
+    await expect(client.searchPets(valuationRecord(), controller.signal)).rejects.toThrow("已暂停");
+    expect(mocks.closePetSource).toHaveBeenCalledTimes(2);
+    expect(mocks.searchPetPricing).toHaveBeenCalledOnce();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+  });
+
+  it("已取消宝宝查价不创建工作页，浏览器连接失败不回退AI", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    const controller = new AbortController();
+    controller.abort(new Error("已暂停"));
+    await expect(client.searchPets(valuationRecord(), controller.signal)).rejects.toThrow("已暂停");
+    expect(mocks.createPetSource).not.toHaveBeenCalled();
+    mocks.createPetSource.mockRejectedValueOnce(new Error("藏宝阁需要扫码登录"));
+    await expect(
+      client.searchPets(valuationRecord(), new AbortController().signal),
+    ).rejects.toThrow("扫码登录");
+    expect(mocks.searchPetPricing).not.toHaveBeenCalled();
+    expect(mocks.closePetSource).not.toHaveBeenCalled();
+    expect(mocks.codexAccount).not.toHaveBeenCalled();
+    expect(mocks.codexModel).not.toHaveBeenCalled();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+    expect(mocks.requestCodex).not.toHaveBeenCalled();
+    expect(mocks.requestDeepSeek).not.toHaveBeenCalled();
   });
 
   it("DeepSeek装备查询使用已登录藏宝阁source，不访问Codex账号/模型或AI搜索，结束关闭source", async () => {

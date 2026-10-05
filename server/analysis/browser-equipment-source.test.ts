@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import type { Page } from "playwright-core";
 import {
   equipmentQuery,
+  equipmentListingMismatch,
   equipmentSourceFromPages,
   createEquipmentSource,
   type EquipmentSearchConfig,
@@ -45,6 +46,13 @@ const config: EquipmentSearchConfig = {
     ["1041,2041", "乾坤斩"],
   ],
   gems: [[6, "黑宝石"]],
+  addedAttrs: [
+    [4, "法伤"],
+    [3, "速度"],
+    [13, "防御"],
+    [14, "法防"],
+    [12, "气血"],
+  ],
 };
 const item = (overrides: Partial<EquipmentPricingItem> = {}): EquipmentPricingItem => ({
   key: "道具/法宝:0",
@@ -353,6 +361,138 @@ describe("官方装备搜索条件", () => {
     expect(args).toMatchObject({ equip_level_min: 100, kindid: "64", jinglian_level: 0 });
     for (const field of ["init_hp", "init_defense", "init_dex", "attr_without_melt"])
       expect(args).not.toHaveProperty(field);
+  });
+
+  it("官网名称配置唯一明确武器分类时补kind，不靠自制名字表", () => {
+    expect(
+      equipmentQuery(item({ category: "人物装备", name: "鱼肠" }), {
+        ...config,
+        namedKinds: [[6, "剑"]],
+      }).args.kindid,
+    ).toBe("6");
+    expect(
+      equipmentQuery(item({ category: "人物装备", name: "月光" }), {
+        ...config,
+        namedKinds: [
+          [6, "剑"],
+          [13, "双环"],
+        ],
+      }).args,
+    ).not.toHaveProperty("kindid");
+  });
+
+  it("灵饰主法伤和双附加法伤分开，按官网配置生成明细词条计数", () => {
+    const { args } = equipmentQuery(
+      item({
+        category: "灵饰 · 耳饰",
+        kindId: "62",
+        level: 80,
+        description:
+          "#r等级 80#r法术伤害 +16#r精炼等级 7#r#G法术伤害 +8[+28]#r#G法术伤害 +9[+28]#r#G速度 +8[+21]",
+      }),
+      { ...config, kinds: [[62, "耳饰"]] },
+    );
+    expect(args).toMatchObject({
+      kindid: "62",
+      magic_damage: 16,
+      jinglian_level: 7,
+      added_attr_logic: "detail",
+      added_attr_num: "3",
+      "added_attr.4": 2,
+      "added_attr.3": 1,
+    });
+    expect(args).not.toHaveProperty("synthesized_attr_total");
+    expect(args).not.toHaveProperty("added_attr_repeat_num");
+  });
+
+  it("灵饰无码旧描述不把主法伤与附加法伤混成三法伤筛选", () => {
+    const { args } = equipmentQuery(
+      item({
+        category: "灵饰 · 耳饰",
+        kindId: "62",
+        description: "等级 80\n法术伤害 +16\n精炼等级 7\n法术伤害 +8\n法术伤害 +9\n速度 +8",
+      }),
+      { ...config, kinds: [[62, "耳饰"]] },
+    );
+    expect(args).not.toHaveProperty("magic_damage");
+    expect(args).not.toHaveProperty("added_attr_logic");
+  });
+
+  it("灵饰完整三同名附加词条逐条计数，不覆盖重复项", () => {
+    const { args } = equipmentQuery(
+      item({
+        category: "灵饰 · 耳饰",
+        description:
+          "等级 80\n法术防御 +16\n精炼等级 0\n附加属性：\n法术伤害 +8\n法术伤害 +9\n法术伤害 +10",
+      }),
+      { ...config, kinds: [[62, "耳饰"]] },
+    );
+    expect(args).toMatchObject({
+      magic_defense: 16,
+      jinglian_level: 0,
+      "added_attr.4": 3,
+      added_attr_num: "3",
+    });
+  });
+
+  it("灵饰词条缺官方映射时不发送不完整的组合，主属性0和精炼越界不发送", () => {
+    const { args } = equipmentQuery(
+      item({
+        category: "灵饰 · 耳饰",
+        description: "等级 80\n法术伤害 0\n精炼等级 17\n附加属性：\n法术伤害 +8\n速度 +9",
+      }),
+      { ...config, kinds: [[62, "耳饰"]], addedAttrs: [[4, "法伤"]] },
+    );
+    for (const key of ["magic_damage", "jinglian_level", "added_attr_logic", "added_attr.4"])
+      expect(args).not.toHaveProperty(key);
+  });
+});
+
+describe("官网列表前置排除", () => {
+  const target = item({ description: "等级 70\n气血 +176 防御 +37\n耐久度 435", level: 70 });
+  const args = { kindid: "20" };
+
+  it.each([
+    ["气血 +475 防御 +43", "气血"],
+    ["气血 +176 防御 +38", "防御"],
+    ["气血 +176 防御 +37\n锻炼等级 7 镶嵌宝石 光芒石", "锻炼等级"],
+    ["气血 +176 防御 +37\n特效：简易", "特效"],
+  ])("列表已明确%s时不再打开详情", (description, field) => {
+    expect(
+      equipmentListingMismatch(target, { description: "等级 70\n" + description }, args),
+    ).toContain(field);
+  });
+
+  it("明确kind或等级冲突直接排除，缺少资料仍留给详情核验", () => {
+    expect(equipmentListingMismatch(target, { kindId: "19" }, args)).toContain("分类");
+    expect(equipmentListingMismatch(target, { kindId: "020", level: "80" }, args)).toContain(
+      "等级",
+    );
+    expect(equipmentListingMismatch(target, {}, args)).toBeNull();
+    expect(equipmentListingMismatch(target, { description: "等级 70\n防御 +37" }, args)).toBeNull();
+  });
+
+  it("耐久差异不排除，数值格式等价时仍打开详情", () => {
+    expect(
+      equipmentListingMismatch(
+        target,
+        { description: "等级：70<br>防御：37<br>气血：176<br>耐久度：5" },
+        args,
+      ),
+    ).toBeNull();
+  });
+
+  it("灵饰部分列表缺一条相同属性不判不符，明确不同附加值才排除", () => {
+    const jewelry = item({
+      description: "等级 80\n法术伤害 +16\n法术伤害 +8\n法术伤害 +9",
+      level: 80,
+    });
+    expect(
+      equipmentListingMismatch(jewelry, { description: "等级 80\n法术伤害 +8" }, {}),
+    ).toBeNull();
+    expect(
+      equipmentListingMismatch(jewelry, { description: "等级 80\n法术伤害 +10" }, {}),
+    ).toContain("法术伤害");
   });
 });
 

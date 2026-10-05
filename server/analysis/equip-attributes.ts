@@ -45,6 +45,13 @@ const labels = [
   "抗封印等级",
   "治疗能力",
   "格挡值",
+  "固定伤害",
+  "狂暴等级",
+  "穿刺等级",
+  "抗物理暴击等级",
+  "抗法术暴击等级",
+  "气血回复效果",
+  "抵抗封印等级",
   "抵抗封印",
   "抵抗控制",
   "特技",
@@ -106,6 +113,13 @@ const statLabels = [
   "气血",
   "魔法",
   "速度",
+  "固定伤害",
+  "狂暴等级",
+  "穿刺等级",
+  "抗物理暴击等级",
+  "抗法术暴击等级",
+  "气血回复效果",
+  "抵抗封印等级",
 ];
 function canonicalValues(value: string): string[] {
   const text = value.replace(/＋/g, "+").replace(/−/g, "-");
@@ -170,7 +184,11 @@ export function parseEquipmentAttributes(description: string): EquipmentAttribut
       );
     const matches = [...content.matchAll(fieldPattern)];
     if (!matches.length) {
-      if (/^(?:法术|物理|封印|抗封|治疗|格挡|抵抗|附加|熔炼|星位|星相|[+＋−-]\d)/.test(line))
+      if (
+        /^(?:法术|物理|封印|抗|治疗|格挡|抵抗|固定|狂暴|穿刺|气血|附加|熔炼|星位|星相|[+＋−-]\d)/.test(
+          line,
+        )
+      )
         unknownLines.push(line);
       continue;
     }

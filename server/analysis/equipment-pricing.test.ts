@@ -100,6 +100,14 @@ async function matchedPricing(record = recordWithEquipment()) {
 }
 
 describe("装备联网查价的来源核对", () => {
+  it("旧库存只有数字类别时按已采到的腰带槽位补分类，不猜官网kindid", () => {
+    const record = recordWithEquipment();
+    const item = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
+    item.category = "9";
+    item.location = "role_using_equip_5";
+    expect(equipmentInventory(record).items[0]).toMatchObject({ category: "人物装备 · 腰带" });
+    expect(equipmentInventory(record).items[0].kindId).toBeUndefined();
+  });
   it("采齐的法宝灵宝神器不误报漏采或计装备价，混入真实装备仍正常查价", async () => {
     const record = recordWithEquipment();
     record

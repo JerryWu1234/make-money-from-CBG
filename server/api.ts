@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { diagnostics } from "./diagnostics";
 import { ScheduleConfigError } from "./crawler/schedule-time";
+import { validateSampleSelection } from "./analysis/sample-selection";
 
 const getRoutes = new Set([
   "/api/browser/status",
@@ -146,7 +147,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
           res.end(prompt ? detail.promptText : detail.inputText);
           return;
         }
-        case "/api/analysis/start":
+        case "/api/analysis/start": {
           if (
             input.sampleSize !== undefined &&
             (input.sample !== true ||
@@ -161,14 +162,21 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             (typeof input.model !== "string" || input.model.length > 200)
           )
             throw new Error("请选择有效的分析模型");
+          const productKeys = validateSampleSelection(
+            input.sample === true,
+            (input.sampleSize as number | undefined) ?? 1,
+            input.productKeys,
+          );
           result = await analysis.startAnalysis(
             (await import("./ai-connection")).aiProvider(input.provider),
             input.force === true,
             input.sample === true,
             (input.model as string | undefined) || undefined,
             (input.sampleSize as number | undefined) ?? 1,
+            productKeys,
           );
           break;
+        }
         case "/api/analysis/pause":
           result = await analysis.pauseAnalysis(runId || undefined);
           break;

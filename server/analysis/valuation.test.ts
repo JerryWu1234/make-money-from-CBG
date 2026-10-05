@@ -120,6 +120,38 @@ describe("裸号估值的复算与可追溯输入", () => {
     });
     expect(anomalous.pending_rules).toContain("飞升师门技能公式出现反常溢价，需核实适用范围");
   });
+  it("飞升异常检查只核对实际参与公式的最高五项，不阻塞未参与的低技能", () => {
+    const record = completeRecord();
+    record.detail!.tabs[0].fields.find((field) => field.name === "飞升/渡劫/化圣")!.value =
+      "已飞升";
+    const skills = record.detail!.tabs[1].items!.filter((item) => item.category === "师门技能");
+    const setLevels = (levels: number[]) => {
+      skills.forEach((skill, index) => {
+        skill.level = String(levels[index]);
+      });
+    };
+    setLevels([150, 130, 150, 139, 150, 130, 50]);
+    const normal = calculateValuation(record, profile());
+    expect(normal.items.find((item) => item.name === "师门技能")?.amount).toBeCloseTo(32.46);
+    expect(normal.pending_rules).not.toContain("飞升师门技能公式出现反常溢价，需核实适用范围");
+    expect(normal.model_value).not.toBeNull();
+    expect(normal.bare_role_value).toBe(normal.model_value);
+    expect(normal.decision).not.toBe("NEED_INFO");
+
+    const participatingLow = [150, 130, 150, 139, 55, 54, 50];
+    setLevels(participatingLow);
+    const anomalous = calculateValuation(record, profile());
+    expect(anomalous.items.find((item) => item.name === "师门技能")?.amount).toBe(
+      schoolPrice(participatingLow, "已飞升", false),
+    );
+    expect(anomalous.pending_rules).toContain("飞升师门技能公式出现反常溢价，需核实适用范围");
+    expect(anomalous).toMatchObject({
+      decision: "NEED_INFO",
+      model_value: null,
+      bare_role_value: null,
+      price_difference: null,
+    });
+  });
   it("AI只核对结论，金额和缺项由程序产生；错误买入结论仍拒绝", () => {
     const record = completeRecord();
     record.listing.price = "100000";

@@ -3,6 +3,7 @@ import type { SavedRoleRecord } from "../crawler/types";
 import type { ValuationResult } from "./valuation-types";
 import { compareListingPrice } from "./valuation-calculator";
 import { compareEquipmentAttributes, parseEquipmentAttributes } from "./equip-attributes";
+import { observedEquipmentCategory } from "../crawler/compact";
 
 export type EquipmentCandidate = {
   url: string;
@@ -87,7 +88,7 @@ export function equipmentInventory(record: SavedRoleRecord) {
         .filter(([key]) => !Object.hasOwn(observed.fields, key))
         .map(([key, value]) => key + "：" + value);
       const description = [details, ...restrictions].filter(Boolean).join("\n");
-      const category = item.category || "";
+      const category = observedEquipmentCategory(item.category, item.location) || "";
       if (item.kind === "skill" || item.kind === "innerSkill") continue;
       if (/法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(category)) continue;
       const level = levelOf(description, item.attributes);

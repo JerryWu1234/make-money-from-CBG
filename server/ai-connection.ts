@@ -7,7 +7,6 @@ import {
   codexModels,
   probeCodex,
   requestCodex,
-  requestCodexSearch,
   shutdownCodex,
 } from "./ai/codex";
 import {
@@ -18,13 +17,10 @@ import {
 } from "./ai/deepseek";
 import type { AiConnectionStatus, AiModelOptions, AiProvider, AiStatus } from "./ai/types";
 import type { SavedRoleRecord } from "./crawler/types";
-import {
-  equipmentInventory,
-  searchEquipmentPrices,
-  type Search,
-} from "./analysis/equipment-pricing";
+import { equipmentInventory, searchEquipmentPrices } from "./analysis/equipment-pricing";
 import { createEquipmentSource } from "./analysis/browser-equipment-source";
-import { searchPetPricing } from "./analysis/pet-pricing";
+import { petInventory, searchPetPricing } from "./analysis/pet-pricing";
+import { createPetSource } from "./analysis/browser-pet-source";
 
 export { startCodexLogin, codexLoginStatus, cancelCodexLogin } from "./ai/codex";
 
@@ -202,7 +198,6 @@ export async function shutdownAiConnections() {
   await shutdownCodex();
 }
 
-type SearchContext = { model?: string; account?: Awaited<ReturnType<typeof codexAccount>> };
 const unusedEquipmentSource = {
   async findCandidates() {
     throw new Error("装备资料不足或无需查价，不应发起浏览器查询");
@@ -228,47 +223,30 @@ async function searchEquipment(record: SavedRoleRecord, signal: AbortSignal) {
     throw new Error(publicError(error));
   }
 }
-function assetSearcher<T>(
-  searchPrices: (
-    record: SavedRoleRecord,
-    model: string,
-    signal: AbortSignal,
-    search: Search,
-  ) => Promise<T>,
-  context: SearchContext,
-) {
-  return async (record: SavedRoleRecord, signal: AbortSignal) => {
+const unusedPetSource = {
+  async findCandidates() {
+    throw new Error("宝宝资料不足或无需查价，不应发起浏览器查询");
+  },
+  async readSource() {
+    throw new Error("宝宝资料不足或无需查价，不应读取报价网页");
+  },
+};
+async function searchPets(record: SavedRoleRecord, signal: AbortSignal) {
+  try {
+    signal.throwIfAborted();
+    const inventory = petInventory(record);
+    if (!inventory.captureComplete || !inventory.items.some((item) => item.status === "no_match"))
+      return await searchPetPricing(record, signal, unusedPetSource);
+    const source = await createPetSource(signal);
     try {
       signal.throwIfAborted();
-      context.model ||= await codexModel();
-      const searchModel = context.model;
-      return await searchPrices(
-        record,
-        searchModel,
-        signal,
-        async (prompt, schema, searchSignal) => {
-          const before = await codexAccount();
-          if (!before)
-            throw new Error("资产联网查价需要先登录 ChatGPT；DeepSeek 本身不提供联网搜索");
-          if (context.account && before.email !== context.account.email)
-            throw new Error("查价的 ChatGPT 登录账号已变化，请重新连接");
-          context.account ||= before;
-          const searchAccount = context.account;
-          const response = await requestCodexSearch(prompt, searchSignal, {
-            model: searchModel,
-            outputSchema: schema,
-          });
-          searchSignal.throwIfAborted();
-          const after = await codexAccount();
-          if (!after || after.email !== searchAccount.email)
-            throw new Error("查价的 ChatGPT 登录账号已变化，请重新连接");
-          return response;
-        },
-      );
-    } catch (error) {
-      throw new Error(publicError(error));
+      return await searchPetPricing(record, signal, source);
+    } finally {
+      await source.close();
     }
-  };
+  } catch (error) {
+    throw new Error(publicError(error));
+  }
 }
 
 /** Credentials remain inside the Node process; an analysis run fixes its provider and model. */
@@ -279,11 +257,10 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
     if (selectedModel && !(await codexModels()).some((item) => item.id === selectedModel))
       throw new Error("Codex 模型不在当前模型列表中，请重新选择或使用默认模型");
     const model = selectedModel || (await codexModel());
-    const searchContext = { model, account };
     return {
       model,
       searchEquipment,
-      searchPets: assetSearcher(searchPetPricing, searchContext),
+      searchPets,
       async analyze(prompt: string, schema: unknown, signal: AbortSignal) {
         const current = await codexAccount();
         if (!current || current.email !== account.email)
@@ -302,11 +279,10 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
   const model = selectedModel || config.model || DEFAULT_DEEPSEEK_MODEL;
   if (!deepseekModels.some((item) => item.id === model))
     throw new Error("DeepSeek 模型不可用，请重新选择");
-  const searchContext: SearchContext = {};
   return {
     model,
     searchEquipment,
-    searchPets: assetSearcher(searchPetPricing, searchContext),
+    searchPets,
     async analyze(prompt: string, _schema: unknown, signal: AbortSignal) {
       try {
         return await requestDeepSeek(key, model, prompt, signal, 8192);

@@ -7,7 +7,6 @@ import type { EquipmentCandidate } from "./equipment-pricing";
 import {
   combinePetPricing,
   petInventory,
-  petSearchPrompt,
   searchPetPricing,
   verifyPetCandidate,
 } from "./pet-pricing";
@@ -127,14 +126,13 @@ const response = (
   candidates = [candidate()],
   queries = ["梦幻西游电脑版 藏宝阁 全服 画魂 须弥真言"],
 ) => ({
-  text: JSON.stringify({ items: [{ key: "召唤兽/孩子:1", candidates, note: "" }] }),
+  items: [{ key: "召唤兽/孩子:1", candidates, note: "", query: queries[0] }],
   queries,
   searchItems: queries.map((query, index) => ({
-    id: "web-search-" + index,
-    type: "web_search",
+    id: "browser-search-" + index,
+    type: "browser",
     query,
   })),
-  usage: { input_tokens: 100, output_tokens: 100 },
 });
 async function pricing(
   record = recordWithPets(),
@@ -143,13 +141,10 @@ async function pricing(
 ) {
   const search = vi.fn().mockResolvedValue(response(candidates));
   const read = vi.fn(async (url: string) => pages.get(url)!);
-  const snapshot = await searchPetPricing(
-    record,
-    "test-model",
-    new AbortController().signal,
-    search,
-    read,
-  );
+  const snapshot = await searchPetPricing(record, new AbortController().signal, {
+    findCandidates: search,
+    readSource: read,
+  });
   return { snapshot, search, read };
 }
 const upstream = (value: number | null = 2000): ValuationResult => ({
@@ -173,19 +168,34 @@ describe("宝宝来源核对与挂牌比价", () => {
       search = vi.fn(),
       read = vi.fn();
     expect(
-      (await searchPetPricing(empty, "test", new AbortController().signal, search, read)).total,
+      (
+        await searchPetPricing(empty, new AbortController().signal, {
+          findCandidates: search,
+          readSource: read,
+        })
+      ).total,
     ).toBe(0);
     expect(search).not.toHaveBeenCalled();
     delete empty.detail!.petCapture;
     expect(petInventory(empty).captureComplete).toBe(false);
     expect(
-      (await searchPetPricing(empty, "test", new AbortController().signal, search, read)).total,
+      (
+        await searchPetPricing(empty, new AbortController().signal, {
+          findCandidates: search,
+          readSource: read,
+        })
+      ).total,
     ).toBeNull();
     const partial = recordWithPets();
     partial.detail!.tabs.find((tab) => tab.name === "召唤兽/孩子")!.petCount = 2;
     expect(petInventory(partial).issues.join(" ")).toContain("数量");
     expect(
-      (await searchPetPricing(partial, "test", new AbortController().signal, search, read)).total,
+      (
+        await searchPetPricing(partial, new AbortController().signal, {
+          findCandidates: search,
+          readSource: read,
+        })
+      ).total,
     ).toBeNull();
   });
 
@@ -209,13 +219,52 @@ describe("宝宝来源核对与挂牌比价", () => {
     expect(verifyPetCandidate(item, candidate(), sourcePage(), "now").verified).toBe(true);
   });
 
+  it("明确base+bonus资质保留原值，不擅自合计；模糊表达仍为不完整", async () => {
+    const pet = makePet();
+    pet.fields.find((field) => field.name === "攻击资质")!.value = "1550 +22";
+    const record = recordWithPets([pet]);
+    expect(petInventory(record).items[0].status).toBe("no_match");
+    const result = await pricing(
+      record,
+      [candidate()],
+      new Map([[candidate().url, sourcePage(1000, pet)]]),
+    );
+    expect(result.snapshot.total).toBe(1000);
+    expect(result.snapshot.items[0].fields).toContainEqual({ name: "攻击资质", value: "1550 +22" });
+    expect(
+      verifyPetCandidate(
+        petInventory(record).items[0],
+        candidate(),
+        sourcePage(1000, pet).replace("1550 +22", "1572"),
+        "now",
+      ).verified,
+    ).toBe(false);
+    pet.fields.find((field) => field.name === "攻击资质")!.value = "1550 未知加成";
+    expect(petInventory(recordWithPets([pet])).items[0].status).toBe("incomplete");
+  });
+
+  it("不支持的官方类型即使未发起查询也保留具体拒绝理由", async () => {
+    const result = {
+      queries: [],
+      items: [{ key: "召唤兽/孩子:1", candidates: [], note: "官网召唤兽类型目录未识别，不查询" }],
+    };
+    const read = vi.fn();
+    const snapshot = await searchPetPricing(recordWithPets(), new AbortController().signal, {
+      findCandidates: vi.fn().mockResolvedValue(result),
+      readSource: read,
+    });
+    expect(snapshot.total).toBeNull();
+    expect(snapshot.items[0].issues.join("；")).toContain("类型目录未识别");
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("实际搜索记录、原始回复、请求和网页hash均保存；全服匹配不限定区服", async () => {
     const { snapshot, search, read } = await pricing();
     expect(snapshot).toMatchObject({
       total: 1000,
       knownTotal: 1000,
-      model: "test-model",
-      provider: "codex",
+      model: "browser",
+      provider: "browser",
     });
     expect(snapshot.queries).toHaveLength(1);
     expect(snapshot.searchItems).toHaveLength(1);
@@ -225,36 +274,29 @@ describe("宝宝来源核对与挂牌比价", () => {
     expect(snapshot.items[0].issues).toContain("仅1条挂牌样本，参考范围有限");
     expect(search).toHaveBeenCalledOnce();
     expect(read).toHaveBeenCalledOnce();
-    expect(petSearchPrompt(snapshot.items)).toContain("范围为全服");
   });
 
-  it("没有实际搜索、坏JSON、读取失败、只有AI报价都不产出宝宝价格", async () => {
+  it("没有实际查询、结果格式错误或网页读取失败都不产出宝宝价格", async () => {
     const record = recordWithPets();
     for (const result of [
       response([candidate()], []),
-      { ...response(), text: "不是JSON" },
-      { ...response(), text: "null" },
-      { ...response(), text: "42" },
+      { ...response(), items: null },
+      { ...response(), items: 42 },
+      { ...response(), items: {} },
     ]) {
       const read = vi.fn();
-      const snapshot = await searchPetPricing(
-        record,
-        "test",
-        new AbortController().signal,
-        vi.fn().mockResolvedValue(result),
-        read,
-      );
+      const snapshot = await searchPetPricing(record, new AbortController().signal, {
+        findCandidates: vi.fn().mockResolvedValue(result),
+        readSource: read,
+      });
       expect(snapshot.total).toBeNull();
       expect(read).not.toHaveBeenCalled();
-      expect(snapshot.rawResponse).toBe(result.text);
+      expect(snapshot.rawResponse).toBe(JSON.stringify(result));
     }
-    const snapshot = await searchPetPricing(
-      record,
-      "test",
-      new AbortController().signal,
-      vi.fn().mockResolvedValue(response()),
-      vi.fn().mockRejectedValue(new Error("网页需登录")),
-    );
+    const snapshot = await searchPetPricing(record, new AbortController().signal, {
+      findCandidates: vi.fn().mockResolvedValue(response()),
+      readSource: vi.fn().mockRejectedValue(new Error("网页需登录")),
+    });
     expect(snapshot.total).toBeNull();
     expect(snapshot.items[0].candidates[0].reason).toContain("登录");
   });
@@ -305,8 +347,12 @@ describe("宝宝来源核对与挂牌比价", () => {
     ).toBe(false);
     delete record.detail!.petCapture;
     expect(
-      (await searchPetPricing(record, "test", new AbortController().signal, vi.fn(), vi.fn()))
-        .total,
+      (
+        await searchPetPricing(record, new AbortController().signal, {
+          findCandidates: vi.fn(),
+          readSource: vi.fn(),
+        })
+      ).total,
     ).toBeNull();
   });
 

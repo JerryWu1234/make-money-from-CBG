@@ -99,12 +99,10 @@ async function valuationSetup() {
   const searchEquipment = vi
     .fn<NonNullable<AnalysisClient["searchEquipment"]>>()
     .mockResolvedValue(pricing);
-  const petPricing = await searchPetPricing(
-    record,
-    "test-model",
-    new AbortController().signal,
-    noNetwork,
-  );
+  const petPricing = await searchPetPricing(record, new AbortController().signal, {
+    findCandidates: noNetwork,
+    readSource: noNetwork,
+  });
   const searchPets = vi
     .fn<NonNullable<AnalysisClient["searchPets"]>>()
     .mockResolvedValue(petPricing);
@@ -130,6 +128,57 @@ function untilAborted(signal: AbortSignal): Promise<never> {
 }
 
 describe("持久化的商品分析队列", () => {
+  it("指定商品试分析只分析所选商品，保留选择顺序", async () => {
+    const { crawl, store, runner, analyze } = setup(["a", "b", "c"]);
+    const id = await runner.start("codex", true, undefined, true, undefined, 2, ["c", "b"]);
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({ total: 2, completed: 2, failed: 0 });
+    expect(
+      crawl.db
+        .prepare("SELECT listing_key FROM analysis_tasks WHERE run_id=? ORDER BY ordinal")
+        .all(id)
+        .map((t) => t.listing_key),
+    ).toEqual(["c", "b"]);
+    expect(analyze).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["missing", "pending"])(
+    "指定商品%s不存在或未采齐时回滚整批，不分析其它商品",
+    async (key) => {
+      const { crawl, runner, analyze } = setup(["a"]);
+      crawl.observe(analysisRecord("pending").listing);
+      await expect(
+        runner.start("codex", true, undefined, true, undefined, 2, ["a", key]),
+      ).rejects.toThrow("指定商品不存在或详情未完成");
+      expect(crawl.db.prepare("SELECT COUNT(*) n FROM analysis_runs").get()?.n).toBe(0);
+      expect(analyze).not.toHaveBeenCalled();
+      expect(crawl.db.prepare("SELECT COUNT(*) n FROM analysis_tasks").get()?.n).toBe(0);
+      expect(crawl.db.prepare("SELECT COUNT(*) n FROM analysis_lock").get()?.n).toBe(0);
+    },
+  );
+
+  it("重复或与试分析数量不符的选择在连接AI前被拒绝", async () => {
+    const { runner, connect } = setup(["a", "b"]);
+    await expect(
+      runner.start("codex", true, undefined, true, undefined, 2, ["a", "a"]),
+    ).rejects.toThrow("不同的商品 ID");
+    await expect(runner.start("codex", true, undefined, true, undefined, 2, ["a"])).rejects.toThrow(
+      "数量一致",
+    );
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("当前任务执行中拒绝指定商品试分析，不把现有批次当作选择结果", async () => {
+    const { runner, analyze } = setup(["a", "b"]);
+    analyze.mockImplementation((_prompt, _schema, signal) => untilAborted(signal));
+    await runner.start("codex", true, undefined, true);
+    await expect(runner.start("codex", true, undefined, true, undefined, 1, ["b"])).rejects.toThrow(
+      "请先暂停当前分析",
+    );
+    expect(analyze).toHaveBeenCalledOnce();
+    await runner.pause();
+  });
+
   it("完成后宝宝行情过期会移出当前推荐榜，原价格和证据仍能在历史查看", async () => {
     const { store, runner, profile } = await valuationSetup();
     const id = await runner.start("codex", true, profile);

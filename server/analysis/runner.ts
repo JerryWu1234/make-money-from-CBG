@@ -8,6 +8,7 @@ import { AnalysisStore } from "./store";
 import { VALUATION_SCHEMA, validateValuation } from "./valuation-contract";
 import type { AnalysisProfile } from "./valuation-types";
 import { CALCULATION_VERSION } from "./profile";
+import { validateSampleSelection } from "./sample-selection";
 
 export type AnalysisClient = {
   model: string;
@@ -42,13 +43,14 @@ export class AnalysisRunner {
     sample = false,
     selectedModel?: string,
     sampleSize = 1,
+    productKeys?: string[],
   ) {
-    if (sample && (!Number.isInteger(sampleSize) || sampleSize < 1 || sampleSize > 3))
-      throw new Error("试分析数量请选择 1 到 3 件");
+    validateSampleSelection(sample, sampleSize, productKeys);
     if (profile && profile.calculationVersion !== CALCULATION_VERSION)
       throw new Error("估值规则已更新，请按新规则开始分析；旧结果仍可查看");
     const existing = this.currentActivity();
     if (existing) {
+      if (productKeys) throw new Error("请先暂停当前分析，再指定商品试分析");
       const run = this.store.run(existing.id);
       if (run?.provider !== provider) throw new Error("请先暂停当前分析，再切换 AI");
       if (selectedModel && run.model !== selectedModel)
@@ -60,6 +62,7 @@ export class AnalysisRunner {
     // The lease also protects the await above and separate local Node services.
     const afterConnect = this.currentActivity();
     if (afterConnect) {
+      if (productKeys) throw new Error("请先暂停当前分析，再指定商品试分析");
       const run = this.store.run(afterConnect.id);
       if (run?.provider !== provider) throw new Error("请先暂停当前分析，再切换 AI");
       if (selectedModel && run.model !== selectedModel)
@@ -69,13 +72,22 @@ export class AnalysisRunner {
     this.store.recover();
     const owner = randomUUID();
     if (!this.store.acquire(owner)) {
+      if (productKeys) throw new Error("另一个本机服务正在分析，请先在该服务暂停");
       const current = this.store.activeRun();
       if (current?.provider === provider && (!selectedModel || current.model === selectedModel))
         return current.id;
       throw new Error("另一个本机服务正在分析，请先在该服务暂停");
     }
     try {
-      const id = this.store.createRun(provider, client.model, force, profile, sample, sampleSize);
+      const id = this.store.createRun(
+        provider,
+        client.model,
+        force,
+        profile,
+        sample,
+        sampleSize,
+        productKeys,
+      );
       this.launch(id, owner, client);
       return id;
     } catch (error) {

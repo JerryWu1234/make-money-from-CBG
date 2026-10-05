@@ -9,6 +9,7 @@ import type { AnalysisProfile } from "./valuation-types";
 import type { ProductDocument } from "./product-document";
 import { equipmentInventory, type EquipmentPricingSnapshot } from "./equipment-pricing";
 import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
+import { validateSampleSelection } from "./sample-selection";
 import type {
   AnalysisDetail,
   AnalysisItem,
@@ -202,7 +203,9 @@ export class AnalysisStore {
     profile?: AnalysisProfile,
     sample = false,
     sampleSize = 1,
+    productKeys?: string[],
   ) {
+    validateSampleSelection(sample, sampleSize, productKeys);
     const id = randomUUID();
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -220,13 +223,26 @@ export class AnalysisStore {
           now(),
           profile ? JSON.stringify(profile) : null,
         );
+      const selected = productKeys
+        ? " AND key IN (" + productKeys.map(() => "?").join(",") + ")"
+        : "";
       const rows = this.db
         .prepare(
-          "SELECT key,listing_json,detail_json FROM listings WHERE status='complete' AND detail_json IS NOT NULL ORDER BY " +
+          "SELECT key,listing_json,detail_json FROM listings WHERE status='complete' AND detail_json IS NOT NULL" +
+            selected +
+            " ORDER BY " +
             (sample ? "key ASC" : "first_seen_at ASC,key ASC") +
-            (sample ? " LIMIT ?" : ""),
+            (sample && !productKeys ? " LIMIT ?" : ""),
         )
-        .all(...(sample ? [sampleSize] : []));
+        .all(...(productKeys || (sample ? [sampleSize] : [])));
+      if (productKeys) {
+        if (rows.length !== productKeys.length)
+          throw new Error("指定商品不存在或详情未完成，请先补采后再试分析");
+        rows.sort(
+          (left, right) =>
+            productKeys.indexOf(String(left.key)) - productKeys.indexOf(String(right.key)),
+        );
+      }
       if (!rows.length) throw new Error("暂无详情完整的商品，请先采集商品详情");
       const insert = this.db.prepare(
         `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,

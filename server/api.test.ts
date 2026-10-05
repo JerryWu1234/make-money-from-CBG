@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => ({
   prepareAnalysisClient: vi.fn(),
   checkEquipment: vi.fn(),
   equipmentCheckImported: vi.fn(),
+  startAnalysis: vi.fn(),
+  aiProvider: vi.fn(),
 }));
 vi.mock("./crawler/controller", () => mocks);
 vi.mock("./crawler/schedule", () => mocks);
@@ -58,12 +60,42 @@ beforeEach(() => {
   });
   mocks.isCrawling.mockReturnValue(false);
   mocks.isAnalyzing.mockReturnValue(false);
+  mocks.aiProvider.mockReturnValue("codex");
   mocks.scanScheduleStatus.mockReturnValue({ mode: "disabled" });
   mocks.enableScanSchedule.mockReturnValue({ mode: "enabled" });
   mocks.checkCbgStatus.mockResolvedValue({
     running: false,
     isLoggedIn: true,
     workflowStep: "completed",
+  });
+});
+
+describe("指定商品试分析", () => {
+  it("传递明确商品列表，不替换成列表第一件", async () => {
+    const input = { provider: "codex", sample: true, sampleSize: 1, productKeys: ["462:target"] };
+    mocks.startAnalysis.mockResolvedValue({ id: "selected-run", total: 1 });
+    const { apiMiddleware } = await import("./api");
+    const res = response();
+    await apiMiddleware(request("/api/analysis/start", input), res, vi.fn());
+    expect(mocks.startAnalysis).toHaveBeenCalledWith("codex", false, true, undefined, 1, [
+      "462:target",
+    ]);
+    expect(res.statusCode).toBe(200);
+  });
+
+  it.each([
+    { sample: false, productKeys: ["a"] },
+    { sample: true, productKeys: [] },
+    { sample: true, sampleSize: 2, productKeys: ["a", "a"] },
+    { sample: true, productKeys: ["a", "b"] },
+    { sample: true, productKeys: [" a "] },
+    { sample: true, productKeys: [42] },
+  ])("拒绝不明确的商品选择 %j，不开始分析", async (input) => {
+    const { apiMiddleware } = await import("./api");
+    const res = response();
+    await apiMiddleware(request("/api/analysis/start", input), res, vi.fn());
+    expect(res.statusCode).toBe(500);
+    expect(mocks.startAnalysis).not.toHaveBeenCalled();
   });
 });
 

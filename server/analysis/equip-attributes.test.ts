@@ -3,6 +3,29 @@ import { compareEquipmentAttributes, parseEquipmentAttributes } from "./equip-at
 
 describe("装备价敏字段的结构化比较", () => {
   it.each([
+    "固定伤害",
+    "狂暴等级",
+    "穿刺等级",
+    "抗物理暴击等级",
+    "抗法术暴击等级",
+    "气血回复效果",
+    "抵抗封印等级",
+  ])("完整保留灵饰词条%s及重复数值，报价不能漏项或改值", (name) => {
+    const target = parseEquipmentAttributes(`等级80\n${name}+8\n${name}+9`);
+    expect(target.fields[name]).toEqual(["+8", "+9"]);
+    expect(target.level).toBe(80);
+    expect(
+      compareEquipmentAttributes(target, parseEquipmentAttributes(`等级80\n${name}+9\n${name}+8`)),
+    ).toBeNull();
+    expect(
+      compareEquipmentAttributes(target, parseEquipmentAttributes(`等级80\n${name}+8`)),
+    ).toContain(name);
+    expect(
+      compareEquipmentAttributes(target, parseEquipmentAttributes(`等级80\n${name}+8\n${name}+10`)),
+    ).toContain(name);
+  });
+
+  it.each([
     "等级70\n【装备条件】等级70\n【装备角色】女",
     "等级70<br>【装备条件】 等级70<br>【装备角色】女",
     "等级70\n【装备条件】 等级70 【装备角色】 女",

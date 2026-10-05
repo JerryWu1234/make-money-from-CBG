@@ -25,11 +25,13 @@ export function equipmentSearchDocument(options = {}) {
 <div id="search_result"></div><div id="pager"></div>
 <script>
 window.IsLogin=1;
-window.EquipKinds=[[6,'剑'],[7,'双剑'],[20,'腰带']];
+window.EquipKinds=[[6,'剑'],[7,'双剑'],[20,'腰带'],[19,'鞋子'],[21,'饰品']];
 window.Kinds=[[61,'戒指'],[62,'耳饰'],[63,'手镯'],[64,'佩饰']];
 window.SpecialEffects=[[3,'愤怒'],[5,'永不磨损']];
 window.SpecialSkills=[[1036,'破血狂攻']];window.Gems=[[6,'黑宝石']];
 window.settings=${JSON.stringify(settings).replaceAll("<", "\\u003c")};
+window.AUTO_SEARCH_CONFIG={wjd_equip_equip_type:settings.namedModels||{}};
+window.AddedAttr1=[[4,'法伤'],[3,'速度']];window.AddedAttr2=[[13,'防御'],[14,'法防'],[12,'气血']];
 window.OverallSearchAct=settings.jewelry?'overall_search_lingshi':'overall_search_equip';
 window.CurSearchValue={arg:null,order_by:{key:null,sort:null}};
 window.calls=[];window.historyWrites=0;
@@ -57,7 +59,7 @@ window.overall_search=function(args,page,order){
    const root=document.querySelector('#search_result');
    if(!result.msg.length){root.innerHTML='<p>没有符合条件的商品</p>';return;}
    const table=document.createElement('table');
-   for(const row of result.msg){const tr=document.createElement('tr'),td=document.createElement('td'),a=document.createElement('a'),img=document.createElement('img');a.className='soldImg';a.href='https://xyq.cbg.163.com/equip?s=1&eid='+encodeURIComponent(row.eid)+'&from_shareid=must-not-send-viewer&reco_request_id=tracking&cross_buy_serverid=99';img.src=${JSON.stringify(pixel)};img.width=40;img.height=40;img.setAttribute('data_equip_name',row.name);img.setAttribute('data_equipid','ordersn-'+row.eid);a.append(img);td.append(a);tr.append(td);table.append(tr);}root.append(table);
+   for(const row of result.msg){const tr=document.createElement('tr'),td=document.createElement('td'),a=document.createElement('a'),img=document.createElement('img');a.className='soldImg';a.href='https://xyq.cbg.163.com/equip?s=1&eid='+encodeURIComponent(row.eid)+'&from_shareid=must-not-send-viewer&reco_request_id=tracking&cross_buy_serverid=99';img.src=${JSON.stringify(pixel)};img.width=40;img.height=40;img.setAttribute('data_equip_name',row.name);img.setAttribute('data_equipid','ordersn-'+row.eid);if(row.kindId!==undefined)img.setAttribute('data_kindid',row.kindId);if(row.level!==undefined)img.setAttribute('data_equip_level',row.level);a.append(img);td.append(a);if(row.description!==undefined){const desc=document.createElement('textarea');desc.id='equip_desc_'+(row.descriptionOrdersn||'ordersn-'+row.eid);desc.style.display='none';desc.value=row.description;td.append(desc);}tr.append(td);table.append(tr);}root.append(table);
    const pager=document.querySelector('#pager');
    if(result.paging.num_end>1){pager.append('第'+page+'页, 共'+result.paging.num_end+'页');if(page>1)pager.insertAdjacentHTML('beforeend','<a href="javascript:goto('+(page-1)+')">上一页</a>');if(page<result.paging.num_end)pager.insertAdjacentHTML('beforeend','<a href="javascript:goto('+(page+1)+')">下一页</a>');}
   },

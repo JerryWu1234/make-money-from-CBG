@@ -62,6 +62,7 @@ export async function startAnalysis(
   sample = false,
   model?: string,
   sampleSize = 1,
+  productKeys?: string[],
 ) {
   try {
     await refreshMarket(service().store.db);
@@ -76,6 +77,7 @@ export async function startAnalysis(
     sample,
     model,
     sampleSize,
+    productKeys,
   );
   return service().store.run(id);
 }
