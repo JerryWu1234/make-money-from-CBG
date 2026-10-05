@@ -235,6 +235,50 @@ try {
     }),
   );
 
+  for (const missingConfig of [false, true])
+    await check(
+      `套装官网映射${missingConfig ? "缺失仍核验详情" : "实际传给查询并保存原始args"}`,
+      () => {
+        const name = "风月宝链",
+          description =
+            "等级60\n灵力56\n耐久126 修理失败3次\n套装效果：附加状态炼气化神\n装备条件：等级60";
+        return withSource(
+          {
+            suitConfigMissing: missingConfig,
+            pages: [[{ eid: "same-suit", name, description, modelId: "2810" }]],
+          },
+          { name, description, renderedPanel: true, selling: 1, modelId: 2810 },
+          async ({ source, searchPage, control }) => {
+            const result = await source.findCandidates(
+              [
+                item({
+                  name,
+                  description,
+                  modelId: "2810",
+                  kindId: "21",
+                  category: "项链",
+                  level: 60,
+                }),
+              ],
+              control.signal,
+            );
+            const calls = await searchPage.evaluate(() => window.calls);
+            assert.equal(calls[0].suit_effect, missingConfig ? undefined : "4013");
+            assert.equal(
+              result.searchItems[0].args.suit_effect,
+              missingConfig ? undefined : "4013",
+            );
+            assert.equal(
+              result.searchItems[0].modes[0].args.suit_effect,
+              missingConfig ? undefined : "4013",
+            );
+            if (!missingConfig) assert.match(result.queries[0], /"suit_effect":"4013"/);
+            assert.equal(result.items[0].candidates[0].verified, true);
+          },
+        );
+      },
+    );
+
   await check("同名推荐在主商品前也只悬浮主图标", () =>
     withSource(
       {},

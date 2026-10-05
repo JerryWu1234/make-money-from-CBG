@@ -239,19 +239,119 @@ export function petObservationSource(observed: PetObservation, url: string) {
 }
 
 export async function petPageSource(page: Page, signal: AbortSignal) {
+  try {
+    return await readMainPet(page, signal);
+  } catch (error) {
+    signal.throwIfAborted();
+    const diagnostics = await page
+      .evaluate(() => {
+        const excluded =
+          '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [id$="TipsBox"], [role="tooltip"]';
+        const describe = (selector: string) =>
+          Array.from(document.querySelectorAll<HTMLElement>(selector))
+            .filter((node) => !node.closest(excluded))
+            .slice(0, 3)
+            .map((node) => {
+              const ancestors = [];
+              for (
+                let parent = node.parentElement, count = 0;
+                parent && count < 3;
+                parent = parent.parentElement, count++
+              )
+                ancestors.push({
+                  tag: parent.tagName,
+                  id: parent.id.slice(0, 80),
+                  className: String(parent.className).slice(0, 120),
+                });
+              return { visible: node.checkVisibility(), ancestors };
+            });
+        return {
+          panels: describe("#equip_desc_panel"),
+          info: describe("#info_panel"),
+          jsonInputs: Array.from(document.querySelectorAll("#equip_desc_value")).filter(
+            (node) => !node.closest(excluded),
+          ).length,
+          mainPrices: Array.from(document.querySelectorAll<HTMLElement>("#info_panel .price"))
+            .filter(
+              (node) =>
+                node.checkVisibility() &&
+                !node.closest(excluded) &&
+                !node.closest("#equip_price_addon_info"),
+            )
+            .slice(0, 3)
+            .map((node) => node.innerText.slice(0, 80)),
+        };
+      })
+      .catch(() => null);
+    const failure =
+      error instanceof Error && error.name !== "TimeoutError"
+        ? error
+        : new Error("主宝宝属性、商品信息或价格区域未加载完成");
+    throw Object.assign(failure, { petDiagnostics: diagnostics });
+  }
+}
+
+async function readMainPet(page: Page, signal: AbortSignal) {
   signal.throwIfAborted();
   await assertAvailable(page);
-  const observed = await page.evaluate(() => {
+  const excluded =
+    '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [id$="TipsBox"], [role="tooltip"]';
+  await page.waitForFunction(
+    (excluded) => {
+      const visible = (node: Element) =>
+        node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+        !node.closest(excluded);
+      const panels = Array.from(document.querySelectorAll<HTMLElement>("#equip_desc_panel")).filter(
+        visible,
+      );
+      const infos = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(
+        visible,
+      );
+      const inputs = Array.from(
+        document.querySelectorAll<HTMLInputElement>("#equip_desc_value"),
+      ).filter((node) => !node.closest(excluded));
+      const g = window as unknown as Record<string, any>;
+      return (
+        (g.equip || g.EquipInfo) &&
+        panels.length === 1 &&
+        infos.length === 1 &&
+        panels[0].innerText.trim() &&
+        !/加载中|正在加载/.test(panels[0].innerText) &&
+        infos[0].innerText.trim() &&
+        inputs.length === 1 &&
+        inputs[0].value.trim() &&
+        Array.from(
+          infos[0].querySelectorAll<HTMLElement>(".price, [data_price], [data-price]"),
+        ).some(
+          (node) =>
+            visible(node) &&
+            !node.closest("#equip_price_addon_info") &&
+            (node.innerText.trim() ||
+              node.getAttribute("data_price") ||
+              node.getAttribute("data-price")),
+        )
+      );
+    },
+    excluded,
+    { timeout: 5000 },
+  );
+  signal.throwIfAborted();
+  await assertAvailable(page);
+  const observed = await page.evaluate((excluded) => {
     const g = window as unknown as Record<string, any>;
     const raw = g.equip || g.EquipInfo;
-    const panel = document.querySelector<HTMLElement>("#equip_desc_panel");
-    const info = document.querySelector<HTMLElement>("#info_panel");
-    const root = panel?.closest<HTMLElement>(".infoList.goodsInfo");
-    const excluded =
-      '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [id$="TipsBox"], [role="tooltip"]';
     const visible = (node: Element) =>
       node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
       !node.closest(excluded);
+    const panels = Array.from(document.querySelectorAll<HTMLElement>("#equip_desc_panel")).filter(
+      visible,
+    );
+    const infos = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(visible);
+    const panel = panels.length === 1 ? panels[0] : null;
+    const info = infos.length === 1 ? infos[0] : null;
+    let root = panel?.parentElement;
+    while (root && root !== document.body && info && !root.contains(info))
+      root = root.parentElement;
     if (
       !raw ||
       !panel ||
@@ -259,12 +359,18 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
       !root ||
       !visible(panel) ||
       !visible(info) ||
-      info.closest(".infoList.goodsInfo") !== root
+      root === document.body ||
+      root === document.documentElement ||
+      !root.contains(info) ||
+      root.closest(excluded)
     )
       throw new Error("官网独立宝宝主商品区域未识别，未采用推荐内容");
     if (/加载中|正在加载|展开全部(?:技能|装备|内丹)/.test(panel.innerText))
       throw new Error("宝宝详情尚未展开完整");
-    const input = document.querySelector<HTMLInputElement>("#equip_desc_value");
+    const inputs = Array.from(
+      document.querySelectorAll<HTMLInputElement>("#equip_desc_value"),
+    ).filter((node) => !node.closest(excluded));
+    const input = inputs.length === 1 ? inputs[0] : null;
     let pet: Record<string, any>;
     try {
       pet = JSON.parse(input?.value || "");
@@ -402,10 +508,18 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
       if (!name) throw new Error("认证技能未完整识别");
       if (!fields.some((field) => field.name === "认证技能")) add("认证技能", name);
     }
-    const body = root.cloneNode(true) as HTMLElement;
-    body
-      .querySelectorAll(excluded + ", #equip_price_addon_info, script, style")
-      .forEach((node) => node.remove());
+    // Status text comes only from the two bound principal regions, not their broader wrapper.
+    const body = [info, panel]
+      .map((region) => {
+        const copy = region.cloneNode(true) as HTMLElement;
+        copy
+          .querySelectorAll(
+            excluded + ", #equip_price_addon_info, script, style, nav, header, footer",
+          )
+          .forEach((node) => node.remove());
+        return copy.textContent || "";
+      })
+      .join("\n");
     return {
       productId: raw.eid,
       serverId: raw.serverid ?? raw.server_id,
@@ -424,7 +538,7 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
             node.getAttribute("data_price") || node.getAttribute("data-price") || node.innerText,
         ),
       selling: raw.is_selling,
-      body: body.textContent || "",
+      body,
       fields,
       parsedFields,
       skills,
@@ -434,7 +548,7 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
       equipment,
       expectedEquipment,
     };
-  });
+  }, excluded);
   signal.throwIfAborted();
   return petObservationSource(observed, page.url());
 }
@@ -601,6 +715,7 @@ export function petSourceFromPages(
           query =
             "全服 / 综合排序 / " + item.name + " / " + matchType + " / " + JSON.stringify(args);
           const seen = new Set<string>();
+          const detailFailures: { url: string; reason: string; diagnostics: unknown }[] = [];
           let rows = 0,
             readDetails = 0,
             lastPage = 0,
@@ -784,6 +899,15 @@ export function petSourceFromPages(
                   ...candidate,
                   reason: error instanceof Error ? error.message : "无法读取宝宝详情",
                 });
+                detailFailures.push({
+                  url: row.url,
+                  reason:
+                    error instanceof Error ? error.message.split("\n")[0] : "无法读取宝宝详情",
+                  diagnostics:
+                    error && typeof error === "object" && "petDiagnostics" in error
+                      ? error.petDiagnostics
+                      : null,
+                });
               }
               if (count >= MAX_ROWS || acceptedCount() >= sampleLimit) {
                 pageFullyRead = rowIndex === listing.rows.length - 1;
@@ -810,6 +934,7 @@ export function petSourceFromPages(
             rows,
             details: readDetails,
             exhausted,
+            detailFailures,
           });
         }
         const distinct = new Map<string, EquipmentCandidate>();

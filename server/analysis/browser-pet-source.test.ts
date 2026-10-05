@@ -4,6 +4,7 @@ import {
   createPetSource,
   PET_SEARCH_URL,
   petObservationSource,
+  petPageSource,
   petQuery,
   petSourceFromPages,
   type PetSearchConfig,
@@ -175,6 +176,32 @@ describe("官网宝宝查询参数", () => {
 });
 
 describe("主宝宝商品来源核对", () => {
+  it("读取前等待主商品渲染；等待期间取消保持原原因且不采诊断", async () => {
+    const read = vi.fn().mockResolvedValue(observation());
+    const wait = vi.fn().mockResolvedValue(undefined);
+    const page = { waitForFunction: wait, evaluate: read, url: () => url } as unknown as Page;
+    expect((await petPageSource(page, new AbortController().signal)).price).toBe(368.6);
+    expect(wait).toHaveBeenCalledWith(expect.any(Function), expect.any(String), { timeout: 5000 });
+    expect(wait.mock.invocationCallOrder[0]).toBeLessThan(read.mock.invocationCallOrder[0]);
+    const control = new AbortController();
+    const cancellation = new Error("取消等待主宝宝");
+    read.mockClear();
+    wait.mockImplementationOnce(async () => control.abort(cancellation));
+    await expect(petPageSource(page, control.signal)).rejects.toBe(cancellation);
+    expect(read).not.toHaveBeenCalled();
+  });
+  it("渲染超时保存最小结构诊断并给出公开原因，不读取完整页面或登录状态", async () => {
+    const diagnostics = { panels: [], info: [], jsonInputs: 0, mainPrices: [] };
+    const timeout = Object.assign(new Error("Timeout 5000ms"), { name: "TimeoutError" });
+    const page = {
+      waitForFunction: vi.fn().mockRejectedValue(timeout),
+      evaluate: vi.fn().mockResolvedValue(diagnostics),
+    } as unknown as Page;
+    await expect(petPageSource(page, new AbortController().signal)).rejects.toMatchObject({
+      message: "主宝宝属性、商品信息或价格区域未加载完成",
+      petDiagnostics: diagnostics,
+    });
+  });
   it("绑定当前URL/ID/区服、可见主价与JSON，按人民币元生成可复核来源", () => {
     const source = petObservationSource(observation(), url);
     expect(source.price).toBe(368.6);
@@ -390,6 +417,7 @@ describe("宝宝查询拥有页面与共享采集锁", () => {
     };
     const detail = {
       close: vi.fn(async () => {}),
+      waitForFunction: vi.fn(async () => {}),
       goto: vi.fn(async (url: string) => {
         currentUrl = url;
       }),

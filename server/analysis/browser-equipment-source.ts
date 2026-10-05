@@ -27,6 +27,7 @@ const MAX_PAGES = 3,
   MAX_ROWS = 60,
   MAX_DETAILS = 20;
 type Choices = Array<[string | number, string]>;
+type SuitType = "added_status" | "append_skill" | "transform_skill" | "transform_charm";
 export type EquipmentSearchConfig = {
   kinds: Choices;
   effects: Choices;
@@ -34,12 +35,50 @@ export type EquipmentSearchConfig = {
   gems: Choices;
   namedKinds?: Choices;
   addedAttrs?: Choices;
+  suits?: Choices;
+  suitTypes?: Partial<Record<SuitType, Choices>>;
 };
 type Query = Record<string, string | number>;
 const isJewelry = (item: EquipmentPricingItem) =>
   /灵饰|戒指|耳饰|手镯|佩饰|配饰/.test(item.category) ||
   /精炼等级/.test(item.description) ||
   [61, 62, 63, 64].includes(Number(item.kindId));
+
+function suitFilter(values: string[], config: EquipmentSearchConfig) {
+  const normalize = (value: string) => value.replace(/\s|[：:]/g, "");
+  const descriptions = [...new Set(values.map(normalize))];
+  if (descriptions.length !== 1) return undefined;
+  const value = descriptions[0];
+  const prefixes: Array<[string, SuitType]> = [
+    ["附加状态", "added_status"],
+    ["追加法术", "append_skill"],
+    ["追加技能", "append_skill"],
+    ["变身术之", "transform_skill"],
+    ["变化咒之", "transform_charm"],
+  ];
+  const explicit = prefixes.find(([prefix]) => value.startsWith(prefix));
+  const choices = explicit ? config.suitTypes?.[explicit[1]] || [] : config.suits || [];
+  const name = explicit ? value.slice(explicit[0].length) : value;
+  const matching = choices.filter(([, label]) => normalize(label) === name);
+  // The official chooser supports typed maps; an unqualified duplicate name is ambiguous.
+  if (
+    !explicit &&
+    Object.values(config.suitTypes || {})
+      .flat()
+      .some(
+        ([id, label]) =>
+          normalize(label) === name &&
+          !matching.some(([matchId]) => String(matchId) === String(id)),
+      )
+  )
+    return undefined;
+  const ids = [
+    ...new Set(
+      matching.map(([id]) => String(id)).filter((id) => /^\d+$/.test(id) && Number(id) > 0),
+    ),
+  ];
+  return ids.length === 1 ? ids[0] : undefined;
+}
 
 /** Official page fields are coarse filters; only detail verification establishes a match. */
 export function equipmentQuery(
@@ -125,6 +164,8 @@ export function equipmentQuery(
       }
     }
   } else {
+    const suit = suitFilter(fields.套装 || [], config);
+    if (suit) args.suit_effect = suit;
     integer("伤害", "damage");
     integer("灵力", "all_wakan");
     integer("锻炼等级", "gem_level");
@@ -657,6 +698,11 @@ export function equipmentSourceFromPages(
               Gems?: Choices;
               AddedAttr1?: Choices;
               AddedAttr2?: Choices;
+              SuitEffects?: Choices;
+              SuitAddedStatus?: Record<string, string | number>;
+              SuitAppendSkills?: Record<string, string | number>;
+              SuitTransformSkills?: Record<string, string | number>;
+              SuitTransformCharms?: Record<string, string | number>;
               AUTO_SEARCH_CONFIG?: {
                 wjd_equip_equip_type?: Record<string, Array<{ label: string }>>;
               };
@@ -675,6 +721,8 @@ export function equipmentSourceFromPages(
                   namedIds.add(parts[2]);
               }
             }
+            const typedSuits = (values: Record<string, string | number> = {}): Choices =>
+              Object.entries(values || {}).map(([name, id]) => [id, name]);
             return {
               kinds: (jewelry ? g.Kinds : g.EquipKinds) || [],
               effects: g.SpecialEffects || [],
@@ -685,6 +733,13 @@ export function equipmentSourceFromPages(
                   ? (g.EquipKinds || []).filter(([id]) => namedIds.has(String(id)))
                   : [],
               addedAttrs: [...(g.AddedAttr1 || []), ...(g.AddedAttr2 || [])],
+              suits: g.SuitEffects || [],
+              suitTypes: {
+                added_status: typedSuits(g.SuitAddedStatus),
+                append_skill: typedSuits(g.SuitAppendSkills),
+                transform_skill: typedSuits(g.SuitTransformSkills),
+                transform_charm: typedSuits(g.SuitTransformCharms),
+              },
             };
           },
           { jewelry, name: item.name, level: item.level },

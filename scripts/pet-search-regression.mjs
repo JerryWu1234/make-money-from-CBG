@@ -213,34 +213,43 @@ try {
     assert.equal(searchPage.isClosed(), true);
     assert.equal(detailPage.isClosed(), true);
   };
-  await check("source→adapter完整核对全服宝宝，正确读取元价格且排除推荐/跨服费", () =>
-    withSource({}, {}, async ({ source, searchPage, control }) => {
-      const result = await searchPetPricing(record(), control.signal, source);
-      assert.equal(result.provider, "browser");
-      assert.equal(result.total, 368.6);
-      assert.equal(result.items[0].candidates[0].verified, true);
-      assert.equal(result.items[0].candidates[0].price, 368.6);
-      assert.equal(
-        result.items[0].candidates[0].url,
-        "https://xyq.cbg.163.com/equip?s=1&eid=primary",
-      );
-      const [query] = await searchPage.evaluate(() => window.calls);
-      assert.equal(query.act, "overall_search_pet");
-      assert.equal(query.type, "2001");
-      assert.equal(query.growth, 1280);
-      assert.equal(query.attack_aptitude, 1550);
-      assert.equal(query.skill, "1,2");
-      assert.equal(query.serverid, undefined);
-      assert.equal(query.server_type, undefined);
-      assert.equal(await searchPage.evaluate(() => window.historyWrites), 0);
-      assert.equal(
-        await role.evaluate(() => localStorage.getItem("saved_overall_search_pet_query")),
-        "kept",
-      );
-      assert.equal(result.items[0].candidates[0].sourceHash.length, 64);
-      assert.equal(result.queries.length, 1);
-    }),
-  );
+  await check("source→adapter等待主区域/主价/JSON，绑定新容器并排除先出现的同名推荐", async () => {
+    for (const detail of [
+      {},
+      { wrapperClass: "product-detail", footerStatus: "状态：已下架" },
+      { panelDelay: 100 },
+      { infoDelay: 100 },
+      { priceDelay: 100 },
+      { jsonDelay: 100 },
+      { recommendationFirst: true, recommendationMainIds: true },
+    ])
+      await withSource({}, detail, async ({ source, searchPage, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.provider, "browser");
+        assert.equal(result.total, 368.6);
+        assert.equal(result.items[0].candidates[0].verified, true);
+        assert.equal(result.items[0].candidates[0].price, 368.6);
+        assert.equal(
+          result.items[0].candidates[0].url,
+          "https://xyq.cbg.163.com/equip?s=1&eid=primary",
+        );
+        const [query] = await searchPage.evaluate(() => window.calls);
+        assert.equal(query.act, "overall_search_pet");
+        assert.equal(query.type, "2001");
+        assert.equal(query.growth, 1280);
+        assert.equal(query.attack_aptitude, 1550);
+        assert.equal(query.skill, "1,2");
+        assert.equal(query.serverid, undefined);
+        assert.equal(query.server_type, undefined);
+        assert.equal(await searchPage.evaluate(() => window.historyWrites), 0);
+        assert.equal(
+          await role.evaluate(() => localStorage.getItem("saved_overall_search_pet_query")),
+          "kept",
+        );
+        assert.equal(result.items[0].candidates[0].sourceHash.length, 64);
+        assert.equal(result.queries.length, 1);
+      });
+  });
   await check("技能/内丹/随身装备不完整或主JSON缺失不产出价格", async () => {
     for (const detail of [
       { missingSkill: true },
@@ -318,11 +327,20 @@ try {
       { rawName: "其他宝宝" },
       { rawPrice: 36860 },
       { status: "已下架", selling: 1 },
+      { splitRegions: true },
+      { duplicatePanel: true },
     ])
       await withSource({}, detail, async ({ source, control }) => {
         const result = await searchPetPricing(record(), control.signal, source);
         assert.equal(result.total, null);
         assert.equal(result.items[0].candidates[0].verified, false);
+        if (detail.splitRegions || detail.duplicatePanel) {
+          const failure = result.searchItems[0].detailFailures[0];
+          assert.ok(failure.diagnostics);
+          assert.ok(Array.isArray(failure.diagnostics.panels));
+          assert.equal(failure.diagnostics.jsonInputs, 1);
+          if (detail.duplicatePanel) assert.equal(failure.diagnostics.panels.length, 2);
+        }
       });
   });
   await check("不支持类型只留本项缺价，后续宝宝仍可查", () =>

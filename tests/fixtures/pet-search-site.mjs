@@ -57,6 +57,16 @@ export function petDetailDocument(options = {}) {
     incompleteJson: false,
     cifuDecoration: true,
     recommendation: true,
+    wrapperClass: "infoList goodsInfo",
+    panelDelay: 0,
+    infoDelay: 0,
+    priceDelay: 0,
+    jsonDelay: 0,
+    recommendationFirst: false,
+    recommendationMainIds: false,
+    splitRegions: false,
+    duplicatePanel: false,
+    footerStatus: "",
     ...options,
   };
   const pet = {
@@ -108,10 +118,24 @@ export function petDetailDocument(options = {}) {
         `<img width="40" height="40" src="https://xyq.cbg.163.com/images/${gear.shipin ? "pet_shipin" : "equip"}/small/1.gif" data_equip_name="${escape(gear.name)}" data_equip_desc="${escape(gear.description)}">`,
     )
     .join("");
+  const info = `<ul id="info_panel"><li>服务器：测试区 ID：${escape(s.nickname)} 等级：119</li><li>状态：${escape(s.status)}</li><li>价格：<span class="price">￥${s.price}（元）</span><span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul>`;
+  const panel = `<div class="attribute"><div id="equip_desc_panel"><p>名字：${escape(s.nickname)} 等级：119</p><table>${table}</table><h4>赐福技能</h4>${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div></div>`;
+  const main = s.splitRegions
+    ? `<section>${info}</section><section>${panel}</section>`
+    : `<div class="${escape(s.wrapperClass)}">${info}${panel}${s.duplicatePanel ? panel : ""}${s.footerStatus ? `<footer>${escape(s.footerStatus)}</footer>` : ""}</div>`;
+  const recommendation = s.recommendation
+    ? `<aside id="bottomRecommands" class="goodsInfo goodsRemmds recommandWrp">${s.recommendationMainIds ? '<ul id="info_panel"><li>状态：已下架</li><li class="price">￥10</li></ul><div id="equip_desc_panel">成长：9.99 攻击资质：9999</div>' : '<p>状态：已售出</p><span class="price">￥10</span><p>成长：9.99 攻击资质：9999</p>'}<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif" data_store_name="推荐技能"></aside>`
+    : "";
+  const visibleMain = s.panelDelay ? '<div id="delayed-main"></div>' : main;
   return `<meta charset="utf-8"><title>独立宝宝详情结构模拟页</title>
-<div class="infoList goodsInfo"><ul id="info_panel"><li>服务器：测试区 ID：${escape(s.nickname)} 等级：119</li><li>状态：${escape(s.status)}</li><li>价格：<span class="price">￥${s.price}（元）</span><span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul>
-<div class="attribute"><div id="equip_desc_panel"><p>名字：${escape(s.nickname)} 等级：119</p><table>${table}</table><h4>赐福技能</h4>${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div></div></div>
-${s.recommendation ? '<aside id="bottomRecommands" class="goodsInfo goodsRemmds recommandWrp"><p>状态：已售出</p><span class="price">￥10</span><p>成长：9.99 攻击资质：9999</p><img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif" data_store_name="推荐技能"></aside>' : ""}
+${s.recommendationFirst ? recommendation + visibleMain : visibleMain + recommendation}
 <input type="hidden" id="equip_desc_value" value="${escape(JSON.stringify(pet))}">
-<script>window.IsLogin=1;window.StorageStype={pet:2,role:3};window.equip={storage_type:2,equip_name:${encoded(s.rawName)},price:${encoded(s.rawPrice)},eid:${s.rawEid ? encoded(s.rawEid) : "new URL(location.href).searchParams.get('eid')"},server_id:1,is_selling:${encoded(s.selling)}};window.CBG_GAME_CONFIG={pet_info:{2001:'画魂'},pet_skill_desc:{1:{name:'须弥真言'},2:{name:'高级法术暴击'}}};</script>`;
+<script>window.IsLogin=1;window.StorageStype={pet:2,role:3};window.equip={storage_type:2,equip_name:${encoded(s.rawName)},price:${encoded(s.rawPrice)},eid:${s.rawEid ? encoded(s.rawEid) : "new URL(location.href).searchParams.get('eid')"},server_id:1,is_selling:${encoded(s.selling)}};window.CBG_GAME_CONFIG={pet_info:{2001:'画魂'},pet_skill_desc:{1:{name:'须弥真言'},2:{name:'高级法术暴击'}}};
+${s.jsonDelay ? `const json=document.getElementById('equip_desc_value'), jsonValue=json.value;json.value='';setTimeout(()=>json.value=jsonValue,${s.jsonDelay});` : ""}
+function delayParts(){
+ ${s.infoDelay ? `const info=document.querySelector('#info_panel'), content=info.innerHTML;info.innerHTML='';setTimeout(()=>info.innerHTML=content,${s.infoDelay});` : ""}
+ ${s.priceDelay ? `const price=document.querySelector('#info_panel .price'), value=price.innerHTML;price.innerHTML='';setTimeout(()=>price.innerHTML=value,${s.priceDelay});` : ""}
+}
+${s.panelDelay ? `setTimeout(()=>{document.getElementById('delayed-main').innerHTML=${encoded(main)};delayParts();},${s.panelDelay});` : "delayParts();"}
+</script>`;
 }

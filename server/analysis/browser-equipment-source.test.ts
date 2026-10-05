@@ -69,6 +69,80 @@ const item = (overrides: Partial<EquipmentPricingItem> = {}): EquipmentPricingIt
 });
 
 describe("官方装备搜索条件", () => {
+  const suitConfig: EquipmentSearchConfig = {
+    ...config,
+    suits: [
+      [4013, "炼气化神"],
+      [4005, "逆鳞"],
+    ],
+    suitTypes: {
+      added_status: [
+        [4013, "炼气化神"],
+        [4005, "逆鳞"],
+      ],
+      append_skill: [[3018, "龙卷雨击"]],
+      transform_skill: [[1060, "噬天虎"]],
+      transform_charm: [[2035, "蛟龙"]],
+    },
+  };
+  it.each([
+    ["附加状态炼气化神", "4013"],
+    ["追加法术龙卷雨击", "3018"],
+    ["追加技能：龙卷雨击", "3018"],
+    ["变身术之噬天虎", "1060"],
+    ["变化咒之蛟龙", "2035"],
+    ["炼气化神", "4013"],
+  ])("套装%s按官网对应类别准确取ID，近似查询保留同一套装", (suit, id) => {
+    const target = item({ description: "等级100\n灵力56\n套装效果：" + suit });
+    expect(equipmentQuery(target, suitConfig).args.suit_effect).toBe(id);
+    expect(equipmentQuery(target, suitConfig, "similar").args.suit_effect).toBe(id);
+  });
+
+  it("有类别的同名套装只使用对应表，未指明类别或表内多ID不取首项", () => {
+    const sameName: EquipmentSearchConfig = {
+      ...suitConfig,
+      suits: [[4013, "炼气化神"]],
+      suitTypes: {
+        added_status: [[4013, "炼气化神"]],
+        append_skill: [[3018, "炼气化神"]],
+      },
+    };
+    expect(
+      equipmentQuery(item({ description: "等级100\n套装效果：附加状态炼气化神" }), sameName).args
+        .suit_effect,
+    ).toBe("4013");
+    expect(
+      equipmentQuery(item({ description: "等级100\n套装效果：追加法术炼气化神" }), sameName).args
+        .suit_effect,
+    ).toBe("3018");
+    expect(
+      equipmentQuery(item({ description: "等级100\n套装效果：炼气化神" }), sameName).args,
+    ).not.toHaveProperty("suit_effect");
+    sameName.suitTypes!.added_status!.push([4005, "炼气化神"]);
+    expect(
+      equipmentQuery(item({ description: "等级100\n套装效果：附加状态炼气化神" }), sameName).args,
+    ).not.toHaveProperty("suit_effect");
+  });
+
+  it("套装配置缺失、名称未识别或多个套装条目时保留详情核验，不猜编号", () => {
+    expect(
+      equipmentQuery(item({ description: "等级100\n套装效果：附加状态炼气化神" }), config).args,
+    ).not.toHaveProperty("suit_effect");
+    for (const suit of [
+      "附加状态未知名称",
+      "附加状态炼气化神、逆鳞",
+      "附加状态炼气化神\n套装效果：附加状态逆鳞",
+    ])
+      expect(
+        equipmentQuery(item({ description: "等级100\n套装效果：" + suit }), suitConfig).args,
+      ).not.toHaveProperty("suit_effect");
+    expect(
+      equipmentQuery(
+        item({ category: "灵饰 · 耳饰", description: "等级100\n套装效果：附加状态炼气化神" }),
+        suitConfig,
+      ).args,
+    ).not.toHaveProperty("suit_effect");
+  });
   it("同配查询保持原下限，相近查询只放宽公开数值下限至95%，宝石/修理状态不变", () => {
     const target = item({
       category: "腰带",

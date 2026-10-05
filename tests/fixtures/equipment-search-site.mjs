@@ -30,6 +30,13 @@ window.Kinds=[[61,'戒指'],[62,'耳饰'],[63,'手镯'],[64,'佩饰']];
 window.SpecialEffects=[[3,'愤怒'],[5,'永不磨损']];
 window.SpecialSkills=[[1036,'破血狂攻']];window.Gems=[[6,'黑宝石']];
 window.settings=${JSON.stringify(settings).replaceAll("<", "\\u003c")};
+if(!settings.suitConfigMissing){
+window.SuitEffects=[[4013,'炼气化神'],[4005,'逆鳞']];
+window.SuitAddedStatus={'炼气化神':4013,'逆鳞':4005};
+window.SuitAppendSkills={'龙卷雨击':3018};
+window.SuitTransformSkills={'噬天虎':1060};
+window.SuitTransformCharms={'蛟龙':2035};
+}
 window.AUTO_SEARCH_CONFIG={wjd_equip_equip_type:settings.namedModels||{}};
 window.CBG_GAME_CONFIG={minghun_attr:{102:'防御',106:'抗封印',101:'气血'}};
 window.AddedAttr1=[[4,'法伤'],[3,'速度']];window.AddedAttr2=[[13,'防御'],[14,'法防'],[12,'气血']];
