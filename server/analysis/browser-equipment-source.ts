@@ -79,110 +79,150 @@ export function equipmentQuery(item: EquipmentPricingItem, config: EquipmentSear
   return { jewelry, args };
 }
 
-/** Read only the principal equipment icon/tooltip and principal price, never recommendations. */
+/** Read only the principal equipment description and price, never recommendations. */
 export async function equipmentPageSource(page: Page, signal: AbortSignal) {
   signal.throwIfAborted();
   await assertAvailable(page);
-  const icons = page.locator("img[data_equip_name], img[data-equip-name]");
-  const index = await icons.evaluateAll((nodes) => {
-    const candidates = nodes.filter(
-      (node) =>
-        node.checkVisibility() &&
-        !node.closest(
-          '#search_result, #recommd_list, #recommend, .recommend, .recommd, [id$="TipsBox"]',
-        ),
+  const excluded =
+    '#search_result, #recommd_list, #recommend, .recommend, .recommd, #bottomRecommands, .recommandWrp, .goodsRemmds, [id$="TipsBox"]';
+  const directPanel = await page
+    .locator("#equip_desc_panel")
+    .evaluateAll(
+      (nodes, excluded) => nodes.some((node) => node.checkVisibility() && !node.closest(excluded)),
+      excluded,
     );
-    return candidates.length === 1 ? nodes.indexOf(candidates[0]) : -1;
-  });
-  if (index < 0) throw new Error("未能确认独立装备的主商品图标，不能采用推荐商品价格");
-  const principal = icons.nth(index);
-  await principal.evaluate((el) => el.setAttribute("data-cbg-main-equipment", "true"));
-  await hoverForInspection(page, principal);
-  await page.waitForFunction(
-    () => {
-      const main = document.querySelector('[data-cbg-main-equipment="true"]');
-      if (!main) return false;
-      const description =
-        main.getAttribute("data_equip_desc") || main.getAttribute("data-equip-desc") || "";
-      const name =
-        main.getAttribute("data_equip_name") || main.getAttribute("data-equip-name") || "";
-      const id = main.getAttribute("data_tip_box") || main.getAttribute("data-tip-box");
-      if (!id && /等级\s*[：:]?\s*\d/.test(description)) return true;
-      const tips = id
-        ? [document.getElementById(id)]
+  if (!directPanel) {
+    const icons = page.locator("img[data_equip_name], img[data-equip-name]");
+    const index = await icons.evaluateAll((nodes, excluded) => {
+      const candidates = nodes.filter((node) => node.checkVisibility() && !node.closest(excluded));
+      return candidates.length === 1 ? nodes.indexOf(candidates[0]) : -1;
+    }, excluded);
+    if (index < 0) throw new Error("未能确认独立装备的主商品图标，不能采用推荐商品价格");
+    const principal = icons.nth(index);
+    await principal.evaluate((el) => el.setAttribute("data-cbg-main-equipment", "true"));
+    await hoverForInspection(page, principal);
+    await page.waitForFunction(
+      () => {
+        const main = document.querySelector('[data-cbg-main-equipment="true"]');
+        if (!main) return false;
+        const description =
+          main.getAttribute("data_equip_desc") || main.getAttribute("data-equip-desc") || "";
+        const name =
+          main.getAttribute("data_equip_name") || main.getAttribute("data-equip-name") || "";
+        const id = main.getAttribute("data_tip_box") || main.getAttribute("data-tip-box");
+        if (!id && /等级\s*[：:]?\s*\d/.test(description)) return true;
+        const tips = id
+          ? [document.getElementById(id)]
+          : Array.from(
+              document.querySelectorAll<HTMLElement>(
+                '[id$="TipsBox"], [role="tooltip"], .equip_tips',
+              ),
+            );
+        return tips.some(
+          (tip) =>
+            tip?.checkVisibility() &&
+            tip.innerText.includes(name) &&
+            /等级\s*[：:]?\s*\d/.test(tip.innerText),
+        );
+      },
+      undefined,
+      { timeout: 5000 },
+    );
+  }
+  signal.throwIfAborted();
+  const observed = await page.evaluate(
+    ({ directPanel, excluded }) => {
+      const globals = window as unknown as {
+        equip?: Record<string, unknown>;
+        EquipInfo?: Record<string, unknown>;
+        CBG_GAME_CONFIG?: { equip_info?: Record<string, { name?: unknown; desc?: unknown }> };
+      };
+      const raw = globals.equip || globals.EquipInfo;
+      const panel = directPanel ? document.querySelector<HTMLElement>("#equip_desc_panel") : null;
+      const info = directPanel ? document.querySelector<HTMLElement>("#info_panel") : null;
+      const root = panel?.closest<HTMLElement>(".infoList.goodsInfo");
+      if (
+        directPanel &&
+        (!panel?.checkVisibility() ||
+          !info?.checkVisibility() ||
+          !root ||
+          info.closest(".infoList.goodsInfo") !== root ||
+          root.closest(excluded))
+      )
+        throw new Error("无法确认独立装备的主商品属性与价格区域");
+      const main = document.querySelector<HTMLImageElement>('[data-cbg-main-equipment="true"]');
+      if (!directPanel && !main) throw new Error("装备主商品图标已改变");
+      const name = directPanel
+        ? info!.innerText
+            .match(/(?:^|\s)ID\s*[：:]\s*(.+?)(?=\s+等级\s*[：:]|\r?\n|$)/i)?.[1]
+            ?.trim() || ""
+        : main!.getAttribute("data_equip_name") || main!.getAttribute("data-equip-name") || "";
+      const tipId = main?.getAttribute("data_tip_box") || main?.getAttribute("data-tip-box");
+      const tips = tipId
+        ? [document.getElementById(tipId)]
         : Array.from(
             document.querySelectorAll<HTMLElement>(
               '[id$="TipsBox"], [role="tooltip"], .equip_tips',
             ),
           );
-      return tips.some(
-        (tip) =>
-          tip?.checkVisibility() &&
-          tip.innerText.includes(name) &&
-          /等级\s*[：:]?\s*\d/.test(tip.innerText),
+      const tooltip = tips.find(
+        (node) => !directPanel && node?.checkVisibility() && node.textContent?.includes(name),
       );
-    },
-    undefined,
-    { timeout: 5000 },
-  );
-  signal.throwIfAborted();
-  const observed = await page.evaluate(() => {
-    const globals = window as unknown as {
-      equip?: Record<string, unknown>;
-      EquipInfo?: Record<string, unknown>;
-    };
-    const main = document.querySelector<HTMLImageElement>('[data-cbg-main-equipment="true"]');
-    if (!main) throw new Error("装备主商品图标已改变");
-    const name = main.getAttribute("data_equip_name") || main.getAttribute("data-equip-name") || "";
-    const tipId = main.getAttribute("data_tip_box") || main.getAttribute("data-tip-box");
-    const tips = tipId
-      ? [document.getElementById(tipId)]
-      : Array.from(
-          document.querySelectorAll<HTMLElement>('[id$="TipsBox"], [role="tooltip"], .equip_tips'),
+      const prices = Array.from(
+        (info || document).querySelectorAll<HTMLElement>("[data_price], [data-price], .price"),
+      )
+        .filter(
+          (node) =>
+            node.checkVisibility() &&
+            !node.closest(excluded) &&
+            !node.closest("#equip_price_addon_info"),
+        )
+        .map(
+          (node) =>
+            node.getAttribute("data_price") || node.getAttribute("data-price") || node.innerText,
         );
-    const tooltip = tips.find(
-      (node) => node?.checkVisibility() && node.textContent?.includes(name),
-    );
-    const raw = globals.equip || globals.EquipInfo;
-    const prices = Array.from(
-      document.querySelectorAll<HTMLElement>("[data_price], [data-price], .price"),
-    )
-      .filter(
-        (node) =>
-          node.checkVisibility() &&
-          !node.closest(
-            '#search_result, #recommd_list, #recommend, .recommend, .recommd, [id$="TipsBox"]',
-          ),
-      )
-      .map(
-        (node) =>
-          node.getAttribute("data_price") || node.getAttribute("data-price") || node.innerText,
-      );
-    const rawPrice = raw && typeof raw.price === "number" ? raw.price / 100 : null;
-    const body = document.body.cloneNode(true) as HTMLElement;
-    body
-      .querySelectorAll(
-        '#search_result, #recommd_list, #recommend, .recommend, .recommd, [id$="TipsBox"], script, style, nav, header, footer',
-      )
-      .forEach((el) => el.remove());
-    return {
-      name,
-      tooltip: tooltip?.innerText?.trim() || "",
-      description:
-        main.getAttribute("data_equip_desc") || main.getAttribute("data-equip-desc") || "",
-      typeDescription:
-        main.getAttribute("data_equip_type_desc") ||
-        main.getAttribute("data-equip-type-desc") ||
-        "",
-      prices,
-      rawPrice,
-      body: body.textContent || "",
-      selling: raw?.is_selling,
-      productName: raw?.equip_name,
-      productId: raw?.eid,
-      serverId: raw?.serverid ?? raw?.server_id,
-    };
-  });
+      const rawPrice =
+        raw &&
+        (typeof raw.price === "number" ||
+          (typeof raw.price === "string" && /^\d+(?:\.\d+)?$/.test(raw.price.trim())))
+          ? Number(raw.price)
+          : null;
+      const model =
+        directPanel && (typeof raw?.equip_type === "string" || typeof raw?.equip_type === "number")
+          ? globals.CBG_GAME_CONFIG?.equip_info?.[String(raw.equip_type)]
+          : undefined;
+      if (model && model.name !== raw?.equip_name)
+        throw new Error("主商品模型目录名称与当前商品不一致");
+      const body = (root || document.body).cloneNode(true) as HTMLElement;
+      body
+        .querySelectorAll(
+          excluded + ", #equip_price_addon_info, script, style, nav, header, footer",
+        )
+        .forEach((el) => el.remove());
+      return {
+        name,
+        tooltip: tooltip?.innerText?.trim() || "",
+        description: directPanel
+          ? panel!.innerText.trim()
+          : main!.getAttribute("data_equip_desc") || main!.getAttribute("data-equip-desc") || "",
+        typeDescription: directPanel
+          ? typeof model?.desc === "string"
+            ? model.desc
+            : ""
+          : main?.getAttribute("data_equip_type_desc") ||
+            main?.getAttribute("data-equip-type-desc") ||
+            "",
+        prices,
+        rawPrice,
+        body: body.textContent || "",
+        selling: raw?.is_selling,
+        productName: raw?.equip_name,
+        productId: raw?.eid,
+        serverId: raw?.serverid ?? raw?.server_id,
+      };
+    },
+    { directPanel, excluded },
+  );
   const productId =
     typeof observed.productId === "string" || typeof observed.productId === "number"
       ? String(observed.productId)
@@ -192,6 +232,7 @@ export async function equipmentPageSource(page: Page, signal: AbortSignal) {
       ? String(observed.serverId)
       : "";
   if (
+    !observed.name ||
     !productId ||
     !serverId ||
     observed.productName !== observed.name ||
@@ -221,17 +262,27 @@ export async function equipmentPageSource(page: Page, signal: AbortSignal) {
   const price = visiblePrices.length === 1 ? visiblePrices[0] : null;
   if (price === null || !Number.isFinite(price) || price <= 0)
     throw new Error("无法确认主商品人民币挂牌价");
-  if (observed.rawPrice !== null && observed.rawPrice !== price)
+  if (
+    (directPanel && observed.rawPrice === null) ||
+    (observed.rawPrice !== null && observed.rawPrice !== price)
+  )
     throw new Error("主商品数据价格与可见价格不一致");
-  const status = observed.body.match(/是否上架\s*[：:]?\s*(已上架|未上架|已下架)/)?.[1];
+  const status = observed.body.match(
+    /(?:是否上架|状态)\s*[：:]?\s*(已上架|上架中|未上架|已下架|已售出)/,
+  )?.[1];
   const offShelf =
     status === "未上架" ||
     status === "已下架" ||
+    status === "已售出" ||
     observed.selling === false ||
     observed.selling === 0 ||
     /商品已下架|商品已售出|商品不存在/.test(observed.body);
   const selling =
-    !offShelf && (status === "已上架" || observed.selling === true || observed.selling === 1);
+    !offShelf &&
+    (status === "已上架" ||
+      status === "上架中" ||
+      observed.selling === true ||
+      observed.selling === 1);
   if (
     !selling &&
     observed.selling !== false &&
@@ -440,6 +491,23 @@ export function equipmentSourceFromPages(
           requestSignal.throwIfAborted();
           await assertAvailable(searchPage);
           const listing = await searchPage.evaluate((currentPage) => {
+            const canonicalEquipmentUrl = (href: string) => {
+              const url = new URL(href, location.href);
+              const identityFields = new Set([
+                "s",
+                "serverid",
+                "server_id",
+                "eid",
+                "equip_id",
+                "ordersn",
+              ]);
+              const canonical = new URL(url.origin + url.pathname);
+              for (const key of identityFields) {
+                const value = url.searchParams.get(key);
+                if (value !== null) canonical.searchParams.set(key, value);
+              }
+              return canonical.href;
+            };
             const result = (window as unknown as Record<string, any>).__cbgEquipmentResult;
             if (!result?.ok) throw new Error(result?.error || "官网装备查询未成功");
             const root = document.querySelector<HTMLElement>("#search_result");
@@ -447,7 +515,7 @@ export function equipmentSourceFromPages(
             const rows = Array.from(root.querySelectorAll<HTMLAnchorElement>("a.soldImg[href]"))
               .filter((a) => a.checkVisibility())
               .map((a) => ({
-                url: a.href,
+                url: canonicalEquipmentUrl(a.href),
                 name: a.querySelector("img")?.getAttribute("data_equip_name") || "",
               }));
             const empty = result.count === 0 && /没有符合|没有找到|暂无/.test(root.innerText);

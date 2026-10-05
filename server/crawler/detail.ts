@@ -110,6 +110,11 @@ async function inspectItems(
     report(`正在读取 ${snapshot.name} 的物品属性 ${index + 1}/${count}`);
     // 名称、技能类别或装备属性已在元素里时直接读取，不触发无意义的提示框。
     let item = itemFromAttributes(attrs, index);
+    // 已明确属于法宝、灵宝或神器的图标不参与人物装备查价，缺少其提示框不算装备漏采。
+    if (/^(?:法宝|灵宝|神器)$/.test(item.category || "")) {
+      snapshot.items!.push(item);
+      continue;
+    }
     if (attrs.data_equip_desc?.trim() || attrs.data_skill_type) {
       if (!item.name.startsWith("图标 ")) snapshot.items!.push(item);
       continue;
@@ -209,7 +214,7 @@ export function equipmentCaptureSummary(
     for (const item of tab.items || []) {
       if (
         item.kind !== "equipment" ||
-        /法宝|灵宝|道具|材料|消耗品|召唤兽装备/.test(item.category || "")
+        /法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(item.category || "")
       )
         continue;
       const stats = Object.entries(item.attributes || {}).some(

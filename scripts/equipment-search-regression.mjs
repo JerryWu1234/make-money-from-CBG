@@ -200,6 +200,10 @@ try {
       assert.equal(result.items[0].candidates[0].price, 1000);
       assert.equal(result.items[0].candidates[0].verified, true);
       assert.match(result.items[0].candidates[0].url, /eid=primary/);
+      assert.doesNotMatch(
+        result.items[0].candidates[0].url,
+        /from_shareid|reco_request_id|cross_buy_serverid|must-not-send-viewer/,
+      );
       assert.equal(result.items[0].query, result.queries[0]);
       assert.equal(input.query, result.queries[0]);
       const [query] = await searchPage.evaluate(() => window.calls);
@@ -235,6 +239,98 @@ try {
       const result = await source.findCandidates([item()], control.signal);
       assert.equal(result.items[0].candidates[0].verified, true);
     }),
+  );
+
+  for (const rawPriceValue of [368.6, "368.60"])
+    await check(`官网直排属性模板读取元报价 ${rawPriceValue}，排除推荐和跨服费`, () =>
+      withSource(
+        {},
+        {
+          renderedPanel: true,
+          tooltipMissing: true,
+          price: 368.6,
+          rawPriceValue,
+          selling: 1,
+          status: "上架中",
+          recommend: true,
+          recommendFirst: true,
+          recommendSameName: true,
+        },
+        async ({ source, detailPage, control }) => {
+          const result = await source.findCandidates([item()], control.signal);
+          const candidate = result.items[0].candidates[0];
+          assert.equal(candidate.price, 368.6);
+          assert.equal(candidate.verified, true);
+          assert.deepEqual(await detailPage.evaluate(() => window.hovers), []);
+          assert.doesNotMatch(candidate.quote, /999|推荐商品|跨服交易费/);
+        },
+      ),
+    );
+
+  for (const { name, settings } of [
+    { name: "直排模板缺主价，推荐价不能替代", settings: { visiblePrice: false } },
+    { name: "直排模板全局价格与主价不同", settings: { rawPriceValue: "999.00" } },
+    { name: "直排模板全局名称与可见名称不同", settings: { rawName: "其他装备" } },
+    { name: "直排模板商品ID与URL不同", settings: { rawEid: "different-product" } },
+    { name: "直排模板只有推荐商品", settings: { onlyRecommendation: true } },
+  ])
+    await check(name + "拒绝报价", () =>
+      withSource(
+        {},
+        { renderedPanel: true, selling: 1, recommend: true, ...settings },
+        async ({ source, control }) => {
+          await assert.rejects(
+            source.readSource("https://xyq.cbg.163.com/equip?s=1&eid=primary", control.signal),
+          );
+        },
+      ),
+    );
+
+  await check("直排模板主商品下架，推荐仍上架也不能采用", () =>
+    withSource(
+      {},
+      { renderedPanel: true, selling: 0, status: "上架中", recommend: true },
+      async ({ source, control }) => {
+        const result = await source.findCandidates([item()], control.signal);
+        assert.equal(result.items[0].candidates[0].verified, false);
+        assert.match(result.items[0].candidates[0].reason, /下架/);
+      },
+    ),
+  );
+
+  await check("直排模板仅从当前主商品模型目录补装备限制", () =>
+    withSource(
+      {},
+      { renderedPanel: true, selling: 1, modelDescription: "说明文字#r【装备条件】等级100" },
+      async ({ source, control }) => {
+        const result = await source.findCandidates(
+          [item({ description: equipmentDescription + "\n装备条件：等级100" })],
+          control.signal,
+        );
+        const candidate = result.items[0].candidates[0];
+        assert.equal(candidate.verified, true);
+        assert.match(candidate.quote, /装备条件.*等级100/);
+        assert.doesNotMatch(candidate.quote, /说明文字|装备角色.*男/);
+      },
+    ),
+  );
+
+  await check("直排模板模型目录名称与主商品不同拒绝报价", () =>
+    withSource(
+      {},
+      {
+        renderedPanel: true,
+        selling: 1,
+        modelName: "其他装备",
+        modelDescription: "【装备条件】等级100",
+      },
+      async ({ source, control }) => {
+        await assert.rejects(
+          source.readSource("https://xyq.cbg.163.com/equip?s=1&eid=primary", control.signal),
+          /模型目录名称/,
+        );
+      },
+    ),
   );
 
   await check("第二页末尾只有上一页时终止，不再请求第三页", () =>

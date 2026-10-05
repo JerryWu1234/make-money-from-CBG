@@ -100,6 +100,48 @@ async function matchedPricing(record = recordWithEquipment()) {
 }
 
 describe("装备联网查价的来源核对", () => {
+  it("采齐的法宝灵宝神器不误报漏采或计装备价，混入真实装备仍正常查价", async () => {
+    const record = recordWithEquipment();
+    record
+      .detail!.tabs.find((tab) => tab.name === "道具/法宝")!
+      .items!.push(
+        {
+          index: 1,
+          name: "测试法宝",
+          kind: "equipment",
+          category: "法宝",
+          location: "RoleUsingFabao",
+          description: "灵气：500\n修炼境界：第15层",
+        },
+        {
+          index: 2,
+          name: "测试灵宝",
+          kind: "equipment",
+          category: "灵宝",
+          location: "RoleStoreLingbao",
+        },
+        {
+          index: 3,
+          name: "测试神器",
+          kind: "equipment",
+          category: "神器",
+          location: "RoleStoreShenqi",
+        },
+      );
+    const inventory = equipmentInventory(record);
+    expect(inventory.captureComplete).toBe(true);
+    expect(inventory.issues).toEqual([]);
+    expect(inventory.items.map((item) => item.name)).toEqual([equipmentName]);
+    const { pricing, search } = await matchedPricing(record);
+    expect(search).toHaveBeenCalledOnce();
+    expect(search.mock.calls[0][0].map((item: { name: string }) => item.name)).toEqual([
+      equipmentName,
+    ]);
+    expect(pricing.items.map((item) => item.name)).toEqual([equipmentName]);
+    expect(pricing.captureComplete).toBe(true);
+    expect(pricing.total).toBe(200);
+    expect(pricing.knownTotal).toBe(200);
+  });
   it("官方kindid原值进入结构化查价且改变输入快照，不从物品类别推算", async () => {
     const record = recordWithEquipment();
     const item = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];

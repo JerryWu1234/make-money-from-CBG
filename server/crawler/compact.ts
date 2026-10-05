@@ -61,18 +61,21 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
   );
   const location =
     attrs.data_equip_location || attrs.data_equip_position || attrs.data_item_position;
-  const declaredCategory =
-    attrs.data_equip_category ||
-    attrs.data_equip_type_name ||
-    attrs.data_item_type_name ||
-    attrs.data_equip_type;
-  const category =
-    declaredCategory ||
-    (/灵气|修炼境界/.test(description) || /fabao/i.test(location || "")
-      ? "法宝"
-      : /lingbao/i.test(location || "")
-        ? "灵宝"
-        : undefined);
+  const declaredCategory = [
+    attrs.data_equip_category,
+    attrs.data_equip_type_name,
+    attrs.data_item_type_name,
+    attrs.data_equip_type,
+  ].find((value) => value?.trim() && !/^\d+$/.test(value.trim()));
+  // model/type 的数字编号不是装备分类；以官网容器和法宝属性等明确证据识别。
+  const storage = [attrs.data_storage_type, location].filter(Boolean).join(" ");
+  const category = /lingbao|灵宝/i.test(storage)
+    ? "灵宝"
+    : /shenqi|神器/i.test(storage)
+      ? "神器"
+      : /(?:^|\n)\s*(?:灵气|修炼境界)[：:\s]/.test(description) || /fabao|法宝/i.test(storage)
+        ? "法宝"
+        : declaredCategory;
   // 官方图标明确给出的分类 ID；不从名字、data_type 或 data_equip_type 推算。
   const kindId = attrs.data_kindid || attrs["data-kindid"];
   return {

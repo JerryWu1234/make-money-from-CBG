@@ -351,6 +351,55 @@ describe("商品身份和时间", () => {
       false,
     );
   });
+  it("数字model不会覆盖官网法宝、灵宝、神器容器及灵气证据", () => {
+    const samples = [
+      [{ data_equip_type: "17320", data_equip_desc: "灵气：29" }, "法宝"],
+      [
+        {
+          data_equip_type: "6033",
+          data_equip_location: "RoleStoreFabao",
+          data_equip_desc: "灵气：500 五行：火\n修炼境界：第15层 天人合一",
+        },
+        "法宝",
+      ],
+      [{ data_equip_location: "RoleStoreShenqi" }, "神器"],
+      [{ data_equip_type: "6145", data_equip_location: "RoleUsingFabao" }, "法宝"],
+      [{ data_equip_type: " 6030 ", data_equip_location: "RoleStoreLingbao" }, "灵宝"],
+      [{ data_equip_type: "6030", data_storage_type: "法宝" }, "法宝"],
+    ] as const;
+    const items = samples.map(([attrs, category], index) => {
+      const item = itemFromAttributes({ data_equip_name: `测试物品${index}`, ...attrs }, index);
+      expect(item.category).toBe(category);
+      return item;
+    });
+    const snapshot = {
+      name: "道具/法宝",
+      text: "道具和法宝",
+      fields: [],
+      tables: [],
+      elements: [],
+      tooltips: [],
+      items,
+    };
+    expect(equipmentCaptureSummary([snapshot], "now").complete).toBe(true);
+    const unknown = itemFromAttributes({ data_equip_name: "未知物品", data_equip_type: "6033" }, 5);
+    expect(unknown.category).toBeUndefined();
+    expect(equipmentCaptureSummary([{ ...snapshot, items: [unknown] }], "now").complete).toBe(
+      false,
+    );
+    const gear = itemFromAttributes(
+      {
+        data_equip_name: "测试鞋",
+        data_equip_type: "2755",
+        data_equip_desc: "等级130\n防御70\n敏捷50",
+      },
+      6,
+    );
+    expect(gear.category).toBeUndefined();
+    expect(equipmentCaptureSummary([{ ...snapshot, items: [gear] }], "now").complete).toBe(true);
+    gear.description = "等级130";
+    expect(equipmentCaptureSummary([{ ...snapshot, items: [gear] }], "now").complete).toBe(false);
+  });
   it("跟踪参数、悬停时间和 URL 时间片段不会改变商品身份或时间", () => {
     const a = parseListing(
       "https://xyq.cbg.163.com/equip?s=367&eid=202607021800113-367-abc&reco_request_id=999",

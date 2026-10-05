@@ -89,7 +89,7 @@ export function equipmentInventory(record: SavedRoleRecord) {
       const description = [details, ...restrictions].filter(Boolean).join("\n");
       const category = item.category || "";
       if (item.kind === "skill" || item.kind === "innerSkill") continue;
-      if (/法宝|灵宝|道具|材料|消耗品|召唤兽装备/.test(category)) continue;
+      if (/法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(category)) continue;
       const level = levelOf(description, item.attributes);
       const equipment =
         /人物装备|灵饰|武器|头盔|衣服|项链|腰带|鞋/.test(category) ||

@@ -57,7 +57,7 @@ window.overall_search=function(args,page,order){
    const root=document.querySelector('#search_result');
    if(!result.msg.length){root.innerHTML='<p>没有符合条件的商品</p>';return;}
    const table=document.createElement('table');
-   for(const row of result.msg){const tr=document.createElement('tr'),td=document.createElement('td'),a=document.createElement('a'),img=document.createElement('img');a.className='soldImg';a.href='https://xyq.cbg.163.com/equip?s=1&eid='+encodeURIComponent(row.eid);img.src=${JSON.stringify(pixel)};img.width=40;img.height=40;img.setAttribute('data_equip_name',row.name);img.setAttribute('data_equipid','ordersn-'+row.eid);a.append(img);td.append(a);tr.append(td);table.append(tr);}root.append(table);
+   for(const row of result.msg){const tr=document.createElement('tr'),td=document.createElement('td'),a=document.createElement('a'),img=document.createElement('img');a.className='soldImg';a.href='https://xyq.cbg.163.com/equip?s=1&eid='+encodeURIComponent(row.eid)+'&from_shareid=must-not-send-viewer&reco_request_id=tracking&cross_buy_serverid=99';img.src=${JSON.stringify(pixel)};img.width=40;img.height=40;img.setAttribute('data_equip_name',row.name);img.setAttribute('data_equipid','ordersn-'+row.eid);a.append(img);td.append(a);tr.append(td);table.append(tr);}root.append(table);
    const pager=document.querySelector('#pager');
    if(result.paging.num_end>1){pager.append('第'+page+'页, 共'+result.paging.num_end+'页');if(page>1)pager.insertAdjacentHTML('beforeend','<a href="javascript:goto('+(page-1)+')">上一页</a>');if(page<result.paging.num_end)pager.insertAdjacentHTML('beforeend','<a href="javascript:goto('+(page+1)+')">下一页</a>');}
   },
@@ -86,14 +86,22 @@ export function equipmentDetailDocument(options = {}) {
     rawName: null,
     rawEid: null,
     onlyRecommendation: false,
+    renderedPanel: false,
+    rawPriceValue: null,
+    selling: null,
+    modelName: null,
+    modelDescription: null,
     ...options,
   };
   const icon = (name, tipId, recommended = false) =>
     `<img id="${recommended ? "recommended-icon" : "main-icon"}" width="50" height="50" src="${pixel}" data_equip_name="${escape(name)}" ${settings.linkedTooltip || recommended ? `data_tip_box="${tipId}"` : ""} ${recommended ? 'data_price="100"' : settings.visiblePrice ? `data_price="${settings.price}"` : ""} onmouseover="showTip('${tipId}')">`;
-  const main = `<main id="equip_detail">${icon(settings.name, "EquipTipsBox")}${settings.visiblePrice ? `<span class="price">¥${settings.price}</span>` : ""}<p>是否上架：${escape(settings.status)}</p></main>`;
+  // The live official template renders attributes directly, without a data_equip_name image.
+  const main = settings.renderedPanel
+    ? `<div class="infoList goodsInfo"><ul id="info_panel"><li>服务器：测试区 ID：${escape(settings.name)} 等级：100</li><li>状态：${escape(settings.status)}</li><li>价格：${settings.visiblePrice ? `<span class="price fB">￥${settings.price}（元）</span>` : ""}<span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul><div class="attribute"><p id="equip_desc_panel" style="white-space:pre-line">${escape(settings.description)}</p></div></div>`
+    : `<main id="equip_detail">${icon(settings.name, "EquipTipsBox")}${settings.visiblePrice ? `<span class="price">¥${settings.price}</span>` : ""}<p>是否上架：${escape(settings.status)}</p></main>`;
   const recommendedName = settings.recommendSameName ? settings.name : "推荐腰带";
   const recommend = settings.recommend
-    ? `<aside id="recommend"><h2>推荐商品</h2>${icon(recommendedName, "RecommendedTipsBox", true)}<span class="price">¥100</span><p>是否上架：已上架</p></aside>`
+    ? `<aside ${settings.renderedPanel ? 'id="bottomRecommands" class="recommandWrp goodsInfo goodsRemmds"' : 'id="recommend"'}><h2>推荐商品</h2>${icon(recommendedName, "RecommendedTipsBox", true)}<span class="price">¥100</span><p>是否上架：已上架</p></aside>`
     : "";
   const tooltip = settings.tooltipMissing
     ? ""
@@ -103,7 +111,8 @@ ${settings.onlyRecommendation ? recommend : settings.recommendFirst ? recommend 
 <div id="RecommendedTipsBox" role="tooltip" style="display:none;white-space:pre-line">${escape(recommendedName + "\n" + settings.description.replace("防御：50", "防御：99"))}</div>
 <script>
 window.IsLogin=1;window.hovers=[];window.tooltipDelay=${settings.tooltipDelay};
-${settings.rawPrice ? `window.equip={price:${settings.price * 100},equip_name:${JSON.stringify(settings.rawName || settings.name)},eid:${settings.rawEid ? JSON.stringify(settings.rawEid) : "new URL(location.href).searchParams.get('eid')"},serverid:1};` : ""}
+${settings.rawPrice ? `window.equip={price:${JSON.stringify(settings.rawPriceValue ?? settings.price)},equip_name:${JSON.stringify(settings.rawName || settings.name)},eid:${settings.rawEid ? JSON.stringify(settings.rawEid) : "new URL(location.href).searchParams.get('eid')"},server_id:1${settings.selling !== null ? `,is_selling:${JSON.stringify(settings.selling)}` : ""}${settings.modelDescription !== null ? ",equip_type:2912" : ""}};` : ""}
+${settings.modelDescription !== null ? `window.CBG_GAME_CONFIG={equip_info:{2912:{name:${JSON.stringify(settings.modelName || settings.name)},desc:${JSON.stringify(settings.modelDescription)}},9999:{name:"其他装备",desc:"【装备角色】男"}}};` : ""}
 window.showTip=function(id){hovers.push(id);setTimeout(()=>{const tip=document.getElementById(id);if(tip)tip.style.display='block';},tooltipDelay);};
 </script>`;
 }

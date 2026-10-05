@@ -49,14 +49,19 @@ const previous = (): RoleDetail => ({
         : [],
   })),
 });
-const fixture = (missingTooltip: boolean, petHtml = "<p>召唤兽(0/10)</p>", iconKindId?: string) => {
+const fixture = (
+  missingTooltip: boolean,
+  petHtml = "<p>召唤兽(0/10)</p>",
+  iconKindId?: string,
+  nonEquipmentHtml = "",
+) => {
   const gear = `<p>道具和法宝</p><div id="RoleEquip"><a data_kindid="999" data_equip_name="新武器" data_equip_desc="" data_equip_category="武器" data_tip_box="RoleEquipTipsBox"><img ${iconKindId ? `data_kindid="${iconKindId}"` : ""} width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseover="${missingTooltip ? "" : "document.getElementById('RoleEquipTipsBox').style.display='block';document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'"}"></a></div>`;
   return `<meta charset="utf-8"><section><nav>${MAIN_TABS.map(
     (name) =>
       `<button onclick="show(${JSON.stringify(name).replaceAll('"', "&quot;")})">${name}</button>`,
   ).join(
     "",
-  )}</nav><div id="panel">${"基本资料。".repeat(60)}</div><div id="RoleEquipTipsBox" style="display:none"></div></section><script>function show(name){document.getElementById('panel').innerHTML=name==='道具/法宝'?${JSON.stringify(gear)}:name==='召唤兽/孩子'?${JSON.stringify(petHtml)}:'<p>'+name+'：新资料</p>'}</script>`;
+  )}</nav><div id="panel">${"基本资料。".repeat(60)}</div><div id="RoleEquipTipsBox" style="display:none"></div></section><script>function show(name){document.getElementById('panel').innerHTML=name==='道具/法宝'?${JSON.stringify(gear + nonEquipmentHtml)}:name==='召唤兽/孩子'?${JSON.stringify(petHtml)}:'<p>'+name+'：新资料</p>'}</script>`;
 };
 const completePet = () =>
   `<p>召唤兽(1/10)</p><img width="30" height="30" data_idx="0" src="/images/pets/small/0.gif"><section><p>详细信息</p><p>类型：幽灵</p><p>等级：0</p><p>成长：1.23</p>${["攻击资质", "防御资质", "体力资质", "法力资质", "速度资质", "躲闪资质"].map((name) => `<p>${name}：1400</p>`).join("")}<p>技能（2）</p><img width="30" height="30" data_skill_type="cifu" data_equip_name="鬼魂术"><img width="30" height="30" data_skill_type="cifu" data_equip_name="死亡召唤"><p>装备（1）</p><img width="30" height="30" data_equip_name="宝宝项圈" data_equip_desc="等级 80#r速度 +20"><p>内丹（1）</p><img width="30" height="30" data_skill_type="neidan" data_equip_name="玄武躯" data_equip_level="5"></section><p>孩子</p><img width="30" height="30" data_skill_type="cifu" data_equip_name="孩子技能">`;
@@ -128,6 +133,31 @@ describe("装备局部补采", () => {
         new AbortController().signal,
       );
       expect(detail.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].kindId).toBe("025");
+    } finally {
+      await page.close();
+    }
+  }, 15000);
+  it("官方法宝和神器容器内的无描述图标不造成真实装备采集失败", async () => {
+    const page = await browser.newPage();
+    try {
+      const others = `<div id="RoleStoreFabao"><img width="40" height="40" data_equip_name="测试法宝" data_equip_type="6033" data_tip_box="MissingArtifactBox"></div><div id="RoleStoreShenqi"><img width="40" height="40" data_equip_name="测试神器"></div><div id="RoleStoreLingbao"><img width="40" height="40" data_equip_name="测试灵宝"></div>`;
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, others),
+        }),
+      );
+      const detail = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      const items = detail.tabs.find((tab) => tab.name === "道具/法宝")!.items!;
+      expect(items.map((item) => item.category)).toEqual(["武器", "法宝", "神器", "灵宝"]);
+      expect(items[0].description).toContain("伤害 +420");
+      expect(detail.equipmentCapture?.complete).toBe(true);
+      expect(detail.equipmentCapture?.issues).toEqual([]);
     } finally {
       await page.close();
     }
