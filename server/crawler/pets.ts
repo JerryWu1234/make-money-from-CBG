@@ -218,7 +218,9 @@ export async function collectPets(
           !visible(icon) ||
           !range.intersectsNode(icon) ||
           /\/pets\/(?:big|small)\//.test(icon.getAttribute("src") || "") ||
-          /\/images\/time_lock_\d+\.png(?:[?#]|$)/.test(icon.getAttribute("src") || "")
+          /\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#]|$)/.test(
+            icon.getAttribute("src") || "",
+          )
         )
           continue;
         icon.setAttribute("data-cbg-pet-item", "true");

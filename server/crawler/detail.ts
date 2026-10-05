@@ -61,7 +61,9 @@ async function inspectItems(
         (el) =>
           !el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]') &&
           // Official show_lock() adds these badges next to equipment/pet icons.
-          !/\/images\/time_lock_\d+\.png(?:[?#].*)?$/i.test(el.getAttribute("src") || ""),
+          !/\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#].*)?$/i.test(
+            el.getAttribute("src") || "",
+          ),
       );
       icons.forEach((el, index) => el.setAttribute("data-cbg-inspect-index", String(index)));
       return icons.length;

@@ -84,7 +84,7 @@ describe("装备局部补采", () => {
     try {
       await page.route("**/images/**", (route) => route.abort());
       const badges =
-        '<img width="14" height="14" src="/images/time_lock_9.png"><img width="14" height="14" src="/images/time_lock_1.png?v=1">';
+        '<img width="14" height="14" src="/images/time_lock_9.png"><img width="14" height="14" src="/images/time_lock_1.png?v=1"><img width="14" height="14" src="/images/time_lock_protect.png"><img width="14" height="14" src="/images/time_lock_huoyue.png?v=1">';
       await page.route(url, (route) =>
         route.fulfill({
           contentType: "text/html",
@@ -293,7 +293,16 @@ describe("装备局部补采", () => {
     const page = await browser.newPage();
     try {
       await page.route(url, (route) =>
-        route.fulfill({ contentType: "text/html", body: fixture(false, completePet()) }),
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(
+            false,
+            completePet().replace(
+              "<p>内丹（1）</p>",
+              '<img width="14" height="14" src="/images/time_lock_protect.png"><img width="14" height="14" src="/images/time_lock_huoyue.png?v=1"><p>内丹（1）</p>',
+            ),
+          ),
+        }),
       );
       const detail = await collectDetail(page, listing, new AbortController().signal);
       const snapshot = detail.tabs.find((entry) => entry.name === "召唤兽/孩子")!;
