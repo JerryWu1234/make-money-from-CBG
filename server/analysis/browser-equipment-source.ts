@@ -63,6 +63,28 @@ export function equipmentQuery(item: EquipmentPricingItem, config: EquipmentSear
     integer("伤害", "damage");
     integer("灵力", "all_wakan");
     integer("锻炼等级", "gem_level");
+    const gemLevels = fields.锻炼等级;
+    const noGems =
+      !(fields.宝石 || []).some((value) => value.trim()) &&
+      (!gemLevels ||
+        (gemLevels.length === 1 && /^\+?\d+$/.test(gemLevels[0]) && Number(gemLevels[0]) === 0));
+    if (noGems) {
+      // The official init_* inputs are lower bounds. Only ungemmed, separately observed
+      // base values are usable here; do not convert total values or add melting effects.
+      for (const [field, parameter] of [
+        ["防御", "init_defense"],
+        ["气血", "init_hp"],
+        ["敏捷", "init_dex"],
+      ] as const) {
+        if (field === "敏捷" && kind?.[1] !== "鞋子") continue;
+        const values = fields[field];
+        if (values?.length !== 1 || !/^\+?\d+$/.test(values[0])) continue;
+        const value = Number(values[0]);
+        if (value > 10000) continue;
+        args[parameter] = value;
+        args.attr_without_melt = 1;
+      }
+    }
     for (const [field, key, choices] of [
       ["特效", "special_effect", config.effects],
       ["特技", "special_skill", config.skills],

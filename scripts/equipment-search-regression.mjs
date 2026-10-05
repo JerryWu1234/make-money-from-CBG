@@ -234,6 +234,24 @@ try {
     ),
   );
 
+  await check("无宝石装备向官网发送初血初防筛选，详情仍逐项核对", () => {
+    const description = "等级 100\n气血 +176 防御 +50\n耐久度 435";
+    return withSource(
+      {},
+      { renderedPanel: true, selling: 1, description },
+      async ({ source, searchPage, control }) => {
+        const result = await source.findCandidates([item({ description })], control.signal);
+        const [query] = await searchPage.evaluate(() => window.calls);
+        assert.equal(query.init_hp, 176);
+        assert.equal(query.init_defense, 50);
+        assert.equal(query.attr_without_melt, 1);
+        assert.equal(query.hp, undefined);
+        assert.equal(query.defense, undefined);
+        assert.equal(result.items[0].candidates[0].verified, true);
+      },
+    );
+  });
+
   await check("悬浮提示异步出现后读取完整属性", () =>
     withSource({}, { tooltipDelay: 150 }, async ({ source, control }) => {
       const result = await source.findCandidates([item()], control.signal);

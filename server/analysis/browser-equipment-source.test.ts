@@ -32,6 +32,9 @@ const config: EquipmentSearchConfig = {
     [5, "斧"],
     [83, "双斧"],
     [20, "腰带"],
+    [19, "鞋子"],
+    [21, "饰品"],
+    [18, "男衣"],
   ],
   effects: [
     [3, "愤怒"],
@@ -180,6 +183,176 @@ describe("官方装备搜索条件", () => {
         equip_level_max: 100,
       },
     });
+  });
+
+  it("70级无宝石兽王腰带使用初血176、初防37下限，排除熔炼加值", () => {
+    const { args } = equipmentQuery(
+      item({
+        name: "兽王腰带",
+        level: 70,
+        kindId: "20",
+        description: "等级：70\n防御：37\n气血：176\n耐久：83\n修理失败：0",
+      }),
+      config,
+    );
+    expect(args).toMatchObject({
+      level_min: 70,
+      level_max: 70,
+      kindid: "20",
+      init_hp: 176,
+      init_defense: 37,
+      attr_without_melt: 1,
+    });
+    for (const field of ["hp", "defense", "dex", "init_dex", "attr_with_melt"])
+      expect(args).not.toHaveProperty(field);
+  });
+
+  it("锻炼明确为0也允许初值，熔炼单列不混加到主属性", () => {
+    const { args } = equipmentQuery(
+      item({
+        category: "人物装备 · 鞋子",
+        kindId: "19",
+        description:
+          "等级：70\n气血：176\n防御：37\n敏捷：4\n锻炼等级：0\n熔炼效果：\n+3防御\n+10气血\n+2敏捷",
+      }),
+      config,
+    );
+    expect(args).toMatchObject({
+      init_hp: 176,
+      init_defense: 37,
+      init_dex: 4,
+      attr_without_melt: 1,
+    });
+    expect(args).not.toHaveProperty("attr_with_melt");
+  });
+
+  it.each([
+    ["有宝石但锻炼字段缺失", "宝石：黑宝石"],
+    ["有宝石且锻炼为0", "宝石：黑宝石\n锻炼等级：0"],
+    ["锻炼大于0但宝石名缺失", "锻炼等级：8"],
+    ["锻炼字段混合多值", "锻炼等级：0\n锻炼等级：8"],
+    ["锻炼字段不明确", "锻炼等级：未知"],
+    ["锻炼字段不是整数格式", "锻炼等级：0.0"],
+  ])("%s时不发送可能含宝石效果的初值", (_label, gemDescription) => {
+    const { args } = equipmentQuery(
+      item({
+        category: "人物装备 · 鞋子",
+        kindId: "19",
+        description: "等级：70\n气血：176\n防御：37\n敏捷：4\n" + gemDescription,
+      }),
+      config,
+    );
+    for (const field of ["init_hp", "init_defense", "init_dex", "attr_without_melt"])
+      expect(args).not.toHaveProperty(field);
+  });
+
+  it.each([0, 10000])("官网范围端点%d完整保留，包括0不会因真假判断丢失", (value) => {
+    const { args } = equipmentQuery(
+      item({
+        category: "人物装备 · 鞋子",
+        kindId: "19",
+        description: `等级：70\n气血：${value}\n防御：${value}\n敏捷：${value}`,
+      }),
+      config,
+    );
+    expect(args).toMatchObject({
+      init_hp: value,
+      init_defense: value,
+      init_dex: value,
+      attr_without_melt: 1,
+    });
+  });
+
+  it.each(["10001", "-1", "37.5", "未知"])("主属性%s不在官网整数范围时不发送初值", (value) => {
+    const { args } = equipmentQuery(
+      item({
+        category: "人物装备 · 鞋子",
+        kindId: "19",
+        description: `等级：70\n气血：${value}\n防御：${value}\n敏捷：${value}`,
+      }),
+      config,
+    );
+    for (const field of ["init_hp", "init_defense", "init_dex", "attr_without_melt"])
+      expect(args).not.toHaveProperty(field);
+  });
+
+  it("多个防御值不擅自合并，其余明确的气血仍可过滤", () => {
+    const { args } = equipmentQuery(
+      item({
+        description: "等级：70\n防御：37\n防御：40\n气血：176",
+      }),
+      config,
+    );
+    expect(args).not.toHaveProperty("init_defense");
+    expect(args).toMatchObject({ init_hp: 176, attr_without_melt: 1 });
+  });
+
+  it("泛型装备只在官网kind标签明确为鞋子时发送初敏", () => {
+    const { args } = equipmentQuery(
+      item({ category: "人物装备", kindId: "019", description: "等级：70\n敏捷：4" }),
+      config,
+    );
+    expect(args).toMatchObject({ kindid: "19", init_dex: 4, attr_without_melt: 1 });
+  });
+
+  it.each([
+    ["饰品", "21"],
+    ["剑", "6"],
+    ["男衣", "18"],
+    ["未知类型", undefined],
+  ])("%s的敏捷不当作鞋子初敏", (category, kindId) => {
+    const { args } = equipmentQuery(
+      item({ category: "人物装备 · " + category, kindId, description: "等级：70\n敏捷：4" }),
+      config,
+    );
+    expect(args).not.toHaveProperty("init_dex");
+    expect(args).not.toHaveProperty("attr_without_melt");
+  });
+
+  it("已解析kind是饰品时，即使采集分类写鞋子也不发送初敏", () => {
+    const { args } = equipmentQuery(
+      item({ category: "人物装备 · 鞋子", kindId: "21", description: "等级：70\n敏捷：4" }),
+      config,
+    );
+    expect(args.kindid).toBe("21");
+    expect(args).not.toHaveProperty("init_dex");
+  });
+
+  it("官网配置没有识别kind时不根据19这个编号猜初敏", () => {
+    const { args } = equipmentQuery(
+      item({ category: "人物装备", kindId: "19", description: "等级：70\n敏捷：4" }),
+      { ...config, kinds: [] },
+    );
+    expect(args).not.toHaveProperty("kindid");
+    expect(args).not.toHaveProperty("init_dex");
+  });
+
+  it("鞋子多个敏捷值不擅自合并，其余明确初防仍可过滤", () => {
+    const { args } = equipmentQuery(
+      item({
+        category: "人物装备 · 鞋子",
+        kindId: "19",
+        description: "等级：70\n敏捷：4\n敏捷：6\n防御：37",
+      }),
+      config,
+    );
+    expect(args).not.toHaveProperty("init_dex");
+    expect(args).toMatchObject({ init_defense: 37, attr_without_melt: 1 });
+  });
+
+  it("灵饰保持原有精炼筛选，不套用普通装备初属性字段", () => {
+    const { jewelry, args } = equipmentQuery(
+      item({
+        category: "灵饰 · 佩饰",
+        kindId: "64",
+        description: "等级：100\n防御：37\n气血：176\n敏捷：4\n精炼等级：0",
+      }),
+      { ...config, kinds: [[64, "佩饰"]] },
+    );
+    expect(jewelry).toBe(true);
+    expect(args).toMatchObject({ equip_level_min: 100, kindid: "64", jinglian_level: 0 });
+    for (const field of ["init_hp", "init_defense", "init_dex", "attr_without_melt"])
+      expect(args).not.toHaveProperty(field);
   });
 });
 

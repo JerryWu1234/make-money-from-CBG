@@ -33,6 +33,7 @@ const postRoutes = new Set([
   "/api/analysis/pause",
   "/api/analysis/resume",
   "/api/analysis/retry",
+  "/api/analysis/equipment/check",
   "/api/analysis/settings/save",
 ]);
 
@@ -92,6 +93,22 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
           )
         : {};
     if (pathname.startsWith("/api/analysis/")) {
+      switch (pathname) {
+        case "/api/analysis/equipment/check": {
+          if (res.destroyed) return;
+          const controller = new AbortController();
+          const cancel = () => controller.abort(new Error("装备查价请求已断开"));
+          res.once("close", cancel);
+          try {
+            const { checkEquipment } = await import("./analysis/equipment-check");
+            const result = await checkEquipment(body as Record<string, unknown>, controller.signal);
+            if (!res.destroyed) res.end(JSON.stringify(result));
+          } finally {
+            res.removeListener("close", cancel);
+          }
+          return;
+        }
+      }
       const analysis = await import("./analysis/controller");
       const params = new URL(req.url!, expectedOrigin).searchParams;
       const input = body as Record<string, unknown>;
@@ -305,6 +322,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
     res.end(JSON.stringify(result));
   } catch (error) {
     diagnostics.record("api.error", { route: pathname, error });
+    if (res.destroyed) return;
     res.statusCode = error instanceof ScheduleConfigError ? 400 : 500;
     res.end(JSON.stringify({ error: error instanceof Error ? error.message : "请求失败" }));
   }
