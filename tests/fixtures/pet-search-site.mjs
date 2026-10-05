@@ -29,7 +29,7 @@ export function petSearchDocument(options = {}) {
   })
     .replace("官方装备搜索结构模拟页", "官方宝宝搜索结构模拟页")
     .replace(
-      "window.OverallSearchAct=settings.jewelry?'overall_search_lingshi':'overall_search_equip';",
+      /window\.OverallSearchAct=[^;]+;/,
       "window.OverallSearchAct='overall_search_pet';window.SaleablePetNameInfo={'2001':'画魂','3001':'幽灵'};window.PetSkills=[[1,'须弥真言'],[2,'高级法术暴击']];window.HighNeidans=[[9,'催心浪']];window.LowNeidans=[];",
     )
     .replace(

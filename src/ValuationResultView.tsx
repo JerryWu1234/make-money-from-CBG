@@ -14,8 +14,15 @@ const comparisonLabels: Record<Decision, string> = {
   NEED_INFO: "暂无法比较",
   OUT_OF_SCOPE: "不适用估值规则",
 };
-export const valuationDecisionLabel = (result: ValuationResult) =>
-  (result.comparison_mode === "listing-only" ? comparisonLabels : decisionLabels)[result.decision];
+export const valuationDecisionLabel = (result: ValuationResult) => {
+  if (result.estimated_comparison)
+    return { below: "挂牌低于参考区间", within: "挂牌在参考区间内", above: "挂牌高于参考区间" }[
+      result.estimated_comparison
+    ];
+  return (result.comparison_mode === "listing-only" ? comparisonLabels : decisionLabels)[
+    result.decision
+  ];
+};
 export const valuationMoney = (value: number | null | undefined) =>
   value == null
     ? "暂无法计算"
@@ -30,6 +37,14 @@ export function valuationPriceSummary(result: ValuationResult) {
           : "裸号参考估值",
       value: result.model_value,
     };
+  if (result.estimated_value_range)
+    return { label: "完整参考估值区间", value: null, range: result.estimated_value_range };
+  if (result.estimated_subtotal_range)
+    return {
+      label: "部分参考价区间（仍有缺项）",
+      value: null,
+      range: result.estimated_subtotal_range,
+    };
   if ((result.equipment_pricing || result.pet_pricing) && result.known_subtotal > 0)
     return { label: "已算部分（非完整估值）", value: result.known_subtotal };
   if (result.bare_role_value != null)
@@ -42,6 +57,12 @@ export function valuationPriceSummary(result: ValuationResult) {
   if (result.items.length) return { label: "已算部分（非完整估值）", value: result.known_subtotal };
   return { label: "关键资料不足", value: null };
 }
+export const valuationRangeMoney = (range: { min: number; max: number }) =>
+  valuationMoney(range.min) + "—" + valuationMoney(range.max);
+export const valuationSummaryText = (result: ValuationResult) => {
+  const summary = valuationPriceSummary(result);
+  return summary.range ? valuationRangeMoney(summary.range) : valuationMoney(summary.value);
+};
 export function ValuationResultView({
   result,
   onConfigure,
@@ -55,7 +76,7 @@ export function ValuationResultView({
   const comparison = result.comparison_mode === "listing-only";
   const metrics: [string, number][] = [];
   if (amount.value !== null) metrics.push([amount.label, amount.value]);
-  if (result.asking_price !== null) metrics.push(["当前挂牌价", result.asking_price]);
+  if (result.asking_price !== null) metrics.push(["采集时挂牌价", result.asking_price]);
   if (comparison) {
     if (result.equipment_pricing && result.bare_role_value != null)
       metrics.push(["裸号参考估值", result.bare_role_value]);
@@ -86,6 +107,18 @@ export function ValuationResultView({
         <p>{result.reason}</p>
       </div>
       <div className="analysis-valuation-metrics">
+        {amount.range && (
+          <div>
+            <small>{amount.label}</small>
+            <strong>{valuationRangeMoney(amount.range)}</strong>
+          </div>
+        )}
+        {result.estimated_price_difference && (
+          <div>
+            <small>估值区间与挂牌差额</small>
+            <strong>{valuationRangeMoney(result.estimated_price_difference)}</strong>
+          </div>
+        )}
         {metrics.map(([name, value]) => (
           <div key={String(name)}>
             <small>{name}</small>
@@ -111,7 +144,12 @@ export function ValuationResultView({
           : "按裸号规则估值，装备、灵饰、召唤兽个体和锦衣未计价。"}
       </p>
       {comparison && <p>差额为正表示估值高于挂牌价，为负表示挂牌价更高。</p>}
-      {result.model_value === null && (
+      {result.estimated_value_range && (
+        <p className="analysis-pending-note">
+          这是基于相近配置挂牌样本的完整参考区间，配置差异已列明，不能视为精确成交价值。
+        </p>
+      )}
+      {result.model_value === null && !result.estimated_value_range && (
         <p className="analysis-pending-note">
           当前金额是已算部分。请按下面的具体缺项补齐资料或定价规则，
           {comparison ? "再比较挂牌差异。" : "再判断买入上限。"}
@@ -127,18 +165,22 @@ export function ValuationResultView({
           </ul>
         </section>
       )}
-      {onConfigure && (result.decision === "NEED_INFO" || previousSettings) && (
-        <button
-          type="button"
-          className="analysis-button analysis-button-outline"
-          onClick={onConfigure}
-        >
-          去补充分析设置
-        </button>
-      )}
+      {onConfigure &&
+        ((result.decision === "NEED_INFO" && !result.estimated_value_range) ||
+          previousSettings) && (
+          <button
+            type="button"
+            className="analysis-button analysis-button-outline"
+            onClick={onConfigure}
+          >
+            去补充分析设置
+          </button>
+        )}
       {!!(result.pending_rules.length || result.missing_fields.length) && (
         <details>
-          <summary>查看缺少的资料和未设置的规则</summary>
+          <summary>
+            {result.estimated_value_range ? "查看未取得精确报价的项目" : "查看未补齐的项目与原因"}
+          </summary>
           {!!result.pending_rules.length && (
             <section>
               <h3>未设置的计价方式</h3>
@@ -151,7 +193,7 @@ export function ValuationResultView({
           )}
           {!!result.missing_fields.length && (
             <section>
-              <h3>缺少的资料</h3>
+              <h3>未补齐的项目与原因</h3>
               <ul>
                 {result.missing_fields.map((value) => (
                   <li key={value}>{value}</li>

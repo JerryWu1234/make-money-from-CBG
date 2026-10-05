@@ -86,24 +86,16 @@ describe("裸号估值的复算与可追溯输入", () => {
         price_difference_ratio: null,
       });
   });
-  it("未覆盖修炼和飞升公式异常继续阻塞完整价格，不能当作0后产生差价", () => {
+  it("低级修炼按明示经验规则估算，飞升异常仍阻塞完整价格", () => {
     const training = completeRecord();
     for (const label of ["攻击修炼", "法术修炼"])
       training.detail!.tabs[0].fields.find((field) => field.name === label)!.value = "3/25";
-    const missingTraining = calculateValuation(training, profile());
-    expect(missingTraining).toMatchObject({
-      decision: "NEED_INFO",
-      model_value: null,
-      bare_role_value: null,
-      price_difference: null,
-      price_difference_ratio: null,
-    });
-    expect(
-      missingTraining.items.find((item) => item.name === "人物有效攻法修炼")?.amount,
-    ).toBeNull();
-    expect(missingTraining.missing_fields).toContain(
-      "已采集人物有效攻法修炼3级，原价表未提供1—4级定价",
-    );
+    const estimatedTraining = calculateValuation(training, profile());
+    expect(estimatedTraining.model_value).not.toBeNull();
+    const lowItem = estimatedTraining.items.find((item) => item.name === "人物有效攻法修炼")!;
+    expect(lowItem.amount).toBeCloseTo((30 * 650) / 1550, 2);
+    expect(lowItem.formula).toContain("经验比例估算");
+    expect(estimatedTraining.missing_fields).toEqual([]);
     const flying = completeRecord();
     flying.detail!.tabs[0].fields.find((field) => field.name === "飞升/渡劫/化圣")!.value =
       "已飞升";
@@ -258,10 +250,19 @@ describe("裸号估值的复算与可追溯输入", () => {
     expect(incomplete.decision).toBe("NEED_INFO");
     expect(incomplete.missing_fields).toContain("神器1槽位状态或五行未完整读取");
   });
-  it("不提前舍入、不给1—4级插值、强壮口径分别计算", () => {
+  it("低级经验折算不提前舍入，强壮口径分别计算", () => {
     expect(trainingPrice(6, "defense")).toBe(50 / 1.5);
     expect(trainingPrice(17, "defense")).toBe(230);
-    expect(trainingPrice(4, "petAttack")).toBeNull();
+    for (const [level, experience] of [150, 360, 650, 1040].map((experience, i) => [
+      i + 1,
+      experience,
+    ])) {
+      expect(trainingPrice(level, "attack")).toBe((30 * experience) / 1550);
+      expect(trainingPrice(level, "defense")).toBe((20 * experience) / 1550);
+      expect(trainingPrice(level, "petAttack")).toBe((40 * experience) / 1550);
+      expect(trainingPrice(level, "petDefense")).toBe((30 * experience) / 1550);
+    }
+    for (const level of [-1, 26, 1.5, NaN]) expect(trainingPrice(level, "attack")).toBeNull();
     expect(trainingPrice(0, "petAttack")).toBe(0);
     expect(strengthPrice(2, "single")).toBe(8 / 270);
     expect(strengthPrice(2, "cumulative")).toBe(9 / 270);
@@ -585,7 +586,7 @@ describe("裸号估值的复算与可追溯输入", () => {
     const automatic = createProfile(template);
     expect(automatic.equipmentSearch).toBe(true);
     expect(automatic.petSearch).toBe(true);
-    expect(automatic.calculationVersion).toBe("price-comparison-v7");
+    expect(automatic.calculationVersion).toBe("price-comparison-v8");
     const ignoredPolicy = createProfile(template, {
       ...DEFAULT_SETTINGS,
       b: 0.3,

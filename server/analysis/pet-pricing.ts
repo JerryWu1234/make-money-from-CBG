@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import type { DetailItem, PetSnapshot, SavedRoleRecord } from "../crawler/types";
 import { cleanDescription, coreEquipmentDescription, itemFromAttributes } from "../crawler/compact";
 import { compareListingPrice } from "./valuation-calculator";
+import { inventoryMatchesSnapshot, validateExactPricing } from "./pricing-integrity";
 import type { ValuationResult } from "./valuation-types";
+import { buildSimilarEstimate } from "./pricing-estimate";
 import {
   equipmentIdentity,
   listingPrices,
@@ -20,6 +22,7 @@ export type PetPricingItem = EquipmentPricingItem & {
   skills: string[];
   innerSkills: { name: string; level: string }[];
   equipment: PetEquipment[];
+  diagnosticSources?: EquipmentCandidate[];
 };
 export type PetPricingSnapshot = Omit<EquipmentPricingSnapshot, "items"> & {
   items: PetPricingItem[];
@@ -30,7 +33,14 @@ export type PetSource = {
     signal: AbortSignal,
   ) => Promise<{
     queries: string[];
-    items: Array<{ key: string; candidates: EquipmentCandidate[]; note?: string; query?: string }>;
+    items: Array<{
+      key: string;
+      candidates: EquipmentCandidate[];
+      note?: string;
+      query?: string;
+      similarAttempted?: boolean;
+      diagnosticSources?: EquipmentCandidate[];
+    }>;
     searchItems?: unknown[];
   }>;
   readSource: (url: string, signal: AbortSignal) => Promise<string>;
@@ -340,18 +350,70 @@ function fieldMatches(fields: Map<string, string[]>, field: { name: string; valu
   return values.every((value) => canonical(value) === canonical(field.value));
 }
 
+export type PetMatchType = "exact" | "similar";
+const mainAptitudes = new Set(["攻击资质", "防御资质", "体力资质", "法力资质"]);
+const secondaryAptitudes = new Set(["速度资质", "躲闪资质"]);
+const allocationFields = new Set(["体质", "魔力", "力量", "耐力", "敏捷", "潜能"]);
+const performanceFields = new Set(["攻击", "防御", "速度", "法伤", "法防"]);
+const aptitudeParts = (value: string) => {
+  const match = value.trim().match(/^(\d+(?:\.\d+)?)(?:\s*\+\s*(\d+(?:\.\d+)?))?$/);
+  if (!match) return null;
+  const base = Number(match[1]),
+    bonus = Number(match[2] || "0");
+  return Number.isFinite(base) && Number.isFinite(bonus) ? { base, bonus } : null;
+};
+function similarFieldDifference(
+  fields: Map<string, string[]>,
+  field: { name: string; value: string },
+): string | null {
+  const values = fields.get(fieldName(field.name));
+  if (!values?.length || new Set(values.map(normalize)).size !== 1) return null;
+  const source = values[0];
+  if (mainAptitudes.has(field.name) || secondaryAptitudes.has(field.name)) {
+    const target = aptitudeParts(field.value),
+      observed = aptitudeParts(source);
+    const tolerance = mainAptitudes.has(field.name) ? 0.05 : 0.1;
+    if (
+      !target ||
+      !observed ||
+      target.bonus !== observed.bonus ||
+      Math.abs(observed.base - target.base) > target.base * tolerance
+    )
+      return null;
+    return `${field.name}：目标 ${field.value}，样本 ${source}（基础值差异≤${tolerance * 100}%，加成一致）`;
+  }
+  if (allocationFields.has(field.name) || performanceFields.has(field.name)) {
+    if (
+      !/^\d+(?:\.\d+)?$/.test(field.value) ||
+      !/^\d+(?:\.\d+)?$/.test(source) ||
+      !Number.isFinite(Number(field.value)) ||
+      !Number.isFinite(Number(source))
+    )
+      return null;
+    if (
+      performanceFields.has(field.name) &&
+      Math.abs(Number(source) - Number(field.value)) > Number(field.value) * 0.1
+    )
+      return null;
+    return `${field.name}：目标 ${field.value}，样本 ${source}（${allocationFields.has(field.name) ? "普通加点不同，未据此折价" : "衍生性能差异≤10%"}）`;
+  }
+  return null;
+}
+
 /** Only independently read principal product content can establish a price. */
 export function verifyPetCandidate(
   item: PetPricingItem,
   candidate: EquipmentCandidate,
   html: string,
   fetchedAt: string,
+  matchType: PetMatchType = "exact",
 ): EquipmentCandidate {
   const source = productSource(html);
   const text = pageText(source);
   const fields = sourceFields(source, text);
   const reject = (reason: string) => ({
     ...candidate,
+    matchType,
     verified: false,
     reason,
     fetchedAt,
@@ -369,8 +431,14 @@ export function verifyPetCandidate(
     return reject("来源不可用、需要登录或已下架");
   if (/角色编号|人物修炼|召唤兽修炼|角色等级|珍宝阁|梦幻西游手游/.test(text))
     return reject("不是电脑版独立召唤兽商品报价");
-  if (!/召唤兽|宠物/.test(text) || item.fields.some((field) => !fieldMatches(fields, field)))
-    return reject("宝宝类型、等级、成长、资质或其他关键属性不匹配");
+  if (!/召唤兽|宠物/.test(text)) return reject("不是可核对的独立宝宝商品");
+  const differences: string[] = [];
+  for (const field of item.fields) {
+    if (fieldMatches(fields, field)) continue;
+    const difference = matchType === "similar" ? similarFieldDifference(fields, field) : null;
+    if (!difference) return reject("宝宝类型、等级、成长、资质或其他关键属性不匹配：" + field.name);
+    differences.push(difference);
+  }
   for (const field of extraSensitive)
     if (fields.has(field) && !item.fields.some((value) => value.name === field))
       return reject("报价多出宝宝价格相关属性“" + field + "”，需补采再核对");
@@ -428,11 +496,14 @@ export function verifyPetCandidate(
   if (!/上架中|在售|公示中|公示期/.test(text)) return reject("无法确认当前在售状态");
   return {
     ...candidate,
+    matchType: differences.length ? "similar" : "exact",
     verified: true,
-    reason: "独立宝宝商品的挂牌价、完整技能及属性已核对；含匹配随身装备且只计一次",
+    reason: differences.length
+      ? "同类型同等级宝宝在售挂牌已核对；成长、完整技能、认证、内丹和穿戴装备一致，白名单属性存在明确差异，仅作相似样本"
+      : "独立宝宝商品的挂牌价、完整技能及属性已核对；含匹配随身装备且只计一次",
     fetchedAt,
     sourceHash: hash(source),
-    differences: [],
+    differences,
   };
 }
 
@@ -507,7 +578,7 @@ export async function searchPetPricing(
   const pages = new Map<string, Promise<string>>();
   for (const item of searchable) {
     const result = results.get(item.key);
-    if (!result || !Array.isArray(result.candidates) || result.candidates.length > 5) {
+    if (!result || !Array.isArray(result.candidates) || result.candidates.length > 10) {
       item.issues.push("未返回该宝宝的有效候选");
       continue;
     }
@@ -515,7 +586,13 @@ export async function searchPetPricing(
     if (typeof result.note === "string" && result.note.trim())
       item.issues.push(result.note.slice(0, 500));
     const seen = new Set<string>();
-    for (const raw of result.candidates) {
+    const rawEntries = [
+      ...result.candidates.map((raw) => ({ raw, diagnostic: false })),
+      ...(Array.isArray(result.diagnosticSources) && result.diagnosticSources.length <= 3
+        ? result.diagnosticSources.map((raw) => ({ raw, diagnostic: true }))
+        : []),
+    ];
+    for (const { raw, diagnostic } of rawEntries) {
       if (
         !raw ||
         typeof raw !== "object" ||
@@ -536,26 +613,43 @@ export async function searchPetPricing(
         reason: "",
         fetchedAt: null,
         sourceHash: null,
+        matchType: raw.matchType === "similar" ? "similar" : "exact",
       };
       try {
         candidate.url = safeEquipmentUrl(candidate.url);
         const identity = equipmentIdentity(candidate.url);
         if (seen.has(identity)) continue;
         seen.add(identity);
-        if (!pages.has(identity)) pages.set(identity, source.readSource(candidate.url, signal));
-        candidate = verifyPetCandidate(
-          item,
-          candidate,
-          await pages.get(identity)!,
-          new Date().toISOString(),
-        );
+        if (candidate.price === null)
+          candidate.reason =
+            typeof raw.reason === "string" && raw.reason.trim()
+              ? raw.reason.slice(0, 500)
+              : "宝宝详情未能完整读取，缺少有效挂牌价";
+        else {
+          if (!pages.has(identity)) pages.set(identity, source.readSource(candidate.url, signal));
+          candidate = verifyPetCandidate(
+            item,
+            candidate,
+            await pages.get(identity)!,
+            new Date().toISOString(),
+            candidate.matchType,
+          );
+        }
       } catch (error) {
         signal.throwIfAborted();
         candidate.reason = error instanceof Error ? error.message : "无法核对宝宝报价来源";
       }
-      item.candidates.push(candidate);
+      if (diagnostic)
+        (item.diagnosticSources ||= []).push({
+          ...candidate,
+          verified: false,
+          reason: "仅用于真实独立详情诊断，不计价：" + candidate.reason,
+        });
+      else item.candidates.push(candidate);
     }
-    const verified = item.candidates.filter((candidate) => candidate.verified);
+    const verified = item.candidates.filter(
+      (candidate) => candidate.verified && candidate.matchType !== "similar",
+    );
     if (verified.length) {
       const prices = verified.map((candidate) => candidate.price!).sort((a, b) => a - b);
       const middle = Math.floor(prices.length / 2);
@@ -565,6 +659,14 @@ export async function searchPetPricing(
       item.status = "priced";
       item.issues = verified.length === 1 ? ["仅1条挂牌样本，参考范围有限"] : [];
     } else item.issues.push("没有已核对的同配置宝宝挂牌报价，暂不自动定价");
+    if (
+      item.query.includes("/ similar /") ||
+      result.similarAttempted === true ||
+      item.candidates.some((candidate) => candidate.matchType === "similar")
+    ) {
+      item.similarEstimate = buildSimilarEstimate(item.candidates);
+      if (item.similarEstimate.status !== "range") item.issues.push(...item.similarEstimate.issues);
+    }
   }
   snapshot.knownTotal = round(
     snapshot.items.reduce((sum, item) => sum + (item.referencePrice ?? 0), 0),
@@ -582,11 +684,19 @@ export function combinePetPricing(
   pricing?: PetPricingSnapshot,
 ): ValuationResult {
   const inventory = petInventory(record);
-  const snapshot = pricing?.inputHash === inventory.inputHash ? pricing : undefined;
+  const snapshot =
+    pricing?.inputHash === inventory.inputHash && inventoryMatchesSnapshot(pricing, inventory.items)
+      ? pricing
+      : undefined;
   const age = snapshot ? Date.now() - Date.parse(snapshot.searchedAt) : Infinity;
   const fresh = age >= -60_000 && age < 24 * 60 * 60 * 1000;
+  const verified = validateExactPricing(snapshot, inventory.items);
   const complete =
-    inventory.captureComplete && !!snapshot?.captureComplete && snapshot.total !== null && fresh;
+    inventory.captureComplete &&
+    !!snapshot?.captureComplete &&
+    snapshot.total !== null &&
+    fresh &&
+    verified;
   const petValue = complete ? snapshot!.total : null;
   const value =
     result.model_value !== null && petValue !== null ? round(result.model_value + petValue) : null;
@@ -601,6 +711,7 @@ export function combinePetPricing(
         .map((item) => item.name + "：" + item.issues.join("；")),
     );
   if (snapshot && !fresh) missing.push("宝宝行情已过期，需要开始新批次重新联网查价");
+  if (snapshot && fresh && !verified) missing.push("宝宝报价快照与样本金额不一致，需要重新查价");
   const suggestions = [...(result.suggestions || [])];
   if (!inventory.captureComplete)
     suggestions.unshift("先补采完整宝宝数量、技能、资质、内丹及随身装备，再开始分析。");
@@ -619,7 +730,9 @@ export function combinePetPricing(
     pet_pricing: snapshot,
     price_comparison_scope:
       "裸号本体、人物装备/灵饰与召唤兽（含已核对随身装备）；锦衣和其他道具未计价",
-    known_subtotal: round(result.known_subtotal + (fresh ? snapshot?.knownTotal || 0 : 0)),
+    known_subtotal: round(
+      result.known_subtotal + (fresh && verified ? snapshot?.knownTotal || 0 : 0),
+    ),
     items: [
       ...result.items,
       ...(snapshot?.items || []).map((item, index) => ({
@@ -627,12 +740,14 @@ export function combinePetPricing(
         input: item.description,
         formula:
           "同配置宝宝（含匹配随身装备）挂牌价中位数（" +
-          item.candidates.filter((candidate) => candidate.verified).length +
+          item.candidates.filter(
+            (candidate) => candidate.verified && candidate.matchType !== "similar",
+          ).length +
           "条样本）；不另加装备价",
-        amount: fresh ? item.referencePrice : null,
-        confirmed: fresh && item.status === "priced",
+        amount: fresh && verified ? item.referencePrice : null,
+        confirmed: fresh && verified && item.status === "priced",
         evidence: item.candidates
-          .filter((candidate) => candidate.verified)
+          .filter((candidate) => candidate.verified && candidate.matchType !== "similar")
           .map((candidate) => ({
             path: "/pet_pricing/items/" + index + "/candidates",
             value: candidate.quote,

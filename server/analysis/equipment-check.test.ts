@@ -159,13 +159,25 @@ describe("同会话单件装备查价", () => {
   it.each([
     ["防御 +50", "装备等级缺失"],
     ["等级 100\n防御 +50\n玩家123专用", "专用或绑定"],
-    ["等级 100\n防御 +50\n耐久 0", "耐久为0"],
   ])("拒绝不可查询的装备：%s", async (description, problem) => {
     const record = savedRecord();
     record.detail!.tabs.at(-1)!.items![1].description = description;
     mocks.savedDetail.mockReturnValue(record);
     await expect(checkEquipment(input, new AbortController().signal)).rejects.toThrow(problem);
     expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
+  });
+
+  it("0耐久资料保留为完整装备并实际查价，不套用正常耐久价格", async () => {
+    const record = savedRecord();
+    record.detail!.tabs.at(-1)!.items![1].description = "等级 100\n防御 +50\n耐久 0\n修理失败 3次";
+    mocks.savedDetail.mockReturnValue(record);
+    await checkEquipment(input, new AbortController().signal);
+    expect(mocks.findCandidates).toHaveBeenCalledOnce();
+    expect(mocks.findCandidates.mock.calls[0][0][0]).toMatchObject({
+      status: "no_match",
+      description: expect.stringContaining("耐久 0"),
+    });
+    expect(mocks.close).toHaveBeenCalledOnce();
   });
 
   it("查询失败仍关闭来源并保留原始原因", async () => {

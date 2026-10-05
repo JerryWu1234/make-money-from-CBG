@@ -16,6 +16,7 @@ import {
   petEquipmentDescription,
   verifyPetCandidate,
   type PetEquipment,
+  type PetMatchType,
   type PetPricingItem,
   type PetSource,
 } from "./pet-pricing";
@@ -28,21 +29,38 @@ export type PetSearchConfig = {
   skills: Choices;
   highNeidans: Choices;
   lowNeidans: Choices;
+  officialTypeIds?: string[];
 };
 const MAX_PAGES = 3,
   MAX_ROWS = 60,
   MAX_DETAILS = 20;
 
 /** These are the public OverallPetSearcher parameters, without server or price constraints. */
-export function petQuery(item: PetPricingItem, config: PetSearchConfig) {
+export type PetQueryMode = PetMatchType | "diagnostic";
+export function petQuery(
+  item: PetPricingItem,
+  config: PetSearchConfig,
+  matchType: PetQueryMode = "exact",
+) {
   const ids = Object.entries(config.names)
     .filter(([, name]) => name === item.name)
     .map(([id]) => id);
-  if (!ids.length) throw new Error("官网召唤兽类型目录未识别“" + item.name + "”，未发起宽泛查询");
+  if (!ids.length) {
+    if (config.officialTypeIds?.length)
+      throw new Error(
+        `官网类型目录确认“${item.name}”（${config.officialTypeIds.join(",")}），但没有独立可交易筛选定义；特殊类型保留未定价，不替换为其他宝宝`,
+      );
+    throw new Error("官网召唤兽类型目录未识别“" + item.name + "”，未发起宽泛查询");
+  }
   const args: Record<string, string | number> = { type: ids.join(",") };
   if (item.level !== null && item.level >= 0 && item.level <= 180)
     args.level_min = args.level_max = item.level;
   const fields = new Map(item.fields.map((field) => [field.name, field.value]));
+  if (matchType === "diagnostic") {
+    if (["是否宝宝", "宝宝"].some((name) => /^(?:是|1)$/.test(fields.get(name) || "")))
+      args.is_baobao = 1;
+    return args;
+  }
   for (const [name, parameter] of [
     ["攻击资质", "attack_aptitude"],
     ["防御资质", "defence_aptitude"],
@@ -53,9 +71,17 @@ export function petQuery(item: PetPricingItem, config: PetSearchConfig) {
   ]) {
     const value = fields.get(name);
     const base = value?.match(/^([0-9]+)(?:\s*\+\s*[0-9]+)?$/)?.[1];
-    if (base !== undefined && Number(base) <= 10000) args[parameter] = Number(base);
+    if (base !== undefined && Number(base) <= 10000) {
+      const tolerance =
+        matchType === "similar" && name.endsWith("资质") ? (name === "速度资质" ? 0.1 : 0.05) : 0;
+      args[parameter] = Math.ceil(Number(base) * (1 - tolerance));
+    }
   }
-  if (args.speed_aptitude_min !== undefined) args.speed_aptitude_max = args.speed_aptitude_min;
+  if (args.speed_aptitude_min !== undefined) {
+    const speed = Number(fields.get("速度资质")?.match(/^([0-9]+)/)?.[1]);
+    args.speed_aptitude_max =
+      matchType === "similar" ? Math.min(10000, Math.floor(speed * 1.1)) : args.speed_aptitude_min;
+  }
   const growth = fields.get("成长");
   if (growth && /^\d\.\d{1,3}$/.test(growth)) args.growth = Math.round(Number(growth) * 1000);
   if (["是否宝宝", "宝宝"].some((name) => /^(?:是|1)$/.test(fields.get(name) || "")))
@@ -498,15 +524,18 @@ export function petSourceFromPages(
           undefined,
           { timeout: 15000 },
         );
-        const config = await searchPage.evaluate(() => {
+        const config = await searchPage.evaluate((name) => {
           const g = window as unknown as Record<string, any>;
           return {
             names: g.SaleablePetNameInfo || {},
             skills: g.PetSkills || [],
             highNeidans: g.HighNeidans || [],
             lowNeidans: g.LowNeidans || [],
+            officialTypeIds: Object.entries(g.CBG_GAME_CONFIG?.pet_info || {})
+              .filter(([, value]) => value === name)
+              .map(([id]) => id),
           };
-        });
+        }, item.name);
         let args: ReturnType<typeof petQuery>;
         try {
           args = petQuery(item, config);
@@ -519,16 +548,15 @@ export function petSourceFromPages(
           continue;
         }
         const act = "overall_search_pet";
-        const query = "全服 / 综合排序 / " + item.name + " / " + JSON.stringify(args);
-        queries.push(query);
-        item.query = query;
+        let query = "";
+        const notes: string[] = [];
         const candidates: EquipmentCandidate[] = [],
-          rejected: EquipmentCandidate[] = [];
-        const seen = new Set<string>();
+          rejected: EquipmentCandidate[] = [],
+          diagnosticSources: EquipmentCandidate[] = [];
+        let similarAttempted = false;
+        const allSeen = new Set<string>();
         let count = 0,
-          details = 0,
-          lastPage = 0,
-          exhausted = false;
+          details = 0;
         await searchPage.evaluate(() => {
           const g = window as unknown as Record<string, any>;
           const original = g.ajax_with_recommend;
@@ -562,181 +590,240 @@ export function petSourceFromPages(
             );
           };
         });
-        for (
-          let pageNumber = 1;
-          pageNumber <= MAX_PAGES &&
-          count < MAX_ROWS &&
-          details < MAX_DETAILS &&
-          candidates.length < 3 &&
-          Date.now() < deadline;
-          pageNumber++
-        ) {
-          await pace(requestSignal);
-          await searchPage.evaluate(
-            ({ args, pageNumber, act }) => {
-              const g = window as unknown as Record<string, any>;
-              if (g.OverallSearchAct !== act || typeof g.overall_search !== "function")
-                throw new Error("宝宝查询类别与预期不符");
-              g.__cbgPetResult = null;
-              g.CurSearchValue.arg = args;
-              g.CurSearchValue.order_by = { key: "", sort: "DESC" };
-              // Use the page's actual search component; do not save query history or copy credentials.
-              g.overall_search(args, pageNumber, g.CurSearchValue.order_by);
-            },
-            { args, pageNumber, act },
-          );
-          await searchPage.waitForFunction(
-            (wanted) => {
-              const globals = window as unknown as Record<string, any>;
-              if (
-                globals.CaptchaCheck?.need_captcha ||
-                globals.IsLogin === 0 ||
-                globals.LoginInfo?.login === 0 ||
-                /show_login\.py/.test(location.pathname) ||
-                Array.from(
-                  document.querySelectorAll(".yidun_popup, .geetest_panel, #captcha_container"),
-                ).some((el) => el.checkVisibility()) ||
-                /系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText)
-              )
-                return true;
-              const result = globals.__cbgPetResult;
-              const loading = document.querySelector("#loading_img");
-              return result?.page === wanted && (!loading || !loading.checkVisibility());
-            },
-            pageNumber,
-            { timeout: 20000, polling: 200 },
-          );
-          requestSignal.throwIfAborted();
-          await assertAvailable(searchPage);
-          const listing = await searchPage.evaluate((currentPage) => {
-            const canonicalEquipmentUrl = (href: string) => {
-              const url = new URL(href, location.href);
-              const identityFields = new Set([
-                "s",
-                "serverid",
-                "server_id",
-                "eid",
-                "equip_id",
-                "ordersn",
-              ]);
-              const canonical = new URL(url.origin + url.pathname);
-              for (const key of identityFields) {
-                const value = url.searchParams.get(key);
-                if (value !== null) canonical.searchParams.set(key, value);
-              }
-              return canonical.href;
-            };
-            const result = (window as unknown as Record<string, any>).__cbgPetResult;
-            if (!result?.ok) throw new Error(result?.error || "官网宝宝查询未成功");
-            const root = document.querySelector<HTMLElement>("#search_result");
-            if (!root?.checkVisibility()) throw new Error("宝宝列表尚未加载");
-            const rows = Array.from(root.querySelectorAll<HTMLAnchorElement>("a.soldImg[href]"))
-              .filter((a) => a.checkVisibility())
-              .map((a) => ({
-                url: canonicalEquipmentUrl(a.href),
-                name: a.querySelector("img")?.getAttribute("data_equip_name") || "",
-                type: a.querySelector("img")?.getAttribute("data_equip_type") || "",
-              }));
-            const empty = result.count === 0 && /没有符合|没有找到|暂无/.test(root.innerText);
-            if (!rows.length && !empty) throw new Error("宝宝列表为空但未确认没有匹配商品");
-            const hasNext = Array.from(
-              document.querySelectorAll<HTMLAnchorElement>("#pager a[href]"),
-            ).some(
-              (a) =>
-                a.checkVisibility() &&
-                Number(a.getAttribute("href")?.match(/^javascript:goto\((\d+)\)/)?.[1]) ===
-                  currentPage + 1,
-            );
-            return { rows, empty, hasNext };
-          }, pageNumber);
-          lastPage = pageNumber;
-          if (listing.empty) {
-            exhausted = true;
+        for (const matchType of ["exact", "similar", "diagnostic"] as const) {
+          if (
+            matchType === "similar" &&
+            candidates.some((candidate) => candidate.matchType !== "similar")
+          )
             break;
-          }
-          let added = 0,
-            pageFullyRead = true;
-          for (const [rowIndex, row] of listing.rows.entries()) {
+          if (matchType === "diagnostic" && count > 0) break;
+          args = petQuery(item, config, matchType);
+          query =
+            "全服 / 综合排序 / " + item.name + " / " + matchType + " / " + JSON.stringify(args);
+          const seen = new Set<string>();
+          let rows = 0,
+            readDetails = 0,
+            lastPage = 0,
+            exhausted = false;
+          const acceptedCount = () =>
+            matchType === "diagnostic"
+              ? diagnosticSources.length
+              : candidates.filter((candidate) =>
+                  matchType === "exact"
+                    ? candidate.matchType !== "similar"
+                    : candidate.matchType === "similar",
+                ).length;
+          const sampleLimit = matchType === "similar" ? 5 : 3;
+          for (
+            let pageNumber = 1;
+            pageNumber <= MAX_PAGES &&
+            count < MAX_ROWS &&
+            acceptedCount() < sampleLimit &&
+            Date.now() < deadline;
+            pageNumber++
+          ) {
+            await pace(requestSignal);
+            await searchPage.evaluate(
+              ({ args, pageNumber, act }) => {
+                const g = window as unknown as Record<string, any>;
+                if (g.OverallSearchAct !== act || typeof g.overall_search !== "function")
+                  throw new Error("宝宝查询类别与预期不符");
+                g.__cbgPetResult = null;
+                g.CurSearchValue.arg = args;
+                g.CurSearchValue.order_by = { key: "", sort: "DESC" };
+                // Use the page's actual search component; do not save query history or copy credentials.
+                g.overall_search(args, pageNumber, g.CurSearchValue.order_by);
+              },
+              { args, pageNumber, act },
+            );
+            if (pageNumber === 1) {
+              queries.push(query);
+              item.query = query;
+              if (matchType === "similar") similarAttempted = true;
+            }
+            await searchPage.waitForFunction(
+              (wanted) => {
+                const globals = window as unknown as Record<string, any>;
+                if (
+                  globals.CaptchaCheck?.need_captcha ||
+                  globals.IsLogin === 0 ||
+                  globals.LoginInfo?.login === 0 ||
+                  /show_login\.py/.test(location.pathname) ||
+                  Array.from(
+                    document.querySelectorAll(".yidun_popup, .geetest_panel, #captcha_container"),
+                  ).some((el) => el.checkVisibility()) ||
+                  /系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText)
+                )
+                  return true;
+                const result = globals.__cbgPetResult;
+                const loading = document.querySelector("#loading_img");
+                return result?.page === wanted && (!loading || !loading.checkVisibility());
+              },
+              pageNumber,
+              { timeout: 20000, polling: 200 },
+            );
             requestSignal.throwIfAborted();
-            const identity = equipmentIdentity(safeEquipmentUrl(row.url));
-            if (seen.has(identity)) continue;
-            seen.add(identity);
-            added++;
-            count++;
-            if (row.type && !String(args.type).split(",").includes(row.type)) {
-              if (count >= MAX_ROWS) {
+            await assertAvailable(searchPage);
+            const listing = await searchPage.evaluate((currentPage) => {
+              const canonicalEquipmentUrl = (href: string) => {
+                const url = new URL(href, location.href);
+                const identityFields = new Set([
+                  "s",
+                  "serverid",
+                  "server_id",
+                  "eid",
+                  "equip_id",
+                  "ordersn",
+                ]);
+                const canonical = new URL(url.origin + url.pathname);
+                for (const key of identityFields) {
+                  const value = url.searchParams.get(key);
+                  if (value !== null) canonical.searchParams.set(key, value);
+                }
+                return canonical.href;
+              };
+              const result = (window as unknown as Record<string, any>).__cbgPetResult;
+              if (!result?.ok) throw new Error(result?.error || "官网宝宝查询未成功");
+              const root = document.querySelector<HTMLElement>("#search_result");
+              if (!root?.checkVisibility()) throw new Error("宝宝列表尚未加载");
+              const rows = Array.from(root.querySelectorAll<HTMLAnchorElement>("a.soldImg[href]"))
+                .filter((a) => a.checkVisibility())
+                .map((a) => ({
+                  url: canonicalEquipmentUrl(a.href),
+                  name: a.querySelector("img")?.getAttribute("data_equip_name") || "",
+                  type: a.querySelector("img")?.getAttribute("data_equip_type") || "",
+                }));
+              const empty = result.count === 0 && /没有符合|没有找到|暂无/.test(root.innerText);
+              if (!rows.length && !empty) throw new Error("宝宝列表为空但未确认没有匹配商品");
+              const hasNext = Array.from(
+                document.querySelectorAll<HTMLAnchorElement>("#pager a[href]"),
+              ).some(
+                (a) =>
+                  a.checkVisibility() &&
+                  Number(a.getAttribute("href")?.match(/^javascript:goto\((\d+)\)/)?.[1]) ===
+                    currentPage + 1,
+              );
+              return { rows, empty, hasNext };
+            }, pageNumber);
+            lastPage = pageNumber;
+            if (listing.empty) {
+              exhausted = true;
+              break;
+            }
+            let added = 0,
+              pageFullyRead = true;
+            for (const [rowIndex, row] of listing.rows.entries()) {
+              requestSignal.throwIfAborted();
+              const identity = equipmentIdentity(safeEquipmentUrl(row.url));
+              if (seen.has(identity)) continue;
+              seen.add(identity);
+              added++;
+              rows++;
+              if (!allSeen.has(identity)) {
+                allSeen.add(identity);
+                count++;
+              }
+              if (row.type && !String(args.type).split(",").includes(row.type)) {
+                if (count >= MAX_ROWS) {
+                  pageFullyRead = rowIndex === listing.rows.length - 1;
+                  break;
+                }
+                continue;
+              }
+              const sourceCached = cache.has(safeEquipmentUrl(row.url));
+              if ((!sourceCached && details >= MAX_DETAILS) || Date.now() >= deadline) {
+                pageFullyRead = false;
+                break;
+              }
+              if (!sourceCached) {
+                details++;
+                readDetails++;
+              }
+              let candidate: EquipmentCandidate = {
+                url: row.url,
+                title: row.name,
+                price: null,
+                priceType: "unknown",
+                quote: "",
+                verified: false,
+                reason: "",
+                fetchedAt: null,
+                sourceHash: null,
+                matchType: matchType === "exact" ? "exact" : "similar",
+              };
+              try {
+                const html = await readSource(row.url, requestSignal);
+                const text = pageText(html);
+                const price = text.match(/挂牌价：¥(\d+(?:\.\d+)?)/)?.[1];
+                candidate = {
+                  ...candidate,
+                  price: price ? Number(price) : null,
+                  priceType: "listing",
+                  quote: text,
+                };
+                candidate = verifyPetCandidate(
+                  item,
+                  candidate,
+                  html,
+                  new Date().toISOString(),
+                  matchType === "exact" ? "exact" : "similar",
+                );
+                if (matchType === "diagnostic")
+                  diagnosticSources.push({
+                    ...candidate,
+                    verified: false,
+                    reason: "仅用于真实独立详情诊断，不计价：" + candidate.reason,
+                  });
+                else if (candidate.verified) candidates.push(candidate);
+                else rejected.push(candidate);
+              } catch (error) {
+                requestSignal.throwIfAborted();
+                if (error instanceof Error && /登录|安全验证|频繁|网站繁忙/.test(error.message))
+                  throw error;
+                (matchType === "diagnostic" ? diagnosticSources : rejected).push({
+                  ...candidate,
+                  reason: error instanceof Error ? error.message : "无法读取宝宝详情",
+                });
+              }
+              if (count >= MAX_ROWS || acceptedCount() >= sampleLimit) {
                 pageFullyRead = rowIndex === listing.rows.length - 1;
                 break;
               }
-              continue;
             }
-            if (details >= MAX_DETAILS || Date.now() >= deadline) {
-              pageFullyRead = false;
-              break;
-            }
-            details++;
-            let candidate: EquipmentCandidate = {
-              url: row.url,
-              title: row.name,
-              price: null,
-              priceType: "unknown",
-              quote: "",
-              verified: false,
-              reason: "",
-              fetchedAt: null,
-              sourceHash: null,
-            };
-            try {
-              const html = await readSource(row.url, requestSignal);
-              const text = pageText(html);
-              const price = text.match(/挂牌价：¥(\d+(?:\.\d+)?)/)?.[1];
-              candidate = {
-                ...candidate,
-                price: price ? Number(price) : null,
-                priceType: "listing",
-                quote: text,
-              };
-              candidate = verifyPetCandidate(item, candidate, html, new Date().toISOString());
-              if (candidate.verified) candidates.push(candidate);
-              else rejected.push(candidate);
-            } catch (error) {
-              requestSignal.throwIfAborted();
-              if (error instanceof Error && /登录|安全验证|频繁|网站繁忙/.test(error.message))
-                throw error;
-              rejected.push({
-                ...candidate,
-                reason: error instanceof Error ? error.message : "无法读取宝宝详情",
-              });
-            }
-            if (count >= MAX_ROWS || candidates.length >= 3) {
-              pageFullyRead = rowIndex === listing.rows.length - 1;
+            if (!added) break;
+            if (!listing.hasNext) {
+              exhausted = pageFullyRead;
               break;
             }
           }
-          if (!added) break;
-          if (!listing.hasNext) {
-            exhausted = pageFullyRead;
-            break;
-          }
+          const note =
+            `${matchType === "exact" ? "严格" : matchType === "similar" ? "相似" : "诊断"}筛选已查询${lastPage}页、${rows}个列表候选、${readDetails}个新详情；` +
+            (exhausted ? "本次筛选结果已读完" : "有限样本查询，未遍历全部在售商品") +
+            "。";
+          notes.push(note);
+          records.push({
+            key: item.key,
+            act,
+            matchType,
+            args,
+            pages: lastPage,
+            rows,
+            details: readDetails,
+            exhausted,
+          });
         }
-        const note =
-          `已查询${lastPage}页、${count}个列表候选、${details}个详情；` +
-          (exhausted ? "本次筛选结果已读完" : "有限样本查询，未遍历全部在售商品") +
-          "。";
-        records.push({
-          key: item.key,
-          act,
-          args,
-          pages: lastPage,
-          rows: count,
-          details,
-          exhausted,
-        });
+        const distinct = new Map<string, EquipmentCandidate>();
+        for (const candidate of [...candidates, ...rejected]) {
+          const identity = equipmentIdentity(candidate.url);
+          if (!distinct.has(identity)) distinct.set(identity, candidate);
+        }
         results.push({
           key: item.key,
-          query,
-          candidates: [...candidates, ...rejected].slice(0, 5),
-          note,
+          query: item.query,
+          candidates: [...distinct.values()].slice(0, 10),
+          similarAttempted,
+          diagnosticSources,
+          note: notes.join(" "),
         });
       }
       return { queries, items: results, searchItems: records };

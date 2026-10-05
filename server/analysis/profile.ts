@@ -5,12 +5,13 @@ import type { DatabaseSync } from "node:sqlite";
 import { textHash } from "./contract";
 import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { marketServers } from "./market";
+import { SIMILAR_POLICY_VERSION } from "./pricing-estimate";
 import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "./valuation-settings";
 
 export const PROMPT_FILE = resolve("prompts/role-valuation.md");
-export const CALCULATION_VERSION = "price-comparison-v7";
+export const CALCULATION_VERSION = "price-comparison-v8";
 // Update alongside the calculator when changing pricing sections III through VIII.
-const PRICING_HASH = "4fe072675806ec5d6fbb3c796eccfcae4bd8eece613c68ec3611209935567928";
+const PRICING_HASH = "0b29ddcd68d656a7749b447604eb1c5eae6903c72d74fc3cb1876336a55f5ddf";
 export const DEFAULT_SETTINGS: ValuationSettings = {
   b: RECOMMENDED_BUY_FACTOR,
   a: null,
@@ -133,7 +134,8 @@ export function createProfile(
         promptHash,
         settingsHash,
         CALCULATION_VERSION,
-        "valuation-schema-v3",
+        "valuation-schema-v4",
+        SIMILAR_POLICY_VERSION,
         equipmentSearch,
         petSearch,
       ]),

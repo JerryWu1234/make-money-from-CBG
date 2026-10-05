@@ -100,6 +100,134 @@ async function matchedPricing(record = recordWithEquipment()) {
 }
 
 describe("装备联网查价的来源核对", () => {
+  it("3条有官方型号证据的相近报价只生成范围，同配报价优先计入金额", async () => {
+    const record = recordWithEquipment();
+    record.detail!.tabs.at(-1)!.items![0].modelId = "2912";
+    const descriptions = [48, 49, 52].map((value) =>
+      description.replace("防御：50", "防御：" + value),
+    );
+    const candidates = descriptions.map((desc, index) => ({
+      ...candidate([100, 120, 140][index], "https://xyq.cbg.163.com/equip/1/similar-" + index),
+      quote: quote([100, 120, 140][index], desc),
+    }));
+    const pages = new Map(
+      candidates.map((value, index) => [
+        value.url,
+        '<main data-cbg-model-id="2912">' +
+          sourcePage(value.price!, descriptions[index]) +
+          "</main>",
+      ]),
+    );
+    const source = {
+      findCandidates: vi.fn().mockResolvedValue(searchResponse(candidates)),
+      readSource: vi.fn(async (url: string) => pages.get(url)!),
+    };
+    const result = await searchEquipmentPrices(record, new AbortController().signal, source);
+    expect(result).toMatchObject({ total: null, knownTotal: 0 });
+    expect(result.items[0]).toMatchObject({
+      referencePrice: null,
+      similarEstimate: { status: "range", sampleCount: 3, range: { min: 100, max: 140 } },
+    });
+    expect(
+      result.items[0].candidates.every((value) => value.verified && value.matchType === "similar"),
+    ).toBe(true);
+    const exact = candidate(110, "https://xyq.cbg.163.com/equip/1/exact");
+    pages.set(exact.url, sourcePage(110));
+    source.findCandidates.mockResolvedValue(searchResponse([...candidates, exact]));
+    const mixed = await searchEquipmentPrices(record, new AbortController().signal, source);
+    expect(mixed.items[0]).toMatchObject({ status: "priced", referencePrice: 110 });
+    expect(mixed.total).toBe(110);
+  });
+
+  it("相近样本官方型号不一致或缺证据都拒绝，关键特效不放宽", () => {
+    const item = { ...equipmentInventory(recordWithEquipment()).items[0], modelId: "2912" };
+    const desc = description.replace("防御：50", "防御：49");
+    for (const id of [undefined, "9999"]) {
+      const html = `<main${id ? ' data-cbg-model-id="' + id + '"' : ""}>${sourcePage(100, desc)}</main>`;
+      expect(
+        verifyEquipmentCandidate(
+          item,
+          { ...candidate(), quote: quote(100, desc) },
+          html,
+          new Date().toISOString(),
+        ).verified,
+      ).toBe(false);
+    }
+    const effects = desc.replace("愤怒", "暴怒");
+    expect(
+      verifyEquipmentCandidate(
+        item,
+        { ...candidate(), quote: quote(100, effects) },
+        '<main data-cbg-model-id="2912">' + sourcePage(100, effects) + "</main>",
+        new Date().toISOString(),
+      ).verified,
+    ).toBe(false);
+  });
+
+  it("玉魄无需等级，必须核对阴阳型号和完整奇袭/到期描述", () => {
+    const desc =
+      "防御 +25\n耐久度 102\n抵抗封印等级 +13 [+48]\n气血 +67 [+168]\n奇袭特技：破血狂攻\n有效期：2026-12-01";
+    const item = {
+      ...equipmentInventory(recordWithEquipment()).items[0],
+      name: "上古玉魄·阴",
+      category: "上古玉魄",
+      modelId: "61717",
+      level: null,
+      description: desc,
+    };
+    const quote = "上古玉魄·阴\n" + desc + "\n在售\n挂牌价：¥100";
+    const html =
+      '<main data-cbg-model-id="61717"><p>上古玉魄·阴</p><pre data-cbg-equipment-description>' +
+      desc +
+      "</pre><p>在售\n挂牌价：¥100</p></main>";
+    expect(
+      verifyEquipmentCandidate(item, { ...candidate(), quote }, html, new Date().toISOString())
+        .verified,
+    ).toBe(true);
+    for (const changed of [
+      html.replace("61717", "61718"),
+      html.replace("2026-12-01", "2026-11-01"),
+      html.replace("奇袭特技：破血狂攻", ""),
+    ])
+      expect(
+        verifyEquipmentCandidate(item, { ...candidate(), quote }, changed, new Date().toISOString())
+          .verified,
+      ).toBe(false);
+  });
+  it("玉魄tooltip只剔除自身完整名称标题，未知行和到期条件仍逐项核验", () => {
+    const description = "防御 +25\n耐久度 102\n有效期：2026-12-01";
+    const item = {
+      ...equipmentInventory(recordWithEquipment()).items[0],
+      name: "上古玉魄·阴",
+      category: "上古玉魄",
+      modelId: "61717",
+      level: null,
+      description,
+    };
+    const source = (prefix: string, suffix = "") =>
+      '<main data-cbg-model-id="61717"><pre data-cbg-equipment-description>' +
+      prefix +
+      "\n" +
+      description +
+      suffix +
+      "</pre><p>在售\n挂牌价：¥100</p></main>";
+    const quoted = {
+      ...candidate(),
+      quote: "防御 +25\n耐久度 102\n有效期：2026-12-01" + "\n在售\n挂牌价：¥100",
+    };
+    expect(
+      verifyEquipmentCandidate(item, quoted, source("上古玉魄·阴"), new Date().toISOString())
+        .verified,
+    ).toBe(true);
+    for (const html of [
+      source("上古玉魄·阳"),
+      source("上古玉魄·阴", "\n未识别的效形限制"),
+      source("上古玉魄·阴").replace("2026-12-01", "2026-11-01"),
+    ])
+      expect(verifyEquipmentCandidate(item, quoted, html, new Date().toISOString()).verified).toBe(
+        false,
+      );
+  });
   it("实际0级双短剑保留为装备，官网检索不覆盖时明确缺价，不当空装或发越界查询", async () => {
     const record = recordWithEquipment();
     const item = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
@@ -113,7 +241,7 @@ describe("装备联网查价的来源核对", () => {
       name: "双短剑",
       level: 0,
       category: "人物装备",
-      status: "incomplete",
+      status: "unsupported",
       referencePrice: null,
     });
     expect(inventory.items[0].issues.join(" ")).toContain("0级装备尚缺");
@@ -145,16 +273,17 @@ describe("装备联网查价的来源核对", () => {
       category: "上古玉魄",
       modelId: "61717",
       level: null,
-      status: "incomplete",
+      status: "no_match",
       referencePrice: null,
     });
     expect(inventory.items[1].issues).not.toContain("装备等级缺失");
     const { pricing, search } = await matchedPricing(record);
     expect(search.mock.calls[0][0].map((item: { name: string }) => item.name)).toEqual([
       equipmentName,
+      "上古玉魄·阴",
     ]);
     expect(pricing).toMatchObject({ total: null, knownTotal: 200 });
-    expect(pricing.items[1].issues.join(" ")).toContain("不能按0元处理");
+    expect(pricing.items[1].issues.join(" ")).toContain("未返回");
   });
 
   it("已核对的技能书模型归普通道具范围，旧记录只见名字不能凭名字排除", () => {
@@ -674,7 +803,7 @@ describe("装备联网查价的来源核对", () => {
     expect(result.reason).toContain(reason);
   });
 
-  it("正常可修装备耐久不同可展示差异，不推测折扣；0耐久或无法修复不套报价", async () => {
+  it("正常耐久差异不推测折扣，破损装备只采用同状态独立报价", () => {
     const record = recordWithEquipment();
     const item = equipmentInventory(record).items[0];
     const sourceDescription = description.replace("耐久：300", "耐久：250");
@@ -693,15 +822,20 @@ describe("装备联网查价的来源核对", () => {
       description + "\n无法修复",
     ]) {
       record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description = broken;
-      const search = vi.fn(),
-        read = vi.fn();
-      const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
-        findCandidates: search,
-        readSource: read,
-      });
-      expect(pricing.total).toBeNull();
-      expect(pricing.items[0]).toMatchObject({ status: "incomplete", referencePrice: null });
-      expect(search).not.toHaveBeenCalled();
+      const brokenItem = equipmentInventory(record).items[0];
+      expect(brokenItem).toMatchObject({ status: "no_match", referencePrice: null });
+      expect(
+        verifyEquipmentCandidate(brokenItem, candidate(), sourcePage(100), new Date().toISOString())
+          .verified,
+      ).toBe(false);
+      expect(
+        verifyEquipmentCandidate(
+          brokenItem,
+          { ...candidate(), quote: quote(100, broken) },
+          sourcePage(100, broken),
+          new Date().toISOString(),
+        ).verified,
+      ).toBe(true);
     }
   });
 

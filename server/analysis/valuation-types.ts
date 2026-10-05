@@ -59,6 +59,11 @@ export type ValuationResult = {
   price_difference?: number | null;
   price_difference_ratio?: number | null;
   price_comparison_scope?: string;
+  estimated_value_range?: import("./pricing-estimate").PriceRange;
+  estimated_subtotal_range?: import("./pricing-estimate").PriceRange;
+  estimated_price_difference?: import("./pricing-estimate").PriceRange;
+  estimated_comparison?: "below" | "within" | "above";
+  estimate_missing_count?: number;
   asking_price: number | null;
   extra_cost: number | null;
   total_cost: number | null;

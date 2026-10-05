@@ -40,6 +40,45 @@ const makePet = (index = 1): PetSnapshot => ({
   innerSkills: [{ index: 0, name: "催心浪", level: "5", kind: "innerSkill" }],
   equipment: [],
 });
+const allocatedPet = () => {
+  const pet = makePet();
+  pet.fields.push(
+    ...[
+      ["体质", "316"],
+      ["魔力", "191"],
+      ["力量", "878"],
+      ["耐力", "181"],
+      ["敏捷", "184"],
+      ["潜能", "0"],
+      ["攻击", "1806"],
+      ["防御", "788"],
+      ["速度", "225"],
+      ["法伤", "769"],
+      ["法防", "769"],
+    ].map(([name, value]) => ({ name, value })),
+  );
+  return pet;
+};
+const setField = (pet: PetSnapshot, name: string, value: string) => {
+  pet.fields.find((field) => field.name === name)!.value = value;
+  return pet;
+};
+const similarPet = () => {
+  const pet = allocatedPet();
+  for (const [name, value] of [
+    ["攻击资质", "1230"],
+    ["防御资质", "1380"],
+    ["速度资质", "1280"],
+    ["躲闪资质", "1150"],
+    ["体质", "394"],
+    ["力量", "800"],
+    ["攻击", "1740"],
+    ["防御", "820"],
+    ["速度", "230"],
+  ])
+    setField(pet, name, value);
+  return pet;
+};
 function recordWithPets(pets = [makePet()]): SavedRoleRecord {
   const record = valuationRecord();
   record.detail!.petCapture = {
@@ -164,6 +203,246 @@ const upstream = (value: number | null = 2000): ValuationResult => ({
 });
 
 describe("宝宝来源核对与挂牌比价", () => {
+  it("相似模式仅允许有界资质/衍生性能和普通加点差异，记录逐项差异", () => {
+    const target = petInventory(recordWithPets([allocatedPet()])).items[0];
+    const page = sourcePage(1000, similarPet());
+    expect(verifyPetCandidate(target, candidate(), page, "now").verified).toBe(false);
+    const verified = verifyPetCandidate(target, candidate(), page, "now", "similar");
+    expect(verified).toMatchObject({ verified: true, matchType: "similar" });
+    expect(verified.differences).toHaveLength(9);
+    expect(verified.differences).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("攻击资质：目标 1200，样本 1230"),
+        expect.stringContaining("力量：目标 878，样本 800"),
+        expect.stringContaining("攻击：目标 1806，样本 1740"),
+      ]),
+    );
+    expect(
+      verifyPetCandidate(target, candidate(), sourcePage(1000, allocatedPet()), "now", "similar"),
+    ).toMatchObject({ verified: true, matchType: "exact", differences: [] });
+  });
+  it.each([
+    ["攻击资质", "1261"],
+    ["速度资质", "1321"],
+    ["攻击", "1625"],
+    ["成长", "1.281"],
+    ["等级", "120"],
+    ["类型", "幽灵"],
+    ["灵性", "109"],
+    ["体质", "未知"],
+  ])("相似模式拒绝超窗口或关键事实变化：%s", (name, value) => {
+    const target = petInventory(recordWithPets([allocatedPet()])).items[0];
+    const sample = setField(similarPet(), name, value);
+    expect(
+      verifyPetCandidate(target, candidate(), sourcePage(1000, sample), "now", "similar").verified,
+    ).toBe(false);
+  });
+  it("相似模式不把资质base加bonus相加，技能、内丹、认证及穿戴仍须一致", () => {
+    const targetPet = setField(allocatedPet(), "攻击资质", "1200 +22");
+    const target = petInventory(recordWithPets([targetPet])).items[0];
+    const sample = setField(similarPet(), "攻击资质", "1230 +22");
+    expect(
+      verifyPetCandidate(target, candidate(), sourcePage(1000, sample), "now", "similar").verified,
+    ).toBe(true);
+    const changed = [
+      setField(structuredClone(sample), "攻击资质", "1230 +21"),
+      setField(structuredClone(sample), "攻击资质", "1252"),
+      { ...structuredClone(sample), skills: sample.skills.slice(1) },
+      { ...structuredClone(sample), innerSkills: [{ ...sample.innerSkills[0], level: "4" }] },
+      {
+        ...structuredClone(sample),
+        fields: [...sample.fields, { name: "认证技能", value: "雷击" }],
+      },
+      {
+        ...structuredClone(sample),
+        equipment: [
+          {
+            index: 0,
+            kind: "equipment" as const,
+            name: "宝宝项圈",
+            description: "等级：85\n速度：30",
+          },
+        ],
+      },
+    ];
+    for (const pet of changed)
+      expect(
+        verifyPetCandidate(target, candidate(), sourcePage(1000, pet), "now", "similar").verified,
+      ).toBe(false);
+    const missing = structuredClone(sample);
+    missing.fields = missing.fields.filter((field) => field.name !== "力量");
+    expect(
+      verifyPetCandidate(target, candidate(), sourcePage(1000, missing), "now", "similar").verified,
+    ).toBe(false);
+  });
+  it("三件有效在售相似商品只给区间，不能写成exact金额、小计或完整估值", async () => {
+    const record = recordWithPets([allocatedPet()]);
+    const candidates = [900, 1000, 1100].map((price, index) => ({
+      ...candidate(price, "similar-" + index),
+      url: `https://xyq.cbg.163.com/equip?s=367&eid=similar-${index}`,
+      matchType: "similar" as const,
+    }));
+    const pages = new Map(
+      candidates.map((candidate) => [candidate.url, sourcePage(candidate.price!, similarPet())]),
+    );
+    const { snapshot } = await pricing(record, candidates, pages);
+    expect(snapshot.items[0]).toMatchObject({
+      status: "no_match",
+      referencePrice: null,
+      similarEstimate: { status: "range", sampleCount: 3, range: { min: 900, max: 1100 } },
+    });
+    expect(snapshot).toMatchObject({ total: null, knownTotal: 0 });
+    expect(
+      snapshot.items[0].candidates.every(
+        (candidate) => candidate.verified && candidate.matchType === "similar",
+      ),
+    ).toBe(true);
+    const result = combinePetPricing(upstream(), record, snapshot);
+    expect(result).toMatchObject({
+      decision: "NEED_INFO",
+      pet_value: null,
+      model_value: null,
+      known_subtotal: 2000,
+    });
+    expect(result.items[0]).toMatchObject({ amount: null, confirmed: false, evidence: [] });
+    const duplicate = [candidates[0], candidates[1], { ...candidates[1] }];
+    expect(
+      (await pricing(record, duplicate, pages)).snapshot.items[0].similarEstimate,
+    ).toMatchObject({ status: "insufficient", sampleCount: 2, range: null });
+    const offPages = new Map(pages);
+    offPages.set(candidates[2].url, pages.get(candidates[2].url)!.replace("在售", "商品已下架"));
+    expect(
+      (await pricing(record, candidates, offPages)).snapshot.items[0].similarEstimate,
+    ).toMatchObject({ status: "insufficient", sampleCount: 2, range: null });
+  });
+  it("宽查询的真实详情诊断单独保留，即使3条均能过相似边界也不算报价区间", async () => {
+    const record = recordWithPets([allocatedPet()]);
+    const diagnostics = [900, 1000, 1100].map((price, index) => ({
+      ...candidate(price),
+      url: `https://xyq.cbg.163.com/equip?s=367&eid=diagnostic-${index}`,
+      matchType: "similar" as const,
+    }));
+    const pages = new Map(
+      diagnostics.map((candidate) => [candidate.url, sourcePage(candidate.price!, similarPet())]),
+    );
+    const snapshot = await searchPetPricing(record, new AbortController().signal, {
+      findCandidates: vi.fn().mockResolvedValue({
+        queries: ["/ exact /", "/ similar /", "/ diagnostic /"],
+        items: [
+          {
+            key: "召唤兽/孩子:1",
+            query: "/ diagnostic /",
+            candidates: [],
+            similarAttempted: true,
+            diagnosticSources: diagnostics,
+          },
+        ],
+      }),
+      readSource: vi.fn(async (url: string) => pages.get(url)!),
+    });
+    expect(snapshot).toMatchObject({ total: null, knownTotal: 0 });
+    expect(snapshot.items[0]).toMatchObject({
+      status: "no_match",
+      referencePrice: null,
+      candidates: [],
+      similarEstimate: { status: "insufficient", sampleCount: 0, range: null },
+    });
+    expect(snapshot.items[0].diagnosticSources).toHaveLength(3);
+    expect(
+      snapshot.items[0].diagnosticSources!.every(
+        (candidate) =>
+          !candidate.verified && candidate.sourceHash && candidate.reason.includes("诊断，不计价"),
+      ),
+    ).toBe(true);
+  });
+  it("失败的诊断来源保留原因，不为补价重复读取同一失败模板", async () => {
+    const read = vi.fn();
+    const snapshot = await searchPetPricing(recordWithPets(), new AbortController().signal, {
+      findCandidates: vi.fn().mockResolvedValue({
+        queries: ["/ diagnostic /"],
+        items: [
+          {
+            key: "召唤兽/孩子:1",
+            candidates: [],
+            similarAttempted: true,
+            diagnosticSources: [
+              {
+                ...candidate(),
+                url: "https://xyq.cbg.163.com/equip?s=367&eid=diagnostic-failed",
+                price: null,
+                quote: "",
+                reason: "主宝宝JSON详情未识别",
+                matchType: "similar",
+              },
+            ],
+          },
+        ],
+      }),
+      readSource: read,
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(snapshot.items[0].diagnosticSources![0]).toMatchObject({
+      verified: false,
+      price: null,
+      sourceHash: null,
+    });
+    expect(snapshot.items[0].diagnosticSources![0].reason).toContain("主宝宝JSON详情未识别");
+  });
+  it("缺价的严格和相似候选保留失败原因不重读，诊断仍隔离且取消仍中止", async () => {
+    const record = recordWithPets();
+    const failed = (matchType: "exact" | "similar", id: string) => ({
+      ...candidate(1000, id),
+      price: null,
+      quote: "",
+      reason: "宝宝详情读取超时：" + id,
+      matchType,
+    });
+    const result = {
+      queries: ["/ exact /", "/ similar /", "/ diagnostic /"],
+      items: [
+        {
+          key: "召唤兽/孩子:1",
+          candidates: [failed("exact", "failed-exact"), failed("similar", "failed-similar")],
+          similarAttempted: true,
+          diagnosticSources: [failed("similar", "failed-diagnostic")],
+        },
+      ],
+    };
+    const search = vi.fn().mockResolvedValue(result);
+    const read = vi.fn().mockRejectedValue(new Error("失败详情不应重读"));
+    const snapshot = await searchPetPricing(record, new AbortController().signal, {
+      findCandidates: search,
+      readSource: read,
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(snapshot).toMatchObject({ total: null, knownTotal: 0 });
+    expect(snapshot.items[0]).toMatchObject({
+      status: "no_match",
+      referencePrice: null,
+      similarEstimate: { status: "insufficient", sampleCount: 0, range: null },
+    });
+    expect(snapshot.items[0].candidates.map((value) => value.reason)).toEqual([
+      "宝宝详情读取超时：failed-exact",
+      "宝宝详情读取超时：failed-similar",
+    ]);
+    expect(snapshot.items[0].diagnosticSources).toHaveLength(1);
+    expect(snapshot.items[0].diagnosticSources![0]).toMatchObject({
+      verified: false,
+      price: null,
+      sourceHash: null,
+    });
+    expect(snapshot.items[0].diagnosticSources![0].reason).toContain("诊断，不计价");
+    const controller = new AbortController();
+    const cancellation = new Error("停止宝宝查价");
+    search.mockImplementationOnce(async () => {
+      controller.abort(cancellation);
+      return result;
+    });
+    await expect(
+      searchPetPricing(record, controller.signal, { findCandidates: search, readSource: read }),
+    ).rejects.toBe(cancellation);
+    expect(read).not.toHaveBeenCalled();
+  });
   it("采集凭据与数量一致才能确认空宝宝为0；旧或数量不全不当0", async () => {
     const empty = recordWithPets([]),
       search = vi.fn(),

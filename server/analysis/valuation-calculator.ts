@@ -22,17 +22,39 @@ const PET_DEFENSE = [
   30, 40, 51, 65, 85, 115, 150, 190, 235, 285, 340, 400, 470, 610, 770, 950, 1150, 1320, 1500, 1740,
   2000,
 ];
+// NetEase's official toolbox cumulative experience (0→N), shared by role/pet training.
+// https://xyq.163.com/tools/; monetary values are our explicit supplemental model rule.
+const LOW_TRAINING_EXPERIENCE = [0, 150, 360, 650, 1040, 1550];
 export function trainingPrice(
   level: number,
   kind: "attack" | "defense" | "petAttack" | "petDefense",
 ) {
   if (level === 0) return 0;
-  if (!Number.isInteger(level) || level < 5 || level > 25) return null;
+  if (!Number.isInteger(level) || level < 1 || level > 25) return null;
+  if (level < 5) {
+    const base =
+      kind === "attack"
+        ? TRAINING[0]
+        : kind === "defense"
+          ? TRAINING[0] / 1.5
+          : kind === "petAttack"
+            ? PET_ATTACK[0]
+            : PET_DEFENSE[0];
+    return (base * LOW_TRAINING_EXPERIENCE[level]) / LOW_TRAINING_EXPERIENCE[5];
+  }
   if (kind === "defense") return level === 17 ? 230 : TRAINING[level - 5] / 1.5;
   return (kind === "attack" ? TRAINING : kind === "petAttack" ? PET_ATTACK : PET_DEFENSE)[
     level - 5
   ];
 }
+const trainingFormula = (level: number | null, regular: string) =>
+  level !== null && level >= 1 && level <= 4
+    ? "经验比例估算：原5级价格 × 官方0至" +
+      level +
+      "级累计经验" +
+      LOW_TRAINING_EXPERIENCE[level] +
+      " / 5级累计经验1550；这是补充模型规则，不是市场报价"
+    : regular;
 export const lifeSkillPrice = (level: number) => (level < 100 ? 0 : (level - 95) ** 1.175);
 export const strengthPrice = (level: number, mode: "single" | "cumulative") =>
   mode === "single" ? level ** 3 / 270 : ((level * (level + 1)) / 2) ** 2 / 270;
@@ -294,18 +316,16 @@ export function calculateValuation(
       .slice(0, 2)
       .map((value) => value?.raw || "未知")
       .join(" / "),
-    "攻击与法术取等级较高一项，按价表查价",
+    trainingFormula(knownMax, "攻击与法术取等级较高一项，按价表查价"),
     knownMax === null ? null : trainingPrice(knownMax, "attack"),
     humanFacts.slice(0, 2).flatMap((value) => value?.evidence || []),
-    knownMax !== null && knownMax >= 1 && knownMax <= 4
-      ? `已采集人物有效攻法修炼${knownMax}级，原价表未提供1—4级定价`
-      : "人物攻法修炼缺失或等级未覆盖",
+    "人物攻法修炼缺失或等级未覆盖",
   );
   for (const index of [2, 3])
     add(
       humanLabels[index],
       humanFacts[index]?.raw || "未知",
-      "17级固定230；其余已列等级=攻法价/1.5",
+      trainingFormula(human[index], "17级固定230；其余已列等级=攻法价/1.5"),
       human[index] === null ? null : trainingPrice(human[index], "defense"),
       humanFacts[index]?.evidence,
       humanLabels[index] + "缺失或等级未覆盖",
@@ -316,12 +336,10 @@ export function calculateValuation(
     add(
       "召唤兽" + label,
       value?.raw || "未知",
-      "四项分别按召唤兽修炼价表查价",
+      trainingFormula(n, "四项分别按召唤兽修炼价表查价"),
       n === null ? null : trainingPrice(n, index < 2 ? "petAttack" : "petDefense"),
       value?.evidence,
-      n !== null && n >= 1 && n <= 4
-        ? `已采集${label}${n}级，原价表未提供1—4级定价`
-        : label + "缺失或等级未覆盖",
+      label + "缺失或等级未覆盖",
     );
   }
   const skillTabIndex = tabs.findIndex((tab) => tab.name === "技能"),
@@ -740,10 +758,6 @@ export function calculateValuation(
     suggestions.push("确认金价与210元基准采用相同游戏币数量单位，避免金额被放大。");
   if (pending.size)
     suggestions.push("核实下方未确定的规则和异常资料；计价方式可在分析设置重新选择。");
-  if ([...missing].some((item) => item.includes("1—4级定价")))
-    suggestions.push(
-      "角色修炼已采到；原Prompt只有5—25级价表，需要补充1—4级的价格，不能通过重复采集补出定价。",
-    );
   if (!suggestions.length && missing.size)
     suggestions.push("补采或核实：" + [...missing][0] + "。");
   const moneyText = (amount: number | null) =>

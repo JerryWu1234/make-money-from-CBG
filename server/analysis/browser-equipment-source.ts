@@ -7,7 +7,9 @@ import { hoverForInspection } from "../viewport";
 import { buildPageState } from "../page-state";
 import { readStableSnapshot } from "../workflow";
 import { cleanDescription, jewelryDescriptionSections } from "../crawler/compact";
-import { compareEquipmentAttributes, parseEquipmentAttributes } from "./equip-attributes";
+import { parseEquipmentAttributes } from "./equip-attributes";
+import { matchEquipmentAttributes } from "./equipment-match";
+import { jadeQuery, JADE_SEARCH_URL, type JadeSearchConfig } from "./jade-query";
 import {
   equipmentIdentity,
   safeEquipmentUrl,
@@ -22,8 +24,8 @@ export const EQUIPMENT_SEARCH_URL =
 export const JEWELRY_SEARCH_URL =
   "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=show_overall_search_lingshi";
 const MAX_PAGES = 3,
-  MAX_ROWS = 30,
-  MAX_DETAILS = 10;
+  MAX_ROWS = 60,
+  MAX_DETAILS = 20;
 type Choices = Array<[string | number, string]>;
 export type EquipmentSearchConfig = {
   kinds: Choices;
@@ -40,7 +42,11 @@ const isJewelry = (item: EquipmentPricingItem) =>
   [61, 62, 63, 64].includes(Number(item.kindId));
 
 /** Official page fields are coarse filters; only detail verification establishes a match. */
-export function equipmentQuery(item: EquipmentPricingItem, config: EquipmentSearchConfig) {
+export function equipmentQuery(
+  item: EquipmentPricingItem,
+  config: EquipmentSearchConfig,
+  mode: "exact" | "similar" = "exact",
+) {
   if (item.level === null) throw new Error("装备等级缺失，不能查询");
   const jewelry = isJewelry(item);
   const fields = parseEquipmentAttributes(item.description).fields;
@@ -57,8 +63,11 @@ export function equipmentQuery(item: EquipmentPricingItem, config: EquipmentSear
   if (kind) args.kindid = String(kind[0]);
   const integer = (field: string, parameter: string) => {
     const values = fields[field];
-    if (values?.length !== 1 || !/^\+?\d+$/.test(values[0])) return;
-    args[parameter] = Number(values[0].replace("+", ""));
+    const match =
+      values?.length === 1
+        ? values[0].match(field === "修理失败" ? /^\+?(\d+)\s*次?$/ : /^\+?(\d+)$/)
+        : null;
+    if (match) args[parameter] = Number(match[1]);
   };
   integer("修理失败", "repair_fail");
   if (jewelry) {
@@ -154,6 +163,23 @@ export function equipmentQuery(item: EquipmentPricingItem, config: EquipmentSear
     }
     if (args.special_effect) args.special_mode = "and";
   }
+  if (mode === "similar") {
+    // All of these official inputs are minima, not exact values. Other filters remain strict.
+    for (const key of [
+      "init_defense",
+      "init_hp",
+      "init_dex",
+      "all_wakan",
+      "damage",
+      "defense",
+      "magic_damage",
+      "magic_defense",
+      "fengyin",
+      "anti_fengyin",
+      "speed",
+    ])
+      if (typeof args[key] === "number" && args[key] > 0) args[key] = Math.ceil(args[key] * 0.95);
+  }
   return { jewelry, args };
 }
 
@@ -171,42 +197,118 @@ export function equipmentListingMismatch(
   const source = parseEquipmentAttributes(
     row.description.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]+>/g, ""),
   );
-  const empty = { level: null, fields: {}, restrictions: [], unknownLines: [] };
-  for (const [name, values] of Object.entries(source.fields)) {
-    if (name === "耐久") continue;
-    const remaining = (target.fields[name] || []).flatMap((value) =>
-      value.split(/[、，,；;]/).filter(Boolean),
-    );
-    if (!remaining.length) return "报价多出价格相关属性“" + name + "”";
-    for (const value of values.flatMap((value) => value.split(/[、，,；;]/).filter(Boolean))) {
-      const index = remaining.findIndex(
-        (expected) =>
-          !compareEquipmentAttributes(
-            { ...empty, fields: { [name]: [expected] } },
-            { ...empty, fields: { [name]: [value] } },
-          ),
-      );
-      if (index < 0) return "关键属性“" + name + "”不匹配";
-      remaining.splice(index, 1);
-    }
-  }
-  const restriction = source.restrictions.find((value) => !target.restrictions.includes(value));
-  if (restriction) return "专用、绑定或修理限制不匹配";
-  return null;
+  return matchEquipmentAttributes(target, source, true).reason;
 }
 
 /** Read only the principal equipment description and price, never recommendations. */
 export async function equipmentPageSource(page: Page, signal: AbortSignal) {
+  try {
+    return await readMainEquipment(page, signal);
+  } catch (error) {
+    signal.throwIfAborted();
+    const diagnostics = await page
+      .evaluate(() => {
+        const globals = window as unknown as {
+          equip?: Record<string, unknown>;
+          EquipInfo?: Record<string, unknown>;
+        };
+        const raw = globals.equip || globals.EquipInfo;
+        const describe = (selector: string) =>
+          Array.from(document.querySelectorAll<HTMLElement>(selector))
+            .slice(0, 4)
+            .map((node) => {
+              const ancestors = [];
+              for (
+                let parent = node.parentElement, count = 0;
+                parent && count < 4;
+                parent = parent.parentElement, count++
+              )
+                ancestors.push({ tag: parent.tagName, id: parent.id, className: parent.className });
+              return { id: node.id, visible: node.checkVisibility(), ancestors };
+            });
+        return {
+          panels: describe("#equip_desc_panel"),
+          info: describe("#info_panel"),
+          product: raw
+            ? {
+                id: raw.eid,
+                server: raw.serverid ?? raw.server_id,
+                name: raw.equip_name,
+                price: raw.price,
+                selling: raw.is_selling,
+              }
+            : null,
+          mainPrices: Array.from(
+            document.querySelectorAll<HTMLElement>(
+              "#info_panel .price, #info_panel [data_price], #info_panel [data-price]",
+            ),
+          )
+            .filter((node) => node.checkVisibility() && !node.closest("#equip_price_addon_info"))
+            .slice(0, 4)
+            .map((node) => node.innerText.slice(0, 80)),
+        };
+      })
+      .catch(() => null);
+    const failure =
+      error instanceof Error && error.name !== "TimeoutError"
+        ? error
+        : new Error("主商品属性或价格区域未加载完成");
+    throw Object.assign(failure, { equipmentDiagnostics: diagnostics });
+  }
+}
+
+async function readMainEquipment(page: Page, signal: AbortSignal) {
   signal.throwIfAborted();
   await assertAvailable(page);
   const excluded =
     '#search_result, #recommd_list, #recommend, .recommend, .recommd, #bottomRecommands, .recommandWrp, .goodsRemmds, [id$="TipsBox"]';
+  await page.waitForFunction(
+    (excluded) =>
+      Array.from(
+        document.querySelectorAll("#equip_desc_panel, img[data_equip_name], img[data-equip-name]"),
+      ).some((node) => node.checkVisibility() && !node.closest(excluded)),
+    excluded,
+    { timeout: 5000 },
+  );
+  signal.throwIfAborted();
+  await assertAvailable(page);
   const directPanel = await page
     .locator("#equip_desc_panel")
     .evaluateAll(
       (nodes, excluded) => nodes.some((node) => node.checkVisibility() && !node.closest(excluded)),
       excluded,
     );
+  if (directPanel) {
+    await page.waitForFunction(
+      (excluded) => {
+        const panels = Array.from(
+          document.querySelectorAll<HTMLElement>("#equip_desc_panel"),
+        ).filter((node) => node.checkVisibility() && !node.closest(excluded));
+        const info = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(
+          (node) => node.checkVisibility() && !node.closest(excluded),
+        );
+        return (
+          panels.length === 1 &&
+          info.length === 1 &&
+          panels[0].innerText.trim() &&
+          info[0].innerText.trim() &&
+          Array.from(
+            info[0].querySelectorAll<HTMLElement>(".price, [data_price], [data-price]"),
+          ).some(
+            (node) =>
+              node.checkVisibility() &&
+              !node.closest("#equip_price_addon_info") &&
+              (node.innerText.trim() ||
+                node.getAttribute("data_price") ||
+                node.getAttribute("data-price")),
+          )
+        );
+      },
+      excluded,
+      { timeout: 5000 },
+    );
+    signal.throwIfAborted();
+  }
   if (!directPanel) {
     const icons = page.locator("img[data_equip_name], img[data-equip-name]");
     const index = await icons.evaluateAll((nodes, excluded) => {
@@ -226,7 +328,16 @@ export async function equipmentPageSource(page: Page, signal: AbortSignal) {
         const name =
           main.getAttribute("data_equip_name") || main.getAttribute("data-equip-name") || "";
         const id = main.getAttribute("data_tip_box") || main.getAttribute("data-tip-box");
-        if (!id && /等级\s*[：:]?\s*\d/.test(description)) return true;
+        const raw = window as unknown as {
+          equip?: Record<string, unknown>;
+          EquipInfo?: Record<string, unknown>;
+        };
+        const type = (raw.equip || raw.EquipInfo)?.equip_type;
+        const model = typeof type === "string" || typeof type === "number" ? String(type) : "";
+        const complete = (value: string) =>
+          /等级\s*[：:]?\s*\d/.test(value) ||
+          (["61717", "61718"].includes(model) && /耐久(?:度)?\s*[：:]?\s*\d/.test(value));
+        if (!id && complete(description)) return true;
         const tips = id
           ? [document.getElementById(id)]
           : Array.from(
@@ -236,9 +347,7 @@ export async function equipmentPageSource(page: Page, signal: AbortSignal) {
             );
         return tips.some(
           (tip) =>
-            tip?.checkVisibility() &&
-            tip.innerText.includes(name) &&
-            /等级\s*[：:]?\s*\d/.test(tip.innerText),
+            tip?.checkVisibility() && tip.innerText.includes(name) && complete(tip.innerText),
         );
       },
       undefined,
@@ -254,15 +363,25 @@ export async function equipmentPageSource(page: Page, signal: AbortSignal) {
         CBG_GAME_CONFIG?: { equip_info?: Record<string, { name?: unknown; desc?: unknown }> };
       };
       const raw = globals.equip || globals.EquipInfo;
-      const panel = directPanel ? document.querySelector<HTMLElement>("#equip_desc_panel") : null;
-      const info = directPanel ? document.querySelector<HTMLElement>("#info_panel") : null;
-      const root = panel?.closest<HTMLElement>(".infoList.goodsInfo");
+      const visible = (selector: string) =>
+        Array.from(document.querySelectorAll<HTMLElement>(selector)).filter(
+          (node) => node.checkVisibility() && !node.closest(excluded),
+        );
+      const panels = directPanel ? visible("#equip_desc_panel") : [];
+      const infos = directPanel ? visible("#info_panel") : [];
+      const panel = panels.length === 1 ? panels[0] : null;
+      const info = infos.length === 1 ? infos[0] : null;
+      let root = panel?.parentElement;
+      while (root && root !== document.body && info && !root.contains(info))
+        root = root.parentElement;
       if (
         directPanel &&
         (!panel?.checkVisibility() ||
           !info?.checkVisibility() ||
           !root ||
-          info.closest(".infoList.goodsInfo") !== root ||
+          root === document.body ||
+          root === document.documentElement ||
+          !root.contains(info) ||
           root.closest(excluded))
       )
         throw new Error("无法确认独立装备的主商品属性与价格区域");
@@ -335,6 +454,8 @@ export async function equipmentPageSource(page: Page, signal: AbortSignal) {
         productName: raw?.equip_name,
         productId: raw?.eid,
         serverId: raw?.serverid ?? raw?.server_id,
+        modelId: raw?.equip_type,
+        kindId: raw?.kindid,
       };
     },
     { directPanel, excluded },
@@ -361,12 +482,18 @@ export async function equipmentPageSource(page: Page, signal: AbortSignal) {
     Object.values(attributes.fields).reduce((total, values) => total + values.length, 0);
   if (rawAttributes.level && tipAttributes.level && rawAttributes.level !== tipAttributes.level)
     throw new Error("主商品数据与提示框等级不一致");
+  const jade = ["61717", "61718"].includes(String(observed.modelId));
   const description = cleanDescription(
-    tipAttributes.level && size(tipAttributes) >= size(rawAttributes)
+    (tipAttributes.level !== null || jade) &&
+      size(tipAttributes) >= size(rawAttributes) &&
+      observed.tooltip
       ? observed.tooltip
       : observed.description,
   );
-  if (!parseEquipmentAttributes(description).level) throw new Error("主商品装备属性尚未读取完整");
+  if (!jade && parseEquipmentAttributes(description).level === null)
+    throw new Error("主商品装备属性尚未读取完整");
+  if (jade && (!description.trim() || !/耐久(?:度)?\s*[：:]?\s*\d/.test(description)))
+    throw new Error("主商品玉魄属性尚未读取完整");
   const visiblePrices = [
     ...new Set(
       observed.prices.flatMap((value) => {
@@ -418,7 +545,20 @@ export async function equipmentPageSource(page: Page, signal: AbortSignal) {
   ].join("\n");
   const escape = (value: string) =>
     value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return { text, price, html: "<main><pre>" + escape(text) + "</pre></main>" };
+  const metadata = [
+    ["model-id", observed.modelId],
+    ["kind-id", observed.kindId],
+  ]
+    .flatMap(([key, value]) => {
+      const id = typeof value === "string" || typeof value === "number" ? String(value) : "";
+      return /^\d+$/.test(id) ? [" data-cbg-" + String(key) + '="' + id + '"'] : [];
+    })
+    .join("");
+  return {
+    text,
+    price,
+    html: `<main${metadata}><p>${escape(observed.name)}</p><pre data-cbg-equipment-description>${escape([description, ...restrictions].join("\n"))}</pre><p>${selling ? "在售" : "商品已下架"}\n挂牌价：¥${price}</p></main>`,
+  };
 }
 
 /** Separate work pages share the existing login; they never navigate the role list. */
@@ -474,30 +614,37 @@ export function equipmentSourceFromPages(
           });
           continue;
         }
-        const jewelry = isJewelry(item);
-        await searchPage.goto(jewelry ? JEWELRY_SEARCH_URL : EQUIPMENT_SEARCH_URL, {
-          waitUntil: "domcontentloaded",
-          timeout: 15000,
-        });
+        const jewelry = isJewelry(item),
+          jade = item.category === "上古玉魄";
+        await searchPage.goto(
+          jade ? JADE_SEARCH_URL : jewelry ? JEWELRY_SEARCH_URL : EQUIPMENT_SEARCH_URL,
+          {
+            waitUntil: "domcontentloaded",
+            timeout: 15000,
+          },
+        );
         requestSignal.throwIfAborted();
         await assertAvailable(searchPage);
         if (!buildPageState(await readStableSnapshot(searchPage)).isLoggedIn)
           throw new Error("藏宝阁登录已失效，请在采集页扫码登录后继续装备查价");
         await searchPage.waitForFunction(
-          (jewelry) => {
+          ({ jewelry, jade }) => {
             const globals = window as unknown as {
               overall_search?: unknown;
               ajax_with_recommend?: unknown;
               EquipKinds?: unknown[];
               Kinds?: unknown[];
+              CBG_GAME_CONFIG?: { minghun_attr?: unknown };
             };
             return (
               typeof globals.overall_search === "function" &&
               typeof globals.ajax_with_recommend === "function" &&
-              !!(jewelry ? globals.Kinds : globals.EquipKinds)?.length
+              (jade
+                ? !!globals.CBG_GAME_CONFIG?.minghun_attr
+                : !!(jewelry ? globals.Kinds : globals.EquipKinds)?.length)
             );
           },
-          jewelry,
+          { jewelry, jade },
           { timeout: 15000 },
         );
         const config = await searchPage.evaluate(
@@ -542,13 +689,42 @@ export function equipmentSourceFromPages(
           },
           { jewelry, name: item.name, level: item.level },
         );
-        const { args } = equipmentQuery(item, config);
-        const act = jewelry ? "overall_search_lingshi" : "overall_search_equip";
-        const query = "全服 / 综合排序 / " + item.name + " / " + JSON.stringify(args);
-        queries.push(query);
-        item.query = query;
+        const jadeConfig = jade
+          ? await searchPage.evaluate(() => {
+              const config = (window as unknown as { CBG_GAME_CONFIG: JadeSearchConfig })
+                .CBG_GAME_CONFIG;
+              return {
+                minghun_attr: config.minghun_attr,
+                minghun_attr_yin: config.minghun_attr_yin,
+                minghun_attr_yang: config.minghun_attr_yang,
+                minghun_effect: config.minghun_effect,
+                minghun_teji: config.minghun_teji,
+                minghun_daoju: config.minghun_daoju,
+              };
+            })
+          : null;
+        const exactArgs = jade
+          ? jadeQuery(item, jadeConfig!).args
+          : equipmentQuery(item, config).args;
+        const act = jade
+          ? "yupo_search"
+          : jewelry
+            ? "overall_search_lingshi"
+            : "overall_search_equip";
+        const similarArgs = jade ? exactArgs : equipmentQuery(item, config, "similar").args;
+        const queryModes = [
+          { mode: "exact", args: exactArgs },
+          ...(JSON.stringify(similarArgs) !== JSON.stringify(exactArgs)
+            ? [{ mode: "similar", args: similarArgs }]
+            : []),
+        ];
+        const actualModes: Array<{ mode: string; args: Query; pages: number; exhausted: boolean }> =
+          [];
+        const itemQueries: string[] = [];
         const candidates: EquipmentCandidate[] = [],
+          similar: EquipmentCandidate[] = [],
           rejected: EquipmentCandidate[] = [];
+        const detailFailures: Array<{ url: string; reason: string; diagnostics: unknown }> = [];
         const seen = new Set<string>();
         const listingRejected: Array<{ url: string; reason: string }> = [];
         let count = 0,
@@ -588,208 +764,271 @@ export function equipmentSourceFromPages(
             );
           };
         });
-        for (
-          let pageNumber = 1;
-          pageNumber <= MAX_PAGES &&
-          count < MAX_ROWS &&
-          details < MAX_DETAILS &&
-          candidates.length < 3 &&
-          Date.now() < deadline;
-          pageNumber++
-        ) {
-          await pace(requestSignal);
-          await searchPage.evaluate(
-            ({ args, pageNumber, act }) => {
-              const g = window as unknown as Record<string, any>;
-              if (g.OverallSearchAct !== act || typeof g.overall_search !== "function")
-                throw new Error("装备查询类别与预期不符");
-              g.__cbgEquipmentResult = null;
-              g.CurSearchValue.arg = args;
-              g.CurSearchValue.order_by = { key: "", sort: "DESC" };
-              // Use the page's actual search component; do not save query history or copy credentials.
-              g.overall_search(args, pageNumber, g.CurSearchValue.order_by);
-            },
-            { args, pageNumber, act },
-          );
-          await searchPage.waitForFunction(
-            (wanted) => {
-              const globals = window as unknown as Record<string, any>;
-              if (
-                globals.CaptchaCheck?.need_captcha ||
-                globals.IsLogin === 0 ||
-                globals.LoginInfo?.login === 0 ||
-                /show_login\.py/.test(location.pathname) ||
-                Array.from(
-                  document.querySelectorAll(".yidun_popup, .geetest_panel, #captcha_container"),
-                ).some((el) => el.checkVisibility()) ||
-                /系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText)
-              )
-                return true;
-              const result = globals.__cbgEquipmentResult;
-              const loading = document.querySelector("#loading_img");
-              return result?.page === wanted && (!loading || !loading.checkVisibility());
-            },
-            pageNumber,
-            { timeout: 20000, polling: 200 },
-          );
-          requestSignal.throwIfAborted();
-          await assertAvailable(searchPage);
-          const listing = await searchPage.evaluate((currentPage) => {
-            const canonicalEquipmentUrl = (href: string) => {
-              const url = new URL(href, location.href);
-              const identityFields = new Set([
-                "s",
-                "serverid",
-                "server_id",
-                "eid",
-                "equip_id",
-                "ordersn",
-              ]);
-              const canonical = new URL(url.origin + url.pathname);
-              for (const key of identityFields) {
-                const value = url.searchParams.get(key);
-                if (value !== null) canonical.searchParams.set(key, value);
-              }
-              return canonical.href;
-            };
-            const result = (window as unknown as Record<string, any>).__cbgEquipmentResult;
-            if (!result?.ok) throw new Error(result?.error || "官网装备查询未成功");
-            const root = document.querySelector<HTMLElement>("#search_result");
-            if (!root?.checkVisibility()) throw new Error("装备列表尚未加载");
-            const rows = Array.from(root.querySelectorAll<HTMLAnchorElement>("a.soldImg[href]"))
-              .filter((a) => a.checkVisibility())
-              .map((a) => {
-                const image = a.querySelector("img");
-                const row = a.closest("tr");
-                const ordersn = image?.getAttribute("data_equipid");
-                const descriptions = Array.from(
-                  row?.querySelectorAll<HTMLTextAreaElement>('textarea[id^="equip_desc_"]') || [],
-                );
-                const description =
-                  descriptions.find((node) => ordersn && node.id === "equip_desc_" + ordersn) ||
-                  (!ordersn && descriptions.length === 1 ? descriptions[0] : undefined);
-                return {
-                  url: canonicalEquipmentUrl(a.href),
-                  name: image?.getAttribute("data_equip_name") || "",
-                  kindId: image?.getAttribute("data_kindid") || "",
-                  level: image?.getAttribute("data_equip_level") || "",
-                  description: description?.value || image?.getAttribute("data_equip_desc") || "",
-                };
-              });
-            const empty = result.count === 0 && /没有符合|没有找到|暂无/.test(root.innerText);
-            if (!rows.length && !empty) throw new Error("装备列表为空但未确认没有匹配商品");
-            const hasNext = Array.from(
-              document.querySelectorAll<HTMLAnchorElement>("#pager a[href]"),
-            ).some(
-              (a) =>
-                a.checkVisibility() &&
-                Number(a.getAttribute("href")?.match(/^javascript:goto\((\d+)\)/)?.[1]) ===
-                  currentPage + 1,
+        for (const { mode, args } of queryModes) {
+          if (
+            mode === "similar" &&
+            (candidates.length || JSON.stringify(args) === JSON.stringify(exactArgs))
+          )
+            break;
+          if (count >= MAX_ROWS || details >= MAX_DETAILS || Date.now() >= deadline) break;
+          const query =
+            "全服 / 综合排序 / " + item.name + " / " + mode + " / " + JSON.stringify(args);
+          queries.push(query);
+          itemQueries.push(query);
+          exhausted = false;
+          lastPage = 0;
+          for (
+            let pageNumber = 1;
+            pageNumber <=
+              (mode === "exact" && queryModes.length > 1
+                ? 1
+                : MAX_PAGES - actualModes.reduce((sum, entry) => sum + entry.pages, 0)) &&
+            count < MAX_ROWS &&
+            details < MAX_DETAILS &&
+            candidates.length < 3 &&
+            Date.now() < deadline;
+            pageNumber++
+          ) {
+            await pace(requestSignal);
+            await searchPage.evaluate(
+              ({ args, pageNumber, act }) => {
+                const g = window as unknown as Record<string, any>;
+                if (g.OverallSearchAct !== act || typeof g.overall_search !== "function")
+                  throw new Error("装备查询类别与预期不符");
+                g.__cbgEquipmentResult = null;
+                g.CurSearchValue.arg = args;
+                g.CurSearchValue.order_by = { key: "", sort: "DESC" };
+                // Use the page's actual search component; do not save query history or copy credentials.
+                g.overall_search(args, pageNumber, g.CurSearchValue.order_by);
+              },
+              { args, pageNumber, act },
             );
-            return { rows, empty, hasNext };
-          }, pageNumber);
-          lastPage = pageNumber;
-          if (listing.empty) {
-            exhausted = true;
-            break;
-          }
-          let added = 0,
-            pageFullyRead = true;
-          for (const [rowIndex, row] of listing.rows.entries()) {
+            await searchPage.waitForFunction(
+              (wanted) => {
+                const globals = window as unknown as Record<string, any>;
+                if (
+                  globals.CaptchaCheck?.need_captcha ||
+                  globals.IsLogin === 0 ||
+                  globals.LoginInfo?.login === 0 ||
+                  /show_login\.py/.test(location.pathname) ||
+                  Array.from(
+                    document.querySelectorAll(".yidun_popup, .geetest_panel, #captcha_container"),
+                  ).some((el) => el.checkVisibility()) ||
+                  /系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText)
+                )
+                  return true;
+                const result = globals.__cbgEquipmentResult;
+                const loading = document.querySelector("#loading_img");
+                return result?.page === wanted && (!loading || !loading.checkVisibility());
+              },
+              pageNumber,
+              { timeout: 20000, polling: 200 },
+            );
             requestSignal.throwIfAborted();
-            const identity = equipmentIdentity(safeEquipmentUrl(row.url));
-            if (seen.has(identity)) continue;
-            seen.add(identity);
-            added++;
-            count++;
-            if (row.name !== item.name) {
-              if (count >= MAX_ROWS) {
-                pageFullyRead = rowIndex === listing.rows.length - 1;
-                break;
-              }
-              continue;
-            }
-            const mismatch = equipmentListingMismatch(item, row, args);
-            if (mismatch) {
-              listingRejected.push({ url: row.url, reason: mismatch });
-              if (count >= MAX_ROWS) {
-                pageFullyRead = rowIndex === listing.rows.length - 1;
-                break;
-              }
-              continue;
-            }
-            if (details >= MAX_DETAILS || Date.now() >= deadline) {
-              pageFullyRead = false;
-              break;
-            }
-            details++;
-            let candidate: EquipmentCandidate = {
-              url: row.url,
-              title: row.name,
-              price: null,
-              priceType: "unknown",
-              quote: "",
-              verified: false,
-              reason: "",
-              fetchedAt: null,
-              sourceHash: null,
-            };
-            try {
-              const html = await readSource(row.url, requestSignal);
-              const text = html
-                .replace(/<[^>]+>/g, "")
-                .replace(/&amp;/g, "&")
-                .replace(/&lt;/g, "<")
-                .replace(/&gt;/g, ">");
-              const price = text.match(/挂牌价：¥(\d+(?:\.\d+)?)/)?.[1];
-              candidate = {
-                ...candidate,
-                price: price ? Number(price) : null,
-                priceType: "listing",
-                quote: text,
+            await assertAvailable(searchPage);
+            const listing = await searchPage.evaluate((currentPage) => {
+              const canonicalEquipmentUrl = (href: string) => {
+                const url = new URL(href, location.href);
+                const identityFields = new Set([
+                  "s",
+                  "serverid",
+                  "server_id",
+                  "eid",
+                  "equip_id",
+                  "ordersn",
+                ]);
+                const canonical = new URL(url.origin + url.pathname);
+                for (const key of identityFields) {
+                  const value = url.searchParams.get(key);
+                  if (value !== null) canonical.searchParams.set(key, value);
+                }
+                return canonical.href;
               };
-              candidate = verifyEquipmentCandidate(item, candidate, html, new Date().toISOString());
-              if (candidate.verified) candidates.push(candidate);
-              else rejected.push(candidate);
-            } catch (error) {
-              requestSignal.throwIfAborted();
-              if (error instanceof Error && /登录|安全验证|频繁|网站繁忙/.test(error.message))
-                throw error;
-              rejected.push({
-                ...candidate,
-                reason: error instanceof Error ? error.message : "无法读取装备详情",
-              });
+              const result = (window as unknown as Record<string, any>).__cbgEquipmentResult;
+              if (!result?.ok) throw new Error(result?.error || "官网装备查询未成功");
+              const root = document.querySelector<HTMLElement>("#search_result");
+              if (!root?.checkVisibility()) throw new Error("装备列表尚未加载");
+              const rows = Array.from(root.querySelectorAll<HTMLAnchorElement>("a.soldImg[href]"))
+                .filter((a) => a.checkVisibility())
+                .map((a) => {
+                  const image = a.querySelector("img");
+                  const row = a.closest("tr");
+                  const ordersn = image?.getAttribute("data_equipid");
+                  const descriptions = Array.from(
+                    row?.querySelectorAll<HTMLTextAreaElement>('textarea[id^="equip_desc_"]') || [],
+                  );
+                  const description =
+                    descriptions.find((node) => ordersn && node.id === "equip_desc_" + ordersn) ||
+                    (!ordersn && descriptions.length === 1 ? descriptions[0] : undefined);
+                  return {
+                    url: canonicalEquipmentUrl(a.href),
+                    name: image?.getAttribute("data_equip_name") || "",
+                    kindId: image?.getAttribute("data_kindid") || "",
+                    modelId: image?.getAttribute("data_equip_type") || "",
+                    level: image?.getAttribute("data_equip_level") || "",
+                    description: description?.value || image?.getAttribute("data_equip_desc") || "",
+                  };
+                });
+              const empty = result.count === 0 && /没有符合|没有找到|暂无/.test(root.innerText);
+              if (!rows.length && !empty) throw new Error("装备列表为空但未确认没有匹配商品");
+              const hasNext = Array.from(
+                document.querySelectorAll<HTMLAnchorElement>("#pager a[href]"),
+              ).some(
+                (a) =>
+                  a.checkVisibility() &&
+                  Number(a.getAttribute("href")?.match(/^javascript:goto\((\d+)\)/)?.[1]) ===
+                    currentPage + 1,
+              );
+              return { rows, empty, hasNext };
+            }, pageNumber);
+            lastPage = pageNumber;
+            if (listing.empty) {
+              exhausted = true;
+              break;
             }
-            if (count >= MAX_ROWS || candidates.length >= 3) {
-              pageFullyRead = rowIndex === listing.rows.length - 1;
+            let added = 0,
+              pageFullyRead = true;
+            const rankedRows = listing.rows
+              .map((row) => {
+                if (row.name !== item.name) return { row, score: Infinity };
+                if (!row.description) return { row, score: 1000 };
+                const target = parseEquipmentAttributes(item.description),
+                  source = parseEquipmentAttributes(
+                    row.description.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]+>/g, ""),
+                  );
+                const full = matchEquipmentAttributes(target, source),
+                  partial = full.reason ? matchEquipmentAttributes(target, source, true) : full;
+                return {
+                  row,
+                  score: full.reason ? 500 + partial.similarityScore : full.similarityScore,
+                };
+              })
+              .sort((a, b) => a.score - b.score)
+              .map(({ row }) => row);
+            for (const [rowIndex, row] of rankedRows.entries()) {
+              requestSignal.throwIfAborted();
+              const identity = equipmentIdentity(safeEquipmentUrl(row.url));
+              if (seen.has(identity)) continue;
+              seen.add(identity);
+              added++;
+              count++;
+              if (row.name !== item.name) {
+                if (count >= MAX_ROWS) {
+                  pageFullyRead = rowIndex === rankedRows.length - 1;
+                  break;
+                }
+                continue;
+              }
+              const mismatch =
+                item.modelId && row.modelId && Number(item.modelId) !== Number(row.modelId)
+                  ? "装备型号不匹配"
+                  : equipmentListingMismatch(item, row, args);
+              if (mismatch) {
+                listingRejected.push({ url: row.url, reason: mismatch });
+                if (count >= MAX_ROWS) {
+                  pageFullyRead = rowIndex === rankedRows.length - 1;
+                  break;
+                }
+                continue;
+              }
+              if (details >= MAX_DETAILS || Date.now() >= deadline) {
+                pageFullyRead = false;
+                break;
+              }
+              details++;
+              let candidate: EquipmentCandidate = {
+                url: row.url,
+                title: row.name,
+                price: null,
+                priceType: "unknown",
+                quote: "",
+                verified: false,
+                reason: "",
+                fetchedAt: null,
+                sourceHash: null,
+              };
+              try {
+                const html = await readSource(row.url, requestSignal);
+                const text = html
+                  .replace(/<[^>]+>/g, "")
+                  .replace(/&amp;/g, "&")
+                  .replace(/&lt;/g, "<")
+                  .replace(/&gt;/g, ">");
+                const price = text.match(/挂牌价：¥(\d+(?:\.\d+)?)/)?.[1];
+                candidate = {
+                  ...candidate,
+                  price: price ? Number(price) : null,
+                  priceType: "listing",
+                  quote: text,
+                };
+                candidate = verifyEquipmentCandidate(
+                  item,
+                  candidate,
+                  html,
+                  new Date().toISOString(),
+                );
+                if (candidate.verified && candidate.matchType === "similar")
+                  similar.push(candidate);
+                else if (candidate.verified) candidates.push(candidate);
+                else rejected.push(candidate);
+              } catch (error) {
+                requestSignal.throwIfAborted();
+                if (error instanceof Error && /登录|安全验证|频繁|网站繁忙/.test(error.message))
+                  throw error;
+                rejected.push({
+                  ...candidate,
+                  reason: error instanceof Error ? error.message : "无法读取装备详情",
+                });
+                detailFailures.push({
+                  url: row.url,
+                  reason:
+                    error instanceof Error ? error.message.split("\n")[0] : "无法读取装备详情",
+                  diagnostics:
+                    error && typeof error === "object" && "equipmentDiagnostics" in error
+                      ? error.equipmentDiagnostics
+                      : null,
+                });
+              }
+              if (count >= MAX_ROWS || candidates.length >= 3) {
+                pageFullyRead = rowIndex === rankedRows.length - 1;
+                break;
+              }
+            }
+            if (!added && mode === "exact") break;
+            if (!listing.hasNext) {
+              exhausted = pageFullyRead;
               break;
             }
           }
-          if (!added) break;
-          if (!listing.hasNext) {
-            exhausted = pageFullyRead;
-            break;
-          }
+          actualModes.push({ mode, args, pages: lastPage, exhausted });
         }
+        const query = itemQueries.join("\n");
+        item.query = query;
         const note =
-          `已查询${lastPage}页、${count}个列表候选、${details}个详情；` +
+          `已查询${actualModes.reduce((sum, mode) => sum + mode.pages, 0)}页、${count}个列表候选、${details}个详情；` +
           (listingRejected.length ? `列表已排除${listingRejected.length}个配置不符商品；` : "") +
           (exhausted ? "本次筛选结果已读完" : "有限样本查询，未遍历全部在售商品") +
           "。";
         records.push({
           key: item.key,
           act,
-          args,
-          pages: lastPage,
+          args: exactArgs,
+          modes: actualModes,
+          pages: actualModes.reduce((sum, mode) => sum + mode.pages, 0),
           rows: count,
           details,
           exhausted,
           listingRejected,
+          detailFailures,
         });
         results.push({
           key: item.key,
           query,
-          candidates: [...candidates, ...rejected].slice(0, 5),
+          candidates: [
+            ...candidates,
+            ...similar.sort((a, b) => (a.similarityScore || 0) - (b.similarityScore || 0)),
+            ...rejected,
+          ].slice(0, 5),
           note,
         });
       }

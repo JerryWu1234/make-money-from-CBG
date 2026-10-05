@@ -69,6 +69,39 @@ const item = (overrides: Partial<EquipmentPricingItem> = {}): EquipmentPricingIt
 });
 
 describe("官方装备搜索条件", () => {
+  it("同配查询保持原下限，相近查询只放宽公开数值下限至95%，宝石/修理状态不变", () => {
+    const target = item({
+      category: "腰带",
+      description: "等级70\n气血176 防御37\n耐久0\n修理失败3次",
+      level: 70,
+    });
+    expect(equipmentQuery(target, config).args).toMatchObject({
+      init_hp: 176,
+      init_defense: 37,
+      repair_fail: 3,
+    });
+    expect(equipmentQuery(target, config, "similar").args).toMatchObject({
+      init_hp: 168,
+      init_defense: 36,
+      repair_fail: 3,
+      level_min: 70,
+      level_max: 70,
+      kindid: "20",
+    });
+    expect(
+      equipmentQuery(
+        item({ description: "等级100\n伤害354 灵力89\n锻炼等级8\n镶嵌宝石：黑宝石\n特效：愤怒" }),
+        config,
+        "similar",
+      ).args,
+    ).toMatchObject({
+      damage: 337,
+      all_wakan: 85,
+      gem_level: 8,
+      gem_value: "6",
+      special_effect: "3",
+    });
+  });
   it("从公开装备字段构造全服查询，保留修理失败0，不加入费用或区服", () => {
     const result = equipmentQuery(item(), config);
     expect(result).toMatchObject({
@@ -454,13 +487,19 @@ describe("官网列表前置排除", () => {
 
   it.each([
     ["气血 +475 防御 +43", "气血"],
-    ["气血 +176 防御 +38", "防御"],
+    ["气血 +176 防御 +40", "防御"],
     ["气血 +176 防御 +37\n锻炼等级 7 镶嵌宝石 光芒石", "锻炼等级"],
     ["气血 +176 防御 +37\n特效：简易", "特效"],
   ])("列表已明确%s时不再打开详情", (description, field) => {
     expect(
       equipmentListingMismatch(target, { description: "等级 70\n" + description }, args),
     ).toContain(field);
+  });
+
+  it("列表5%内同结构数值差留给详情作为相近候选，不提前排除", () => {
+    expect(
+      equipmentListingMismatch(target, { description: "等级70\n气血176 防御38" }, args),
+    ).toBeNull();
   });
 
   it("明确kind或等级冲突直接排除，缺少资料仍留给详情核验", () => {

@@ -2,8 +2,11 @@ import { createHash } from "node:crypto";
 import type { SavedRoleRecord } from "../crawler/types";
 import type { ValuationResult } from "./valuation-types";
 import { compareListingPrice } from "./valuation-calculator";
-import { compareEquipmentAttributes, parseEquipmentAttributes } from "./equip-attributes";
+import { inventoryMatchesSnapshot, validateExactPricing } from "./pricing-integrity";
+import { parseEquipmentAttributes } from "./equip-attributes";
 import { observedEquipmentCategory } from "../crawler/compact";
+import { matchEquipmentAttributes } from "./equipment-match";
+import { buildSimilarEstimate, type SimilarEstimate } from "./pricing-estimate";
 
 export type EquipmentCandidate = {
   url: string;
@@ -16,6 +19,8 @@ export type EquipmentCandidate = {
   fetchedAt: string | null;
   sourceHash: string | null;
   differences?: string[];
+  matchType?: "exact" | "similar";
+  similarityScore?: number;
 };
 export type EquipmentPricingItem = {
   key: string;
@@ -26,10 +31,11 @@ export type EquipmentPricingItem = {
   modelId?: string;
   description: string;
   query: string;
-  status: "priced" | "no_match" | "incomplete" | "untradable";
+  status: "priced" | "no_match" | "incomplete" | "untradable" | "unsupported";
   referencePrice: number | null;
   candidates: EquipmentCandidate[];
   issues: string[];
+  similarEstimate?: SimilarEstimate;
 };
 export type EquipmentPricingSnapshot = {
   version: 1;
@@ -122,14 +128,11 @@ export function equipmentInventory(record: SavedRoleRecord) {
       }
       const key = tab.name + ":" + item.index;
       const issues: string[] = [];
-      if (category === "上古玉魄")
-        issues.push("上古玉魄尚未接入官网独立查价，价值未计入，不能按0元处理");
-      else if (level === null) issues.push("装备等级缺失");
-      else if (level === 0)
-        issues.push("官网全服装备检索范围为60至160级，0级装备尚缺可用查询入口和可靠报价");
+      if (category !== "上古玉魄" && level === null) issues.push("装备等级缺失");
       if (!description.trim()) issues.push("装备属性未采齐");
-      if (/(?:耐久(?:度)?\s*[：:]?\s*0(?:\D|$)|无法修复|不能修理|不可修理)/.test(description))
-        issues.push("耐久为0或无法修复，需要单独核价");
+      const unsupported = level === 0;
+      if (unsupported)
+        issues.push("官网全服装备检索范围为60至160级，0级装备尚缺可用查询入口和可靠报价");
       const inferred = category || (/精炼等级/.test(description) ? "灵饰" : "人物装备");
       const query =
         "梦幻西游 藏宝阁 " +
@@ -148,7 +151,13 @@ export function equipmentInventory(record: SavedRoleRecord) {
         ...(item.modelId ? { modelId: item.modelId } : {}),
         description,
         query,
-        status: dedicated ? "untradable" : issues.length ? "incomplete" : "no_match",
+        status: dedicated
+          ? "untradable"
+          : unsupported
+            ? "unsupported"
+            : issues.length
+              ? "incomplete"
+              : "no_match",
         referencePrice: null,
         candidates: [],
         issues: dedicated ? ["专用或绑定装备不能套用可交易装备价格"] : issues,
@@ -316,22 +325,67 @@ export function verifyEquipmentCandidate(
     return reject("这是角色总价页面，不能充当单件装备报价");
   const targetAttributes = parseEquipmentAttributes(item.description);
   const sourceAttributes = parseEquipmentAttributes(text);
+  const sourceModel = html.match(/data-cbg-model-id=["'](\d+)["']/)?.[1];
+  const sourceKind = html.match(/data-cbg-kind-id=["'](\d+)["']/)?.[1];
+  const jade = item.category === "上古玉魄";
+  const targetModel =
+    item.modelId || (jade ? { 上古玉魄·阴: "61717", 上古玉魄·阳: "61718" }[item.name] : undefined);
+  if (
+    (targetModel && sourceModel && Number(targetModel) !== Number(sourceModel)) ||
+    (item.kindId && sourceKind && Number(item.kindId) !== Number(sourceKind))
+  )
+    return reject("官方装备类型或型号不匹配");
   if (
     !normalized.includes(normalize(item.name)) ||
-    item.level === null ||
-    sourceAttributes.level !== item.level
+    (!jade && (item.level === null || sourceAttributes.level !== item.level)) ||
+    (jade && (!targetModel || sourceModel !== targetModel))
   )
-    return reject("名称或等级不匹配");
+    return reject("名称、等级或玉魄类型不匹配");
   const durability = (text: string) => text.match(/耐久(?:度)?\s*[：:]?\s*(\d+)/)?.[1];
   const targetDurability = durability(item.description),
     sourceDurability = durability(text);
   if (
     targetDurability !== undefined &&
-    (sourceDurability === undefined || Number(sourceDurability) === 0)
+    (sourceDurability === undefined ||
+      (Number(targetDurability) === 0) !== (Number(sourceDurability) === 0))
   )
-    return reject("报价耐久缺失或为0，不能按正常可修装备比较");
-  const attributeIssue = compareEquipmentAttributes(targetAttributes, sourceAttributes);
-  if (attributeIssue) return reject(attributeIssue);
+    return reject("耐久破损状态不匹配，0耐久只能采用同为0耐久的独立报价");
+  if (!jade && targetDurability !== undefined && Number(targetDurability) === 0) {
+    const targetFailures = targetAttributes.fields.修理失败,
+      sourceFailures = sourceAttributes.fields.修理失败;
+    if (
+      targetFailures?.length !== 1 ||
+      sourceFailures?.length !== 1 ||
+      !/^\d+\s*次?$/.test(targetFailures[0]) ||
+      !/^\d+\s*次?$/.test(sourceFailures[0])
+    )
+      return reject("0耐久装备需要双方明确的修理失败次数，不能推断破损程度");
+  }
+  if (jade) {
+    const sourceDescription = html.match(
+      /<pre\b[^>]*data-cbg-equipment-description[^>]*>([\s\S]*?)<\/pre>/i,
+    )?.[1];
+    const comparable = (value: string) =>
+      pageText(value)
+        .split(/\n/)
+        .map((line) => line.trim())
+        .filter((line) => line && !/^耐久(?:度)?\s*[：:]?\s*\d/.test(line))
+        .map(normalize)
+        .filter((line) => line !== normalize(item.name));
+    if (
+      !sourceDescription ||
+      JSON.stringify(comparable(item.description)) !== JSON.stringify(comparable(sourceDescription))
+    )
+      return reject("玉魄初始/附加属性、灵尘、效形或奇袭/到期条件不完全一致");
+  }
+  const match = matchEquipmentAttributes(targetAttributes, sourceAttributes);
+  if (match.reason) return reject(match.reason);
+  if (
+    match.matchType === "similar" &&
+    !(targetModel && sourceModel && Number(targetModel) === Number(sourceModel)) &&
+    !(item.kindId && sourceKind && Number(item.kindId) === Number(sourceKind))
+  )
+    return reject("相近报价缺少可核对的官方装备类型证据");
   if (!candidate.quote || !normalize(text).includes(normalize(candidate.quote)))
     return reject("候选引用不能在读取的网页逐字核对");
   const prices = [...new Set(listingPrices(text))];
@@ -343,13 +397,20 @@ export function verifyEquipmentCandidate(
   return {
     ...candidate,
     verified: true,
-    reason: "网页价格与关键属性已核对",
+    matchType: match.matchType || "exact",
+    similarityScore: match.similarityScore,
+    reason:
+      match.matchType === "similar"
+        ? "网页价格已核对；配置相近，差异已列出"
+        : "网页价格与关键属性已核对",
     fetchedAt,
     sourceHash: hash(text),
-    differences:
-      targetDurability !== sourceDurability && targetDurability !== undefined
+    differences: [
+      ...match.differences,
+      ...(targetDurability !== sourceDurability && targetDurability !== undefined
         ? ["耐久不同：当前" + targetDurability + "，报价" + sourceDurability + "；未推测折扣"]
-        : [],
+        : []),
+    ],
   };
 }
 
@@ -471,7 +532,9 @@ export async function searchEquipmentPrices(
       }
       item.candidates.push(candidate);
     }
-    const verified = item.candidates.filter((candidate) => candidate.verified);
+    const verified = item.candidates.filter(
+      (candidate) => candidate.verified && candidate.matchType !== "similar",
+    );
     if (verified.length >= 1) {
       const prices = verified.map((candidate) => candidate.price!).sort((a, b) => a - b);
       const mid = Math.floor(prices.length / 2);
@@ -480,7 +543,14 @@ export async function searchEquipmentPrices(
       );
       item.status = "priced";
       if (verified.length === 1) item.issues.push("仅1条挂牌样本，参考范围有限");
-    } else item.issues.push("没有已核对的同配置挂牌报价，暂不自动定价");
+    } else {
+      item.similarEstimate = buildSimilarEstimate(item.candidates);
+      item.issues.push(
+        item.similarEstimate.status === "range"
+          ? "暂无完全同配置报价，展示相近配置的原挂牌参考区间"
+          : "可靠的同配或相近样本不足，暂不自动定价",
+      );
+    }
   }
   snapshot.knownTotal = round(
     snapshot.items.reduce((sum, item) => sum + (item.referencePrice ?? 0), 0),
@@ -497,12 +567,19 @@ export function combineEquipmentPricing(
   pricing?: EquipmentPricingSnapshot,
 ): ValuationResult {
   const inventory = equipmentInventory(record);
-  const valid = pricing?.inputHash === inventory.inputHash;
+  const valid =
+    pricing?.inputHash === inventory.inputHash &&
+    inventoryMatchesSnapshot(pricing, inventory.items);
   const snapshot = valid ? pricing : undefined;
   const age = snapshot ? Date.now() - Date.parse(snapshot.searchedAt) : Infinity;
   const fresh = age >= -60_000 && age < 24 * 60 * 60 * 1000;
+  const verified = validateExactPricing(snapshot, inventory.items);
   const complete =
-    inventory.captureComplete && !!snapshot?.captureComplete && snapshot.total !== null && fresh;
+    inventory.captureComplete &&
+    !!snapshot?.captureComplete &&
+    snapshot.total !== null &&
+    fresh &&
+    verified;
   const equipment = complete ? snapshot!.total : null;
   const value =
     bare.model_value !== null && equipment !== null ? round(bare.model_value + equipment) : null;
@@ -517,6 +594,7 @@ export function combineEquipmentPricing(
       ),
     );
   if (snapshot && !fresh) missing.push("装备行情已过期，需要开始新批次重新联网查价");
+  if (snapshot && fresh && !verified) missing.push("装备报价快照与样本金额不一致，需要重新查价");
   const suggestions = [...(bare.suggestions || [])];
   if (snapshot && !fresh)
     suggestions.unshift("开始新批次重新联网查价；继续旧批次会保留当时的搜索快照。");
@@ -550,7 +628,8 @@ export function combineEquipmentPricing(
     equipment_pricing: snapshot,
     price_comparison_scope: "裸号本体与人物装备/灵饰；召唤兽个体、锦衣和其他道具未计价",
     known_subtotal: round(
-      (bare.model_value ?? bare.known_subtotal) + (fresh ? (snapshot?.knownTotal ?? 0) : 0),
+      (bare.model_value ?? bare.known_subtotal) +
+        (fresh && verified ? (snapshot?.knownTotal ?? 0) : 0),
     ),
     items: [
       ...bare.items,
@@ -559,12 +638,14 @@ export function combineEquipmentPricing(
         input: item.description,
         formula:
           "已核对同配置装备挂牌价的中位数（" +
-          item.candidates.filter((candidate) => candidate.verified).length +
+          item.candidates.filter(
+            (candidate) => candidate.verified && candidate.matchType !== "similar",
+          ).length +
           "条样本）",
-        amount: fresh ? item.referencePrice : null,
-        confirmed: fresh && item.status === "priced",
+        amount: fresh && verified ? item.referencePrice : null,
+        confirmed: fresh && verified && item.status === "priced",
         evidence: item.candidates
-          .filter((candidate) => candidate.verified)
+          .filter((candidate) => candidate.verified && candidate.matchType !== "similar")
           .map((candidate) => ({
             path: "/equipment_pricing/items/" + index + "/candidates",
             value: candidate.quote,

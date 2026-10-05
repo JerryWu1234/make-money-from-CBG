@@ -1,11 +1,12 @@
 import type { EquipmentPricingSnapshot } from "../server/analysis/equipment-pricing";
-import { valuationMoney } from "./ValuationResultView";
+import { valuationMoney, valuationRangeMoney } from "./ValuationResultView";
 
 const statusLabels = {
   priced: "已核实挂牌参考价",
   no_match: "未找到可靠报价",
   incomplete: "装备资料待补采",
   untradable: "不可交易，未计挂牌参考价",
+  unsupported: "资料已齐，需独立定价规则",
 };
 const readTime = (value: string | null) =>
   value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString("zh-CN") : "未读取";
@@ -76,17 +77,37 @@ export function EquipmentPricingView({
               {item.level !== null ? ` · ${item.level}级` : ""}
             </strong>
             <span>
-              {item.status === "priced" ? valuationMoney(item.referencePrice) : label(item.status)}
+              {item.status === "priced"
+                ? valuationMoney(item.referencePrice)
+                : item.similarEstimate?.range
+                  ? valuationRangeMoney(item.similarEstimate.range)
+                  : label(item.status)}
             </span>
           </header>
-          <p>{label(item.status)}</p>
+          <p>{item.similarEstimate?.range ? "相近配置参考区间" : label(item.status)}</p>
           <p>
-            已核实挂牌样本：{item.candidates.filter((candidate) => candidate.verified).length}条。
+            同配置挂牌样本：
+            {
+              item.candidates.filter(
+                (candidate) => candidate.verified && candidate.matchType !== "similar",
+              ).length
+            }
+            条。
+            {item.similarEstimate && " 相近配置样本：" + item.similarEstimate.sampleCount + "条。"}
           </p>
           {item.status === "priced" &&
-            item.candidates.filter((candidate) => candidate.verified).length === 1 && (
+            item.candidates.filter(
+              (candidate) => candidate.verified && candidate.matchType !== "similar",
+            ).length === 1 && (
               <p className="analysis-pending-note">仅1条挂牌样本，参考范围有限。</p>
             )}
+          {item.similarEstimate && (
+            <ul>
+              {item.similarEstimate.issues.map((issue) => (
+                <li key={issue}>{issue}</li>
+              ))}
+            </ul>
+          )}
           <p>
             {item.category} · {item.description}
           </p>
@@ -105,7 +126,12 @@ export function EquipmentPricingView({
             return (
               <details key={index}>
                 <summary>
-                  {candidate.title} · {candidate.verified ? "已核实" : "未采用"}
+                  {candidate.title} ·{" "}
+                  {candidate.verified
+                    ? candidate.matchType === "similar"
+                      ? "相近配置，已核实来源"
+                      : "同配置，已核实来源"
+                    : "未采用"}
                 </summary>
                 <p className="analysis-detail-links">
                   {link ? (

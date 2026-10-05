@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import type { Page } from "playwright-core";
 import {
   createPetSource,
+  PET_SEARCH_URL,
   petObservationSource,
   petQuery,
   petSourceFromPages,
@@ -121,6 +122,55 @@ describe("官网宝宝查询参数", () => {
     expect(petQuery(target, config)).not.toHaveProperty("is_baobao");
     target.fields.push({ name: "宝宝", value: "是" });
     expect(petQuery(target, config)).toHaveProperty("is_baobao", 1);
+  });
+  it("相似筛选保持等级/成长/技能/内丹，有限调整主要资质下限及速度窗口", () => {
+    expect(petQuery(item(), config, "similar")).toMatchObject({
+      type: "2001,2002",
+      level_min: 119,
+      level_max: 119,
+      attack_aptitude: 1473,
+      defence_aptitude: 1330,
+      physical_aptitude: 4750,
+      magic_aptitude: 2660,
+      speed_aptitude_min: 1080,
+      speed_aptitude_max: 1320,
+      growth: 1280,
+      skill: "1,2",
+      skill_num: 2,
+      high_neidan: "9",
+    });
+    const max = item();
+    max.fields = fields.map((field) =>
+      field.name === "速度资质" ? { ...field, value: "10000" } : field,
+    );
+    expect(petQuery(max, config, "similar")).toHaveProperty("speed_aptitude_max", 10000);
+    expect(petQuery({ ...item(), level: 0 }, config, "similar")).toMatchObject({
+      level_min: 0,
+      level_max: 0,
+    });
+  });
+  it("官方特殊类型没有可交易查询定义时明确缺价，恶魔泡泡不替换成泡泡", () => {
+    const special = { ...item(), name: "恶魔泡泡" };
+    expect(() =>
+      petQuery(
+        special,
+        {
+          ...config,
+          names: { 102004: "泡泡" },
+          officialTypeIds: ["112058", "112073"],
+        },
+        "similar",
+      ),
+    ).toThrow(/特殊类型保留未定价/);
+  });
+  it("诊断查询只取官方类型、同等级和明确宝宝flag，不携带估值筛选字段", () => {
+    const target = { ...item(), fields: [...fields, { name: "是否宝宝", value: "是" }] };
+    expect(petQuery(target, config, "diagnostic")).toEqual({
+      type: "2001,2002",
+      level_min: 119,
+      level_max: 119,
+      is_baobao: 1,
+    });
   });
 });
 
@@ -291,6 +341,157 @@ describe("宝宝查询拥有页面与共享采集锁", () => {
     runtime.createHiddenPage.mockResolvedValueOnce(search).mockResolvedValueOnce(detail);
     return { source: await createPetSource(control.signal), search, detail, control };
   };
+  const queryPages = (
+    exactRows: boolean,
+    control = new AbortController(),
+    emptySimilar = false,
+  ) => {
+    const calls: Record<string, number | string>[] = [];
+    let currentArgs: Record<string, number | string> = {},
+      currentUrl = "";
+    const rows = [0, 1, 2].map((index) => ({
+      url: `https://xyq.cbg.163.com/equip?s=1&eid=sample-${index}`,
+      name: "模拟宝宝",
+      type: "2001",
+    }));
+    const search = {
+      goto: vi.fn(async () => {}),
+      close: vi.fn(async () => {}),
+      waitForFunction: vi.fn(async () => {}),
+      evaluate: vi.fn(async (fn: Function, arg: unknown) => {
+        if (fn.name === "readPageSnapshot")
+          return {
+            url: PET_SEARCH_URL,
+            title: "模拟宝宝搜索",
+            ready: true,
+            serverAuthenticated: true,
+            hasLogout: true,
+            hasLogin: false,
+            hasQr: false,
+            hasRoles: false,
+            hasDialog: false,
+            serverName: "",
+          };
+        if (typeof arg === "string") return config;
+        if (arg && typeof arg === "object" && "args" in arg) {
+          currentArgs = (arg as { args: Record<string, number | string> }).args;
+          calls.push(currentArgs);
+        }
+        if (typeof arg === "number") {
+          const visibleRows =
+            currentArgs.speed_aptitude_min === undefined ||
+            exactRows ||
+            (!emptySimilar && currentArgs.speed_aptitude_min !== 1200)
+              ? rows
+              : [];
+          return { rows: visibleRows, empty: !visibleRows.length, hasNext: false };
+        }
+      }),
+    };
+    const detail = {
+      close: vi.fn(async () => {}),
+      goto: vi.fn(async (url: string) => {
+        currentUrl = url;
+      }),
+      url: () => currentUrl,
+      evaluate: vi.fn(async () => {
+        const value = observation();
+        const changed = fields.map((field) =>
+          field.name === "速度资质" && currentArgs.speed_aptitude_min !== 1200
+            ? { ...field, value: "1280" }
+            : field,
+        );
+        const index = Number(currentUrl.match(/sample-(\d)/)?.[1]);
+        return {
+          ...value,
+          productId: "sample-" + index,
+          rawPrice: 300 + index * 30,
+          prices: ["￥" + (300 + index * 30)],
+          fields: changed.filter((field) => field.name !== "类型"),
+          parsedFields: changed,
+        };
+      }),
+    };
+    return {
+      calls,
+      search,
+      detail,
+      source: petSourceFromPages(
+        search as unknown as Page,
+        detail as unknown as Page,
+        control.signal,
+      ),
+    };
+  };
+  it("严格查询空结果才顺序发起相似窗口，读取独立详情并保留真实查询级别", async () => {
+    const { source, calls, detail } = queryPages(false);
+    try {
+      const result = await source.findCandidates([item()], new AbortController().signal);
+      expect(calls).toHaveLength(2);
+      expect(calls[0]).toMatchObject({
+        level_min: 119,
+        speed_aptitude_min: 1200,
+        speed_aptitude_max: 1200,
+      });
+      expect(calls[1]).toMatchObject({
+        level_min: 119,
+        speed_aptitude_min: 1080,
+        speed_aptitude_max: 1320,
+      });
+      expect(detail.goto).toHaveBeenCalledTimes(3);
+      expect(result.items[0].candidates).toHaveLength(3);
+      expect(
+        result.items[0].candidates.every(
+          (candidate) => candidate.verified && candidate.matchType === "similar",
+        ),
+      ).toBe(true);
+      expect(result.searchItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ matchType: "exact", rows: 0, details: 0 }),
+          expect.objectContaining({ matchType: "similar", rows: 3, details: 3 }),
+        ]),
+      );
+    } finally {
+      await source.close();
+    }
+  });
+  it("找到严格样本后不再放宽，不把exact金额混入similar", async () => {
+    const { source, calls } = queryPages(true);
+    try {
+      const result = await source.findCandidates([item()], new AbortController().signal);
+      expect(calls).toHaveLength(1);
+      expect(
+        result.items[0].candidates.every(
+          (candidate) => candidate.verified && candidate.matchType === "exact",
+        ),
+      ).toBe(true);
+    } finally {
+      await source.close();
+    }
+  });
+  it("exact及similar均0行后最多读3个同等级诊断详情，绝不误计匹配样本", async () => {
+    const { source, calls, detail } = queryPages(false, new AbortController(), true);
+    try {
+      const result = await source.findCandidates([item()], new AbortController().signal);
+      expect(calls).toHaveLength(3);
+      expect(calls[2]).toEqual({ type: "2001,2002", level_min: 119, level_max: 119 });
+      expect(detail.goto).toHaveBeenCalledTimes(3);
+      expect(result.items[0].candidates).toEqual([]);
+      expect(result.items[0].diagnosticSources).toHaveLength(3);
+      expect(
+        result.items[0].diagnosticSources!.every(
+          (candidate) => !candidate.verified && candidate.price !== null && candidate.sourceHash,
+        ),
+      ).toBe(true);
+      expect(result.searchItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ matchType: "diagnostic", rows: 3, details: 3 }),
+        ]),
+      );
+    } finally {
+      await source.close();
+    }
+  });
   it("采集持锁或预先取消时不开Chrome/新页", async () => {
     database(0);
     await expect(createPetSource(new AbortController().signal)).rejects.toThrow(/采集/);

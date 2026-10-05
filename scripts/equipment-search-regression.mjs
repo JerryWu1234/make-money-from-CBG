@@ -46,9 +46,20 @@ const session = await moduleUrl("server/session.ts", {
 const attributes = await moduleUrl("server/analysis/equip-attributes.ts", {
   "../crawler/compact": compact,
 });
+const matcher = await moduleUrl("server/analysis/equipment-match.ts", {
+  "./equip-attributes": attributes,
+});
+const integrity = await moduleUrl("server/analysis/pricing-integrity.ts");
+const estimate = await moduleUrl("server/analysis/pricing-estimate.ts", {
+  "./pricing-integrity": integrity,
+});
+const jade = await moduleUrl("server/analysis/jade-query.ts", { "../crawler/compact": compact });
 const pricing = await moduleUrl("server/analysis/equipment-pricing.ts", {
   "../crawler/compact": compact,
   "./equip-attributes": attributes,
+  "./equipment-match": matcher,
+  "./pricing-estimate": estimate,
+  "./pricing-integrity": integrity,
   "./valuation-calculator": await moduleUrl("server/analysis/valuation-calculator.ts", {
     "./valuation-facts": await moduleUrl("server/analysis/valuation-facts.ts"),
   }),
@@ -70,6 +81,8 @@ const { equipmentSourceFromPages } = await import(
     "../workflow": workflow,
     "../crawler/compact": compact,
     "./equip-attributes": attributes,
+    "./equipment-match": matcher,
+    "./jade-query": jade,
     "./equipment-pricing": pricing,
   })
 );
@@ -414,6 +427,129 @@ try {
     );
   });
 
+  for (const delay of ["panelDelay", "infoDelay"])
+    await check(`独立商品容器 ${delay} 延迟后仍绑定主属性与可见价格`, () =>
+      withSource(
+        {},
+        { renderedPanel: true, independentPanels: true, selling: 1, [delay]: 150, recommend: true },
+        async ({ source, control }) => {
+          const result = await source.findCandidates([item()], control.signal);
+          assert.equal(result.items[0].candidates[0].verified, true);
+          assert.equal(result.items[0].candidates[0].price, 1000);
+        },
+      ),
+    );
+
+  await check("主体失败保存最小公开诊断，仍拒绝错误商品身份", () =>
+    withSource(
+      {},
+      { renderedPanel: true, independentPanels: true, selling: 1, rawEid: "wrong-product" },
+      async ({ source, control }) => {
+        const result = await source.findCandidates([item()], control.signal);
+        assert.equal(result.items[0].candidates[0].verified, false);
+        assert.equal(
+          result.searchItems[0].detailFailures[0].diagnostics.product.id,
+          "wrong-product",
+        );
+        assert.equal(result.searchItems[0].detailFailures[0].diagnostics.panels.length, 1);
+      },
+    ),
+  );
+
+  await check("完整同配在列表排序优先，前置相近行不耗尽详情额度", () =>
+    withSource(
+      {
+        pages: [
+          [
+            {
+              eid: "near",
+              name: equipmentName,
+              description: equipmentDescription.replace("防御：50", "防御：49"),
+            },
+            ...Array.from({ length: 3 }, (_, index) => ({
+              eid: "exact-" + index,
+              name: equipmentName,
+              description: equipmentDescription,
+            })),
+          ],
+        ],
+      },
+      { renderedPanel: true, selling: 1, modelId: 2912 },
+      async ({ source, control }) => {
+        const result = await source.findCandidates([item({ modelId: "2912" })], control.signal);
+        assert.deepEqual(detailVisits, ["exact-0", "exact-1", "exact-2"]);
+        assert(result.items[0].candidates.every((candidate) => candidate.matchType === "exact"));
+      },
+    ),
+  );
+
+  await check("同配为空后实际使用95%下限并保留相近差异与查询模式", () => {
+    const description = "等级100\n气血176 防御50\n耐久300\n修理失败0";
+    const health = [172, 174, 178];
+    return withSource(
+      {
+        pages: [[]],
+        broadenedPages: [
+          health.map((value, index) => ({
+            eid: "similar-" + index,
+            name: equipmentName,
+            modelId: "2912",
+            description: description.replace("气血176", "气血" + value),
+          })),
+        ],
+      },
+      (eid) => ({
+        renderedPanel: true,
+        selling: 1,
+        modelId: 2912,
+        price: 1000 + Number(eid.split("-")[1]) * 50,
+        description: description.replace("气血176", "气血" + health[Number(eid.split("-")[1])]),
+      }),
+      async ({ source, searchPage, control }) => {
+        const result = await source.findCandidates(
+          [item({ description, modelId: "2912" })],
+          control.signal,
+        );
+        assert.equal(result.queries.length, 2);
+        assert.deepEqual(
+          result.searchItems[0].modes.map((mode) => mode.mode),
+          ["exact", "similar"],
+        );
+        assert.equal((await searchPage.evaluate(() => window.calls))[1].init_hp, 168);
+        assert.equal(result.items[0].candidates.length, 3);
+        assert(
+          result.items[0].candidates.every(
+            (candidate) =>
+              candidate.verified &&
+              candidate.matchType === "similar" &&
+              candidate.differences.length,
+          ),
+        );
+      },
+    );
+  });
+
+  await check("玉魄通过官网yupo独立入口查价，不构造普通等级查询", () => {
+    const name = "上古玉魄·阴",
+      description = "防御 +25\n耐久度 102\n抵抗封印等级 +13 [+48]\n气血 +67 [+168]";
+    return withSource(
+      { jade: true, pages: [[{ eid: "jade", name, modelId: "61717", description }]] },
+      { name, description, renderedPanel: true, selling: 1, modelId: 61717 },
+      async ({ source, searchPage, control }) => {
+        const result = await source.findCandidates(
+          [item({ name, description, category: "上古玉魄", modelId: "61717", level: null })],
+          control.signal,
+        );
+        assert.match(searchPage.url(), /show_overall_search_yupo/);
+        const call = (await searchPage.evaluate(() => window.calls))[0];
+        assert.equal(call.act, "yupo_search");
+        assert.equal(call.equip_type, "61717");
+        assert.equal(call.level_min, undefined);
+        assert.equal(result.items[0].candidates[0].verified, true);
+      },
+    );
+  });
+
   await check("悬浮提示异步出现后读取完整属性", () =>
     withSource({}, { tooltipDelay: 150 }, async ({ source, control }) => {
       const result = await source.findCandidates([item()], control.signal);
@@ -596,11 +732,11 @@ try {
     ),
   );
 
-  await check("最多三十个列表候选，不无限请求详情", () =>
+  await check("最多六十个列表候选，不无限请求详情", () =>
     withSource(
       {
         pages: Array.from({ length: 3 }, (_, page) =>
-          Array.from({ length: 15 }, (_, row) => ({
+          Array.from({ length: 30 }, (_, row) => ({
             eid: `${page}-${row}`,
             name: "其他装备",
           })),
@@ -610,13 +746,13 @@ try {
       async ({ source, searchPage, control }) => {
         const result = await source.findCandidates([item()], control.signal);
         assert.equal((await searchPage.evaluate(() => window.calls)).length, 2);
-        assert.match(result.items[0].note, /30个列表候选/);
+        assert.match(result.items[0].note, /60个列表候选/);
         assert.deepEqual(detailVisits, []);
       },
     ),
   );
 
-  await check("最多读取十个详情，达到三个真实匹配立即停", async () => {
+  await check("最多读取二十个详情，达到三个真实同配匹配立即停", async () => {
     await withSource(
       {
         pages: Array.from({ length: 3 }, (_, page) =>
@@ -629,8 +765,8 @@ try {
       { description: equipmentDescription.replace("防御：50", "防御：99") },
       async ({ source, control }) => {
         const result = await source.findCandidates([item()], control.signal);
-        assert.equal(detailVisits.length, 10);
-        assert.match(result.items[0].note, /10个详情/);
+        assert.equal(detailVisits.length, 20);
+        assert.match(result.items[0].note, /20个详情/);
       },
     );
     await withSource(

@@ -8,6 +8,7 @@ import {
   valuationDecisionLabel,
   valuationMoney,
   valuationPriceSummary,
+  valuationSummaryText,
 } from "./ValuationResultView";
 import { RoleDetailDrawer } from "./RoleDetailDrawer";
 import { displayTime } from "./SavedRoleList";
@@ -610,10 +611,12 @@ export function AnalysisPreview() {
                           </td>
                           <td>
                             <span className={`analysis-state analysis-state-${item.state}`}>
-                              {item.state === "completed" &&
-                              item.valuation?.decision === "NEED_INFO"
-                                ? "分析完成 · 待补齐"
-                                : labels[item.state]}
+                              {item.state === "completed" && item.valuation?.estimated_value_range
+                                ? "分析完成 · 参考区间"
+                                : item.state === "completed" &&
+                                    item.valuation?.decision === "NEED_INFO"
+                                  ? "分析完成 · 待补齐"
+                                  : labels[item.state]}
                             </span>
                             {item.error && <small>{item.error}</small>}
                           </td>
@@ -623,7 +626,7 @@ export function AnalysisPreview() {
                                 <strong>{valuationDecisionLabel(item.valuation)}</strong>
                                 <small>
                                   {valuationPriceSummary(item.valuation).label}{" "}
-                                  {valuationMoney(valuationPriceSummary(item.valuation).value)}
+                                  {valuationSummaryText(item.valuation)}
                                 </small>
                                 {item.valuation.comparison_mode === "listing-only" &&
                                   item.valuation.price_difference != null && (
@@ -634,15 +637,23 @@ export function AnalysisPreview() {
                                         : ""}
                                     </small>
                                   )}
+                                {item.valuation.estimated_price_difference && (
+                                  <small>
+                                    差额区间{" "}
+                                    {valuationMoney(item.valuation.estimated_price_difference.min)}—
+                                    {valuationMoney(item.valuation.estimated_price_difference.max)}
+                                  </small>
+                                )}
                                 {item.valuation.comparison_mode !== "listing-only" &&
                                   item.valuation.max_listing_price !== null && (
                                     <small>
                                       最高买入 {valuationMoney(item.valuation.max_listing_price)}
                                     </small>
                                   )}
-                                {item.valuation.decision === "NEED_INFO" && (
-                                  <small>查看分析里的补齐建议</small>
-                                )}
+                                {item.valuation.decision === "NEED_INFO" &&
+                                  !item.valuation.estimated_value_range && (
+                                    <small>查看分析里的补齐建议</small>
+                                  )}
                               </>
                             ) : item.state === "completed" ? (
                               (item.score ?? "资料不足")
