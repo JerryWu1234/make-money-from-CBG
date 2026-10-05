@@ -28,8 +28,11 @@ export function petCaptureSummary(
       "速度资质",
       "躲闪资质",
     ]) {
-      const value = field(name);
-      if (!value || !/^\d+(?:\.\d+)?$/.test(value) || (name === "成长" && Number(value) <= 0))
+      const value = field(name)?.trim();
+      const numeric = name.endsWith("资质")
+        ? /^\d+(?:\.\d+)?(?:\s*\+\s*\d+(?:\.\d+)?)?$/
+        : /^\d+(?:\.\d+)?$/;
+      if (!value || !numeric.test(value) || (name === "成长" && Number(value) <= 0))
         issues.push(`第 ${pet.index} 只召唤兽${name}未完整读取`);
     }
     for (const skill of [...pet.skills, ...pet.innerSkills]) {
@@ -38,26 +41,26 @@ export function petCaptureSummary(
       if (skill.kind === "innerSkill" && !/^\d+$/.test(skill.level || ""))
         issues.push(`第 ${pet.index} 只召唤兽${skill.name}的内丹层数未完整读取`);
     }
-    for (const equipment of pet.equipment)
+    for (const equipment of pet.equipment) {
+      const description =
+        (equipment.description || equipment.tooltip || "") +
+        "\n" +
+        Object.entries(equipment.attributes || {})
+          .map(([name, value]) => `${name} ${value}`)
+          .join("\n");
+      // Official RolePetShipin is a cosmetic slot; it has no required combat level or stats.
       if (
         !equipment.name ||
         equipment.name.startsWith("图标 ") ||
-        !/(?:等级|装备条件)\s*[：:]?\s*\d/.test(
-          (equipment.description || "") +
-            "\n" +
-            Object.entries(equipment.attributes || {})
-              .map(([name, value]) => `${name} ${value}`)
-              .join("\n"),
-        ) ||
-        !/(?:命中(?:率)?|伤害|防御|气血|魔法|速度|敏捷|力量|体质|耐力|灵力|魔力|法术|抵抗|附加|镶嵌)\s*[：:]?\s*[+＋−-]?\d/.test(
-          (equipment.description || "") +
-            "\n" +
-            Object.entries(equipment.attributes || {})
-              .map(([name, value]) => `${name} ${value}`)
-              .join("\n"),
-        )
+        (equipment.location === "RolePetShipin"
+          ? !description.trim()
+          : !/(?:等级|装备条件)\s*[：:]?\s*\d/.test(description) ||
+            !/(?:命中(?:率)?|伤害|防御|气血|魔法|速度|敏捷|力量|体质|耐力|灵力|魔力|法术|抵抗|附加|镶嵌)\s*[：:]?\s*[+＋−-]?\d/.test(
+              description,
+            ))
       )
         issues.push(`第 ${pet.index} 只召唤兽${equipment.name}的装备属性未完整读取`);
+    }
   }
   const unique = [...new Set(issues)];
   return { version: 1, collectedAt, complete: unique.length === 0, issues: unique };
@@ -214,7 +217,8 @@ export async function collectPets(
         if (
           !visible(icon) ||
           !range.intersectsNode(icon) ||
-          /\/pets\/(?:big|small)\//.test(icon.getAttribute("src") || "")
+          /\/pets\/(?:big|small)\//.test(icon.getAttribute("src") || "") ||
+          /\/images\/time_lock_\d+\.png(?:[?#]|$)/.test(icon.getAttribute("src") || "")
         )
           continue;
         icon.setAttribute("data-cbg-pet-item", "true");

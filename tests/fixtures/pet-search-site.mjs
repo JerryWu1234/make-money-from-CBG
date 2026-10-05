@@ -75,6 +75,7 @@ export function petDetailDocument(options = {}) {
     equip_list: (s.parsedGear || s.equipment).map((gear) => ({
       name: gear.name,
       desc: gear.description,
+      icon: `https://xyq.cbg.163.com/images/${gear.shipin ? "pet_shipin" : "equip"}/small/1.gif`,
     })),
     sp_skill_id: "0",
   };

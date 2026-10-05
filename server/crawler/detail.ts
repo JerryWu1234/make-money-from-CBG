@@ -2,7 +2,7 @@ import type { Page } from "playwright-core";
 import { hoverForInspection } from "../viewport";
 import type { Listing, RoleDetail, TabSnapshot } from "./types";
 import { assertAvailable, checkAborted, pace } from "./page";
-import { CAPTURE_VERSION, itemFromAttributes } from "./compact";
+import { CAPTURE_VERSION, itemFromAttributes, observedEquipmentCategory } from "./compact";
 import { collectPets, petCaptureSummary } from "./pets";
 import { captureValuation } from "./valuation-capture";
 
@@ -58,7 +58,10 @@ async function inspectItems(
         .querySelectorAll("[data-cbg-inspect-index]")
         .forEach((el) => el.removeAttribute("data-cbg-inspect-index"));
       const icons = elements.filter(
-        (el) => !el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]'),
+        (el) =>
+          !el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]') &&
+          // Official show_lock() adds these badges next to equipment/pet icons.
+          !/\/images\/time_lock_\d+\.png(?:[?#].*)?$/i.test(el.getAttribute("src") || ""),
       );
       icons.forEach((el, index) => el.setAttribute("data-cbg-inspect-index", String(index)));
       return icons.length;
@@ -110,12 +113,15 @@ async function inspectItems(
     report(`正在读取 ${snapshot.name} 的物品属性 ${index + 1}/${count}`);
     // 名称、技能类别或装备属性已在元素里时直接读取，不触发无意义的提示框。
     let item = itemFromAttributes(attrs, index);
-    // 已明确属于法宝、灵宝或神器的图标不参与人物装备查价，缺少其提示框不算装备漏采。
-    if (/^(?:法宝|灵宝|神器)$/.test(item.category || "")) {
+    // 已明确不在人物装备计价范围内的物品不要求普通装备属性。
+    if (/^(?:法宝|灵宝|神器|道具 · 召唤兽技能书)$/.test(item.category || "")) {
       snapshot.items!.push(item);
       continue;
     }
-    if (attrs.data_equip_desc?.trim() || attrs.data_skill_type) {
+    const rawYupo =
+      item.category === "上古玉魄" &&
+      /^\s*\{\s*"minghun"\s*:\s*\{|<json>/i.test(attrs.data_equip_desc || "");
+    if ((attrs.data_equip_desc?.trim() && !rawYupo) || attrs.data_skill_type) {
       if (!item.name.startsWith("图标 ")) snapshot.items!.push(item);
       continue;
     }
@@ -212,28 +218,37 @@ export function equipmentCaptureSummary(
     if (!tab.items?.length && !/现金|存银|道具和法宝|暂无道具|没有装备|无装备/.test(tab.text))
       issues.push(`${tab.name}：物品内容未完整读取，无法确认装备是否为空`);
     for (const item of tab.items || []) {
+      const category = observedEquipmentCategory(item.category, item.location, item.modelId);
       if (
         item.kind !== "equipment" ||
-        /法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(item.category || "")
+        /法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(category || "")
       )
         continue;
+      if (
+        category === "上古玉魄" &&
+        /^\s*\{\s*"minghun"\s*:\s*\{|<json>/i.test(item.description || "")
+      ) {
+        issues.push(`${tab.name}：${item.name} 的玉魄属性仍为原始JSON，未读取官网展示说明`);
+        continue;
+      }
       const stats = Object.entries(item.attributes || {}).some(
         ([name, value]) =>
-          /^(?:命中|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|治疗能力|格挡|抵抗)(?:等级)?$/.test(
+          /^(?:命中|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|抗物理暴击|抗法术暴击|抗固伤|固伤暴击|穿刺|狂暴|治疗能力|格挡|抵抗)(?:等级|值)?$/.test(
             name,
           ) && /\d/.test(value),
       );
       const describedStats =
-        /(?:^|\n|\s)(?:命中|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|治疗能力|格挡|抵抗)(?:等级)?\s*[：:]?\s*[+＋−-]?\d/.test(
+        /(?:^|\n|\s)(?:命中|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|抗物理暴击|抗法术暴击|抗固伤|固伤暴击|穿刺|狂暴|治疗能力|格挡|抵抗)(?:等级|值)?\s*[：:]?\s*[+＋−-]?\d/.test(
           item.description || "",
         );
       if (!describedStats && !stats) issues.push(`${tab.name}：${item.name} 的装备属性未完整读取`);
       const level =
         /^\d{1,3}$/.test(item.attributes?.等级 || "") ||
-        /等级\s*[：:]?\s*\d{1,3}/.test(
+        /(?:^|[\n\s【：:])等级\s*[：:]?\s*\d{1,3}/.test(
           (item.description || "") + "\n" + (item.attributes?.装备条件 || ""),
         );
-      if (!level) issues.push(`${tab.name}：${item.name} 的装备等级未完整读取`);
+      if (!level && category !== "上古玉魄")
+        issues.push(`${tab.name}：${item.name} 的装备等级未完整读取`);
     }
   }
   const unique = [...new Set(issues)];

@@ -35,6 +35,7 @@ const postRoutes = new Set([
   "/api/analysis/resume",
   "/api/analysis/retry",
   "/api/analysis/equipment/check",
+  "/api/analysis/pet/check",
   "/api/analysis/settings/save",
 ]);
 
@@ -95,14 +96,18 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
         : {};
     if (pathname.startsWith("/api/analysis/")) {
       switch (pathname) {
-        case "/api/analysis/equipment/check": {
+        case "/api/analysis/equipment/check":
+        case "/api/analysis/pet/check": {
           if (res.destroyed) return;
           const controller = new AbortController();
-          const cancel = () => controller.abort(new Error("装备查价请求已断开"));
+          const cancel = () => controller.abort(new Error("查价请求已断开"));
           res.once("close", cancel);
           try {
-            const { checkEquipment } = await import("./analysis/equipment-check");
-            const result = await checkEquipment(body as Record<string, unknown>, controller.signal);
+            const check =
+              pathname === "/api/analysis/pet/check"
+                ? (await import("./analysis/pet-check")).checkPet
+                : (await import("./analysis/equipment-check")).checkEquipment;
+            const result = await check(body as Record<string, unknown>, controller.signal);
             if (!res.destroyed) res.end(JSON.stringify(result));
           } finally {
             res.removeListener("close", cancel);

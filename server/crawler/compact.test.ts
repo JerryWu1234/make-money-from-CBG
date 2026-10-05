@@ -7,6 +7,18 @@ import {
 } from "./compact";
 
 describe("有官网证据的角色装备分类", () => {
+  it("官网宝宝饰品保留纯外观说明，不要求含战斗属性", () => {
+    expect(
+      itemFromAttributes(
+        {
+          data_equip_name: "测试饰品",
+          data_equip_location: "RolePetShipin",
+          data_equip_desc: "#r可爱的外观装饰，装扮你的召唤兽。#r不增加战斗属性。",
+        },
+        0,
+      ).description,
+    ).toBe("可爱的外观装饰，装扮你的召唤兽。\n不增加战斗属性。");
+  });
   it.each([
     [3, "鞋子"],
     [4, "饰品"],
@@ -44,6 +56,63 @@ describe("有官网证据的角色装备分类", () => {
       ).category,
     ).toBe("法宝");
   });
+
+  it.each(["61717", "61718"])(
+    "官方玉魄模型 %s 独立分类且保留完整特殊描述，不推算 kindid",
+    (modelId) => {
+      const item = itemFromAttributes(
+        {
+          data_equip_name: "官方物品",
+          data_equip_type: modelId,
+          data_equip_location: "store_equip_tips1",
+          data_equip_desc:
+            "#r气血 +67#r耐久度 102#r效形：坚如磐石#r奇袭法术：弱点击破#r有效期：2026年10月",
+        },
+        0,
+      );
+      expect(item).toMatchObject({ category: "上古玉魄", modelId });
+      expect(item.kindId).toBeUndefined();
+      expect(item.description).toContain("效形：坚如磐石\n奇袭法术：弱点击破\n有效期：2026年10月");
+      expect(observedEquipmentCategory("人物装备", "仓库", modelId)).toBe("上古玉魄");
+    },
+  );
+
+  it("只有官网玉魄容器可以补类别，名字相同但缺模型及容器仍保持未知", () => {
+    expect(
+      itemFromAttributes({ data_equip_name: "上古玉魄·阳", data_equip_location: "RoleYuHun" }, 0)
+        .category,
+    ).toBe("上古玉魄");
+    expect(
+      itemFromAttributes({ data_equip_name: "上古玉魄·阳", data_equip_location: "仓库" }, 0)
+        .category,
+    ).toBeUndefined();
+  });
+
+  it.each(["611", "18521", "56870"])(
+    "官网物品模型 %s 的技能书不要求人物装备等级，技能命名空间不混用",
+    (modelId) => {
+      const item = itemFromAttributes(
+        {
+          data_equip_name: "官方物品",
+          data_equip_type: modelId,
+          data_equip_desc: "召唤兽技能：高级反震",
+        },
+        0,
+      );
+      expect(item).toMatchObject({
+        category: "道具 · 召唤兽技能书",
+        modelId,
+        description: "召唤兽技能：高级反震",
+      });
+      expect(itemFromAttributes({ data_equip_name: "魔兽要诀" }, 0).category).toBeUndefined();
+      expect(
+        itemFromAttributes(
+          { data_equip_name: "坐骑技能", data_equip_type: modelId, data_skill_type: "riderSkill" },
+          0,
+        ),
+      ).toMatchObject({ kind: "skill", category: "坐骑技能" });
+    },
+  );
 });
 
 describe("灵饰主属性和附加属性分段", () => {

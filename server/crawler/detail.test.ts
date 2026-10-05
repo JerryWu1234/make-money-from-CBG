@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import { chromium, type Browser } from "playwright-core";
-import { collectDetail, collectValuationDetail, MAIN_TABS } from "./detail";
-import { CAPTURE_VERSION } from "./compact";
+import {
+  collectDetail,
+  collectValuationDetail,
+  equipmentCaptureSummary,
+  MAIN_TABS,
+} from "./detail";
+import { CAPTURE_VERSION, itemFromAttributes } from "./compact";
 import type { Listing, RoleDetail, TabSnapshot } from "./types";
 
 vi.mock("./page", async (original) => ({
@@ -55,7 +60,7 @@ const fixture = (
   iconKindId?: string,
   nonEquipmentHtml = "",
 ) => {
-  const gear = `<p>道具和法宝</p><div id="RoleEquip"><a data_kindid="999" data_equip_name="新武器" data_equip_desc="" data_equip_category="武器" data_tip_box="RoleEquipTipsBox"><img ${iconKindId ? `data_kindid="${iconKindId}"` : ""} width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseover="${missingTooltip ? "" : "document.getElementById('RoleEquipTipsBox').style.display='block';document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'"}"></a></div>`;
+  const gear = `<p>道具和法宝</p><div id="RoleEquip"><a data_kindid="999" data_equip_name="新武器" data_equip_desc="" data_equip_category="武器" data_tip_box="RoleEquipTipsBox"><img ${iconKindId ? `data_kindid="${iconKindId}"` : ""} width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseout="document.getElementById('RoleEquipTipsBox').style.display='none'" onmouseover="${missingTooltip ? "" : "document.getElementById('RoleEquipTipsBox').style.display='block';document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'"}"></a></div>`;
   return `<meta charset="utf-8"><section><nav>${MAIN_TABS.map(
     (name) =>
       `<button onclick="show(${JSON.stringify(name).replaceAll('"', "&quot;")})">${name}</button>`,
@@ -74,6 +79,79 @@ describe("装备局部补采", () => {
   afterAll(async () => {
     await browser?.close();
   });
+  it("官网时间锁徽章不计装备图标，其他同尺寸未知图片仍报告缺失", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.route("**/images/**", (route) => route.abort());
+      const badges =
+        '<img width="14" height="14" src="/images/time_lock_9.png"><img width="14" height="14" src="/images/time_lock_1.png?v=1">';
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, badges),
+        }),
+      );
+      const detail = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(detail.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      expect(detail.tabs.find((tab) => tab.name === "道具/法宝")!.items).toHaveLength(1);
+      await page.unroute(url);
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(
+            false,
+            undefined,
+            undefined,
+            badges + '<img width="14" height="14" src="/images/unknown.png">',
+          ),
+        }),
+      );
+      const incomplete = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(incomplete.equipmentCapture?.complete).toBe(false);
+      expect(incomplete.equipmentCapture?.issues.join(" ")).toContain(
+        "第 2 个物品图标没有读取到名称和属性",
+      );
+    } finally {
+      await page.close();
+    }
+  }, 15000);
+
+  it("新采保存官网模型号，玉魄和技能书不误报普通装备等级缺失", async () => {
+    const page = await browser.newPage();
+    try {
+      const others =
+        '<div id="store_equip_tips1"><img width="40" height="40" data_equip_name="上古玉魄·阴" data_equip_type="61717" data_equip_desc="防御 +25#r耐久度 102#r抵抗封印等级 +13 [+48]#r奇袭法术：弱点击破"></div><div id="store_equip_tips2"><img width="40" height="40" data_equip_name="魔兽要诀" data_equip_type="611" data_equip_desc="召唤兽技能：高级反震"></div>';
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, others),
+        }),
+      );
+      const detail = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(detail.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      const items = detail.tabs.find((tab) => tab.name === "道具/法宝")!.items!;
+      expect(items[1]).toMatchObject({ modelId: "61717", category: "上古玉魄" });
+      expect(items[1].description).toContain("奇袭法术：弱点击破");
+      expect(items[2]).toMatchObject({ modelId: "611", category: "道具 · 召唤兽技能书" });
+    } finally {
+      await page.close();
+    }
+  }, 15000);
   it("空描述也读取提示框，新装备和宝宝替换旧快照，其余资料保留", async () => {
     const page = await browser.newPage();
     try {
@@ -301,4 +379,47 @@ describe("装备局部补采", () => {
       await page.close();
     }
   }, 15000);
+});
+
+describe("装备完整性按官方物品类型核对", () => {
+  it("玉魄原始JSON不能充当已渲染完整属性，须继续读官网提示框", () => {
+    const snapshot = tab("道具/法宝");
+    snapshot.items = [
+      itemFromAttributes(
+        {
+          data_equip_name: "玉魄",
+          data_equip_type: "61717",
+          data_equip_desc: '{"minghun":{"init":{"desc":"防御 +25"},"base":[{"desc":"气血 +67"}]}}',
+        },
+        0,
+      ),
+    ];
+    expect(equipmentCaptureSummary([snapshot], "2026-10-05T00:00:00Z")).toMatchObject({
+      complete: false,
+    });
+    expect(equipmentCaptureSummary([snapshot], "2026-10-05T00:00:00Z").issues.join(" ")).toContain(
+      "仍为原始JSON",
+    );
+  });
+  it("玉魄不虚构装备等级，但属性漏读仍不标完整", () => {
+    const snapshot = tab("道具/法宝");
+    snapshot.items = [
+      itemFromAttributes(
+        {
+          data_equip_name: "玉魄",
+          data_equip_type: "61718",
+          data_equip_desc: "穿刺等级 +6\n耐久度 294",
+        },
+        0,
+      ),
+    ];
+    expect(equipmentCaptureSummary([snapshot], "2026-10-05T00:00:00Z")).toMatchObject({
+      complete: true,
+      issues: [],
+    });
+    delete snapshot.items[0].description;
+    expect(equipmentCaptureSummary([snapshot], "2026-10-05T00:00:00Z").issues).toEqual([
+      "道具/法宝：玉魄 的装备属性未完整读取",
+    ]);
+  });
 });

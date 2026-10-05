@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { DetailItem, PetSnapshot, SavedRoleRecord } from "../crawler/types";
-import { coreEquipmentDescription, itemFromAttributes } from "../crawler/compact";
+import { cleanDescription, coreEquipmentDescription, itemFromAttributes } from "../crawler/compact";
 import { compareListingPrice } from "./valuation-calculator";
 import type { ValuationResult } from "./valuation-types";
 import {
@@ -14,11 +14,12 @@ import {
   type EquipmentPricingSnapshot,
 } from "./equipment-pricing";
 
+export type PetEquipment = { name: string; description: string; accessory?: boolean };
 export type PetPricingItem = EquipmentPricingItem & {
   fields: PetSnapshot["fields"];
   skills: string[];
   innerSkills: { name: string; level: string }[];
-  equipment: { name: string; description: string }[];
+  equipment: PetEquipment[];
 };
 export type PetPricingSnapshot = Omit<EquipmentPricingSnapshot, "items"> & {
   items: PetPricingItem[];
@@ -81,14 +82,19 @@ const extraSensitive = [
   "转生次数",
   "神兽类型",
 ];
+export const petEquipmentDescription = (gear: PetEquipment) =>
+  gear.accessory ? cleanDescription(gear.description) : coreEquipmentDescription(gear.description);
 const gearDescription = (item: DetailItem) =>
-  coreEquipmentDescription(
-    item.description ||
+  petEquipmentDescription({
+    name: item.name,
+    accessory: item.location === "RolePetShipin",
+    description:
+      item.description ||
       item.tooltip ||
       Object.entries(item.attributes || {})
         .map(([key, value]) => key + "：" + value)
         .join("\n"),
-  );
+  });
 
 /** A complete capture can be empty; missing or partial capture is never an empty inventory. */
 export function petInventory(record: SavedRoleRecord) {
@@ -141,6 +147,7 @@ export function petInventory(record: SavedRoleRecord) {
       const equipment = pet.equipment.map((item) => ({
         name: item.name.trim(),
         description: gearDescription(item),
+        ...(item.location === "RolePetShipin" ? { accessory: true } : {}),
       }));
       if (equipment.some((item) => !item.name || !item.description))
         itemIssues.push("宝宝装备属性未采齐");
@@ -251,7 +258,7 @@ function sourceIcons(html: string) {
         /data[-_](?:skill[-_]type|equip[-_](?:name|desc))\b/i.test(markup) ||
         attrs.data_equip_desc ||
         attrs["data-equip-desc"] ||
-        /(?:skills?|neidan|equipment|\/equip\/)/i.test(attrs.src || "");
+        /(?:skills?|neidan|equipment|\/(?:equip|pet_shipin)\/)/i.test(attrs.src || "");
       if (!potential) continue;
       const name = declaredName || attrs.alt;
       if (!name || /^图标|^技能\s*\d*$|未知|未命名|unknown/i.test(name)) {
@@ -262,7 +269,18 @@ function sourceIcons(html: string) {
         issues.push("来源存在无法分类的宝宝技能图标");
         continue;
       }
-      const item = itemFromAttributes({ ...attrs, data_equip_name: name }, icons.length);
+      const accessory =
+        attrs.data_equip_location === "RolePetShipin" ||
+        stack.some((entry) => entry.attrs.id === "RolePetShipin") ||
+        /\/images\/pet_shipin\//.test(attrs.src || "");
+      const item = itemFromAttributes(
+        {
+          ...attrs,
+          data_equip_name: name,
+          ...(accessory ? { data_equip_location: "RolePetShipin" } : {}),
+        },
+        icons.length,
+      );
       if (item.kind === "equipment" && !gearDescription(item)) {
         issues.push("来源装备图标缺少完整属性，或未能确认图标类别");
         continue;
@@ -388,12 +406,16 @@ export function verifyPetCandidate(
     return reject("内丹名称或层数不匹配，或未确认内丹是否为空");
   const sourceGear = icons
     .filter((icon) => icon.kind === "equipment")
-    .map((icon) => ({ name: icon.name, description: gearDescription(icon) }));
+    .map((icon) => ({
+      name: icon.name,
+      description: gearDescription(icon),
+      accessory: icon.location === "RolePetShipin",
+    }));
   const gearSection = section(text, "(?:宝宝|召唤兽)?装备");
   if (!sourceGear.length && (gearSection === null || tokens(gearSection).length))
     return reject("网页未证明随身宝宝装备完整，不能混用含装备报价");
-  const gearKey = (gear: { name: string; description: string }) =>
-    normalize(gear.name + "\n" + gear.description);
+  const gearKey = (gear: PetEquipment) =>
+    normalize((gear.accessory ? "饰品" : "装备") + "\n" + gear.name + "\n" + gear.description);
   if (!equalSet(item.equipment.map(gearKey), sourceGear.map(gearKey)))
     return reject("随身宝宝装备不匹配；包价不能另外重复加装备钱");
   if (!candidate.quote || !normalize(text).includes(normalize(candidate.quote)))

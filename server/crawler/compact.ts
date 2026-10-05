@@ -1,6 +1,6 @@
 import type { DetailItem, Listing, RoleDetail } from "./types";
 
-export const CAPTURE_VERSION = 6;
+export const CAPTURE_VERSION = 7;
 export function cleanDescription(value: string) {
   return value
     .replace(/#r/g, "\n")
@@ -10,7 +10,10 @@ export function cleanDescription(value: string) {
 }
 
 /** Only these role slots have been observed with an unambiguous category on the official page. */
-export function observedEquipmentCategory(category = "", location = "") {
+export function observedEquipmentCategory(category = "", location = "", modelId = "") {
+  // Official GAME_CONFIG.equip_info and parse_role use these exact model numbers.
+  if ([61717, 61718].includes(Number(modelId)) || location === "RoleYuHun") return "上古玉魄";
+  if ([611, 18521, 56870].includes(Number(modelId))) return "道具 · 召唤兽技能书";
   if (category.trim() && !/^(?:\d+|人物装备|装备|武器)$/.test(category.trim())) return category;
   const label: Record<string, string> = {
     role_using_equip_3: "鞋子",
@@ -119,18 +122,24 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
   const restrictions = cleanDescription(attrs.data_equip_type_desc || "");
   for (const match of restrictions.matchAll(/【(装备角色|装备对象|装备条件)】([^\n]+)/g))
     attributes[match[1]] = match[2].trim();
-  const description = coreEquipmentDescription(
-    attrs.data_equip_desc || attrs["data-equip-desc"] || attrs.title || "",
-  );
+  const rawDescription = attrs.data_equip_desc || attrs["data-equip-desc"] || attrs.title || "";
   const location =
     attrs.data_equip_location || attrs.data_equip_position || attrs.data_item_position;
+  const rawModel = attrs.data_equip_type || attrs["data-equip-type"] || "";
+  const modelId = /^\d+$/.test(rawModel.trim()) ? rawModel.trim() : undefined;
   const declaredCategory = [
     attrs.data_equip_category,
     attrs.data_equip_type_name,
     attrs.data_item_type_name,
     attrs.data_equip_type,
   ].find((value) => value?.trim() && !/^\d+$/.test(value.trim()));
-  // model/type 的数字编号不是装备分类；以官网容器和法宝属性等明确证据识别。
+  const observedCategory = observedEquipmentCategory(declaredCategory, location, modelId);
+  // 玉魄的奇袭/效形/到期描述和技能书内容不能按普通装备字段精简。
+  const description =
+    /上古玉魄|召唤兽技能书/.test(observedCategory || "") || location === "RolePetShipin"
+      ? cleanDescription(rawDescription)
+      : coreEquipmentDescription(rawDescription);
+  // model/type 不作 kindid；仅明确核对过的模型和官网容器参与分类。
   const storage = [attrs.data_storage_type, location].filter(Boolean).join(" ");
   const category = /lingbao|灵宝/i.test(storage)
     ? "灵宝"
@@ -138,7 +147,7 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
       ? "神器"
       : /(?:^|\n)\s*(?:灵气|修炼境界)[：:\s]/.test(description) || /fabao|法宝/i.test(storage)
         ? "法宝"
-        : observedEquipmentCategory(declaredCategory, location);
+        : observedCategory;
   // 官方图标明确给出的分类 ID；不从名字、data_type 或 data_equip_type 推算。
   const kindId = attrs.data_kindid || attrs["data-kindid"];
   return {
@@ -147,6 +156,7 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
     kind: "equipment",
     ...(category ? { category } : {}),
     ...(kindId ? { kindId } : {}),
+    ...(modelId ? { modelId } : {}),
     ...(location ? { location } : {}),
     ...(description ? { description } : {}),
     ...(Object.keys(attributes).length ? { attributes } : {}),

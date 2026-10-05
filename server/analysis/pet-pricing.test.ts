@@ -102,6 +102,7 @@ function sourcePage(price = 1000, pet = makePet(), icons = false) {
             image({
               data_equip_name: gear.name,
               data_equip_desc: gear.description!.replace(/\n/g, "#r"),
+              ...(gear.location ? { data_equip_location: gear.location } : {}),
             }),
           )
           .join("")
@@ -496,6 +497,41 @@ describe("宝宝来源核对与挂牌比价", () => {
     expect(
       verifyPetCandidate(petInventory(record).items[0], candidate(), changed, "now").verified,
     ).toBe(false);
+  });
+  it("饰品保留明确槽位与可见描述并核对同配置，不能当作战斗装备或丢弃", async () => {
+    const pet = makePet();
+    pet.equipment = [
+      {
+        name: "吸血鬼饰品",
+        index: 0,
+        kind: "equipment",
+        location: "RolePetShipin",
+        description: "修理失败 2次\n外观说明：红色披风",
+      },
+    ];
+    const record = recordWithPets([pet]);
+    const target = petInventory(record).items[0];
+    expect(target.status).toBe("no_match");
+    expect(target.equipment).toEqual([
+      {
+        name: "吸血鬼饰品",
+        description: "修理失败 2次\n外观说明：红色披风",
+        accessory: true,
+      },
+    ]);
+    const page = sourcePage(1000, pet);
+    const { snapshot } = await pricing(record, [candidate()], new Map([[candidate().url, page]]));
+    expect(snapshot.total).toBe(1000);
+    expect(verifyPetCandidate(target, candidate(), page, "now").verified).toBe(true);
+    for (const changed of [
+      page.replace("修理失败 2次", "修理失败 1次"),
+      page.replace("红色披风", "蓝色披风"),
+      page.replace("data_equip_location='RolePetShipin'", ""),
+      page.replace(/<img[^>]+>/, ""),
+    ])
+      expect(verifyPetCandidate(target, candidate(), changed, "now").verified).toBe(false);
+    pet.equipment[0].description = undefined;
+    expect(petInventory(record).items[0].status).toBe("incomplete");
   });
 
   it("部分宝宝价格仍显示已知小计，但完整估值未知；前一步未知也不被宠物报价掩盖", async () => {

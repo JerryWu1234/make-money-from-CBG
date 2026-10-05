@@ -5,14 +5,20 @@ import { crawlDatabase } from "../crawler/controller";
 import { assertAvailable, pace } from "../crawler/page";
 import { buildPageState } from "../page-state";
 import { readStableSnapshot } from "../workflow";
-import { cleanDescription, coreEquipmentDescription } from "../crawler/compact";
+import { cleanDescription } from "../crawler/compact";
 import {
   equipmentIdentity,
   safeEquipmentUrl,
   pageText,
   type EquipmentCandidate,
 } from "./equipment-pricing";
-import { verifyPetCandidate, type PetPricingItem, type PetSource } from "./pet-pricing";
+import {
+  petEquipmentDescription,
+  verifyPetCandidate,
+  type PetEquipment,
+  type PetPricingItem,
+  type PetSource,
+} from "./pet-pricing";
 
 export const PET_SEARCH_URL =
   "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=show_overall_search_pet";
@@ -88,8 +94,8 @@ type PetObservation = {
   expectedSkills: string[];
   innerSkills: { name: string; level: string }[];
   expectedInner: { name: string; level: string }[];
-  equipment: { name: string; description: string }[];
-  expectedEquipment: { name: string; description: string }[];
+  equipment: PetEquipment[];
+  expectedEquipment: PetEquipment[];
 };
 const normalized = (value: string) => value.replace(/[\s：:，,（）()【】]/g, "").toLowerCase();
 const canonical = (value: string) =>
@@ -134,10 +140,10 @@ export function petObservationSource(observed: PetObservation, url: string) {
     !same(observed.innerSkills.map(innerKey), observed.expectedInner.map(innerKey))
   )
     throw new Error("主宝宝内丹名称、层数或完整列表未核对");
-  const gearKey = (gear: { name: string; description: string }) =>
-    gear.name + coreEquipmentDescription(gear.description);
+  const gearKey = (gear: PetEquipment) =>
+    (gear.accessory ? "饰品" : "装备") + gear.name + petEquipmentDescription(gear);
   if (
-    observed.equipment.some((gear) => !gear.name || !coreEquipmentDescription(gear.description)) ||
+    observed.equipment.some((gear) => !gear.name || !petEquipmentDescription(gear)) ||
     !same(observed.equipment.map(gearKey), observed.expectedEquipment.map(gearKey))
   )
     throw new Error("主宝宝随身装备未完整显示或与商品数据不一致");
@@ -196,6 +202,7 @@ export function petObservationSource(observed: PetObservation, url: string) {
         (gear) =>
           '<img data_equip_name="' +
           escape(gear.name) +
+          (gear.accessory ? '" data_equip_location="RolePetShipin' : "") +
           '" data_equip_desc="' +
           escape(cleanDescription(gear.description)) +
           '">',
@@ -351,15 +358,17 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
     }));
     const equipment = icons
       .filter(({ attrs, src }) => !attrs.data_skill_type && /\/(?:equip|pet_shipin)\//.test(src))
-      .map(({ attrs }) => ({
+      .map(({ attrs, src }) => ({
         name: attrs.data_equip_name || "",
         description: attrs.data_equip_desc || "",
+        accessory: /\/images\/pet_shipin\//.test(src),
       }));
     const expectedEquipment = pet.equip_list
       .filter(Boolean)
       .map((gear: Record<string, unknown>) => ({
         name: typeof gear.name === "string" ? gear.name : "",
         description: typeof gear.desc === "string" ? gear.desc : "",
+        accessory: typeof gear.icon === "string" && /\/images\/pet_shipin\//.test(gear.icon),
       }));
     const certification = String(pet.sp_skill_id ?? pet.sp_skill ?? "0");
     if (certification !== "0") {

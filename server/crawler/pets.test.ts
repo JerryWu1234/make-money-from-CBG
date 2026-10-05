@@ -66,6 +66,42 @@ describe("宝宝采集完整性凭据", () => {
       "第 1 只召唤兽属性重复，需要核对",
     );
   });
+  it("资质允许可见基础值加加成，保留原值；成长不能使用同一格式", () => {
+    const captured = pet();
+    captured.fields.find((field) => field.name === "攻击资质")!.value = "1550 +22";
+    expect(petCaptureSummary(1, [captured], "now").complete).toBe(true);
+    expect(captured.fields.find((field) => field.name === "攻击资质")!.value).toBe("1550 +22");
+    for (const value of ["1550 +", "1550 +22 +3", "1550 未知"]) {
+      captured.fields.find((field) => field.name === "攻击资质")!.value = value;
+      expect(petCaptureSummary(1, [captured], "now").issues).toContain(
+        "第 1 只召唤兽攻击资质未完整读取",
+      );
+    }
+    captured.fields.find((field) => field.name === "攻击资质")!.value = "1550 +22";
+    captured.fields.find((field) => field.name === "成长")!.value = "1.23 +0.1";
+    expect(petCaptureSummary(1, [captured], "now").issues).toContain("第 1 只召唤兽成长未完整读取");
+  });
+  it("官方饰品槽保留名称和可见描述，不要求战斗等级或攻击属性", () => {
+    const captured = pet();
+    captured.equipment = [
+      {
+        index: 0,
+        name: "吸血鬼饰品",
+        kind: "equipment",
+        location: "RolePetShipin",
+        description: "修理失败 2次",
+      },
+    ];
+    expect(petCaptureSummary(1, [captured], "now").complete).toBe(true);
+    captured.equipment[0].location = "RolePetEquips";
+    expect(petCaptureSummary(1, [captured], "now").complete).toBe(false);
+    captured.equipment[0].location = "RolePetShipin";
+    captured.equipment[0].description = undefined;
+    expect(petCaptureSummary(1, [captured], "now").complete).toBe(false);
+    captured.equipment[0].description = "修理失败 2次";
+    captured.equipment[0].name = "图标 1";
+    expect(petCaptureSummary(1, [captured], "now").complete).toBe(false);
+  });
   it("宝宝装备只读到名称不能标完整，等级和属性可来自结构字段", () => {
     const missing = pet();
     missing.equipment[0].description = undefined;

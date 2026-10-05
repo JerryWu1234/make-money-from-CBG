@@ -64,6 +64,8 @@ export interface DetailItem {
   kind?: "skill" | "equipment" | "innerSkill";
   category?: string;
   kindId?: string;
+  /** Original official data_equip_type model number, not a search category ID. */
+  modelId?: string;
   location?: string;
   level?: string;
 }

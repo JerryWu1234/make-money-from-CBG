@@ -281,10 +281,17 @@ try {
       },
     ),
   );
-  await check("相同宝宝装备包价只计一次，也支持第4槽饰品的完整属性", async () => {
+  await check("相同宝宝装备包价只计一次，饰品保留身份和可见描述不补战斗属性", async () => {
     for (const gear of [
       petGear,
-      [{ name: "宝宝饰品", description: "等级：80\n速度：20", shipin: true }],
+      [
+        {
+          name: "吸血鬼饰品",
+          description: "修理失败 2次\n外观说明：红色披风",
+          shipin: true,
+          location: "RolePetShipin",
+        },
+      ],
     ])
       await withSource({}, { equipment: gear }, async ({ source, control }) => {
         const result = await searchPetPricing(record(gear), control.signal, source);

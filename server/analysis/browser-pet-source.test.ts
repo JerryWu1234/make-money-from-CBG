@@ -224,6 +224,45 @@ describe("主宝宝商品来源核对", () => {
       ).verified,
     ).toBe(true);
   });
+  it("官网饰品无需战斗属性，但可见身份、完整描述和官方饰品图标配置必须一致", () => {
+    const gear = [
+      { name: "吸血鬼饰品", description: "修理失败 2次\n可爱的小裙子", accessory: true },
+    ];
+    const observed = { ...observation(), equipment: gear, expectedEquipment: gear };
+    const source = petObservationSource(observed, url);
+    expect(source.html).toContain('data_equip_location="RolePetShipin"');
+    expect(source.html).toContain("修理失败 2次");
+    expect(source.html).not.toMatch(/等级[：:]80|速度[：:]20/);
+    expect(
+      verifyPetCandidate(
+        { ...item(), equipment: gear },
+        {
+          url,
+          title: "画魂",
+          price: source.price,
+          priceType: "listing",
+          quote: pageText(source.html),
+          verified: false,
+          reason: "",
+          fetchedAt: null,
+          sourceHash: null,
+        },
+        source.html,
+        "now",
+      ).verified,
+    ).toBe(true);
+    for (const expectedEquipment of [
+      [{ ...gear[0], accessory: false }],
+      [{ ...gear[0], description: "修理失败 1次" }],
+      [{ ...gear[0], name: "画魂饰品" }],
+    ])
+      expect(() => petObservationSource({ ...observed, expectedEquipment }, url)).toThrow(
+        /随身装备/,
+      );
+    expect(() =>
+      petObservationSource({ ...observed, equipment: [{ ...gear[0], description: "" }] }, url),
+    ).toThrow(/随身装备/);
+  });
 });
 
 describe("宝宝查询拥有页面与共享采集锁", () => {

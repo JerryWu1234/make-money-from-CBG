@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   resumeAnalysis: vi.fn(),
   prepareAnalysisClient: vi.fn(),
   checkEquipment: vi.fn(),
+  checkPet: vi.fn(),
   equipmentCheckImported: vi.fn(),
   startAnalysis: vi.fn(),
   aiProvider: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock("./browser", () => mocks);
 vi.mock("./analysis/controller", () => mocks);
 vi.mock("./ai-connection", () => mocks);
 vi.mock("./analysis/equipment-check", () => mocks);
+vi.mock("./analysis/pet-check", () => mocks);
 vi.mock("./diagnostics", () => ({ diagnostics: { record: mocks.record } }));
 
 function request(pathname: string, body: Record<string, unknown> = {}) {
@@ -71,6 +73,17 @@ beforeEach(() => {
 });
 
 describe("指定商品试分析", () => {
+  it("宝宝单项诊断沿用请求校验，不准备AI或创建分析批次", async () => {
+    const input = { productKey: "941:role", petKey: "召唤兽/孩子:1" };
+    mocks.checkPet.mockResolvedValue({ queries: ["全服"] });
+    const { apiMiddleware } = await import("./api");
+    const res = response();
+    await apiMiddleware(request("/api/analysis/pet/check", input), res, vi.fn());
+    expect(mocks.checkPet.mock.calls[0][0]).toEqual(input);
+    expect(mocks.checkPet.mock.calls[0][1]).toBeInstanceOf(AbortSignal);
+    expect(mocks.startAnalysis).not.toHaveBeenCalled();
+    expect(mocks.prepareAnalysisClient).not.toHaveBeenCalled();
+  });
   it("传递明确商品列表，不替换成列表第一件", async () => {
     const input = { provider: "codex", sample: true, sampleSize: 1, productKeys: ["462:target"] };
     mocks.startAnalysis.mockResolvedValue({ id: "selected-run", total: 1 });

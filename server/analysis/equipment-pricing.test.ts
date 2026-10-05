@@ -100,6 +100,74 @@ async function matchedPricing(record = recordWithEquipment()) {
 }
 
 describe("装备联网查价的来源核对", () => {
+  it("实际0级双短剑保留为装备，官网检索不覆盖时明确缺价，不当空装或发越界查询", async () => {
+    const record = recordWithEquipment();
+    const item = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
+    delete item.category;
+    item.name = "双短剑";
+    item.description = "命中 +20\n伤害 +15\n耐久度 100";
+    item.attributes = { 装备条件: "等级 0", 装备角色: "英女侠，飞燕女" };
+    const inventory = equipmentInventory(record);
+    expect(inventory).toMatchObject({ captureComplete: true, issues: [] });
+    expect(inventory.items[0]).toMatchObject({
+      name: "双短剑",
+      level: 0,
+      category: "人物装备",
+      status: "incomplete",
+      referencePrice: null,
+    });
+    expect(inventory.items[0].issues.join(" ")).toContain("0级装备尚缺");
+    const search = vi.fn(),
+      read = vi.fn();
+    const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+      findCandidates: search,
+      readSource: read,
+    });
+    expect(pricing).toMatchObject({ total: null, knownTotal: 0 });
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it("官方玉魄无需普通装备等级但独立缺价不算0，已核对的普通装备仍可查价", async () => {
+    const record = recordWithEquipment();
+    record
+      .detail!.tabs.find((tab) => tab.name === "道具/法宝")!
+      .items!.push({
+        index: 1,
+        name: "上古玉魄·阴",
+        kind: "equipment",
+        modelId: "61717",
+        location: "仓库",
+        description: "防御 +25\n耐久度 102\n抵抗封印等级 +13 [+48]\n气血 +67 [+168]",
+      });
+    const inventory = equipmentInventory(record);
+    expect(inventory).toMatchObject({ captureComplete: true, issues: [] });
+    expect(inventory.items[1]).toMatchObject({
+      category: "上古玉魄",
+      modelId: "61717",
+      level: null,
+      status: "incomplete",
+      referencePrice: null,
+    });
+    expect(inventory.items[1].issues).not.toContain("装备等级缺失");
+    const { pricing, search } = await matchedPricing(record);
+    expect(search.mock.calls[0][0].map((item: { name: string }) => item.name)).toEqual([
+      equipmentName,
+    ]);
+    expect(pricing).toMatchObject({ total: null, knownTotal: 200 });
+    expect(pricing.items[1].issues.join(" ")).toContain("不能按0元处理");
+  });
+
+  it("已核对的技能书模型归普通道具范围，旧记录只见名字不能凭名字排除", () => {
+    const record = recordWithEquipment();
+    const items = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items!;
+    items.push({ index: 1, name: "魔兽要诀", kind: "equipment", modelId: "611" });
+    expect(equipmentInventory(record)).toMatchObject({ captureComplete: true, issues: [] });
+    expect(equipmentInventory(record).items).toHaveLength(1);
+    delete items[1].modelId;
+    expect(equipmentInventory(record)).toMatchObject({ captureComplete: false });
+    expect(equipmentInventory(record).issues.join(" ")).toContain("物品类别或装备属性未识别");
+  });
+
   it("旧库存只有数字类别时按已采到的腰带槽位补分类，不猜官网kindid", () => {
     const record = recordWithEquipment();
     const item = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];

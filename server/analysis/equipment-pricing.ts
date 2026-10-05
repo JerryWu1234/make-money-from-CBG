@@ -23,6 +23,7 @@ export type EquipmentPricingItem = {
   level: number | null;
   category: string;
   kindId?: string;
+  modelId?: string;
   description: string;
   query: string;
   status: "priced" | "no_match" | "incomplete" | "untradable";
@@ -63,7 +64,8 @@ const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const round = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 const normalize = (s: string) => s.replace(/\s|[：:，,]/g, "").toLowerCase();
 const levelOf = (description: string, attributes?: Record<string, string>) => {
-  const level = description.match(/等级\s*[：:]?\s*(\d{1,3})/)?.[1] || attributes?.等级;
+  const level =
+    description.match(/(?:^|[\n\s【：:])等级\s*[：:]?\s*(\d{1,3})/)?.[1] || attributes?.等级;
   return level && /^\d+$/.test(level) ? Number(level) : null;
 };
 
@@ -88,14 +90,14 @@ export function equipmentInventory(record: SavedRoleRecord) {
         .filter(([key]) => !Object.hasOwn(observed.fields, key))
         .map(([key, value]) => key + "：" + value);
       const description = [details, ...restrictions].filter(Boolean).join("\n");
-      const category = observedEquipmentCategory(item.category, item.location) || "";
+      const category = observedEquipmentCategory(item.category, item.location, item.modelId) || "";
       if (item.kind === "skill" || item.kind === "innerSkill") continue;
       if (/法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(category)) continue;
-      const level = levelOf(description, item.attributes);
+      const level = category === "上古玉魄" ? null : levelOf(description, item.attributes);
       const equipment =
-        /人物装备|灵饰|武器|头盔|衣服|项链|腰带|鞋/.test(category) ||
+        /人物装备|灵饰|武器|头盔|衣服|项链|腰带|鞋|上古玉魄/.test(category) ||
         (level !== null &&
-          level >= 1 &&
+          level >= 0 &&
           /伤害|防御|灵力|敏捷|速度|气血|封印|治疗/.test(description));
       if (/装备对象[：:]?\s*召唤兽|【?携带/.test(description)) continue;
       if (!equipment) {
@@ -120,7 +122,11 @@ export function equipmentInventory(record: SavedRoleRecord) {
       }
       const key = tab.name + ":" + item.index;
       const issues: string[] = [];
-      if (level === null) issues.push("装备等级缺失");
+      if (category === "上古玉魄")
+        issues.push("上古玉魄尚未接入官网独立查价，价值未计入，不能按0元处理");
+      else if (level === null) issues.push("装备等级缺失");
+      else if (level === 0)
+        issues.push("官网全服装备检索范围为60至160级，0级装备尚缺可用查询入口和可靠报价");
       if (!description.trim()) issues.push("装备属性未采齐");
       if (/(?:耐久(?:度)?\s*[：:]?\s*0(?:\D|$)|无法修复|不能修理|不可修理)/.test(description))
         issues.push("耐久为0或无法修复，需要单独核价");
@@ -139,6 +145,7 @@ export function equipmentInventory(record: SavedRoleRecord) {
         level,
         category: inferred,
         ...(item.kindId ? { kindId: item.kindId } : {}),
+        ...(item.modelId ? { modelId: item.modelId } : {}),
         description,
         query,
         status: dedicated ? "untradable" : issues.length ? "incomplete" : "no_match",
@@ -160,12 +167,13 @@ export function equipmentInventory(record: SavedRoleRecord) {
       collectedAt: capture?.collectedAt,
       captureComplete,
       issues,
-      items: items.map(({ key, name, level, category, kindId, description }) => ({
+      items: items.map(({ key, name, level, category, kindId, modelId, description }) => ({
         key,
         name,
         level,
         category,
         ...(kindId ? { kindId } : {}),
+        ...(modelId ? { modelId } : {}),
         description,
       })),
     }),
