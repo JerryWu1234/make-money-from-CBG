@@ -169,6 +169,7 @@ export function createProfile(
         "valuation-schema-v4",
         "pricing-progress-v1",
         "final-assets-v1",
+        "pet-region-v2",
         SIMILAR_POLICY_VERSION,
         EQUIPMENT_SIMILAR_POLICY_VERSION,
         EQUIPMENT_BASELINE_POLICY_VERSION,

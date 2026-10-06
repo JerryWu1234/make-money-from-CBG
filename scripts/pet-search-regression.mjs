@@ -59,6 +59,10 @@ const matcher = await moduleUrl("server/analysis/equipment-match.ts", {
 });
 const pricing = await moduleUrl("server/analysis/equipment-pricing.ts", {
   "./pricing-progress": progress,
+  "./equipment-baseline": await moduleUrl("server/analysis/equipment-baseline.ts", {
+    "../crawler/compact": compact,
+    "./equip-attributes": attributes,
+  }),
   "./pricing-estimate": estimate,
   "./pricing-integrity": integrity,
   "./equipment-match": matcher,
@@ -221,6 +225,8 @@ try {
   await check("source→adapter等待主区域/主价/JSON，绑定新容器并排除先出现的同名推荐", async () => {
     for (const detail of [
       {},
+      { noPanelId: true },
+      { noPanelId: true, recommendationFirst: true, recommendationMainIds: true },
       { wrapperClass: "product-detail", footerStatus: "状态：已下架" },
       { panelDelay: 100 },
       { infoDelay: 100 },
@@ -260,6 +266,7 @@ try {
       { missingSkill: true },
       { missingInner: true },
       { incompleteJson: true },
+      { noPanelId: true, incompleteJson: true },
       { equipment: petGear, missingGear: true },
     ])
       await withSource({}, detail, async ({ source, control }) => {
@@ -334,6 +341,8 @@ try {
       { status: "已下架", selling: 1 },
       { splitRegions: true },
       { duplicatePanel: true },
+      { noPanelId: true, splitRegions: true },
+      { noPanelId: true, duplicatePanel: true },
     ])
       await withSource({}, detail, async ({ source, control }) => {
         const result = await searchPetPricing(record(), control.signal, source);
@@ -344,7 +353,8 @@ try {
           assert.ok(failure.diagnostics);
           assert.ok(Array.isArray(failure.diagnostics.panels));
           assert.equal(failure.diagnostics.jsonInputs, 1);
-          if (detail.duplicatePanel) assert.equal(failure.diagnostics.panels.length, 2);
+          if (detail.duplicatePanel)
+            assert.equal(failure.diagnostics.panels.length, detail.noPanelId ? 0 : 2);
         }
       });
   });

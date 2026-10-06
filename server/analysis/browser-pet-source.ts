@@ -303,50 +303,95 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
   }
 }
 
+/** Resolve a unique public attribute region, without depending on one template's panel ID. */
+export function petRegionReady(excluded: string) {
+  const visible = (node: Element) =>
+    node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+    !node.closest(excluded);
+  document
+    .querySelectorAll("[data-cbg-pet-main-panel]")
+    .forEach((node) => node.removeAttribute("data-cbg-pet-main-panel"));
+  const infos = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(visible);
+  const inputs = Array.from(
+    document.querySelectorAll<HTMLInputElement>("#equip_desc_value"),
+  ).filter((node) => !node.closest(excluded));
+  const g = window as unknown as Record<string, any>;
+  if (
+    !(g.equip || g.EquipInfo) ||
+    infos.length !== 1 ||
+    inputs.length !== 1 ||
+    !inputs[0].value.trim()
+  )
+    return false;
+  const panels = Array.from(document.querySelectorAll<HTMLElement>("#equip_desc_panel")).filter(
+    visible,
+  );
+  if (panels.length > 1) return false;
+  let panel = panels[0];
+  if (!panel) {
+    const hasStats = (node: HTMLElement) => {
+      const text = node.innerText.replace(/\s/g, "");
+      return (
+        ["成长", "攻击资质", "防御资质", "体力资质", "法力资质", "速度资质"].every((name) =>
+          text.includes(name),
+        ) && /躲[闪避]资质/.test(text)
+      );
+    };
+    let region = infos[0].parentElement;
+    while (region && region !== document.body && region !== document.documentElement) {
+      const tables = Array.from(region.querySelectorAll<HTMLElement>("table, dl")).filter(
+        (node) => visible(node) && hasStats(node),
+      );
+      const leaves = tables.filter(
+        (node) => !tables.some((other) => other !== node && node.contains(other)),
+      );
+      if (leaves.length > 1) return false;
+      if (leaves.length === 1) {
+        let candidate: HTMLElement | null = leaves[0];
+        while (candidate && candidate !== region && !candidate.contains(infos[0])) {
+          const text = candidate.innerText.replace(/\s/g, "");
+          if (
+            text.length <= 20_000 &&
+            /技能/.test(text) &&
+            /内丹/.test(text) &&
+            /装备/.test(text)
+          ) {
+            panel = candidate;
+            break;
+          }
+          candidate = candidate.parentElement;
+        }
+        break;
+      }
+      region = region.parentElement;
+    }
+  }
+  if (
+    !panel ||
+    !visible(panel) ||
+    !panel.innerText.trim() ||
+    /加载中|正在加载/.test(panel.innerText) ||
+    !infos[0].innerText.trim()
+  )
+    return false;
+  const priceReady = Array.from(
+    infos[0].querySelectorAll<HTMLElement>(".price, [data_price], [data-price]"),
+  ).some(
+    (node) =>
+      visible(node) &&
+      !node.closest("#equip_price_addon_info") &&
+      (node.innerText.trim() || node.getAttribute("data_price") || node.getAttribute("data-price")),
+  );
+  if (priceReady) panel.setAttribute("data-cbg-pet-main-panel", "true");
+  return priceReady;
+}
+
 async function readMainPet(page: Page, signal: AbortSignal) {
   signal.throwIfAborted();
   await assertAvailable(page);
   const excluded =
     '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [id$="TipsBox"], [role="tooltip"]';
-  await page.waitForFunction(
-    (excluded) => {
-      const visible = (node: Element) =>
-        node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
-        !node.closest(excluded);
-      const panels = Array.from(document.querySelectorAll<HTMLElement>("#equip_desc_panel")).filter(
-        visible,
-      );
-      const infos = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(
-        visible,
-      );
-      const inputs = Array.from(
-        document.querySelectorAll<HTMLInputElement>("#equip_desc_value"),
-      ).filter((node) => !node.closest(excluded));
-      const g = window as unknown as Record<string, any>;
-      return (
-        (g.equip || g.EquipInfo) &&
-        panels.length === 1 &&
-        infos.length === 1 &&
-        panels[0].innerText.trim() &&
-        !/加载中|正在加载/.test(panels[0].innerText) &&
-        infos[0].innerText.trim() &&
-        inputs.length === 1 &&
-        inputs[0].value.trim() &&
-        Array.from(
-          infos[0].querySelectorAll<HTMLElement>(".price, [data_price], [data-price]"),
-        ).some(
-          (node) =>
-            visible(node) &&
-            !node.closest("#equip_price_addon_info") &&
-            (node.innerText.trim() ||
-              node.getAttribute("data_price") ||
-              node.getAttribute("data-price")),
-        )
-      );
-    },
-    excluded,
-    { timeout: 5000 },
-  );
+  await page.waitForFunction(petRegionReady, excluded, { timeout: 5000 });
   signal.throwIfAborted();
   await assertAvailable(page);
   const observed = await page.evaluate((excluded) => {
@@ -355,9 +400,9 @@ async function readMainPet(page: Page, signal: AbortSignal) {
     const visible = (node: Element) =>
       node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
       !node.closest(excluded);
-    const panels = Array.from(document.querySelectorAll<HTMLElement>("#equip_desc_panel")).filter(
-      visible,
-    );
+    const panels = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-cbg-pet-main-panel]"),
+    ).filter(visible);
     const infos = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(visible);
     const panel = panels.length === 1 ? panels[0] : null;
     const info = infos.length === 1 ? infos[0] : null;
