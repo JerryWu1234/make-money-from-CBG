@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { valuationRecord } from "../../tests/fixtures/analysis";
 import {
   equipmentInventory,
+  equipmentPricingPlan,
   combineEquipmentPricing,
   type EquipmentCandidate,
   type EquipmentPricingSnapshot,
@@ -114,6 +115,196 @@ function fixture() {
     );
   return { record, profile, bare, equipment, pet, combine };
 }
+function baselineFixture(level = 70, withGold = true) {
+  const value = fixture();
+  const tab = value.record.detail!.tabs.find((row) => row.name === "道具/法宝")!;
+  tab.items = [
+    {
+      index: 0,
+      kind: "equipment",
+      name: "环装测试武器",
+      category: "武器",
+      description:
+        "等级 " +
+        level +
+        (level === 0 ? "\n命中 +10 伤害 +5" : "\n命中 +200 伤害 +180") +
+        "\n耐久度 100\n修理失败 0次",
+    },
+  ];
+  const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), {
+    ...DEFAULT_SETTINGS,
+    servers: [
+      {
+        serverId: value.record.listing.serverId,
+        age: withGold ? "older" : "three",
+        rank: withGold ? 70 : 10,
+        goldPrice: withGold ? 210 : null,
+        goldUnit: withGold ? 10_000_000 : null,
+        baselineUnitConfirmed: true,
+      },
+    ],
+  });
+  const equipment = equipmentPricingPlan(value.record, profile.settings);
+  const bare = calculateValuation(value.record, profile);
+  const combine = () =>
+    applyValuationRange(
+      combinePetPricing(
+        combineEquipmentPricing(bare, value.record, equipment, profile.settings),
+        value.record,
+        value.pet,
+      ),
+      bare,
+      value.record,
+      profile,
+    );
+  return { ...value, equipment, profile, bare, combine };
+}
+
+describe("默认装备参考价与挂牌比较", () => {
+  it("普通环装默认价只形成注明来源的参考总价，不冒充同配报价或已核实小计", () => {
+    const { equipment, bare, combine } = baselineFixture();
+    const baseline = equipment.items[0].baselineEstimate!;
+    expect(baseline.kind).toBe("ring");
+    expect(baseline.source.basis).toBe("historical");
+    expect(baseline.amount).toBeGreaterThan(0);
+    const result = combine();
+    expect(result.estimated_value_range).toEqual({
+      min: bare.model_value! + baseline.amount!,
+      max: bare.model_value! + baseline.amount!,
+    });
+    expect(result.estimated_price_difference?.min).toBeCloseTo(
+      bare.model_value! + baseline.amount! - result.asking_price!,
+    );
+    expect(result.estimated_sources).toEqual(["baseline"]);
+    expect(result.model_value).toBeNull();
+    expect(result.known_subtotal).toBe(bare.model_value);
+    expect(result.reason).toContain("历史参考价");
+    expect(result.reason).toContain("不是同配置挂牌报价");
+    expect(result.reason).not.toContain("包含相近配置挂牌样本");
+    expect(equipment.items[0].candidates).toEqual([]);
+    expect(equipment.items[0].referencePrice).toBeNull();
+    expect(equipment.total).toBeNull();
+  });
+
+  it("默认价可以与精确报价、相近区间相加，只有精确报价进入knownSubtotal", () => {
+    const value = baselineFixture();
+    const tab = value.record.detail!.tabs.find((row) => row.name === "道具/法宝")!;
+    tab.items!.push(
+      {
+        index: 1,
+        kind: "equipment",
+        name: "特技测试腰带",
+        category: "腰带",
+        description: "等级 120\n气血 +500 防御 +80\n耐久度 100\n特技：罗汉金钟",
+      },
+      {
+        index: 2,
+        kind: "equipment",
+        name: "特技测试鞋",
+        category: "人物装备 · 鞋子",
+        description: "等级 120\n敏捷 +50 防御 +80\n耐久度 100\n特技：晶清诀",
+      },
+    );
+    const updated = equipmentPricingPlan(value.record, value.profile.settings);
+    Object.assign(value.equipment, updated);
+    const amount = value.equipment.items[0].baselineEstimate!.amount!;
+    const exact = value.equipment.items[1];
+    expect(exact.baselineEstimate).toBeUndefined();
+    exact.status = "priced";
+    exact.referencePrice = 100;
+    exact.candidates = [{ ...candidates()[0], matchType: "exact" }];
+    const similar = value.equipment.items[2];
+    expect(similar.baselineEstimate).toBeUndefined();
+    similar.candidates = candidates();
+    similar.similarEstimate = buildSimilarEstimate(similar.candidates);
+    value.equipment.knownTotal = 100;
+    const result = value.combine();
+    expect(result.estimated_value_range).toEqual({
+      min: value.bare.model_value! + amount + 200,
+      max: value.bare.model_value! + amount + 240,
+    });
+    expect(result.known_subtotal).toBe(value.bare.model_value! + 100);
+    expect(result.estimated_sources).toEqual(["similar", "baseline"]);
+    expect(result.model_value).toBeNull();
+    similar.candidates = [];
+    similar.similarEstimate = undefined;
+    const partial = value.combine();
+    expect(partial.estimated_value_range).toBeUndefined();
+    expect(partial.estimated_subtotal_range).toEqual({
+      min: value.bare.model_value! + amount + 100,
+      max: value.bare.model_value! + amount + 100,
+    });
+    expect(partial.estimate_missing_count).toBe(1);
+  });
+
+  it("明确忽略的0级普通装备可按0元参考比较，未知60/90/100级价格仍是缺项", () => {
+    const { equipment, bare, combine } = baselineFixture(0, false);
+    expect(equipment.items[0].status).toBe("unsupported");
+    expect(equipment.items[0].baselineEstimate?.kind).toBe("ignored");
+    expect(equipment.items[0].baselineEstimate?.amount).toBe(0);
+    const result = combine();
+    expect(result.estimated_value_range).toEqual({ min: bare.model_value, max: bare.model_value });
+    expect(result.estimated_price_difference).toBeDefined();
+    expect(result.reason).toContain("低值未计入");
+    expect(result.reason).toContain("不代表其市场售价为0");
+    expect(result.known_subtotal).toBe(bare.model_value);
+    for (const level of [60, 90, 100]) {
+      const value = baselineFixture(level);
+      expect(value.equipment.items[0].baselineEstimate?.amount).toBeNull();
+      const missing = value.combine();
+      expect(missing.estimated_value_range).toBeUndefined();
+      expect(missing.estimated_price_difference).toBeUndefined();
+      expect(missing.model_value).toBeNull();
+    }
+  });
+
+  it("默认价设置、区服单位和快照金额均须吻合，过期/缺年代/错库存不得采纳", () => {
+    for (const change of [
+      "settings",
+      "unit",
+      "amount",
+      "server",
+      "policy",
+      "age",
+      "old",
+      "capture",
+      "inventory",
+    ]) {
+      const value = baselineFixture();
+      const baseline = value.equipment.items[0].baselineEstimate!;
+      if (change === "settings")
+        value.profile.settings.equipmentBaselinePrices![70].weapon! += 10_000;
+      if (change === "unit") baseline.goldUnit! *= 10;
+      if (change === "amount") baseline.amount! += 1;
+      if (change === "server") baseline.serverId = "999";
+      if (change === "policy") baseline.policyVersion = "forged-policy";
+      if (change === "age") value.profile.settings.servers[0].age = null;
+      if (change === "old")
+        value.equipment.searchedAt = new Date(Date.now() - 25 * 3600_000).toISOString();
+      if (change === "capture") value.equipment.captureComplete = false;
+      if (change === "inventory") value.equipment.items[0].description += "\n伤害 +999";
+      const result = value.combine();
+      expect(result.estimated_value_range).toBeUndefined();
+      expect(result.estimated_price_difference).toBeUndefined();
+      expect(result.known_subtotal).toBe(value.bare.model_value);
+      expect(result.model_value).toBeNull();
+    }
+  });
+
+  it("默认价缺金价或报价单位时保留未定，人工修改后的来源明确标为预设", () => {
+    for (const field of ["goldPrice", "goldUnit"] as const) {
+      const value = baselineFixture();
+      value.profile.settings.servers[0][field] = null;
+      expect(value.combine().estimated_value_range).toBeUndefined();
+    }
+    const value = baselineFixture();
+    value.profile.settings.equipmentBaselinePrices![70].weapon! += 10_000;
+    Object.assign(value.equipment, equipmentPricingPlan(value.record, value.profile.settings));
+    expect(value.equipment.items[0].baselineEstimate?.source.basis).toBe("preset");
+    expect(value.combine().reason).toContain("人工预设价");
+  });
+});
+
 describe("相近配置报价与完整区间", () => {
   it("同一商品路径的伪造查询别名不能凑足3件，非商品URL不能提供完整区间", () => {
     const source = candidates([100, 100, 100]);

@@ -94,7 +94,7 @@ export function valuationPrompt(
 ) {
   const bare = calculateValuation(record, profile);
   const withEquipment = profile.equipmentSearch
-    ? combineEquipmentPricing(bare, record, equipmentPricing)
+    ? combineEquipmentPricing(bare, record, equipmentPricing, profile.settings)
     : bare;
   const withPets = profile.petSearch
     ? combinePetPricing(withEquipment, record, petPricing)
@@ -129,10 +129,10 @@ export function valuationPrompt(
     "以下参数是本批次实际使用的计价设置。只比较估值与挂牌价，不考虑费用、预算或买入折扣。null表示尚未提供，不能猜金价或排名。区服数据只匹配当前serverId。",
     JSON.stringify(pricingSettings),
     "自动区服参数的来源与读取时间：" + JSON.stringify(profile.marketSources || []),
-    "detail.valuation.fields 是已经从网页角色数据核对的字段，直接使用，不能重复补提或用标签原文覆盖。只有程序未识别的缺失事实才可补提；装备和宝宝参考价采用下方已核对的联网报价快照，缺规则和行情不能靠猜测解决。所有需要的角色事实都已核对时 extracted_facts 必须是空数组。",
+    "detail.valuation.fields 是已经从网页角色数据核对的字段，直接使用，不能重复补提或用标签原文覆盖。只有程序未识别的缺失事实才可补提；装备和宝宝参考价采用下方已保存的查价快照。baselineEstimate是程序识别普通环装/白板后的默认参考价或明确低值排除政策，并非实时挂牌价；金额为空仍是缺价，不能补成0或自行联网猜价。存在baselineInvalidReason的默认价已失效，只说明原因，不采用其中金额。所有需要的角色事实都已核对时 extracted_facts 必须是空数组。",
     "下方是初步计算，尚未识别的原文资料可通过 extracted_facts 补提后重新计算；不要仅复述待确认。补提仅支持神器套数、坐骑总数、进阶状态、主属性百分比，以及神器1至3的满槽/类型/总分、坐骑1至9的成长/进阶状态/主属性百分比。",
     "每条补提必须给出原文 JSON Pointer path 和逐字 quote。quote 须包含对应名称及冒号标记的值，或明确“共有N套神器/共有N只坐骑”；分项可引用“第N套神器/第N只坐骑”下的满槽、五行类型、总分、成长、进阶及主属性比例。进阶可引用“坐骑·已进阶”，明确“没有/未开启/未解锁神器”可提为神器套数0。标题空白、未看到、祥瑞数量不能作为不存在或坐骑总数的证据。没有可补提的事实时 extracted_facts 返回空数组。",
-    "decision必须符合程序价格关系：BUY表示挂牌低于精确参考估值，WATCH表示相等，PASS表示挂牌高于精确参考估值，NEED_INFO表示没有完整精确估值。采用相近配置时保留NEED_INFO，按estimated_value_range与estimated_comparison解释完整参考区间和挂牌差额；只有estimated_subtotal_range时仍是部分金额。这里不做购买建议。reason解释价差与范围；200字以内。缺资料或报价时明确缺什么，不猜完整价格。",
+    "decision必须符合程序价格关系：BUY表示挂牌低于精确参考估值，WATCH表示相等，PASS表示挂牌高于精确参考估值，NEED_INFO表示没有完整精确估值。采用相近配置或默认参考价时保留NEED_INFO，按estimated_value_range与estimated_comparison解释完整参考估值和挂牌差额；只有estimated_subtotal_range时仍是部分金额。estimated_sources含baseline时说明历史/预设参考价或低值排除政策，不能称实时报价。这里不做购买建议。reason解释价差与范围；200字以内。缺资料或报价时明确缺什么，不猜完整价格。",
     JSON.stringify({
       ...report,
       ...(report.equipment_pricing
@@ -189,7 +189,7 @@ export function validateValuation(
   const facts = validateValuationFacts(result.extracted_facts, record);
   const bare = calculateValuation(record, profile, facts);
   const withEquipment = profile.equipmentSearch
-    ? combineEquipmentPricing(bare, record, equipmentPricing)
+    ? combineEquipmentPricing(bare, record, equipmentPricing, profile.settings)
     : bare;
   const withPets = profile.petSearch
     ? combinePetPricing(withEquipment, record, petPricing)

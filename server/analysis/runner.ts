@@ -6,7 +6,7 @@ import type { PetPricingSnapshot } from "./pet-pricing";
 import { ANALYSIS_SCHEMA, validateAnalysis } from "./contract";
 import { AnalysisStore } from "./store";
 import { VALUATION_SCHEMA, validateValuation } from "./valuation-contract";
-import type { AnalysisProfile } from "./valuation-types";
+import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { CALCULATION_VERSION } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
 
@@ -15,6 +15,7 @@ export type AnalysisClient = {
   searchEquipment?: (
     record: SavedRoleRecord,
     signal: AbortSignal,
+    settings?: ValuationSettings,
   ) => Promise<EquipmentPricingSnapshot>;
   searchPets?: (record: SavedRoleRecord, signal: AbortSignal) => Promise<PetPricingSnapshot>;
   analyze: (
@@ -164,7 +165,7 @@ export class AnalysisRunner {
         try {
           this.store.beginEquipmentSearch(task, owner);
           if (!client.searchEquipment) throw new Error("装备联网查价尚未连接");
-          const snapshot = await client.searchEquipment(task.record, signal);
+          const snapshot = await client.searchEquipment(task.record, signal, task.profile.settings);
           signal.throwIfAborted();
           if (!this.store.owns(owner)) return;
           task = this.store.saveEquipmentPricing(task, snapshot, owner);

@@ -7,9 +7,14 @@ import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { marketServers } from "./market";
 import { SIMILAR_POLICY_VERSION } from "./pricing-estimate";
 import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "./valuation-settings";
+import {
+  DEFAULT_EQUIPMENT_BASELINE_PRICES,
+  EQUIPMENT_BASELINE_POLICY_VERSION,
+  type EquipmentBaselinePrices,
+} from "./equipment-baseline";
 
 export const PROMPT_FILE = resolve("prompts/role-valuation.md");
-export const CALCULATION_VERSION = "price-comparison-v8";
+export const CALCULATION_VERSION = "price-comparison-v9";
 // Update alongside the calculator when changing pricing sections III through VIII.
 const PRICING_HASH = "0b29ddcd68d656a7749b447604eb1c5eae6903c72d74fc3cb1876336a55f5ddf";
 export const DEFAULT_SETTINGS: ValuationSettings = {
@@ -18,6 +23,7 @@ export const DEFAULT_SETTINGS: ValuationSettings = {
   budget: null,
   extraCost: null,
   ...RECOMMENDED_RULES,
+  equipmentBaselinePrices: DEFAULT_EQUIPMENT_BASELINE_PRICES,
   servers: [],
 };
 export function normalizeSettings(input: unknown): ValuationSettings {
@@ -83,7 +89,33 @@ export function normalizeSettings(input: unknown): ValuationSettings {
     .sort((left, right) => left.serverId.localeCompare(right.serverId));
   if (new Set(servers.map((row) => row.serverId)).size !== servers.length)
     throw new Error("同一服务器只能配置一次");
+  const baseline = value.equipmentBaselinePrices ?? DEFAULT_EQUIPMENT_BASELINE_PRICES;
+  if (!baseline || typeof baseline !== "object" || Array.isArray(baseline))
+    throw new Error("普通装备默认价格格式错误");
+  const equipmentBaselinePrices = Object.fromEntries(
+    Object.keys(DEFAULT_EQUIPMENT_BASELINE_PRICES).map((level) => {
+      const row = (baseline as Record<string, unknown>)[level];
+      if (!row || typeof row !== "object" || Array.isArray(row))
+        throw new Error("普通装备默认价格缺少等级 " + level);
+      const prices = Object.fromEntries(
+        ["weapon", "armor"].map((kind) => {
+          const amount = (row as Record<string, unknown>)[kind];
+          if (
+            amount !== null &&
+            (typeof amount !== "number" ||
+              !Number.isSafeInteger(amount) ||
+              amount <= 0 ||
+              amount > 1e9)
+          )
+            throw new Error("普通装备默认价格应为正整数梦幻币或留空");
+          return [kind, amount];
+        }),
+      );
+      return [level, prices];
+    }),
+  ) as EquipmentBaselinePrices;
   return {
+    equipmentBaselinePrices,
     b,
     a,
     budget: number("budget"),
@@ -136,6 +168,7 @@ export function createProfile(
         CALCULATION_VERSION,
         "valuation-schema-v4",
         SIMILAR_POLICY_VERSION,
+        EQUIPMENT_BASELINE_POLICY_VERSION,
         equipmentSearch,
         petSearch,
       ]),

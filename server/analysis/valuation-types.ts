@@ -2,6 +2,7 @@ import type { Evidence } from "./types";
 
 export type Decision = "BUY" | "WATCH" | "PASS" | "NEED_INFO" | "OUT_OF_SCOPE";
 export type ValuationSettings = {
+  equipmentBaselinePrices?: import("./equipment-baseline").EquipmentBaselinePrices;
   b: number | null;
   a: number | null;
   budget: number | null;
@@ -40,6 +41,7 @@ export type AnalysisProfile = {
   hash: string;
 };
 export type ValuationItem = {
+  referenceBasis?: "baseline" | "excluded";
   name: string;
   input: string;
   formula: string;
@@ -64,6 +66,7 @@ export type ValuationResult = {
   estimated_price_difference?: import("./pricing-estimate").PriceRange;
   estimated_comparison?: "below" | "within" | "above";
   estimate_missing_count?: number;
+  estimated_sources?: Array<"similar" | "baseline">;
   asking_price: number | null;
   extra_cost: number | null;
   total_cost: number | null;

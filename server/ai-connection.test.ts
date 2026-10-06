@@ -272,11 +272,16 @@ describe("AI 连接验证", () => {
     const snapshot = await client.searchEquipment(record, signal);
     expect(snapshot.provider).toBe("browser");
     expect(mocks.createEquipmentSource).toHaveBeenCalledWith(signal);
-    expect(mocks.searchEquipmentPrices).toHaveBeenCalledWith(record, signal, {
-      findCandidates: mocks.findCandidates,
-      readSource: mocks.readSource,
-      close: mocks.closeSource,
-    });
+    expect(mocks.searchEquipmentPrices).toHaveBeenCalledWith(
+      record,
+      signal,
+      {
+        findCandidates: mocks.findCandidates,
+        readSource: mocks.readSource,
+        close: mocks.closeSource,
+      },
+      undefined,
+    );
     expect(mocks.closeSource).toHaveBeenCalledOnce();
     expect(mocks.codexAccount).not.toHaveBeenCalled();
     expect(mocks.codexModel).not.toHaveBeenCalled();
@@ -296,6 +301,41 @@ describe("AI 连接验证", () => {
     expect(mocks.codexModel).toHaveBeenCalledTimes(modelCalls);
     expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
     expect(mocks.closeSource).toHaveBeenCalledOnce();
+  });
+
+  it("普通环装与待补默认价只走程序规则，不创建浏览器或触发扫码", async () => {
+    const { DEFAULT_SETTINGS } = await import("./analysis/profile");
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("codex");
+    const record = equipmentRecord();
+    const item = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
+    item.category = "人物装备 · 武器";
+    item.description = "等级：70\n命中：255\n伤害：220\n耐久：200\n修理失败：0";
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      servers: [
+        {
+          serverId: String(record.listing.serverId),
+          age: "older" as const,
+          rank: 70,
+          goldPrice: 210,
+          goldUnit: 30000000,
+          baselineUnitConfirmed: true,
+        },
+      ],
+    };
+    const signal = new AbortController().signal;
+    await client.searchEquipment(record, signal, settings);
+    item.description = item.description
+      .replace("70", "60")
+      .replace("255", "220")
+      .replace("伤害：220", "伤害：190");
+    await client.searchEquipment(record, signal, settings);
+    expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
+    expect(mocks.closeSource).not.toHaveBeenCalled();
+    expect(mocks.searchEquipmentPrices).toHaveBeenCalledTimes(2);
+    expect(mocks.searchEquipmentPrices.mock.calls[0][3]).toBe(settings);
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
   });
 
   it("缺资料、明确空装备或均不可交易时不创建浏览器查询", async () => {

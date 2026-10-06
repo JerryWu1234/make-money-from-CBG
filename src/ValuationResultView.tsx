@@ -38,10 +38,18 @@ export function valuationPriceSummary(result: ValuationResult) {
       value: result.model_value,
     };
   if (result.estimated_value_range)
-    return { label: "完整参考估值区间", value: null, range: result.estimated_value_range };
+    return {
+      label: result.estimated_sources?.includes("baseline")
+        ? "完整参考估值区间（含默认参考价）"
+        : "完整参考估值区间",
+      value: null,
+      range: result.estimated_value_range,
+    };
   if (result.estimated_subtotal_range)
     return {
-      label: "部分参考价区间（仍有缺项）",
+      label: result.estimated_sources?.includes("baseline")
+        ? "部分参考价区间（含默认参考价，仍有缺项）"
+        : "部分参考价区间（仍有缺项）",
       value: null,
       range: result.estimated_subtotal_range,
     };
@@ -73,6 +81,9 @@ export function ValuationResultView({
   previousSettings?: boolean;
 }) {
   const amount = valuationPriceSummary(result);
+  const hasBaseline =
+    result.items.some((item) => item.referenceBasis) ||
+    result.equipment_pricing?.items.some((item) => item.baselineEstimate);
   const comparison = result.comparison_mode === "listing-only";
   const metrics: [string, number][] = [];
   if (amount.value !== null) metrics.push([amount.label, amount.value]);
@@ -144,7 +155,15 @@ export function ValuationResultView({
           : "按裸号规则估值，装备、灵饰、召唤兽个体和锦衣未计价。"}
       </p>
       {comparison && <p>差额为正表示估值高于挂牌价，为负表示挂牌价更高。</p>}
-      {result.estimated_value_range && (
+      {amount.range && result.estimated_sources?.includes("baseline") && (
+        <p className="analysis-pending-note">
+          {result.estimated_sources.includes("similar")
+            ? "参考区间包含相近配置挂牌样本和普通装备默认参考价；"
+            : "参考金额包含普通装备默认参考价；"}
+          默认价来自历史资料或人工预设，未实时核实藏宝阁报价，不能视为精确成交价值。
+        </p>
+      )}
+      {result.estimated_value_range && !result.estimated_sources?.includes("baseline") && (
         <p className="analysis-pending-note">
           这是基于相近配置挂牌样本的完整参考区间，配置差异已列明，不能视为精确成交价值。
         </p>
@@ -220,13 +239,25 @@ export function ValuationResultView({
       <h3>估值明细</h3>
       <p>
         已核算分项小计：{valuationMoney(result.known_subtotal)}
-        。小计包含已识别项目，未完成的项目仍需补齐。
+        {hasBaseline
+          ? "。已核算小计不含另列默认参考价或相近区间；未完成的项目仍需补齐。"
+          : "。小计包含已识别项目，未完成的项目仍需补齐。"}
       </p>
       {result.items.map((item) => (
         <section key={item.name} className="analysis-evidence-card">
           <header>
             <strong>{item.name}</strong>
-            <span>{item.amount === null ? "缺资料或计价设置" : valuationMoney(item.amount)}</span>
+            <span>
+              {item.referenceBasis === "excluded"
+                ? "低值未计入"
+                : item.referenceBasis === "baseline"
+                  ? item.amount === null
+                    ? "默认价或金价待补"
+                    : "默认参考 " + valuationMoney(item.amount)
+                  : item.amount === null
+                    ? "缺资料或计价设置"
+                    : valuationMoney(item.amount)}
+            </span>
           </header>
           <p>输入：{item.input}</p>
           <p>{item.formula}</p>

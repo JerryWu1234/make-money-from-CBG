@@ -2,6 +2,58 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { AnalysisProfile, ValuationSettings } from "../server/analysis/valuation-types";
 import { RECOMMENDED_RULES } from "../server/analysis/valuation-settings";
+import {
+  DEFAULT_EQUIPMENT_BASELINE_PRICES,
+  type EquipmentBaselinePrices,
+} from "../server/analysis/equipment-baseline";
+
+export function EquipmentBaselinePriceFields({
+  prices = DEFAULT_EQUIPMENT_BASELINE_PRICES,
+  onChange,
+}: {
+  prices?: EquipmentBaselinePrices;
+  onChange: (prices: EquipmentBaselinePrices) => void;
+}) {
+  return (
+    <details className="analysis-settings-section">
+      <summary>普通装备默认参考价（梦幻币）</summary>
+      <p>
+        60–80级普通环装、90–100级普通白板采用默认参考价，按角色区服金价折算成人民币。预设来自历史资料或人工参数，不是实时藏宝阁报价；修改后会标为人工预设。
+      </p>
+      <p>60、90、100级默认留空待补。70、80级历史默认值仅适用于三年外区服；其他年代需自行设置。</p>
+      <p>只填大于0的梦幻币整数。留空表示暂不计价，保留待补；低值装备会保留卡片并标明未计入。</p>
+      {(["60", "70", "80", "90", "100"] as const).map((level) => (
+        <fieldset key={level}>
+          <legend>
+            {level}级{Number(level) <= 80 ? "环装" : "普通白板"}
+          </legend>
+          <div className="analysis-settings-grid">
+            {(["weapon", "armor"] as const).map((kind) => (
+              <label key={kind}>
+                {level}级{kind === "weapon" ? "武器" : "防具"}默认价（梦幻币）
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={prices[level][kind] ?? ""}
+                  onChange={(event) =>
+                    onChange({
+                      ...prices,
+                      [level]: {
+                        ...prices[level],
+                        [kind]: event.target.value === "" ? null : Number(event.target.value),
+                      },
+                    })
+                  }
+                />
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      ))}
+    </details>
+  );
+}
 
 type SettingsResponse = {
   profile: AnalysisProfile;
@@ -118,6 +170,17 @@ export function AnalysisSettings({
     );
   async function save() {
     if (!source || !settings || busy) return;
+    if (
+      Object.values(settings.equipmentBaselinePrices || DEFAULT_EQUIPMENT_BASELINE_PRICES).some(
+        (row) =>
+          Object.values(row).some(
+            (value) => value !== null && (!Number.isSafeInteger(value) || value <= 0),
+          ),
+      )
+    ) {
+      setError("普通装备默认价须为大于0的梦幻币整数；留空表示未计价。");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -174,7 +237,7 @@ export function AnalysisSettings({
         <>
           <h3>计价方式</h3>
           <p className="analysis-pending-note">
-            分析前自动查找装备和宝宝的全服同类挂牌样本。强壮神速按当前等级计价，查价来源和采用的价格会保存在结果里。
+            普通环装采用默认参考价，其他装备和宝宝查找全服同类挂牌样本。强壮神速按当前等级计价，参考依据和采用的价格会保存在结果里。
           </p>
           <button
             type="button"
@@ -255,6 +318,10 @@ export function AnalysisSettings({
               确认多只进阶坐骑分别计价后全额相加
             </label>
           </details>
+          <EquipmentBaselinePriceFields
+            prices={settings.equipmentBaselinePrices}
+            onChange={(prices) => set("equipmentBaselinePrices", prices)}
+          />
           <details className="analysis-settings-section">
             <summary>全服行情：自动匹配每件商品的区服</summary>
             <p>

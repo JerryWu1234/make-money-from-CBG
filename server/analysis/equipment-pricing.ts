@@ -7,6 +7,12 @@ import { parseEquipmentAttributes } from "./equip-attributes";
 import { observedEquipmentCategory } from "../crawler/compact";
 import { matchEquipmentAttributes } from "./equipment-match";
 import { buildSimilarEstimate, type SimilarEstimate } from "./pricing-estimate";
+import {
+  makeEquipmentBaseline,
+  validateEquipmentBaseline,
+  type BaselineEstimate,
+} from "./equipment-baseline";
+import type { ValuationSettings } from "./valuation-types";
 
 export type EquipmentCandidate = {
   url: string;
@@ -36,6 +42,8 @@ export type EquipmentPricingItem = {
   candidates: EquipmentCandidate[];
   issues: string[];
   similarEstimate?: SimilarEstimate;
+  baselineEstimate?: BaselineEstimate;
+  baselineInvalidReason?: string;
 };
 export type EquipmentPricingSnapshot = {
   version: 1;
@@ -419,11 +427,11 @@ export type Search = (
   schema: unknown,
   signal: AbortSignal,
 ) => Promise<{ text: string; queries: string[]; searchItems?: unknown[]; usage?: unknown }>;
-export async function searchEquipmentPrices(
+/** Apply explicit default/exclusion policies before deciding whether a browser is needed. */
+export function equipmentPricingPlan(
   record: SavedRoleRecord,
-  signal: AbortSignal,
-  source: EquipmentSource,
-): Promise<EquipmentPricingSnapshot> {
+  settings?: ValuationSettings,
+): EquipmentPricingSnapshot {
   const inventory = equipmentInventory(record);
   const snapshot: EquipmentPricingSnapshot = {
     version: 1,
@@ -439,9 +447,38 @@ export async function searchEquipmentPrices(
     items: inventory.items.map((item) => ({ ...item, query: "" })),
     issues: inventory.issues,
   };
+  if (inventory.captureComplete && settings) {
+    for (const item of snapshot.items) {
+      const baseline = makeEquipmentBaseline(item, String(record.listing.serverId), settings);
+      if (!baseline) continue;
+      item.baselineEstimate = baseline;
+      item.issues = [baseline.note];
+    }
+    if (snapshot.items.some((item) => item.baselineEstimate)) {
+      snapshot.requestText = JSON.stringify({
+        baselineItems: snapshot.items.filter((item) => item.baselineEstimate),
+        prices: settings.equipmentBaselinePrices,
+        server: settings.servers.find(
+          (server) => server.serverId === String(record.listing.serverId),
+        ),
+      });
+      snapshot.requestHash = hash(snapshot.requestText);
+    }
+  }
+  return snapshot;
+}
+export async function searchEquipmentPrices(
+  record: SavedRoleRecord,
+  signal: AbortSignal,
+  source: EquipmentSource,
+  settings?: ValuationSettings,
+): Promise<EquipmentPricingSnapshot> {
+  const snapshot = equipmentPricingPlan(record, settings);
   signal.throwIfAborted();
-  if (!inventory.captureComplete) return snapshot;
-  const searchable = snapshot.items.filter((item) => item.status === "no_match");
+  if (!snapshot.captureComplete) return snapshot;
+  const searchable = snapshot.items.filter(
+    (item) => item.status === "no_match" && !item.baselineEstimate,
+  );
   if (!searchable.length) {
     snapshot.total = snapshot.items.length ? null : 0;
     return snapshot;
@@ -451,7 +488,9 @@ export async function searchEquipmentPrices(
     candidates: [],
     issues: [...item.issues],
   }));
-  snapshot.requestText = JSON.stringify(lookupItems);
+  snapshot.requestText = snapshot.requestText
+    ? JSON.stringify({ ...JSON.parse(snapshot.requestText), lookupItems })
+    : JSON.stringify(lookupItems);
   snapshot.requestHash = hash(snapshot.requestText);
   const response = await source.findCandidates(lookupItems, signal);
   signal.throwIfAborted();
@@ -565,15 +604,41 @@ export function combineEquipmentPricing(
   bare: ValuationResult,
   record: SavedRoleRecord,
   pricing?: EquipmentPricingSnapshot,
+  settings?: ValuationSettings,
 ): ValuationResult {
   const inventory = equipmentInventory(record);
   const valid =
     pricing?.inputHash === inventory.inputHash &&
     inventoryMatchesSnapshot(pricing, inventory.items);
-  const snapshot = valid ? pricing : undefined;
+  let snapshot = valid ? pricing : undefined;
   const age = snapshot ? Date.now() - Date.parse(snapshot.searchedAt) : Infinity;
   const fresh = age >= -60_000 && age < 24 * 60 * 60 * 1000;
   const verified = validateExactPricing(snapshot, inventory.items);
+  const baselineFor = (item: EquipmentPricingItem) =>
+    inventory.captureComplete &&
+    snapshot?.captureComplete &&
+    fresh &&
+    verified &&
+    settings &&
+    validateEquipmentBaseline(item, String(record.listing.serverId), settings)
+      ? item.baselineEstimate
+      : undefined;
+  if (snapshot)
+    snapshot = {
+      ...snapshot,
+      items: snapshot.items.map((item) => {
+        if (!item.baselineEstimate) return item;
+        const { baselineInvalidReason: _invalidReason, ...original } = item;
+        return baselineFor(item)
+          ? original
+          : {
+              ...original,
+              baselineInvalidReason: !fresh
+                ? "默认参考价记录已过期，请开始新批次重新分析。"
+                : "默认参考价与本批设置或装备资料不一致，请开始新批次重新分析。",
+            };
+      }),
+    };
   const complete =
     inventory.captureComplete &&
     !!snapshot?.captureComplete &&
@@ -590,7 +655,9 @@ export function combineEquipmentPricing(
     missing.push(
       ...snapshot.issues,
       ...snapshot.items.flatMap((item) =>
-        item.status === "priced" ? [] : [item.name + "：" + item.issues.join("；")],
+        item.status === "priced" || baselineFor(item)?.amount != null
+          ? []
+          : [item.name + "：" + (item.baselineInvalidReason || item.issues.join("；"))],
       ),
     );
   if (snapshot && !fresh) missing.push("装备行情已过期，需要开始新批次重新联网查价");
@@ -600,8 +667,17 @@ export function combineEquipmentPricing(
     suggestions.unshift("开始新批次重新联网查价；继续旧批次会保留当时的搜索快照。");
   if (!inventory.captureComplete)
     suggestions.unshift("先在采集页补齐当前装备资料，再开始联网分析。");
-  else if (!complete)
-    suggestions.unshift("查看装备查价模块的候选与匹配原因；可靠同类报价不足时继续保留未定价。");
+  else if (!complete) {
+    if (snapshot?.items.some((item) => baselineFor(item)?.amount === null))
+      suggestions.unshift("在分析设置补充普通装备默认价及本服金价；留空的默认价仍保留待补。");
+    if (
+      !snapshot ||
+      snapshot.items.some((item) => item.status !== "priced" && !item.baselineEstimate)
+    )
+      suggestions.unshift("查看装备查价模块的候选与匹配原因；可靠同类报价不足时继续保留未定价。");
+    if (snapshot?.items.some((item) => item.baselineInvalidReason))
+      suggestions.unshift("默认参考价已失效，请开始新批次按当前资料和设置重新分析。");
+  }
   const reason =
     bare.decision === "OUT_OF_SCOPE"
       ? bare.reason
@@ -633,25 +709,60 @@ export function combineEquipmentPricing(
     ),
     items: [
       ...bare.items,
-      ...(snapshot?.items || []).map((item, index) => ({
-        name: "装备：" + item.name + "（" + item.key + "）",
-        input: item.description,
-        formula:
-          "已核对同配置装备挂牌价的中位数（" +
-          item.candidates.filter(
-            (candidate) => candidate.verified && candidate.matchType !== "similar",
-          ).length +
-          "条样本）",
-        amount: fresh && verified ? item.referencePrice : null,
-        confirmed: fresh && verified && item.status === "priced",
-        evidence: item.candidates
-          .filter((candidate) => candidate.verified && candidate.matchType !== "similar")
-          .map((candidate) => ({
-            path: "/equipment_pricing/items/" + index + "/candidates",
-            value: candidate.quote,
-            reason: candidate.url + " · " + candidate.fetchedAt,
-          })),
-      })),
+      ...(snapshot?.items || []).map((item, index) => {
+        const baseline = baselineFor(item);
+        return {
+          ...(baseline
+            ? {
+                referenceBasis:
+                  baseline.kind === "ignored" ? ("excluded" as const) : ("baseline" as const),
+              }
+            : {}),
+          name: "装备：" + item.name + "（" + item.key + "）",
+          input: item.description,
+          formula: baseline
+            ? baseline.kind === "ignored"
+              ? "普通低值装备按明确排除策略未计入，保留记录；不表示市场售价为0。"
+              : "普通装备默认参考价（非实时行情）：" +
+                (baseline.gameCurrency === null
+                  ? "默认价待补"
+                  : baseline.amount === null
+                    ? baseline.gameCurrency + "梦幻币，人民币换算待补"
+                    : baseline.gameCurrency +
+                      "梦幻币 ÷ " +
+                      baseline.goldUnit +
+                      " × ¥" +
+                      baseline.goldPrice) +
+                "；" +
+                baseline.source.label
+            : item.baselineInvalidReason
+              ? "默认参考价已失效：" + item.baselineInvalidReason
+              : "已核对同配置装备挂牌价的中位数（" +
+                item.candidates.filter(
+                  (candidate) => candidate.verified && candidate.matchType !== "similar",
+                ).length +
+                "条样本）",
+          amount: baseline ? baseline.amount : fresh && verified ? item.referencePrice : null,
+          confirmed: fresh && verified && item.status === "priced",
+          evidence: baseline
+            ? [
+                {
+                  path: "/equipment_pricing/items/" + index + "/baselineEstimate",
+                  value: JSON.stringify(baseline),
+                  reason:
+                    baseline.source.label +
+                    (baseline.source.publishedAt ? " · " + baseline.source.publishedAt : ""),
+                },
+              ]
+            : item.candidates
+                .filter((candidate) => candidate.verified && candidate.matchType !== "similar")
+                .map((candidate) => ({
+                  path: "/equipment_pricing/items/" + index + "/candidates",
+                  value: candidate.quote,
+                  reason: candidate.url + " · " + candidate.fetchedAt,
+                })),
+        };
+      }),
     ],
     missing_fields: [...new Set(missing)],
     suggestions: [...new Set(suggestions)],

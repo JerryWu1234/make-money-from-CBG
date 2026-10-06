@@ -17,7 +17,8 @@ import {
 } from "./ai/deepseek";
 import type { AiConnectionStatus, AiModelOptions, AiProvider, AiStatus } from "./ai/types";
 import type { SavedRoleRecord } from "./crawler/types";
-import { equipmentInventory, searchEquipmentPrices } from "./analysis/equipment-pricing";
+import { equipmentPricingPlan, searchEquipmentPrices } from "./analysis/equipment-pricing";
+import type { ValuationSettings } from "./analysis/valuation-types";
 import { createEquipmentSource } from "./analysis/browser-equipment-source";
 import { petInventory, searchPetPricing } from "./analysis/pet-pricing";
 import { createPetSource } from "./analysis/browser-pet-source";
@@ -206,16 +207,23 @@ const unusedEquipmentSource = {
     throw new Error("装备资料不足或无需查价，不应读取报价网页");
   },
 };
-async function searchEquipment(record: SavedRoleRecord, signal: AbortSignal) {
+async function searchEquipment(
+  record: SavedRoleRecord,
+  signal: AbortSignal,
+  settings?: ValuationSettings,
+) {
   try {
     signal.throwIfAborted();
-    const inventory = equipmentInventory(record);
-    if (!inventory.captureComplete || !inventory.items.some((item) => item.status === "no_match"))
-      return await searchEquipmentPrices(record, signal, unusedEquipmentSource);
+    const plan = equipmentPricingPlan(record, settings);
+    if (
+      !plan.captureComplete ||
+      !plan.items.some((item) => item.status === "no_match" && !item.baselineEstimate)
+    )
+      return await searchEquipmentPrices(record, signal, unusedEquipmentSource, settings);
     const source = await createEquipmentSource(signal);
     try {
       signal.throwIfAborted();
-      return await searchEquipmentPrices(record, signal, source);
+      return await searchEquipmentPrices(record, signal, source, settings);
     } finally {
       await source.close();
     }

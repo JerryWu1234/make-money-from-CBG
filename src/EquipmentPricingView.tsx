@@ -29,26 +29,65 @@ export function EquipmentPricingView({
   const label = (status: keyof typeof statusLabels) =>
     asset === "宝宝" ? statusLabels[status].replaceAll("装备", "宝宝") : statusLabels[status];
   const browserQuery = snapshot.provider === "browser";
+  const queried = snapshot.queries.length > 0;
+  const baselines = snapshot.items.flatMap((item) =>
+    item.baselineEstimate && item.baselineInvalidReason === undefined
+      ? [item.baselineEstimate]
+      : [],
+  );
+  const hasBaseline = snapshot.items.some((item) => item.baselineEstimate);
+  const exactCount = snapshot.items.reduce(
+    (sum, item) =>
+      sum +
+      item.candidates.filter((candidate) => candidate.verified && candidate.matchType !== "similar")
+        .length,
+    0,
+  );
+  const pricedBaselines = baselines.filter(
+    (item) => item.kind !== "ignored" && item.amount !== null && item.amount > 0,
+  );
+  const baselineTotal = pricedBaselines.reduce((sum, item) => sum + item.amount!, 0);
+  const pendingBaselines = baselines.filter(
+    (item) => item.kind !== "ignored" && item.amount === null,
+  ).length;
   const outdated = Date.now() - Date.parse(snapshot.searchedAt) >= 24 * 60 * 60 * 1000;
   return (
-    <section aria-label={asset + "联网查价"}>
-      <h3>{asset}联网查价</h3>
-      {browserQuery && <p>查价方式：程序通过已登录藏宝阁查询，AI只接收核实后的结果。</p>}
-      <p>相近商品的网页挂牌参考价，不代表实际成交价。</p>
+    <section aria-label={asset + (queried ? "联网查价" : "查价")}>
+      <h3>
+        {asset}
+        {queried ? "联网查价" : "查价"}
+      </h3>
+      {browserQuery && queried && <p>查价方式：程序通过已登录藏宝阁查询，AI只接收核实后的结果。</p>}
+      {hasBaseline && <p>普通装备默认参考价来自历史资料或人工预设，未实时核实藏宝阁报价。</p>}
+      {queried && <p>相近商品的网页挂牌参考价，不代表实际成交价。</p>}
       <p>
-        {browserQuery ? "查询时间" : "搜索时间"}：{readTime(snapshot.searchedAt)}
+        {queried ? (browserQuery ? "查询时间" : "搜索时间") : "参考价记录时间"}：
+        {readTime(snapshot.searchedAt)}
       </p>
       {outdated && (
         <p className="analysis-pending-note">
-          这是超过24小时的历史报价。请开始新批次重新查价；继续旧批次保留当时快照。
+          这是超过24小时的历史快照。请开始新批次重新核对；继续旧批次保留当时资料。
         </p>
       )}
-      <p>
-        {snapshot.total !== null
-          ? asset + "参考价合计："
-          : "已核实" + asset + "小计（非完整总价）："}
-        {valuationMoney(snapshot.total ?? snapshot.knownTotal)}
-      </p>
+      {hasBaseline && snapshot.total === null && snapshot.knownTotal === 0 ? (
+        <p>本次没有已核实同配置挂牌参考价；默认参考价另列。</p>
+      ) : (
+        <p>
+          {snapshot.total !== null
+            ? asset + "参考价合计："
+            : "已核实" + asset + "小计（非完整总价）："}
+          {valuationMoney(snapshot.total ?? snapshot.knownTotal)}
+        </p>
+      )}
+      {hasBaseline && exactCount > 0 && (
+        <p>以上仅含已核实同配置挂牌参考价，不含普通装备默认参考价或相近配置区间。</p>
+      )}
+      {!!pricedBaselines.length && (
+        <p>
+          默认参考价小计（非实时挂牌价）：{valuationMoney(baselineTotal)} · {pricedBaselines.length}
+          件{pendingBaselines ? `，另有${pendingBaselines}件待补价` : ""}。
+        </p>
+      )}
       {!snapshot.captureComplete && (
         <p className="analysis-pending-note">{asset}资料尚未完整，未采到的部分不会按0计价。</p>
       )}
@@ -69,100 +108,181 @@ export function EquipmentPricingView({
           ))}
         </ul>
       )}
-      {snapshot.items.map((item) => (
-        <section key={item.key} className="analysis-evidence-card">
-          <header>
-            <strong>
-              {item.name}
-              {item.level !== null ? ` · ${item.level}级` : ""}
-            </strong>
-            <span>
-              {item.status === "priced"
-                ? valuationMoney(item.referencePrice)
-                : item.similarEstimate?.range
-                  ? valuationRangeMoney(item.similarEstimate.range)
-                  : label(item.status)}
-            </span>
-          </header>
-          <p>{item.similarEstimate?.range ? "相近配置参考区间" : label(item.status)}</p>
-          <p>
-            同配置挂牌样本：
-            {
-              item.candidates.filter(
-                (candidate) => candidate.verified && candidate.matchType !== "similar",
-              ).length
-            }
-            条。
-            {item.similarEstimate && " 相近配置样本：" + item.similarEstimate.sampleCount + "条。"}
-          </p>
-          {item.status === "priced" &&
-            item.candidates.filter(
-              (candidate) => candidate.verified && candidate.matchType !== "similar",
-            ).length === 1 && (
-              <p className="analysis-pending-note">仅1条挂牌样本，参考范围有限。</p>
-            )}
-          {item.similarEstimate && (
-            <ul>
-              {item.similarEstimate.issues.map((issue) => (
-                <li key={issue}>{issue}</li>
-              ))}
-            </ul>
-          )}
-          <p>
-            {item.category} · {item.description}
-          </p>
-          <p>
-            {browserQuery ? "筛选条件" : "搜索关键词"}：{item.query || "资料不足，未发起查价"}
-          </p>
-          {!!item.issues.length && (
-            <ul>
-              {item.issues.map((issue, index) => (
-                <li key={index}>{issue}</li>
-              ))}
-            </ul>
-          )}
-          {item.candidates.map((candidate, index) => {
-            const link = safeLink(candidate.url);
-            return (
-              <details key={index}>
-                <summary>
-                  {candidate.title} ·{" "}
-                  {candidate.verified
-                    ? candidate.matchType === "similar"
-                      ? "相近配置，已核实来源"
-                      : "同配置，已核实来源"
-                    : "未采用"}
-                </summary>
-                <p className="analysis-detail-links">
-                  {link ? (
-                    <a href={link} target="_blank" rel="noreferrer">
-                      打开来源网页
+      {snapshot.items.map((item) => {
+        const baseline = item.baselineEstimate;
+        const baselineInvalid = item.baselineInvalidReason !== undefined;
+        const itemIssues = item.issues.filter((issue) => issue.trim() !== baseline?.note.trim());
+        const baselineLink =
+          baseline?.source.basis === "historical" && baseline.source.url
+            ? safeLink(baseline.source.url)
+            : null;
+        const baselineLabel = baseline?.kind === "ignored" ? "低值未计入" : "默认参考价";
+        return (
+          <section key={item.key} className="analysis-evidence-card">
+            <header>
+              <strong>
+                {item.name}
+                {item.level !== null ? ` · ${item.level}级` : ""}
+              </strong>
+              <span>
+                {baselineInvalid
+                  ? "默认参考价已失效"
+                  : item.status === "priced"
+                    ? valuationMoney(item.referencePrice)
+                    : baseline
+                      ? baseline.kind === "ignored"
+                        ? "低值未计入"
+                        : baseline.amount !== null
+                          ? valuationMoney(baseline.amount)
+                          : "默认参考价待补"
+                      : item.similarEstimate?.range
+                        ? valuationRangeMoney(item.similarEstimate.range)
+                        : label(item.status)}
+              </span>
+            </header>
+            <p>
+              {baselineInvalid
+                ? "默认参考价已失效"
+                : baseline
+                  ? baselineLabel
+                  : item.similarEstimate?.range
+                    ? "相近配置参考区间"
+                    : label(item.status)}
+            </p>
+            {baseline && (
+              <>
+                {baselineInvalid && (
+                  <p className="analysis-pending-note">
+                    {item.baselineInvalidReason || "默认参考价核验未通过。"}
+                    请按当前资料和设置重新分析。
+                  </p>
+                )}
+                {!baselineInvalid && baseline.kind !== "ignored" && (
+                  <p>
+                    梦幻币参考价：
+                    {baseline.gameCurrency === null
+                      ? "未设置默认价，保留待补"
+                      : baseline.gameCurrency.toLocaleString("zh-CN") + "梦幻币"}
+                    ；人民币参考价：{valuationMoney(baseline.amount)}。
+                  </p>
+                )}
+                <p>
+                  {baselineInvalid ? "原参考依据（已失效，未采用）：" : "参考依据："}
+                  {baseline.source.basis === "historical"
+                    ? "历史资料"
+                    : baseline.source.basis === "preset"
+                      ? "人工预设"
+                      : "低值排除"}
+                  {baseline.source.basis === "historical" && baseline.source.publishedAt
+                    ? " · " + baseline.source.publishedAt
+                    : ""}{" "}
+                  ·{" "}
+                  {baselineLink ? (
+                    <a href={baselineLink} target="_blank" rel="noreferrer">
+                      {baseline.source.label}
                     </a>
                   ) : (
-                    "来源链接无效"
+                    baseline.source.label
                   )}
-                  {" · "}
-                  {candidate.priceType === "listing" ? "网页挂牌价" : "价格类型未确认"}：
-                  {valuationMoney(candidate.price)}
                 </p>
-                <p>读取时间：{readTime(candidate.fetchedAt)}</p>
-                <p>核实说明：{candidate.reason}</p>
-                {!!candidate.differences?.length && (
-                  <div>
-                    <p>样本配置差异（未据此折价）：</p>
-                    <ul>
-                      {candidate.differences.map((difference, differenceIndex) => (
-                        <li key={differenceIndex}>{difference}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                <pre>{candidate.quote}</pre>
-              </details>
-            );
-          })}
-        </section>
-      ))}
+                {!baselineInvalid &&
+                  baseline.kind !== "ignored" &&
+                  baseline.gameCurrency !== null && (
+                    <p>
+                      折算区服：{baseline.serverId}；
+                      {baseline.goldPrice !== null && baseline.goldUnit !== null
+                        ? `金价${valuationMoney(baseline.goldPrice)} / ${baseline.goldUnit.toLocaleString("zh-CN")}梦幻币`
+                        : "本服金价或报价单位缺失，人民币参考价待补"}
+                      。
+                    </p>
+                  )}
+                {!baselineInvalid && <p>{baseline.note}</p>}
+              </>
+            )}
+            {!baseline && (
+              <p>
+                同配置挂牌样本：
+                {
+                  item.candidates.filter(
+                    (candidate) => candidate.verified && candidate.matchType !== "similar",
+                  ).length
+                }
+                条。
+                {item.similarEstimate &&
+                  " 相近配置样本：" + item.similarEstimate.sampleCount + "条。"}
+              </p>
+            )}
+            {item.status === "priced" &&
+              item.candidates.filter(
+                (candidate) => candidate.verified && candidate.matchType !== "similar",
+              ).length === 1 && (
+                <p className="analysis-pending-note">仅1条挂牌样本，参考范围有限。</p>
+              )}
+            {item.similarEstimate && (
+              <ul>
+                {item.similarEstimate.issues.map((issue) => (
+                  <li key={issue}>{issue}</li>
+                ))}
+              </ul>
+            )}
+            <p>
+              {item.category} · {item.description}
+            </p>
+            {!baseline && (
+              <p>
+                {browserQuery ? "筛选条件" : "搜索关键词"}：{item.query || "资料不足，未发起查价"}
+              </p>
+            )}
+            {!!itemIssues.length && (
+              <ul>
+                {itemIssues.map((issue, index) => (
+                  <li key={index}>{issue}</li>
+                ))}
+              </ul>
+            )}
+            {item.candidates.map((candidate, index) => {
+              const link = safeLink(candidate.url);
+              return (
+                <details key={index}>
+                  <summary>
+                    {candidate.title} ·{" "}
+                    {candidate.verified
+                      ? candidate.matchType === "similar"
+                        ? "相近配置，已核实来源"
+                        : "同配置，已核实来源"
+                      : "未采用"}
+                  </summary>
+                  <p className="analysis-detail-links">
+                    {link ? (
+                      <a href={link} target="_blank" rel="noreferrer">
+                        打开来源网页
+                      </a>
+                    ) : (
+                      "来源链接无效"
+                    )}
+                    {" · "}
+                    {candidate.priceType === "listing" ? "网页挂牌价" : "价格类型未确认"}：
+                    {valuationMoney(candidate.price)}
+                  </p>
+                  <p>读取时间：{readTime(candidate.fetchedAt)}</p>
+                  <p>核实说明：{candidate.reason}</p>
+                  {!!candidate.differences?.length && (
+                    <div>
+                      <p>样本配置差异（未据此折价）：</p>
+                      <ul>
+                        {candidate.differences.map((difference, differenceIndex) => (
+                          <li key={differenceIndex}>{difference}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <pre>{candidate.quote}</pre>
+                </details>
+              );
+            })}
+          </section>
+        );
+      })}
       {snapshot.rawResponse && (
         <details>
           <summary>{browserQuery ? "查看原始查询记录" : "查看完整搜索回复"}</summary>
