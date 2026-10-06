@@ -17,6 +17,7 @@ import {
 import {
   artifactPrice,
   calculateValuation,
+  compareListingPrice,
   floorPrice,
   mountPrice,
   opportunityPrice,
@@ -26,36 +27,251 @@ import {
   trainingPrice,
 } from "./valuation-calculator";
 import { buildProductDocument } from "./product-document";
-import { validateValuation, valuationPrompt } from "./valuation-contract";
+import { validateValuation, valuationPrompt, VALUATION_SCHEMA } from "./valuation-contract";
 import { readValuationFact, validateValuationFacts } from "./valuation-facts";
 const template = readFileSync(PROMPT_FILE, "utf8");
 const profile = () =>
-  createProfile(template, {
-    ...DEFAULT_SETTINGS,
-    b: 0.8,
-    extraCost: 0,
-    capMode: "both",
-    servers: [
-      {
-        serverId: completeRecord().listing.serverId,
-        age: "three",
-        rank: 10,
-        goldPrice: null,
-        goldUnit: null,
-      },
-    ],
-  });
+  createProfile(
+    template,
+    {
+      ...DEFAULT_SETTINGS,
+      b: 0.8,
+      extraCost: 0,
+      capMode: "both",
+      servers: [
+        {
+          serverId: completeRecord().listing.serverId,
+          age: "three",
+          rank: 10,
+          goldPrice: null,
+          goldUnit: null,
+        },
+      ],
+    },
+    false,
+  );
 describe("裸号估值的复算与可追溯输入", () => {
-  it("不提前舍入、不给1—4级插值、强壮口径分别计算", () => {
+  it("挂牌差额有明确方向，比例以挂牌为分母，等价与缺价格单独处理", () => {
+    expect(compareListingPrice(1500, 1000)).toMatchObject({
+      comparison_mode: "listing-only",
+      decision: "BUY",
+      price_difference: 500,
+      price_difference_ratio: 0.5,
+      extra_cost: null,
+      total_cost: null,
+      max_listing_price: null,
+      ideal_listing_price: null,
+      margin_of_safety: null,
+    });
+    expect(compareListingPrice(1000, 1000)).toMatchObject({
+      decision: "WATCH",
+      price_difference: 0,
+      price_difference_ratio: 0,
+    });
+    expect(compareListingPrice(1000, 1500)).toMatchObject({
+      decision: "PASS",
+      price_difference: -500,
+    });
+    expect(compareListingPrice(1000, 1500).price_difference_ratio).toBeCloseTo(-1 / 3);
+    for (const [value, asking] of [
+      [null, 1000],
+      [1000, null],
+      [1000, 0],
+      [0, 1000],
+      [1000, -1],
+    ])
+      expect(compareListingPrice(value, asking)).toMatchObject({
+        decision: "NEED_INFO",
+        price_difference: null,
+        price_difference_ratio: null,
+      });
+  });
+  it("低级修炼按明示经验规则估算，飞升异常仍阻塞完整价格", () => {
+    const training = completeRecord();
+    for (const label of ["攻击修炼", "法术修炼"])
+      training.detail!.tabs[0].fields.find((field) => field.name === label)!.value = "3/25";
+    const estimatedTraining = calculateValuation(training, profile());
+    expect(estimatedTraining.model_value).not.toBeNull();
+    const lowItem = estimatedTraining.items.find((item) => item.name === "人物有效攻法修炼")!;
+    expect(lowItem.amount).toBeCloseTo((30 * 650) / 1550, 2);
+    expect(lowItem.formula).toContain("经验比例估算");
+    expect(estimatedTraining.missing_fields).toEqual([]);
+    const flying = completeRecord();
+    flying.detail!.tabs[0].fields.find((field) => field.name === "飞升/渡劫/化圣")!.value =
+      "已飞升";
+    for (const skill of flying.detail!.tabs[1].items!.filter(
+      (item) => item.category === "师门技能",
+    ))
+      skill.level = "160";
+    const anomalous = calculateValuation(flying, profile());
+    expect(anomalous).toMatchObject({
+      decision: "NEED_INFO",
+      model_value: null,
+      bare_role_value: null,
+      price_difference: null,
+    });
+    expect(anomalous.pending_rules).toContain("飞升师门技能公式出现反常溢价，需核实适用范围");
+  });
+  it("飞升异常检查只核对实际参与公式的最高五项，不阻塞未参与的低技能", () => {
+    const record = completeRecord();
+    record.detail!.tabs[0].fields.find((field) => field.name === "飞升/渡劫/化圣")!.value =
+      "已飞升";
+    const skills = record.detail!.tabs[1].items!.filter((item) => item.category === "师门技能");
+    const setLevels = (levels: number[]) => {
+      skills.forEach((skill, index) => {
+        skill.level = String(levels[index]);
+      });
+    };
+    setLevels([150, 130, 150, 139, 150, 130, 50]);
+    const normal = calculateValuation(record, profile());
+    expect(normal.items.find((item) => item.name === "师门技能")?.amount).toBeCloseTo(32.46);
+    expect(normal.pending_rules).not.toContain("飞升师门技能公式出现反常溢价，需核实适用范围");
+    expect(normal.model_value).not.toBeNull();
+    expect(normal.bare_role_value).toBe(normal.model_value);
+    expect(normal.decision).not.toBe("NEED_INFO");
+
+    const participatingLow = [150, 130, 150, 139, 55, 54, 50];
+    setLevels(participatingLow);
+    const anomalous = calculateValuation(record, profile());
+    expect(anomalous.items.find((item) => item.name === "师门技能")?.amount).toBe(
+      schoolPrice(participatingLow, "已飞升", false),
+    );
+    expect(anomalous.pending_rules).toContain("飞升师门技能公式出现反常溢价，需核实适用范围");
+    expect(anomalous).toMatchObject({
+      decision: "NEED_INFO",
+      model_value: null,
+      bare_role_value: null,
+      price_difference: null,
+    });
+  });
+  it("AI只核对结论，金额和缺项由程序产生；错误买入结论仍拒绝", () => {
+    const record = completeRecord();
+    record.listing.price = "100000";
+    const actual = calculateValuation(record, profile());
+    const output = {
+      decision: "PASS",
+      reason: "挂牌价格超过裸号估值，不建议买入。",
+      extracted_facts: [],
+    };
+    const result = validateValuation(
+      JSON.stringify(output),
+      buildProductDocument(record),
+      record,
+      profile(),
+    );
+    expect(result.valuation?.model_value).toBe(actual.model_value);
+    expect(result.valuation?.items).toEqual(actual.items);
+    expect(result.valuation?.decision).toBe("PASS");
+    expect(() =>
+      validateValuation(
+        JSON.stringify({ ...output, decision: "BUY" }),
+        buildProductDocument(record),
+        record,
+        profile(),
+      ),
+    ).toThrow("价格比较结论不一致");
+    expect(VALUATION_SCHEMA.required).toEqual(["decision", "reason", "extracted_facts"]);
+  });
+  it("AI重复声明已核对字段时丢弃其引用，不覆盖网页事实、不放宽缺项引用校验", () => {
+    const record = completeRecord();
+    record.detail!.valuation = {
+      version: 1,
+      source: {},
+      issues: [],
+      fields: [{ name: "坐骑总数", value: "0", tab: "坐骑" }],
+    };
+    const duplicate = {
+      name: "坐骑总数",
+      value: "0",
+      path: "/detail/tabs/4/petCount",
+      quote: "AI给出了不真实的引用",
+    };
+    expect(validateValuationFacts([duplicate], record)).toEqual([]);
+    expect(() => validateValuationFacts([{ ...duplicate, value: "1" }], record)).toThrow(
+      "已采集字段冲突",
+    );
+    expect(() =>
+      validateValuationFacts([{ ...duplicate, name: "神器1满槽", value: "是" }], record),
+    ).toThrow("文字字段");
+    const computed = calculateValuation(record, profile());
+    const result = validateValuation(
+      JSON.stringify({ ...computed, extracted_facts: [duplicate] }),
+      buildProductDocument(record),
+      record,
+      profile(),
+    );
+    expect(result.valuation?.extracted_facts).toEqual([]);
+    expect(
+      result.valuation?.items.find((item) => item.name === "坐骑")?.evidence[0].path,
+    ).toContain("/detail/valuation/fields/");
+  });
+  it("无土豪金不误加1400，新采财产覆盖旧摘要，金额引用实际字段", () => {
+    const record = completeRecord();
+    record.listing.summary = { iCash: 999999999, iSaving: 999999999, xianyu: 999999 };
+    record.detail!.valuation = {
+      version: 1,
+      source: {},
+      issues: [],
+      fields: [
+        { name: "靓号特效", value: "无土豪金", tab: "人物/修炼" },
+        ...["现金", "存银", "仙玉", "储备金"].map((name) => ({
+          name,
+          value: "0",
+          tab: "道具/法宝",
+        })),
+      ],
+    };
+    const result = calculateValuation(record, profile());
+    expect(result.items.find((item) => item.name === "土豪金ID")?.amount).toBe(0);
+    expect(result.model_value).toBe(calculateValuation(completeRecord(), profile()).model_value);
+    expect(result.items.find((item) => item.name === "土豪金ID")?.evidence[0].path).toContain(
+      "/detail/valuation/fields/",
+    );
+  });
+  it("资料漏采不能输出完整估值；费用未知不影响完整估值的挂牌差价", () => {
+    const configured = createProfile(template, { ...profile().settings, extraCost: null }, false);
+    const record = completeRecord();
+    record.listing.price = "100000";
+    const result = calculateValuation(record, configured);
+    expect(result.decision).toBe("PASS");
+    expect(result.price_difference).toBeCloseTo(result.model_value! - 100000, 2);
+    expect(result.price_difference_ratio).toBeCloseTo((result.model_value! - 100000) / 100000, 7);
+    expect(result.max_total_cost).toBeNull();
+    expect(result.max_listing_price).toBeNull();
+    expect(result.total_cost).toBeNull();
+    record.detail!.valuation = {
+      version: 1,
+      source: {},
+      fields: [],
+      issues: ["神器1槽位状态或五行未完整读取"],
+    };
+    const incomplete = calculateValuation(record, configured);
+    expect(incomplete.model_value).toBeNull();
+    expect(incomplete.decision).toBe("NEED_INFO");
+    expect(incomplete.missing_fields).toContain("神器1槽位状态或五行未完整读取");
+  });
+  it("低级经验折算不提前舍入，强壮口径分别计算", () => {
     expect(trainingPrice(6, "defense")).toBe(50 / 1.5);
     expect(trainingPrice(17, "defense")).toBe(230);
-    expect(trainingPrice(4, "petAttack")).toBeNull();
+    for (const [level, experience] of [150, 360, 650, 1040].map((experience, i) => [
+      i + 1,
+      experience,
+    ])) {
+      expect(trainingPrice(level, "attack")).toBe((30 * experience) / 1550);
+      expect(trainingPrice(level, "defense")).toBe((20 * experience) / 1550);
+      expect(trainingPrice(level, "petAttack")).toBe((40 * experience) / 1550);
+      expect(trainingPrice(level, "petDefense")).toBe((30 * experience) / 1550);
+    }
+    for (const level of [-1, 26, 1.5, NaN]) expect(trainingPrice(level, "attack")).toBeNull();
     expect(trainingPrice(0, "petAttack")).toBe(0);
     expect(strengthPrice(2, "single")).toBe(8 / 270);
     expect(strengthPrice(2, "cumulative")).toBe(9 / 270);
     expect(schoolPrice([180, 180, 180, 180, 180, 180, 180], "已化圣", false)).toBeCloseTo(
       4814.86,
       2,
+    );
+    expect(schoolPrice([180, 180, 186, 180, 180, 180, 180], "已化圣", false)).toBe(
+      schoolPrice([180, 180, 180, 180, 180, 180, 180], "已化圣", false),
     );
     expect(schoolPrice([160, 130, 130, 130, 130, 130, 130], "未飞升", false)).toBeNull();
     expect(schoolPrice([160, 160, 160, 160, 160, 160, 160], "已飞升", false)).toBeGreaterThan(250);
@@ -88,7 +304,7 @@ describe("裸号估值的复算与可追溯输入", () => {
       "PASS",
     );
   });
-  it("完整条件可BUY；20级上限无溢价，未覆盖上限和未知费用阻止买入", () => {
+  it("完整条件可比较；20级上限无溢价，未覆盖上限阻塞，未知费用不阻塞", () => {
     const record = completeRecord(),
       configured = profile();
     const full = calculateValuation(record, configured);
@@ -107,9 +323,9 @@ describe("裸号估值的复算与可追溯输入", () => {
     expect(partial.items.find((item) => item.name === "防御修炼上限")?.amount).toBeNull();
     const noFees = calculateValuation(
       completeRecord(),
-      createProfile(template, { ...configured.settings, extraCost: null }),
+      createProfile(template, { ...configured.settings, extraCost: null }, false),
     );
-    expect(noFees.decision).toBe("NEED_INFO");
+    expect(noFees.decision).toBe("BUY");
     expect(noFees.total_cost).toBeNull();
     expect(noFees.model_value).not.toBeNull();
   });
@@ -230,7 +446,7 @@ describe("裸号估值的复算与可追溯输入", () => {
     record.detail!.tabs[0].fields.push({ name: "神器套数", value: "0" });
     expect(() => validateValuationFacts(facts, record)).toThrow("已采集字段冲突");
   });
-  it("已经超预算或完整估值时直接拒绝买入，缺费用不伪造可买结论", () => {
+  it("历史购买函数保留原语义，新挂牌比较完全忽略预算、费用和买入系数", () => {
     expect(purchase(1000, 1001, { ...DEFAULT_SETTINGS, b: null }).decision).toBe("PASS");
     expect(purchase(null, 1001, { ...DEFAULT_SETTINGS, budget: 1000 }).decision).toBe("PASS");
     expect(purchase(1000, 500, DEFAULT_SETTINGS).decision).toBe("NEED_INFO");
@@ -239,15 +455,35 @@ describe("裸号估值的复算与可追溯输入", () => {
     expect(
       calculateValuation(
         record,
-        createProfile(template, { ...profile().settings, extraCost: null }),
+        createProfile(template, { ...profile().settings, extraCost: null }, false),
       ).decision,
     ).toBe("PASS");
     const overBudget = calculateValuation(
-      analysisRecord(),
-      createProfile(template, { ...DEFAULT_SETTINGS, budget: 1 }),
+      completeRecord(),
+      createProfile(template, { ...profile().settings, budget: 1 }, false),
     );
-    expect(overBudget.decision).toBe("PASS");
-    expect(overBudget.reason).toContain("超过预算");
+    expect(overBudget.decision).toBe("BUY");
+    expect(overBudget.reason).not.toContain("预算");
+    const ignored = calculateValuation(
+      completeRecord(),
+      createProfile(
+        template,
+        {
+          ...profile().settings,
+          b: null,
+          a: null,
+          extraCost: 1000000,
+          budget: 0,
+        },
+        false,
+      ),
+    );
+    const baseline = calculateValuation(completeRecord(), profile());
+    expect(ignored).toEqual(baseline);
+    expect(ignored.missing_fields.some((field) => /费用|成本|系数|预算/.test(field))).toBe(false);
+    expect(ignored.suggestions!.some((suggestion) => /费用|成本|系数|预算/.test(suggestion))).toBe(
+      false,
+    );
   });
   it("执行中参数修改不影响已冻结批次，校验重试保存实际请求", async () => {
     const crawl = new CrawlStore(":memory:"),
@@ -307,10 +543,10 @@ describe("裸号估值的复算与可追溯输入", () => {
         configured,
       ),
     ).toThrow("核算不一致");
-    const pendingProfile = createProfile(template),
+    const pendingProfile = createProfile(template, DEFAULT_SETTINGS, false),
       pending = calculateValuation(record, pendingProfile);
     for (const wording of [
-      { missing_fields: ["买入系数 b、总费用 F 尚未提供"], pending_rules: ["计价口径需确认"] },
+      { missing_fields: ["AI省略了区服参数"], pending_rules: ["计价口径需确认"] },
       { missing_fields: [], pending_rules: [] },
     ]) {
       const preserved = validateValuation(
@@ -326,7 +562,7 @@ describe("裸号估值的复算与可追溯输入", () => {
       expect(preserved.missingData).toEqual([...pending.missing_fields, ...pending.pending_rules]);
     }
   });
-  it("修改价格会停用旧算法；建议规则默认可算，实际费用仍需填写", () => {
+  it("修改计价规则停用旧算法；默认联网查价，费用不参与新设置指纹", () => {
     expect(createProfile(template).calculationCompatible).toBe(true);
     expect(createProfile(template + "\n请简洁解释。").calculationCompatible).toBe(true);
     const changed = createProfile(template.replace("| 未飞升 | 0 元 |", "| 未飞升 | 10 元 |"));
@@ -347,6 +583,20 @@ describe("裸号估值的复算与可追溯输入", () => {
       budget: 0,
     });
     expect(() => normalizeSettings({ b: 0.8, a: 0.9 })).toThrow("0 < a ≤ b");
+    const automatic = createProfile(template);
+    expect(automatic.equipmentSearch).toBe(true);
+    expect(automatic.petSearch).toBe(true);
+    expect(automatic.calculationVersion).toBe("price-comparison-v9");
+    const ignoredPolicy = createProfile(template, {
+      ...DEFAULT_SETTINGS,
+      b: 0.3,
+      a: 0.1,
+      budget: 1,
+      extraCost: 999,
+    });
+    expect(ignoredPolicy.settingsHash).toBe(automatic.settingsHash);
+    expect(ignoredPolicy.hash).toBe(automatic.hash);
+    expect(createProfile(template, DEFAULT_SETTINGS, false).hash).not.toBe(automatic.hash);
   });
   it("保存设置防止覆盖并持久化，保留原Prompt逐字内容", () => {
     const directory = mkdtempSync(join(tmpdir(), "cbg-profile-")),
@@ -484,12 +734,12 @@ describe("裸号估值的复算与可追溯输入", () => {
       await runner.settled();
       expect(store.run(reused)?.reused).toBe(1);
       expect(analyze).toHaveBeenCalledTimes(1);
-      current = createProfile(template, { ...configured.settings, b: 0.7 });
+      current = createProfile(template, { ...configured.settings, capMode: "effective" }, false);
       const newParameters = await runner.start("codex", false, current, true);
       await runner.settled();
       expect(store.run(newParameters)?.reused).toBe(0);
       expect(analyze).toHaveBeenCalledTimes(2);
-      current = createProfile(template + "\n分析说明调整。", current.settings);
+      current = createProfile(template + "\n分析说明调整。", current.settings, false);
       const newPrompt = await runner.start("codex", false, current, true);
       await runner.settled();
       expect(store.run(newPrompt)?.reused).toBe(0);

@@ -3,6 +3,7 @@ import type { AiProvider } from "../ai/types";
 import { crawlDatabase } from "../crawler/controller";
 import { AnalysisRunner } from "./runner";
 import { AnalysisStore } from "./store";
+import { refreshMarket, marketServers } from "./market";
 import { loadProfile, saveProfile, PROMPT_FILE } from "./profile";
 
 let analysis: { store: AnalysisStore; runner: AnalysisRunner } | undefined;
@@ -26,8 +27,14 @@ export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[
     },
   };
 }
-export function analysisSettings() {
+export async function analysisSettings() {
   const db = service().store.db;
+  let marketError: string | undefined;
+  try {
+    await refreshMarket(db);
+  } catch (error) {
+    marketError = error instanceof Error ? error.message : "行情读取失败";
+  }
   const servers = db
     .prepare(
       "SELECT DISTINCT json_extract(listing_json,'$.serverId') serverId,json_extract(listing_json,'$.serverName') serverName FROM listings ORDER BY serverId",
@@ -37,7 +44,13 @@ export function analysisSettings() {
       serverId: String(row.serverId),
       serverName: String(row.serverName || row.serverId),
     }));
-  return { profile: loadProfile(db), promptFile: PROMPT_FILE, servers };
+  return {
+    profile: loadProfile(db),
+    promptFile: PROMPT_FILE,
+    servers,
+    marketError,
+    market: marketServers(db),
+  };
 }
 export function saveAnalysisSettings(input: unknown) {
   const profile = saveProfile(service().store.db, input);
@@ -49,7 +62,13 @@ export async function startAnalysis(
   sample = false,
   model?: string,
   sampleSize = 1,
+  productKeys?: string[],
 ) {
+  try {
+    await refreshMarket(service().store.db);
+  } catch {
+    /* 缺失行情仍可分析，结果明确列出缺项。 */
+  }
   const profile = loadProfile(service().store.db);
   const id = await service().runner.start(
     provider,
@@ -58,6 +77,7 @@ export async function startAnalysis(
     sample,
     model,
     sampleSize,
+    productKeys,
   );
   return service().store.run(id);
 }

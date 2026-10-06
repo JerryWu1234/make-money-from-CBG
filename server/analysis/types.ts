@@ -1,6 +1,8 @@
 import type { AiProvider } from "../ai/types";
 import type { Listing } from "../crawler/types";
 import type { AnalysisProfile, ValuationResult } from "./valuation-types";
+import type { EquipmentPricingSnapshot } from "./equipment-pricing";
+import type { PetPricingSnapshot } from "./pet-pricing";
 
 export type DimensionId = "foundation" | "equipment" | "pets";
 export type Evidence = { path: string; value: string; reason: string };
@@ -31,6 +33,7 @@ export type AnalysisRun = {
   queued: number;
   reused: number;
   current: string | null;
+  phase?: "equipment_search" | "pet_search" | "analysis" | null;
   profileHash?: string;
   calculationVersion?: string;
 };
@@ -93,6 +96,8 @@ export type AnalysisDetail = {
   error: string | null;
   reusedFrom: string | null;
   profile?: AnalysisProfile | null;
+  equipmentPricing?: EquipmentPricingSnapshot | null;
+  petPricing?: PetPricingSnapshot | null;
   attempts: {
     id: string;
     state: string;

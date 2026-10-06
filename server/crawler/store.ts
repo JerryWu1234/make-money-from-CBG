@@ -1,6 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { CAPTURE_VERSION, compactDetail, compactListing } from "./compact";
 import type { Checkpoint, Listing, RoleDetail, SavedListingPage } from "./types";
@@ -23,7 +24,8 @@ export class CrawlStore {
       CREATE TABLE IF NOT EXISTS role_parameters (listing_key TEXT NOT NULL, section TEXT NOT NULL, path TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(listing_key,section,path));
       CREATE TABLE IF NOT EXISTS crawl_state (id INTEGER PRIMARY KEY CHECK(id=1), checkpoint_json TEXT, backfill_complete INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS crawl_lock (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS role_sources (listing_key TEXT PRIMARY KEY, source_gzip BLOB NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS role_sources (listing_key TEXT PRIMARY KEY, source_gzip BLOB NOT NULL);
+      CREATE TABLE IF NOT EXISTS role_source_history (source_hash TEXT PRIMARY KEY, listing_key TEXT NOT NULL, source_gzip BLOB NOT NULL, archived_at TEXT NOT NULL);`);
     this.ensureListingColumn("attempt_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureListingColumn("last_attempt_at", "TEXT");
     this.ensureCrawlStateColumn("backfill_complete", "INTEGER NOT NULL DEFAULT 0");
@@ -61,14 +63,19 @@ export class CrawlStore {
     const now = new Date().toISOString();
     const old = this.db
       .prepare(
-        "SELECT status, selling_time, json_extract(detail_json,'$.captureVersion') AS version FROM listings WHERE key=?",
+        "SELECT status, selling_time, json_extract(detail_json,'$.captureVersion') AS version,json_array_length(json_extract(detail_json,'$.valuation.issues')) AS valuation_issues,json_extract(detail_json,'$.equipmentCapture.complete') AS equipment_complete,json_array_length(json_extract(detail_json,'$.equipmentCapture.issues')) AS equipment_issues,json_extract(detail_json,'$.petCapture.complete') AS pet_complete,json_array_length(json_extract(detail_json,'$.petCapture.issues')) AS pet_issues FROM listings WHERE key=?",
       )
       .get(item.key);
     // 同一商品重新上架时更新原记录、重采详情，不插入重复商品。
     const complete =
       old?.status === "complete" &&
       old.selling_time === item.sellingTime &&
-      old.version === CAPTURE_VERSION;
+      old.version === CAPTURE_VERSION &&
+      !old.valuation_issues &&
+      old.equipment_complete === 1 &&
+      !old.equipment_issues &&
+      old.pet_complete === 1 &&
+      !old.pet_issues;
     this.db
       .prepare(`INSERT INTO listings(key,server_id,eid,ordersn,url,selling_time,created_time,name,price,listing_json,first_seen_at,last_seen_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET ordersn=excluded.ordersn,url=excluded.url,selling_time=excluded.selling_time,
@@ -95,14 +102,15 @@ export class CrawlStore {
         .run(now, item.key);
     return complete;
   }
-  retryItems(): Listing[] {
+  retryItems(keys?: string[]): Listing[] {
     return this.db
       .prepare(
-        `SELECT listing_json FROM listings WHERE status IN ('pending','failed')
+        `SELECT listing_json FROM listings WHERE (status IN ('pending','failed') OR (status='complete' AND (coalesce(json_extract(detail_json,'$.captureVersion'),0) < ${CAPTURE_VERSION} OR json_array_length(json_extract(detail_json,'$.valuation.issues')) > 0 OR coalesce(json_extract(detail_json,'$.equipmentCapture.complete'),0)!=1 OR json_array_length(json_extract(detail_json,'$.equipmentCapture.issues'))>0 OR coalesce(json_extract(detail_json,'$.petCapture.complete'),0)!=1 OR json_array_length(json_extract(detail_json,'$.petCapture.issues'))>0)))
         ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,first_seen_at ASC,key ASC`,
       )
       .all()
-      .map((row) => JSON.parse(String(row.listing_json)) as Listing);
+      .map((row) => JSON.parse(String(row.listing_json)) as Listing)
+      .filter((item) => !keys || keys.includes(item.key));
   }
   anchorItems(): Listing[] {
     const items = this.db
@@ -116,9 +124,10 @@ export class CrawlStore {
     return last ? [last, ...items.filter((item) => item.key !== last.key)] : items;
   }
   beginRetry(key: string) {
+    if (!this.retryItems([key]).length) throw new Error("待补采商品不存在或已完成");
     const result = this.db
       .prepare(
-        "UPDATE listings SET status='pending',error=NULL,attempt_count=attempt_count+1,last_attempt_at=? WHERE key=? AND status IN ('pending','failed')",
+        "UPDATE listings SET status='pending',error=NULL,attempt_count=attempt_count+1,last_attempt_at=? WHERE key=?",
       )
       .run(new Date().toISOString(), key);
     if (result.changes !== 1) throw new Error("待补采商品不存在或已完成");
@@ -130,9 +139,15 @@ export class CrawlStore {
       detail = compactDetail(detail);
       const result = this.db
         .prepare(
-          "UPDATE listings SET detail_json=?,status='complete',error=NULL,collected_at=? WHERE key=?",
+          "UPDATE listings SET listing_json=?,price=?,detail_json=?,status='complete',error=NULL,collected_at=? WHERE key=?",
         )
-        .run(JSON.stringify(detail), detail.collectedAt, item.key);
+        .run(
+          JSON.stringify(compactListing(item)),
+          item.price,
+          JSON.stringify(detail),
+          detail.collectedAt,
+          item.key,
+        );
       if (result.changes !== 1) throw new Error("商品尚未登记，不能推进断点");
       this.db.prepare("DELETE FROM role_tabs WHERE listing_key=?").run(item.key);
       this.db.prepare("DELETE FROM role_parameters WHERE listing_key=?").run(item.key);
@@ -202,7 +217,10 @@ export class CrawlStore {
       .prepare(`SELECT key,name,price,url,server_id,selling_time,collected_at,last_seen_at,status,error,
       json_extract(listing_json,'$.serverName') AS server_name,
       json_extract(listing_json,'$.highlights') AS highlights,
-      json_extract(listing_json,'$.summary.summary') AS summary,last_attempt_at,attempt_count
+      json_extract(listing_json,'$.summary.summary') AS summary,last_attempt_at,attempt_count,
+      json_extract(detail_json,'$.captureVersion') capture_version,json_array_length(json_extract(detail_json,'$.valuation.issues')) valuation_issues,
+      json_extract(detail_json,'$.equipmentCapture.complete') equipment_complete,json_array_length(json_extract(detail_json,'$.equipmentCapture.issues')) equipment_issues,
+      json_extract(detail_json,'$.petCapture.complete') pet_complete,json_array_length(json_extract(detail_json,'$.petCapture.issues')) pet_issues
       FROM listings ORDER BY first_seen_at DESC,key ASC LIMIT ? OFFSET ?`)
       .all(pageSize, (page - 1) * pageSize);
     return {
@@ -225,6 +243,13 @@ export class CrawlStore {
           lastSeenAt: String(row.last_seen_at),
           lastAttemptAt: row.last_attempt_at ? String(row.last_attempt_at) : null,
           attemptCount: Number(row.attempt_count || 0),
+          valuationReady:
+            row.capture_version === CAPTURE_VERSION &&
+            !row.valuation_issues &&
+            row.equipment_complete === 1 &&
+            !row.equipment_issues &&
+            row.pet_complete === 1 &&
+            !row.pet_issues,
           status: String(row.status),
           error: row.error ? String(row.error) : null,
         };
@@ -268,6 +293,7 @@ export class CrawlStore {
         "role_parameters",
         "role_tabs",
         "role_sources",
+        "role_source_history",
         "crawl_state",
         "crawl_lock",
         "listings",
@@ -282,6 +308,20 @@ export class CrawlStore {
     this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
   }
   private archive(key: string, detail: RoleDetail) {
+    const previous = this.db
+      .prepare("SELECT source_gzip FROM role_sources WHERE listing_key=?")
+      .get(key);
+    if (previous) {
+      const source = previous.source_gzip as Uint8Array;
+      this.db
+        .prepare("INSERT OR IGNORE INTO role_source_history VALUES(?,?,?,?)")
+        .run(
+          createHash("sha256").update(source).digest("hex"),
+          key,
+          source,
+          new Date().toISOString(),
+        );
+    }
     this.db
       .prepare(
         "INSERT INTO role_sources VALUES(?,?) ON CONFLICT(listing_key) DO UPDATE SET source_gzip=excluded.source_gzip",

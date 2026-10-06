@@ -1,13 +1,14 @@
 import type { Page } from "playwright-core";
-import { collectDetail, isOnShelf } from "./detail";
+import { collectDetail, collectValuationDetail, isOnShelf, MAIN_TABS } from "./detail";
 import { gotoPage, hoverListing, pace, prepareList } from "./page";
-import type { CrawlSource } from "./types";
+import type { CrawlSource, SavedRoleRecord } from "./types";
 
 interface SourceOptions {
   listPage: Page;
   detailPage: Page;
   signal: AbortSignal;
   preferredOrder?: string;
+  savedRecord?: (key: string) => SavedRoleRecord | null;
   onDetailProgress: (message: string) => void;
   log: (event: string, data?: Record<string, unknown>) => void;
 }
@@ -17,6 +18,7 @@ export function createCrawlSource({
   detailPage,
   signal,
   preferredOrder,
+  savedRecord,
   onDetailProgress,
   log,
 }: SourceOptions): CrawlSource {
@@ -52,10 +54,25 @@ export function createCrawlSource({
       const started = Date.now();
       log("detail.start", { key: item.key });
       await pace(signal, 1800, 1700);
-      const result = await collectDetail(detailPage, item, signal, onDetailProgress);
+      const previous = savedRecord?.(item.key);
+      const result =
+        previous?.detail &&
+        MAIN_TABS.every((name) => previous.detail!.tabs.some((tab) => tab.name === name))
+          ? await collectValuationDetail(
+              detailPage,
+              item,
+              previous.detail,
+              signal,
+              onDetailProgress,
+            )
+          : await collectDetail(detailPage, item, signal, onDetailProgress);
       log("detail.collected", {
         key: item.key,
         durationMs: Date.now() - started,
+        equipmentComplete: result.equipmentCapture?.complete,
+        equipmentIssues: result.equipmentCapture?.issues,
+        petsComplete: result.petCapture?.complete,
+        petIssues: result.petCapture?.issues,
         tabs: result.tabs.map((tab) => ({
           name: tab.name,
           petCount: tab.petCount,

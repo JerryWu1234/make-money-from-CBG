@@ -16,8 +16,13 @@ import {
   type RoleDetail,
 } from "./types";
 import { gunzipSync } from "node:zlib";
-import { compactDetail, itemFromAttributes, coreEquipmentDescription } from "./compact";
-import { onShelfFromText } from "./detail";
+import {
+  CAPTURE_VERSION,
+  compactDetail,
+  itemFromAttributes,
+  coreEquipmentDescription,
+} from "./compact";
+import { equipmentCaptureSummary, onShelfFromText } from "./detail";
 const signal = () => new AbortController().signal;
 const item = (id: number, time = 10000 - id): Listing => ({
   ...parseListing(
@@ -29,7 +34,19 @@ const item = (id: number, time = 10000 - id): Listing => ({
   orderTime: new Date(time * 1000).toISOString(),
 });
 const detail = (listing: Listing): RoleDetail => ({
-  captureVersion: 3,
+  captureVersion: CAPTURE_VERSION,
+  equipmentCapture: {
+    version: 1,
+    collectedAt: new Date().toISOString(),
+    complete: true,
+    issues: [],
+  },
+  petCapture: {
+    version: 1,
+    collectedAt: new Date().toISOString(),
+    complete: true,
+    issues: [],
+  },
   url: listing.url,
   collectedAt: new Date().toISOString(),
   tabs: [
@@ -79,7 +96,141 @@ const source = (pages: Listing[][]): CrawlSource => {
     detail: vi.fn(async (row) => detail(row)),
   };
 };
+describe("仅补齐估值资料", () => {
+  it("宝宝凭据缺失、未读完整或带异常时都进入补采，补齐后才跳过", () => {
+    const db = memory(),
+      row = item(1);
+    db.observe(row);
+    const missing = detail(row);
+    delete missing.petCapture;
+    for (const incomplete of [
+      missing,
+      {
+        ...detail(row),
+        petCapture: {
+          version: 1 as const,
+          collectedAt: new Date().toISOString(),
+          complete: false,
+          issues: [],
+        },
+      },
+      {
+        ...detail(row),
+        petCapture: {
+          version: 1 as const,
+          collectedAt: new Date().toISOString(),
+          complete: true,
+          issues: ["宝宝技能未完整读取"],
+        },
+      },
+    ]) {
+      db.save(row, incomplete);
+      expect(db.retryItems([row.key])).toHaveLength(1);
+      expect(db.records().items[0].valuationReady).toBe(false);
+      expect(db.observe(row)).toBe(false);
+    }
+    db.save(row, detail(row));
+    expect(db.retryItems([row.key])).toEqual([]);
+    expect(db.records().items[0].valuationReady).toBe(true);
+    expect(db.observe(row)).toBe(true);
+  });
+  it("新版资料的装备未采齐仍可补采，补齐后才跳过且断点保持不变", async () => {
+    const db = memory(),
+      row = item(1),
+      anchor = item(2);
+    db.observe(row);
+    db.observe(anchor);
+    db.save(anchor, detail(anchor), checkpoint(anchor));
+    db.save(row, {
+      ...detail(row),
+      equipmentCapture: {
+        version: 1,
+        collectedAt: new Date().toISOString(),
+        complete: false,
+        issues: ["武器伤害没有读取"],
+      },
+    });
+    const before = db.checkpoint();
+    expect(db.retryItems([row.key])).toHaveLength(1);
+    expect(db.records().items.find((record) => record.key === row.key)?.valuationReady).toBe(false);
+    expect(db.observe(row)).toBe(false);
+    const collector = source([]);
+    collector.prepare = vi.fn();
+    await crawl(collector, db, signal(), () => {}, { backfillOnly: true, keys: [row.key] });
+    expect(collector.detail).toHaveBeenCalledTimes(1);
+    expect(collector.prepare).not.toHaveBeenCalled();
+    expect(db.checkpoint()).toEqual(before);
+    expect(db.retryItems([row.key])).toEqual([]);
+    expect(db.observe(row)).toBe(true);
+    expect(db.records().items.find((record) => record.key === row.key)?.valuationReady).toBe(true);
+    const missingMetadata = detail(row);
+    delete missingMetadata.equipmentCapture;
+    db.save(row, missingMetadata);
+    expect(db.retryItems([row.key])).toHaveLength(1);
+  });
+  it("旧完整记录和漏采资料可重试，补采不扫列表、不推进断点并更新实际售价", async () => {
+    const db = memory(),
+      row = item(1),
+      anchor = item(2);
+    db.observe(row);
+    db.observe(anchor);
+    db.save(anchor, detail(anchor), checkpoint(anchor));
+    db.save(row, { ...detail(row), captureVersion: 3 });
+    const before = db.checkpoint();
+    const collector = source([]);
+    collector.prepare = vi.fn();
+    collector.detail = vi.fn(async (listing) => ({
+      ...detail(listing),
+      valuation: {
+        version: 1 as const,
+        fields: [],
+        issues: [],
+        source: { askingPrice: "16888.00" },
+      },
+    }));
+    await crawl(collector, db, signal(), () => {}, { backfillOnly: true, keys: [row.key] });
+    expect(collector.prepare).not.toHaveBeenCalled();
+    expect(collector.page).not.toHaveBeenCalled();
+    expect(db.checkpoint()).toEqual(before);
+    expect((db.detail(row.key) as { listing: Listing }).listing.price).toBe("16888.00");
+    expect(db.retryItems()).toEqual([]);
+    const incomplete = {
+      ...detail(row),
+      valuation: { version: 1 as const, fields: [], issues: ["坐骑成长缺失"], source: {} },
+    };
+    db.save(row, incomplete);
+    expect(db.retryItems([row.key])).toHaveLength(1);
+    expect(db.records().items.find((record) => record.key === row.key)?.valuationReady).toBe(false);
+  });
+  it("补采保留原始压缩来源，失败后旧详情仍可查看和重试", () => {
+    const db = memory(),
+      row = item(1);
+    db.observe(row);
+    const previous = { ...detail(row), captureVersion: 3 };
+    db.save(row, previous);
+    db.beginRetry(row.key);
+    db.fail(row.key, "网页资料未完整读取");
+    expect((db.detail(row.key) as { detail: RoleDetail }).detail.tabs).toHaveLength(
+      previous.tabs.length,
+    );
+    expect(db.retryItems()).toHaveLength(1);
+    db.save(row, detail(row));
+    const archived = db.db
+      .prepare("SELECT source_gzip FROM role_source_history WHERE listing_key=?")
+      .get(row.key)!;
+    expect(JSON.parse(gunzipSync(archived.source_gzip as Uint8Array).toString())).toEqual(previous);
+  });
+});
 describe("商品身份和时间", () => {
+  it("仅保留明确提供的官方kindid字符串，不用装备名或其他类型编号推算", () => {
+    const attrs = { data_equip_name: "测试武器", data_type: "19", data_equip_type: "20" };
+    expect(itemFromAttributes({ ...attrs, data_kindid: "025" }, 0).kindId).toBe("025");
+    expect(itemFromAttributes({ ...attrs, "data-kindid": "31" }, 0).kindId).toBe("31");
+    expect(itemFromAttributes(attrs, 0).kindId).toBeUndefined();
+    expect(
+      itemFromAttributes({ ...attrs, data_kindid: "025", data_skill_type: "cifu" }, 0).kindId,
+    ).toBeUndefined();
+  });
   it("仅将明确显示已上架的商品作为续采锚点", () => {
     expect(onShelfFromText("是否上架：已上架")).toBe(true);
     expect(onShelfFromText("是否上架：已下架")).toBe(false);
@@ -141,6 +292,113 @@ describe("商品身份和时间", () => {
     );
     expect(pet.description).toBeUndefined();
     expect(pet.attributes).toBeUndefined();
+  });
+  it("保留独立魔力和修理专用限制，HTML换行不会串入下一条限制", () => {
+    const equip = itemFromAttributes(
+      {
+        data_equip_name: "测试衣服",
+        data_equip_desc:
+          "等级 100<br />防御 +150<br>魔力 +20#r修理失败 2次#r玩家 1234 专用#r不可交易",
+        data_equip_type_desc: "【装备条件】等级100<br />【装备角色】女",
+        data_equip_category: "铠甲",
+        data_equip_location: "已装备",
+      },
+      0,
+    );
+    expect(equip.description).toContain("魔力 +20");
+    expect(equip.description).toContain("修理失败 2次");
+    expect(equip.description).toContain("玩家 1234 专用");
+    expect(equip.description).toContain("不可交易");
+    expect(equip.attributes).toEqual({ 装备条件: "等级100", 装备角色: "女" });
+    expect(equip.category).toBe("铠甲");
+    expect(equip.location).toBe("已装备");
+  });
+  it("未知图标和只有装备名字时不宣称完整，明确法宝不会当普通装备", () => {
+    const empty = {
+      name: "道具/法宝",
+      text: "道具和法宝",
+      fields: [],
+      tables: [],
+      elements: [],
+      tooltips: [],
+      items: [itemFromAttributes({ data_equip_name: "测试武器" }, 0)],
+    };
+    expect(equipmentCaptureSummary([empty], "now").complete).toBe(false);
+    expect(equipmentCaptureSummary([empty], "now").issues).toContain(
+      "道具/法宝：测试武器 的装备属性未完整读取",
+    );
+    empty.items[0].description = "等级 100\n耐久度 200";
+    expect(equipmentCaptureSummary([empty], "now").complete).toBe(false);
+    empty.items[0].attributes = { 等级: "100", 耐久: "200", 修理失败: "0" };
+    expect(equipmentCaptureSummary([empty], "now").complete).toBe(false);
+    delete empty.items[0].attributes;
+    empty.items[0].description = "伤害 +420";
+    expect(equipmentCaptureSummary([empty], "now").issues).toContain(
+      "道具/法宝：测试武器 的装备等级未完整读取",
+    );
+    empty.items[0].description = "等级 100\n伤害 +420";
+    expect(equipmentCaptureSummary([empty], "now").complete).toBe(true);
+    empty.items = [
+      itemFromAttributes(
+        { data_equip_name: "测试法宝", data_equip_desc: "灵气：500 修炼境界：第15层" },
+        0,
+      ),
+    ];
+    expect(empty.items[0].category).toBe("法宝");
+    expect(equipmentCaptureSummary([empty], "now").complete).toBe(true);
+    expect(equipmentCaptureSummary([], "now").complete).toBe(false);
+    expect(equipmentCaptureSummary([{ ...empty, text: "", items: [] }], "now").complete).toBe(
+      false,
+    );
+  });
+  it("数字model不会覆盖官网法宝、灵宝、神器容器及灵气证据", () => {
+    const samples = [
+      [{ data_equip_type: "17320", data_equip_desc: "灵气：29" }, "法宝"],
+      [
+        {
+          data_equip_type: "6033",
+          data_equip_location: "RoleStoreFabao",
+          data_equip_desc: "灵气：500 五行：火\n修炼境界：第15层 天人合一",
+        },
+        "法宝",
+      ],
+      [{ data_equip_location: "RoleStoreShenqi" }, "神器"],
+      [{ data_equip_type: "6145", data_equip_location: "RoleUsingFabao" }, "法宝"],
+      [{ data_equip_type: " 6030 ", data_equip_location: "RoleStoreLingbao" }, "灵宝"],
+      [{ data_equip_type: "6030", data_storage_type: "法宝" }, "法宝"],
+    ] as const;
+    const items = samples.map(([attrs, category], index) => {
+      const item = itemFromAttributes({ data_equip_name: `测试物品${index}`, ...attrs }, index);
+      expect(item.category).toBe(category);
+      return item;
+    });
+    const snapshot = {
+      name: "道具/法宝",
+      text: "道具和法宝",
+      fields: [],
+      tables: [],
+      elements: [],
+      tooltips: [],
+      items,
+    };
+    expect(equipmentCaptureSummary([snapshot], "now").complete).toBe(true);
+    const unknown = itemFromAttributes({ data_equip_name: "未知物品", data_equip_type: "6033" }, 5);
+    expect(unknown.category).toBeUndefined();
+    expect(equipmentCaptureSummary([{ ...snapshot, items: [unknown] }], "now").complete).toBe(
+      false,
+    );
+    const gear = itemFromAttributes(
+      {
+        data_equip_name: "测试鞋",
+        data_equip_type: "2755",
+        data_equip_desc: "等级130\n防御70\n敏捷50",
+      },
+      6,
+    );
+    expect(gear.category).toBeUndefined();
+    expect(equipmentCaptureSummary([{ ...snapshot, items: [gear] }], "now").complete).toBe(true);
+    gear.description = "等级130";
+    expect(equipmentCaptureSummary([{ ...snapshot, items: [gear] }], "now").complete).toBe(false);
   });
   it("跟踪参数、悬停时间和 URL 时间片段不会改变商品身份或时间", () => {
     const a = parseListing(

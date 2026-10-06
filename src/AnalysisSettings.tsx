@@ -1,11 +1,65 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { AnalysisProfile, ValuationSettings } from "../server/analysis/valuation-types";
-import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "../server/analysis/valuation-settings";
+import { RECOMMENDED_RULES } from "../server/analysis/valuation-settings";
+import {
+  DEFAULT_EQUIPMENT_BASELINE_PRICES,
+  type EquipmentBaselinePrices,
+} from "../server/analysis/equipment-baseline";
+
+export function EquipmentBaselinePriceFields({
+  prices = DEFAULT_EQUIPMENT_BASELINE_PRICES,
+  onChange,
+}: {
+  prices?: EquipmentBaselinePrices;
+  onChange: (prices: EquipmentBaselinePrices) => void;
+}) {
+  return (
+    <details className="analysis-settings-section">
+      <summary>普通装备默认参考价（梦幻币）</summary>
+      <p>
+        60–80级普通环装、90–100级普通白板采用默认参考价，按角色区服金价折算成人民币。预设来自历史资料或人工参数，不是实时藏宝阁报价；修改后会标为人工预设。
+      </p>
+      <p>60、90、100级默认留空待补。70、80级历史默认值仅适用于三年外区服；其他年代需自行设置。</p>
+      <p>只填大于0的梦幻币整数。留空表示暂不计价，保留待补；低值装备会保留卡片并标明未计入。</p>
+      {(["60", "70", "80", "90", "100"] as const).map((level) => (
+        <fieldset key={level}>
+          <legend>
+            {level}级{Number(level) <= 80 ? "环装" : "普通白板"}
+          </legend>
+          <div className="analysis-settings-grid">
+            {(["weapon", "armor"] as const).map((kind) => (
+              <label key={kind}>
+                {level}级{kind === "weapon" ? "武器" : "防具"}默认价（梦幻币）
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={prices[level][kind] ?? ""}
+                  onChange={(event) =>
+                    onChange({
+                      ...prices,
+                      [level]: {
+                        ...prices[level],
+                        [kind]: event.target.value === "" ? null : Number(event.target.value),
+                      },
+                    })
+                  }
+                />
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      ))}
+    </details>
+  );
+}
 
 type SettingsResponse = {
   profile: AnalysisProfile;
   promptFile: string;
+  marketError?: string;
+  market?: import("../server/analysis/market").MarketServer[];
   servers: { serverId: string; serverName: string }[];
 };
 export function AnalysisSettings({
@@ -51,23 +105,6 @@ export function AnalysisSettings({
   }, []);
   const set = (key: keyof ValuationSettings, value: unknown) =>
     setSettings((current) => (current ? { ...current, [key]: value } : current));
-  const numberInput = (key: "b" | "a" | "budget" | "extraCost", label: string, hint: string) => (
-    <label>
-      {label}
-      <input
-        aria-label={label}
-        type="number"
-        step="any"
-        min="0"
-        max={key === "a" || key === "b" ? 1 : undefined}
-        value={settings?.[key] ?? ""}
-        onChange={(event) =>
-          set(key, event.target.value === "" ? null : Number(event.target.value))
-        }
-      />
-      <small>{hint}</small>
-    </label>
-  );
   const choice = (
     key:
       | "strengthMode"
@@ -126,13 +163,24 @@ export function AnalysisSettings({
             ...current,
             servers: [
               ...current.servers.filter((row) => row.serverId !== id),
-              { ...server(id), [key]: value },
+              { ...server(id), [key]: value, source: "manual" },
             ],
           }
         : current,
     );
   async function save() {
     if (!source || !settings || busy) return;
+    if (
+      Object.values(settings.equipmentBaselinePrices || DEFAULT_EQUIPMENT_BASELINE_PRICES).some(
+        (row) =>
+          Object.values(row).some(
+            (value) => value !== null && (!Number.isSafeInteger(value) || value <= 0),
+          ),
+      )
+    ) {
+      setError("普通装备默认价须为大于0的梦幻币整数；留空表示未计价。");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -163,7 +211,7 @@ export function AnalysisSettings({
       <header className="analysis-modal-header">
         <div>
           <span className="analysis-kicker">PROMPT / 分析设置</span>
-          <h2 id="analysis-settings-title">裸号估值与购买设置</h2>
+          <h2 id="analysis-settings-title">估值与挂牌比较设置</h2>
         </div>
         <button
           autoFocus
@@ -177,7 +225,7 @@ export function AnalysisSettings({
       </header>
       <p>
         每次开始分析都会冻结这份 Prompt
-        和参数。新批次使用新设置，历史结果保留。买入上限默认是估值的八折；实际费用、金价和排名需要填写。
+        和参数。新批次使用新设置，历史结果保留。先核对装备和宝宝，再联网查价，比较挂牌差异；区服金价和热度自动匹配。
       </p>
       {error && (
         <p role="alert" className="analysis-pending-note">
@@ -187,27 +235,19 @@ export function AnalysisSettings({
       {!source && !error && <p role="status">正在读取设置…</p>}
       {source && settings && (
         <>
-          <h3>购买条件</h3>
+          <h3>计价方式</h3>
           <p className="analysis-pending-note">
-            建议先用八折买入、强壮神速按当前等级计价的方案。金价和交易费用按实际填写，确实无费用时填0。
+            普通环装采用默认参考价，其他装备和宝宝查找全服同类挂牌样本。强壮神速按当前等级计价，参考依据和采用的价格会保存在结果里。
           </p>
           <button
             type="button"
             className="analysis-button analysis-button-outline"
             onClick={() =>
-              setSettings((current) =>
-                current ? { ...current, ...RECOMMENDED_RULES, b: RECOMMENDED_BUY_FACTOR } : current,
-              )
+              setSettings((current) => (current ? { ...current, ...RECOMMENDED_RULES } : current))
             }
           >
             使用建议计价方案
           </button>
-          <div className="analysis-settings-grid">
-            {numberInput("b", "最高买入系数 b", "0 < b ≤ 1，例如0.8表示估值的八折。")}
-            {numberInput("a", "理想买入系数 a（可选）", "不大于 b；留空不计算理想买价。")}
-            {numberInput("budget", "总预算 B（元，可选）", "包含挂牌价格和额外成本。")}
-            {numberInput("extraCost", "全部额外成本 F（元）", "无额外费用时明确填0，不默认免费。")}
-          </div>
           <details className="analysis-settings-section">
             <summary>计价方案：已有默认规则，也可修改</summary>
             <p>
@@ -278,10 +318,25 @@ export function AnalysisSettings({
               确认多只进阶坐骑分别计价后全额相加
             </label>
           </details>
+          <EquipmentBaselinePriceFields
+            prices={settings.equipmentBaselinePrices}
+            onChange={(prices) => set("equipmentBaselinePrices", prices)}
+          />
           <details className="analysis-settings-section">
-            <summary>区服参数：按服务器分别设置</summary>
+            <summary>全服行情：自动匹配每件商品的区服</summary>
             <p>
-              金价 G 是每 U 个游戏币的人民币价。三年外还需确认 G 与 Prompt 基准210的报价单位一致。
+              按商品已有服务器 ID
+              匹配全服金价与热度榜，默认报价和基准210元都按3000万游戏币计算。修改某个区服后，该服使用手动参数。
+            </p>
+            {source.marketError && <p role="status">{source.marketError}；可手动填写所需参数。</p>}
+            <p>
+              <a href="https://www.aimhxy.com/mhb" target="_blank" rel="noreferrer">
+                金价来源：梦幻天眼
+              </a>{" "}
+              ·{" "}
+              <a href="https://www.aimhxy.com/hot" target="_blank" rel="noreferrer">
+                热度来源：梦幻天眼
+              </a>
             </p>
             {serverRows.map((row) => {
               const value = server(row.serverId);
@@ -290,6 +345,36 @@ export function AnalysisSettings({
                   <legend>
                     {row.serverName} · {row.serverId}
                   </legend>
+                  <p>{value.source === "auto" ? "已按本商品区服自动匹配" : "手动参数"}</p>
+                  {source.market?.find((item) => item.serverId === row.serverId) &&
+                    value.source !== "auto" && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setSettings((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  servers: [
+                                    ...current.servers.filter(
+                                      (item) => item.serverId !== row.serverId,
+                                    ),
+                                    source.market!.find((item) => item.serverId === row.serverId)!,
+                                  ],
+                                }
+                              : current,
+                          )
+                        }
+                      >
+                        恢复本服自动行情
+                      </button>
+                    )}
+                  {value.source === "auto" && (
+                    <small>
+                      行情读取时间：
+                      {source.market?.find((item) => item.serverId === row.serverId)?.fetchedAt}
+                    </small>
+                  )}
                   <div className="analysis-settings-grid">
                     <label>
                       区服年代

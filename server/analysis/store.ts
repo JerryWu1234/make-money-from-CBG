@@ -7,6 +7,9 @@ import { buildProductDocument } from "./product-document";
 import { valuationPrompt } from "./valuation-contract";
 import type { AnalysisProfile } from "./valuation-types";
 import type { ProductDocument } from "./product-document";
+import { equipmentInventory, type EquipmentPricingSnapshot } from "./equipment-pricing";
+import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
+import { validateSampleSelection } from "./sample-selection";
 import type {
   AnalysisDetail,
   AnalysisItem,
@@ -25,12 +28,21 @@ export type AnalysisTask = {
   attempts: number;
   profile: AnalysisProfile | null;
   lastError: string | null;
+  equipmentPricing?: EquipmentPricingSnapshot;
+  petPricing?: PetPricingSnapshot;
 };
 const now = () => new Date().toISOString();
 const nullable = (value: SQLOutputValue | undefined) => (value == null ? null : String(value));
+const expiredPricingSql = ["equipment_pricing", "pet_pricing"]
+  .map((key) => {
+    const time = `julianday(json_extract(t.result_json,'$.valuation.${key}.searchedAt'))`;
+    return `(json_type(t.result_json,'$.valuation.${key}')='object' AND (${time} IS NULL OR ${time}<=julianday('now','-24 hours') OR ${time}>julianday('now','+1 minute')))`;
+  })
+  .join(" OR ");
 const stateSql = `CASE WHEN l.status!='complete' OR l.detail_json IS NULL THEN 'waiting_detail'
   WHEN t.id IS NULL THEN 'ready'
   WHEN t.source_listing_json!=l.listing_json OR t.source_detail_json!=l.detail_json THEN 'stale'
+  WHEN t.status='completed' AND (${expiredPricingSql}) THEN 'stale'
   ELSE t.status END`;
 
 export class AnalysisStore {
@@ -64,6 +76,8 @@ export class AnalysisStore {
       ["analysis_runs", "profile_json"],
       ["analysis_attempts", "request_text"],
       ["analysis_attempts", "request_hash"],
+      ["analysis_tasks", "equipment_pricing_json"],
+      ["analysis_tasks", "pet_pricing_json"],
     ]) {
       if (
         !db
@@ -136,7 +150,8 @@ export class AnalysisStore {
       .prepare(`SELECT r.*,count(t.id) total,
       coalesce(sum(t.status='completed'),0) completed,coalesce(sum(t.status='failed'),0) failed,
       coalesce(sum(t.status='queued'),0) queued,coalesce(sum(t.reused),0) reused,
-      (SELECT json_extract(source_listing_json,'$.name') FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current
+      (SELECT json_extract(source_listing_json,'$.name') FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current,
+      (SELECT CASE WHEN equipment_pricing_json IS NULL AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search' WHEN pet_pricing_json IS NULL AND json_extract(r.profile_json,'$.petSearch')=1 THEN 'pet_search' ELSE 'analysis' END FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) phase
       FROM analysis_runs r LEFT JOIN analysis_tasks t ON t.run_id=r.id WHERE r.id=? GROUP BY r.id`)
       .get(id);
     return row
@@ -155,6 +170,7 @@ export class AnalysisStore {
           queued: Number(row.queued),
           reused: Number(row.reused),
           current: nullable(row.current),
+          phase: nullable(row.phase) as AnalysisRun["phase"],
           ...(row.profile_json
             ? {
                 profileHash: (JSON.parse(String(row.profile_json)) as AnalysisProfile).hash,
@@ -187,7 +203,9 @@ export class AnalysisStore {
     profile?: AnalysisProfile,
     sample = false,
     sampleSize = 1,
+    productKeys?: string[],
   ) {
+    validateSampleSelection(sample, sampleSize, productKeys);
     const id = randomUUID();
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -205,13 +223,26 @@ export class AnalysisStore {
           now(),
           profile ? JSON.stringify(profile) : null,
         );
+      const selected = productKeys
+        ? " AND key IN (" + productKeys.map(() => "?").join(",") + ")"
+        : "";
       const rows = this.db
         .prepare(
-          "SELECT key,listing_json,detail_json FROM listings WHERE status='complete' AND detail_json IS NOT NULL ORDER BY " +
+          "SELECT key,listing_json,detail_json FROM listings WHERE status='complete' AND detail_json IS NOT NULL" +
+            selected +
+            " ORDER BY " +
             (sample ? "key ASC" : "first_seen_at ASC,key ASC") +
-            (sample ? " LIMIT ?" : ""),
+            (sample && !productKeys ? " LIMIT ?" : ""),
         )
-        .all(...(sample ? [sampleSize] : []));
+        .all(...(productKeys || (sample ? [sampleSize] : [])));
+      if (productKeys) {
+        if (rows.length !== productKeys.length)
+          throw new Error("指定商品不存在或详情未完成，请先补采后再试分析");
+        rows.sort(
+          (left, right) =>
+            productKeys.indexOf(String(left.key)) - productKeys.indexOf(String(right.key)),
+        );
+      }
       if (!rows.length) throw new Error("暂无详情完整的商品，请先采集商品详情");
       const insert = this.db.prepare(
         `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -228,20 +259,21 @@ export class AnalysisStore {
         const prompt = profile
           ? valuationPrompt(document, record, profile)
           : analysisPrompt(document);
-        const previous = force
-          ? undefined
-          : this.db
-              .prepare(
-                `SELECT t.id,t.source_task_id,t.result_json,t.completed_at FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id WHERE t.input_hash=? AND t.prompt_hash=? AND t.status='completed' AND r.provider=? AND r.model=? AND r.rule_version=? AND coalesce(json_extract(r.profile_json,'$.hash'),'')=? ORDER BY t.completed_at DESC LIMIT 1`,
-              )
-              .get(
-                document.contentHash,
-                textHash(prompt),
-                provider,
-                model,
-                profile?.version || RULE_VERSION,
-                profile?.hash || "",
-              );
+        const previous =
+          force || profile?.equipmentSearch || profile?.petSearch
+            ? undefined
+            : this.db
+                .prepare(
+                  `SELECT t.id,t.source_task_id,t.result_json,t.completed_at FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id WHERE t.input_hash=? AND t.prompt_hash=? AND t.status='completed' AND r.provider=? AND r.model=? AND r.rule_version=? AND coalesce(json_extract(r.profile_json,'$.hash'),'')=? ORDER BY t.completed_at DESC LIMIT 1`,
+                )
+                .get(
+                  document.contentHash,
+                  textHash(prompt),
+                  provider,
+                  model,
+                  profile?.version || RULE_VERSION,
+                  profile?.hash || "",
+                );
         insert.run(
           randomUUID(),
           id,
@@ -295,7 +327,114 @@ export class AnalysisStore {
       attempts: Number(row.attempt_count),
       profile: row.profile_json ? JSON.parse(String(row.profile_json)) : null,
       lastError: nullable(row.error),
+      ...(row.equipment_pricing_json
+        ? { equipmentPricing: JSON.parse(String(row.equipment_pricing_json)) }
+        : {}),
+      ...(row.pet_pricing_json ? { petPricing: JSON.parse(String(row.pet_pricing_json)) } : {}),
     };
+  }
+  beginEquipmentSearch(task: AnalysisTask, owner: string) {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    if (
+      this.db
+        .prepare(
+          "UPDATE analysis_tasks SET status='running',error=NULL WHERE id=? AND status='queued' AND equipment_pricing_json IS NULL",
+        )
+        .run(task.id).changes !== 1
+    )
+      throw new Error("装备查价任务状态已变化");
+  }
+  saveEquipmentPricing(
+    task: AnalysisTask,
+    snapshot: EquipmentPricingSnapshot,
+    owner: string,
+  ): AnalysisTask {
+    if (
+      !task.profile?.equipmentSearch ||
+      snapshot.inputHash !== equipmentInventory(task.record).inputHash
+    )
+      throw new Error("装备查价资料与当前任务不匹配");
+    const prompt = valuationPrompt(
+      task.document,
+      task.record,
+      task.profile,
+      snapshot,
+      task.petPricing,
+    );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.owns(owner)) throw new Error("分析锁已失效");
+      if (
+        this.db
+          .prepare(
+            "UPDATE analysis_tasks SET equipment_pricing_json=?,prompt_text=?,prompt_hash=?,status='queued',error=NULL WHERE id=? AND status='running' AND equipment_pricing_json IS NULL",
+          )
+          .run(JSON.stringify(snapshot), prompt, textHash(prompt), task.id).changes !== 1
+      )
+        throw new Error("装备查价任务状态已变化");
+      this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
+      this.db.exec("COMMIT");
+      return { ...task, prompt, equipmentPricing: snapshot, lastError: null };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  abortEquipmentSearch(task: AnalysisTask, owner: string) {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    this.db
+      .prepare(
+        "UPDATE analysis_tasks SET status='queued' WHERE id=? AND status='running' AND equipment_pricing_json IS NULL AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')",
+      )
+      .run(task.id, task.id);
+  }
+  beginPetSearch(task: AnalysisTask, owner: string) {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    if (
+      this.db
+        .prepare(
+          "UPDATE analysis_tasks SET status='running',error=NULL WHERE id=? AND status='queued' AND pet_pricing_json IS NULL",
+        )
+        .run(task.id).changes !== 1
+    )
+      throw new Error("宝宝查价任务状态已变化");
+  }
+  savePetPricing(task: AnalysisTask, snapshot: PetPricingSnapshot, owner: string): AnalysisTask {
+    if (!task.profile?.petSearch || snapshot.inputHash !== petInventory(task.record).inputHash)
+      throw new Error("宝宝查价资料与当前任务不匹配");
+    const prompt = valuationPrompt(
+      task.document,
+      task.record,
+      task.profile,
+      task.equipmentPricing,
+      snapshot,
+    );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.owns(owner)) throw new Error("分析锁已失效");
+      if (
+        this.db
+          .prepare(
+            "UPDATE analysis_tasks SET pet_pricing_json=?,prompt_text=?,prompt_hash=?,status='queued',error=NULL WHERE id=? AND status='running' AND pet_pricing_json IS NULL",
+          )
+          .run(JSON.stringify(snapshot), prompt, textHash(prompt), task.id).changes !== 1
+      )
+        throw new Error("宝宝查价任务状态已变化");
+      this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
+      this.db.exec("COMMIT");
+      return { ...task, prompt, petPricing: snapshot, lastError: null };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  abortPetSearch(task: AnalysisTask, owner: string) {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    this.db
+      .prepare(
+        "UPDATE analysis_tasks SET status='queued' WHERE id=? AND status='running' AND pet_pricing_json IS NULL AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')",
+      )
+      .run(task.id, task.id);
   }
   begin(task: AnalysisTask, owner: string, request = task.prompt) {
     const id = randomUUID();
@@ -413,6 +552,10 @@ export class AnalysisStore {
       error: nullable(row.error),
       reusedFrom: nullable(row.source_task_id),
       profile: row.profile_json ? JSON.parse(String(row.profile_json)) : null,
+      equipmentPricing: row.equipment_pricing_json
+        ? JSON.parse(String(row.equipment_pricing_json))
+        : null,
+      petPricing: row.pet_pricing_json ? JSON.parse(String(row.pet_pricing_json)) : null,
       attempts,
     };
   }
@@ -475,7 +618,7 @@ export class AnalysisStore {
       .map((row) => this.item(row));
     const ranking = this.db
       .prepare(
-        `WITH products AS (${source}) SELECT * FROM products WHERE state='completed' AND (json_extract(result_json,'$.valuation.decision')='BUY' OR (json_extract(result_json,'$.valuation') IS NULL AND json_extract(result_json,'$.score') IS NOT NULL)) ORDER BY json_extract(result_json,'$.valuation.margin_of_safety') DESC,json_extract(result_json,'$.score') DESC,key ASC LIMIT 10`,
+        `WITH products AS (${source}) SELECT * FROM products WHERE state='completed' AND (json_extract(result_json,'$.valuation.decision')='BUY' OR (json_extract(result_json,'$.valuation') IS NULL AND json_extract(result_json,'$.score') IS NOT NULL)) ORDER BY coalesce(json_extract(result_json,'$.valuation.price_difference_ratio'),json_extract(result_json,'$.valuation.margin_of_safety')) DESC,json_extract(result_json,'$.score') DESC,key ASC LIMIT 10`,
       )
       .all(run?.id || "")
       .map((row) => this.item(row));

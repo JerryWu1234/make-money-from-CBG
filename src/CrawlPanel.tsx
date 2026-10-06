@@ -53,7 +53,7 @@ export function CrawlPanel({
       clearTimeout(timer);
     };
   }, [onRunning, selectRecord]);
-  const action = async (command: "start" | "stop") => {
+  const action = async (command: "start" | "stop" | "backfill") => {
     setBusy(true);
     setError("");
     try {
@@ -88,6 +88,13 @@ export function CrawlPanel({
           onClick={() => void action("start")}
         >
           {status?.checkpoint ? "继续采集 / 检查新增" : "开始采集详情"}
+        </button>
+        <button
+          className="btn-secondary"
+          disabled={busy || !!status?.running || !ready}
+          onClick={() => void action("backfill")}
+        >
+          补齐已保存商品的估值资料
         </button>
         <button
           className="btn-secondary"

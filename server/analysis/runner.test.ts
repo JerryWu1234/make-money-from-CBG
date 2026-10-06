@@ -1,19 +1,36 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { analysisRecord, analysisResponse } from "../../tests/fixtures/analysis";
+import { analysisRecord, analysisResponse, valuationRecord } from "../../tests/fixtures/analysis";
 import { CrawlStore } from "../crawler/store";
 import type { SavedRoleRecord } from "../crawler/types";
 import { buildProductDocument } from "./product-document";
 import { AnalysisStore } from "./store";
 import { AnalysisRunner, type AnalysisClient } from "./runner";
+import { createProfile, DEFAULT_SETTINGS, PROMPT_FILE } from "./profile";
+import { calculateValuation } from "./valuation-calculator";
+import { searchEquipmentPrices } from "./equipment-pricing";
+import { searchPetPricing } from "./pet-pricing";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
-function setup(keys = ["a", "b"]) {
+function setup(keys = ["a", "b"], recordFactory = analysisRecord) {
   const crawl = new CrawlStore(":memory:");
   for (const key of keys) {
-    const record = analysisRecord(key);
+    const record = recordFactory(key);
+    record.detail!.equipmentCapture ||= {
+      version: 1,
+      collectedAt: record.detail!.collectedAt,
+      complete: true,
+      issues: [],
+    };
+    record.detail!.petCapture ||= {
+      version: 1,
+      collectedAt: record.detail!.collectedAt,
+      complete: true,
+      issues: [],
+    };
     crawl.observe(record.listing);
     crawl.save(record.listing, record.detail!);
   }
@@ -25,16 +42,84 @@ function setup(keys = ["a", "b"]) {
       usage: { input_tokens: 100, output_tokens: 20 },
     };
   });
-  const connect = vi.fn(async (_provider: unknown, model?: string) => ({
-    model: model || "test-model",
-    analyze,
-  }));
+  const connect = vi.fn<(_provider: unknown, model?: string) => Promise<AnalysisClient>>(
+    async (_provider, model) => ({
+      model: model || "test-model",
+      analyze,
+    }),
+  );
   const runner = new AnalysisRunner(store, connect);
   cleanups.push(async () => {
     await runner.shutdown();
     crawl.db.close();
   });
   return { crawl, store, runner, analyze, connect };
+}
+async function valuationSetup() {
+  const context = setup(["a"], (key) => {
+    const record = valuationRecord(key);
+    record.detail!.equipmentCapture = {
+      version: 1,
+      collectedAt: record.detail!.collectedAt,
+      complete: true,
+      issues: [],
+    };
+    record.detail!.tabs.push({
+      name: "道具/法宝",
+      text: "",
+      fields: [],
+      tables: [],
+      elements: [],
+      tooltips: [],
+      items: [],
+    });
+    record.detail!.tabs.push({
+      name: "召唤兽/孩子",
+      text: "没有召唤兽",
+      fields: [],
+      tables: [],
+      elements: [],
+      tooltips: [],
+      pets: [],
+      petCount: 0,
+    });
+    return record;
+  });
+  const record = context.crawl.detail("a") as SavedRoleRecord;
+  const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), {
+    ...DEFAULT_SETTINGS,
+    servers: [{ serverId: record.listing.serverId, age: "three", rank: 10 }],
+  });
+  const noNetwork = vi.fn().mockRejectedValue(new Error("empty equipment must not search"));
+  const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+    findCandidates: noNetwork,
+    readSource: noNetwork,
+  });
+  expect(noNetwork).not.toHaveBeenCalled();
+  const searchEquipment = vi
+    .fn<NonNullable<AnalysisClient["searchEquipment"]>>()
+    .mockResolvedValue(pricing);
+  const petPricing = await searchPetPricing(record, new AbortController().signal, {
+    findCandidates: noNetwork,
+    readSource: noNetwork,
+  });
+  const searchPets = vi
+    .fn<NonNullable<AnalysisClient["searchPets"]>>()
+    .mockResolvedValue(petPricing);
+  context.connect.mockImplementation(async (_provider, model) => ({
+    model: model || "test-model",
+    analyze: context.analyze,
+    searchEquipment,
+    searchPets,
+  }));
+  context.analyze.mockResolvedValue({
+    text: JSON.stringify({
+      decision: calculateValuation(record, profile).decision,
+      reason: "按采集资料和当前挂牌价核对差额。",
+      extracted_facts: [],
+    }),
+  });
+  return { ...context, profile, pricing, petPricing, searchEquipment, searchPets };
 }
 function untilAborted(signal: AbortSignal): Promise<never> {
   return new Promise((_resolve, reject) => {
@@ -43,6 +128,208 @@ function untilAborted(signal: AbortSignal): Promise<never> {
 }
 
 describe("持久化的商品分析队列", () => {
+  it("指定商品试分析只分析所选商品，保留选择顺序", async () => {
+    const { crawl, store, runner, analyze } = setup(["a", "b", "c"]);
+    const id = await runner.start("codex", true, undefined, true, undefined, 2, ["c", "b"]);
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({ total: 2, completed: 2, failed: 0 });
+    expect(
+      crawl.db
+        .prepare("SELECT listing_key FROM analysis_tasks WHERE run_id=? ORDER BY ordinal")
+        .all(id)
+        .map((t) => t.listing_key),
+    ).toEqual(["c", "b"]);
+    expect(analyze).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["missing", "pending"])(
+    "指定商品%s不存在或未采齐时回滚整批，不分析其它商品",
+    async (key) => {
+      const { crawl, runner, analyze } = setup(["a"]);
+      crawl.observe(analysisRecord("pending").listing);
+      await expect(
+        runner.start("codex", true, undefined, true, undefined, 2, ["a", key]),
+      ).rejects.toThrow("指定商品不存在或详情未完成");
+      expect(crawl.db.prepare("SELECT COUNT(*) n FROM analysis_runs").get()?.n).toBe(0);
+      expect(analyze).not.toHaveBeenCalled();
+      expect(crawl.db.prepare("SELECT COUNT(*) n FROM analysis_tasks").get()?.n).toBe(0);
+      expect(crawl.db.prepare("SELECT COUNT(*) n FROM analysis_lock").get()?.n).toBe(0);
+    },
+  );
+
+  it("重复或与试分析数量不符的选择在连接AI前被拒绝", async () => {
+    const { runner, connect } = setup(["a", "b"]);
+    await expect(
+      runner.start("codex", true, undefined, true, undefined, 2, ["a", "a"]),
+    ).rejects.toThrow("不同的商品 ID");
+    await expect(runner.start("codex", true, undefined, true, undefined, 2, ["a"])).rejects.toThrow(
+      "数量一致",
+    );
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("当前任务执行中拒绝指定商品试分析，不把现有批次当作选择结果", async () => {
+    const { runner, analyze } = setup(["a", "b"]);
+    analyze.mockImplementation((_prompt, _schema, signal) => untilAborted(signal));
+    await runner.start("codex", true, undefined, true);
+    await expect(runner.start("codex", true, undefined, true, undefined, 1, ["b"])).rejects.toThrow(
+      "请先暂停当前分析",
+    );
+    expect(analyze).toHaveBeenCalledOnce();
+    await runner.pause();
+  });
+
+  it("完成后宝宝行情过期会移出当前推荐榜，原价格和证据仍能在历史查看", async () => {
+    const { store, runner, profile } = await valuationSetup();
+    const id = await runner.start("codex", true, profile);
+    await runner.settled();
+    expect(store.overview({ runId: id }).ranking).toHaveLength(1);
+    const taskId = store.overview({ runId: id }).records.items[0].taskId!;
+    const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
+    store.db
+      .prepare(
+        "UPDATE analysis_tasks SET result_json=json_set(result_json,'$.valuation.pet_pricing.searchedAt',?) WHERE id=?",
+      )
+      .run(oldTime, taskId);
+    expect(store.overview({ runId: id }).ranking).toHaveLength(0);
+    expect(store.overview({ runId: id }).records.items[0].state).toBe("stale");
+    expect(store.detail(taskId)?.result?.valuation).toMatchObject({
+      decision: "BUY",
+      pet_pricing: { searchedAt: oldTime },
+    });
+  });
+  it("装备成功后宝宝查价暂停，恢复复用装备快照并把宝宝价格接入结论", async () => {
+    const { store, runner, analyze, profile, pricing, petPricing, searchEquipment, searchPets } =
+      await valuationSetup();
+    searchPets.mockImplementationOnce((_record, signal) => untilAborted(signal));
+    const id = await runner.start("codex", true, profile);
+    await vi.waitFor(() => expect(searchPets).toHaveBeenCalledOnce());
+    expect(store.run(id)?.phase).toBe("pet_search");
+    expect(analyze).not.toHaveBeenCalled();
+    await runner.pause(id);
+    expect(store.run(id)).toMatchObject({ status: "paused", queued: 1, completed: 0 });
+    const taskId = store.overview({ runId: id }).records.items[0].taskId!;
+    expect(store.detail(taskId)).toMatchObject({
+      equipmentPricing: pricing,
+      petPricing: null,
+      attempts: [],
+    });
+    await runner.resume(id);
+    await runner.settled();
+    expect(searchEquipment).toHaveBeenCalledOnce();
+    expect(searchPets).toHaveBeenCalledTimes(2);
+    expect(store.run(id)).toMatchObject({ completed: 1, failed: 0 });
+    expect(store.detail(taskId)?.result?.valuation).toMatchObject({
+      pet_value: 0,
+      pet_pricing: petPricing,
+    });
+    expect(analyze.mock.calls[0][0]).toContain(petPricing.inputHash);
+  });
+
+  it("联网宝宝快照的资料哈希不一致时暂停，不能把另一角色报价用于当前任务", async () => {
+    const { store, runner, analyze, profile, petPricing, searchPets } = await valuationSetup();
+    searchPets.mockResolvedValueOnce({ ...petPricing, inputHash: "another-role" });
+    const id = await runner.start("codex", true, profile);
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({
+      status: "paused",
+      queued: 1,
+      error: "宝宝查价资料与当前任务不匹配",
+    });
+    expect(analyze).not.toHaveBeenCalled();
+  });
+
+  it("先完成装备查价并持久化快照，才开始当前商品分析", async () => {
+    const { crawl, store, runner, analyze, profile, pricing, searchEquipment } =
+      await valuationSetup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    searchEquipment.mockImplementationOnce(async () => {
+      await gate;
+      return pricing;
+    });
+    const id = await runner.start("codex", true, profile);
+    await vi.waitFor(() => expect(searchEquipment).toHaveBeenCalledOnce());
+    expect(analyze).not.toHaveBeenCalled();
+    expect(
+      crawl.db.prepare("SELECT status,attempt_count FROM analysis_tasks WHERE run_id=?").get(id),
+    ).toMatchObject({ status: "running", attempt_count: 0 });
+    release();
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({ completed: 1, failed: 0 });
+    const taskId = store.overview({ runId: id }).records.items[0].taskId!;
+    expect(store.detail(taskId)?.result?.valuation?.equipment_pricing).toEqual(pricing);
+    expect(analyze).toHaveBeenCalledOnce();
+    expect(analyze.mock.calls[0][0]).toContain(pricing.inputHash);
+  });
+
+  it("分析校验重试复用查价快照，不重复联网搜索", async () => {
+    const { store, runner, analyze, profile, pricing, searchEquipment } = await valuationSetup();
+    analyze.mockResolvedValueOnce({ text: "invalid-json" });
+    const id = await runner.start("codex", true, profile);
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({ completed: 1, failed: 0 });
+    expect(analyze).toHaveBeenCalledTimes(2);
+    expect(searchEquipment).toHaveBeenCalledOnce();
+    const taskId = store.overview({ runId: id }).records.items[0].taskId!;
+    const detail = store.detail(taskId)!;
+    expect(detail.result?.valuation?.equipment_pricing).toEqual(pricing);
+    expect(detail.attempts).toHaveLength(2);
+    for (const attempt of detail.attempts) expect(attempt.requestText).toContain(pricing.inputHash);
+  });
+
+  it("查价中暂停保留当前队列，恢复后重新查价，不创建半成品分析尝试", async () => {
+    const { crawl, store, runner, analyze, profile, pricing, searchEquipment } =
+      await valuationSetup();
+    searchEquipment.mockImplementationOnce((_record, signal) => untilAborted(signal));
+    const id = await runner.start("codex", true, profile);
+    await vi.waitFor(() => expect(searchEquipment).toHaveBeenCalledOnce());
+    await runner.pause(id);
+    expect(store.run(id)).toMatchObject({ status: "paused", completed: 0, queued: 1 });
+    expect(
+      crawl.db.prepare("SELECT status,attempt_count FROM analysis_tasks WHERE run_id=?").get(id),
+    ).toMatchObject({ status: "queued", attempt_count: 0 });
+    expect(crawl.db.prepare("SELECT count(*) total FROM analysis_attempts").get()?.total).toBe(0);
+    expect(analyze).not.toHaveBeenCalled();
+    await runner.resume(id);
+    await runner.settled();
+    expect(searchEquipment).toHaveBeenCalledTimes(2);
+    expect(analyze).toHaveBeenCalledOnce();
+    expect(store.run(id)).toMatchObject({ completed: 1, failed: 0 });
+    const taskId = store.overview({ runId: id }).records.items[0].taskId!;
+    expect(store.detail(taskId)?.result?.valuation?.equipment_pricing).toEqual(pricing);
+  });
+
+  it("查价成功后分析中断，恢复继续使用原快照", async () => {
+    const { store, runner, analyze, profile, pricing, searchEquipment } = await valuationSetup();
+    analyze.mockImplementationOnce((_prompt, _schema, signal) => untilAborted(signal));
+    const id = await runner.start("codex", true, profile);
+    await vi.waitFor(() => expect(analyze).toHaveBeenCalledOnce());
+    await runner.pause(id);
+    expect(store.run(id)).toMatchObject({ status: "paused", queued: 1 });
+    await runner.resume(id);
+    await runner.settled();
+    expect(searchEquipment).toHaveBeenCalledOnce();
+    expect(analyze).toHaveBeenCalledTimes(2);
+    expect(store.run(id)).toMatchObject({ completed: 1, failed: 0 });
+    const taskId = store.overview({ runId: id }).records.items[0].taskId!;
+    expect(store.detail(taskId)?.result?.valuation?.equipment_pricing).toEqual(pricing);
+  });
+
+  it("未提供联网查价客户端时暂停队列，显示可识别错误", async () => {
+    const { store, runner, analyze, connect, profile } = await valuationSetup();
+    connect.mockResolvedValue({ model: "test-model", analyze });
+    const id = await runner.start("codex", true, profile);
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({
+      status: "paused",
+      queued: 1,
+      error: "装备联网查价尚未连接",
+    });
+    expect(analyze).not.toHaveBeenCalled();
+  });
   it("先分析一件选择列表首个完整商品，而不是最早入库的商品", async () => {
     const { crawl, store, runner, analyze } = setup(["b", "a"]);
     crawl.db.prepare("UPDATE listings SET first_seen_at=? WHERE key=?").run("2020-01-01", "b");

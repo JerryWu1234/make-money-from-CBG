@@ -23,6 +23,7 @@ async function moduleUrl(file, replacements = {}) {
 const listingUrl = await moduleUrl("server/crawler/listing.ts");
 const viewportUrl = await moduleUrl("server/viewport.ts");
 const compactUrl = await moduleUrl("server/crawler/compact.ts");
+const { CAPTURE_VERSION } = await import(compactUrl);
 const typesUrl = await moduleUrl("server/crawler/types.ts");
 const pageUrl = await moduleUrl("server/crawler/page.ts", {
   "./listing": listingUrl,
@@ -37,6 +38,7 @@ const { collectDetail, MAIN_TABS } = await import(
     "../viewport": viewportUrl,
     "./compact": compactUrl,
     "./pets": petsUrl,
+    "./valuation-capture": await moduleUrl("server/crawler/valuation-capture.ts"),
   })
 );
 const { prepareList, gotoPage, hoverListing, readListings } = await import(pageUrl);
@@ -116,7 +118,19 @@ try {
     store.save(
       item,
       {
-        captureVersion: 3,
+        captureVersion: CAPTURE_VERSION,
+        equipmentCapture: {
+          version: 1,
+          collectedAt: new Date().toISOString(),
+          complete: true,
+          issues: [],
+        },
+        petCapture: {
+          version: 1,
+          collectedAt: new Date().toISOString(),
+          complete: true,
+          issues: [],
+        },
         url: item.url,
         collectedAt: new Date().toISOString(),
         tabs: [],
@@ -148,6 +162,8 @@ try {
   assert.ok(MAIN_TABS.every((name) => saved.detail.tabs.some((tab) => tab.name === name)));
   assert.ok(saved.detail.tabs.some((tab) => tab.text.includes("法术抗性：999")));
   const petTab = saved.detail.tabs.find((t) => t.name === "召唤兽/孩子");
+  assert.equal(saved.detail.petCapture.complete, true);
+  assert.deepEqual(saved.detail.petCapture.issues, []);
   assert.equal(petTab.petCount, 8);
   assert.equal(petTab.pets.length, 8);
   for (let n = 0; n < 8; n++) {

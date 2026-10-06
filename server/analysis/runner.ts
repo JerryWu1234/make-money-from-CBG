@@ -1,13 +1,23 @@
 import { randomUUID } from "node:crypto";
 import type { AiProvider } from "../ai/types";
+import type { SavedRoleRecord } from "../crawler/types";
+import type { EquipmentPricingSnapshot } from "./equipment-pricing";
+import type { PetPricingSnapshot } from "./pet-pricing";
 import { ANALYSIS_SCHEMA, validateAnalysis } from "./contract";
 import { AnalysisStore } from "./store";
 import { VALUATION_SCHEMA, validateValuation } from "./valuation-contract";
-import type { AnalysisProfile } from "./valuation-types";
+import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { CALCULATION_VERSION } from "./profile";
+import { validateSampleSelection } from "./sample-selection";
 
 export type AnalysisClient = {
   model: string;
+  searchEquipment?: (
+    record: SavedRoleRecord,
+    signal: AbortSignal,
+    settings?: ValuationSettings,
+  ) => Promise<EquipmentPricingSnapshot>;
+  searchPets?: (record: SavedRoleRecord, signal: AbortSignal) => Promise<PetPricingSnapshot>;
   analyze: (
     prompt: string,
     schema: unknown,
@@ -34,13 +44,14 @@ export class AnalysisRunner {
     sample = false,
     selectedModel?: string,
     sampleSize = 1,
+    productKeys?: string[],
   ) {
-    if (sample && (!Number.isInteger(sampleSize) || sampleSize < 1 || sampleSize > 3))
-      throw new Error("试分析数量请选择 1 到 3 件");
+    validateSampleSelection(sample, sampleSize, productKeys);
     if (profile && profile.calculationVersion !== CALCULATION_VERSION)
       throw new Error("估值规则已更新，请按新规则开始分析；旧结果仍可查看");
     const existing = this.currentActivity();
     if (existing) {
+      if (productKeys) throw new Error("请先暂停当前分析，再指定商品试分析");
       const run = this.store.run(existing.id);
       if (run?.provider !== provider) throw new Error("请先暂停当前分析，再切换 AI");
       if (selectedModel && run.model !== selectedModel)
@@ -52,6 +63,7 @@ export class AnalysisRunner {
     // The lease also protects the await above and separate local Node services.
     const afterConnect = this.currentActivity();
     if (afterConnect) {
+      if (productKeys) throw new Error("请先暂停当前分析，再指定商品试分析");
       const run = this.store.run(afterConnect.id);
       if (run?.provider !== provider) throw new Error("请先暂停当前分析，再切换 AI");
       if (selectedModel && run.model !== selectedModel)
@@ -61,13 +73,22 @@ export class AnalysisRunner {
     this.store.recover();
     const owner = randomUUID();
     if (!this.store.acquire(owner)) {
+      if (productKeys) throw new Error("另一个本机服务正在分析，请先在该服务暂停");
       const current = this.store.activeRun();
       if (current?.provider === provider && (!selectedModel || current.model === selectedModel))
         return current.id;
       throw new Error("另一个本机服务正在分析，请先在该服务暂停");
     }
     try {
-      const id = this.store.createRun(provider, client.model, force, profile, sample, sampleSize);
+      const id = this.store.createRun(
+        provider,
+        client.model,
+        force,
+        profile,
+        sample,
+        sampleSize,
+        productKeys,
+      );
       this.launch(id, owner, client);
       return id;
     } catch (error) {
@@ -134,10 +155,56 @@ export class AnalysisRunner {
   private async process(id: string, owner: string, client: AnalysisClient, stop: AbortSignal) {
     while (!stop.aborted) {
       if (!this.store.owns(owner)) return;
-      const task = this.store.next(id);
+      let task = this.store.next(id);
       if (!task) {
         this.store.setRun(id, "completed", null, owner);
         return;
+      }
+      if (task.profile?.equipmentSearch && !task.equipmentPricing) {
+        const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
+        try {
+          this.store.beginEquipmentSearch(task, owner);
+          if (!client.searchEquipment) throw new Error("装备联网查价尚未连接");
+          const snapshot = await client.searchEquipment(task.record, signal, task.profile.settings);
+          signal.throwIfAborted();
+          if (!this.store.owns(owner)) return;
+          task = this.store.saveEquipmentPricing(task, snapshot, owner);
+        } catch (error) {
+          if (!this.store.owns(owner)) return;
+          this.store.abortEquipmentSearch(task, owner);
+          const message = stop.aborted
+            ? "已暂停装备查价，继续时先处理这件商品"
+            : signal.aborted
+              ? "装备联网查价超时，请重试"
+              : error instanceof Error
+                ? error.message
+                : "装备联网查价失败，请重试";
+          this.store.setRun(id, "paused", message, owner);
+          return;
+        }
+      }
+      if (task.profile?.petSearch && !task.petPricing) {
+        const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
+        try {
+          this.store.beginPetSearch(task, owner);
+          if (!client.searchPets) throw new Error("宝宝联网查价尚未连接");
+          const snapshot = await client.searchPets(task.record, signal);
+          signal.throwIfAborted();
+          if (!this.store.owns(owner)) return;
+          task = this.store.savePetPricing(task, snapshot, owner);
+        } catch (error) {
+          if (!this.store.owns(owner)) return;
+          this.store.abortPetSearch(task, owner);
+          const message = stop.aborted
+            ? "已暂停宝宝查价，继续时先处理这件商品"
+            : signal.aborted
+              ? "宝宝联网查价超时，请重试"
+              : error instanceof Error
+                ? error.message
+                : "宝宝联网查价失败，请重试";
+          this.store.setRun(id, "paused", message, owner);
+          return;
+        }
       }
       const prompt =
         task.profile && task.lastError && task.attempts > 0
@@ -163,7 +230,14 @@ export class AnalysisRunner {
         signal.throwIfAborted();
         if (!this.store.owns(owner)) throw new Error("分析锁已失效");
         const result = task.profile
-          ? validateValuation(raw, task.document, task.record, task.profile)
+          ? validateValuation(
+              raw,
+              task.document,
+              task.record,
+              task.profile,
+              task.equipmentPricing,
+              task.petPricing,
+            )
           : validateAnalysis(raw, task.document, task.record);
         this.store.finish(task, attempt, owner, { state: "completed", result, raw, usage });
       } catch (error) {

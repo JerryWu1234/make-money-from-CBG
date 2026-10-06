@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { valuationRecord } from "../tests/fixtures/analysis";
+import { equipmentPricingFixture, petPricingFixture } from "../tests/fixtures/analysis";
 
 const mocks = vi.hoisted(() => ({
   codexAccount: vi.fn(),
   codexModel: vi.fn(),
   codexModels: vi.fn(),
   requestCodex: vi.fn(),
+  requestCodexSearch: vi.fn(),
   probeCodex: vi.fn(),
   shutdownCodex: vi.fn(),
   probeDeepSeek: vi.fn(),
@@ -14,6 +17,17 @@ const mocks = vi.hoisted(() => ({
   writeFile: vi.fn(),
   rename: vi.fn(),
   rm: vi.fn(),
+  searchEquipmentPrices: vi.fn(),
+  petInventory: vi.fn(),
+  searchPetPricing: vi.fn(),
+  createEquipmentSource: vi.fn(),
+  createPetSource: vi.fn(),
+  findCandidates: vi.fn(),
+  readSource: vi.fn(),
+  closeSource: vi.fn(),
+  findPetCandidates: vi.fn(),
+  readPetSource: vi.fn(),
+  closePetSource: vi.fn(),
 }));
 vi.mock("./ai/codex", () => mocks);
 vi.mock("./ai/deepseek", () => ({
@@ -26,6 +40,20 @@ vi.mock("./ai/deepseek", () => ({
   ],
 }));
 vi.mock("node:fs/promises", () => mocks);
+vi.mock("./analysis/equipment-pricing", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./analysis/equipment-pricing")>()),
+  searchEquipmentPrices: mocks.searchEquipmentPrices,
+}));
+vi.mock("./analysis/browser-equipment-source", () => ({
+  createEquipmentSource: mocks.createEquipmentSource,
+}));
+vi.mock("./analysis/browser-pet-source", () => ({
+  createPetSource: mocks.createPetSource,
+}));
+vi.mock("./analysis/pet-pricing", () => ({
+  petInventory: mocks.petInventory,
+  searchPetPricing: mocks.searchPetPricing,
+}));
 const account = { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" };
 const fakeKey = "test-only-deepseek-key";
 
@@ -46,9 +74,336 @@ beforeEach(() => {
   mocks.writeFile.mockResolvedValue(undefined);
   mocks.rename.mockResolvedValue(undefined);
   mocks.rm.mockResolvedValue(undefined);
+  mocks.createEquipmentSource.mockResolvedValue({
+    findCandidates: mocks.findCandidates,
+    readSource: mocks.readSource,
+    close: mocks.closeSource,
+  });
+  mocks.closeSource.mockResolvedValue(undefined);
+  mocks.searchEquipmentPrices.mockResolvedValue({
+    ...equipmentPricingFixture(),
+    provider: "browser",
+  });
+  mocks.petInventory.mockReturnValue({
+    captureComplete: true,
+    items: [{ status: "no_match" }],
+  });
+  mocks.createPetSource.mockResolvedValue({
+    findCandidates: mocks.findPetCandidates,
+    readSource: mocks.readPetSource,
+    close: mocks.closePetSource,
+  });
+  mocks.closePetSource.mockResolvedValue(undefined);
+  mocks.searchPetPricing.mockResolvedValue({ ...petPricingFixture(), provider: "browser" });
 });
 
+function equipmentRecord(empty = false) {
+  const record = valuationRecord();
+  record.detail!.equipmentCapture = {
+    version: 1,
+    collectedAt: record.detail!.collectedAt,
+    complete: true,
+    issues: [],
+  };
+  record.detail!.tabs = record.detail!.tabs.filter(
+    (tab) => !/^道具\/法宝(?:\s*\/|$)/.test(tab.name),
+  );
+  record.detail!.tabs.push({
+    name: "道具/法宝",
+    text: "",
+    fields: [],
+    tables: [],
+    elements: [],
+    tooltips: [],
+    items: empty
+      ? []
+      : [
+          {
+            index: 0,
+            name: "模拟测试铠甲",
+            category: "人物装备",
+            kind: "equipment",
+            description: "等级：120\n防御：200",
+          },
+        ],
+  });
+  return record;
+}
+
 describe("AI 连接验证", () => {
+  it("DeepSeek宝宝查询使用浏览器source，不准备Codex搜索模型或账号，结束关闭source", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    mocks.codexAccount.mockResolvedValue(null);
+    mocks.codexModel.mockRejectedValue(new Error("ChatGPT未登录"));
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    const record = valuationRecord(),
+      signal = new AbortController().signal;
+    const snapshot = await client.searchPets(record, signal);
+    expect(snapshot.provider).toBe("browser");
+    expect(mocks.petInventory).toHaveBeenCalledWith(record);
+    expect(mocks.createPetSource).toHaveBeenCalledWith(signal);
+    expect(mocks.searchPetPricing).toHaveBeenCalledWith(record, signal, {
+      findCandidates: mocks.findPetCandidates,
+      readSource: mocks.readPetSource,
+      close: mocks.closePetSource,
+    });
+    expect(mocks.closePetSource).toHaveBeenCalledOnce();
+    expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
+    expect(mocks.codexAccount).not.toHaveBeenCalled();
+    expect(mocks.codexModel).not.toHaveBeenCalled();
+    expect(mocks.codexModels).not.toHaveBeenCalled();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+    expect(mocks.requestCodex).not.toHaveBeenCalled();
+    expect(mocks.requestDeepSeek).not.toHaveBeenCalled();
+  });
+
+  it("Codex宝宝查询也不重新访问账号、模型或AI搜索", async () => {
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("codex", "other-model");
+    const accountCalls = mocks.codexAccount.mock.calls.length,
+      modelCalls = mocks.codexModel.mock.calls.length,
+      modelsCalls = mocks.codexModels.mock.calls.length;
+    mocks.codexAccount.mockResolvedValue(null);
+    mocks.codexModel.mockRejectedValue(new Error("默认模型不可用"));
+    await client.searchPets(valuationRecord(), new AbortController().signal);
+    expect(mocks.codexAccount).toHaveBeenCalledTimes(accountCalls);
+    expect(mocks.codexModel).toHaveBeenCalledTimes(modelCalls);
+    expect(mocks.codexModels).toHaveBeenCalledTimes(modelsCalls);
+    expect(mocks.createPetSource).toHaveBeenCalledOnce();
+    expect(mocks.closePetSource).toHaveBeenCalledOnce();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+    expect(mocks.requestCodex).not.toHaveBeenCalled();
+    expect(mocks.requestDeepSeek).not.toHaveBeenCalled();
+  });
+
+  it("宝宝采集未完成、明确空列表或没有待查宝宝时不创建工作页", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    for (const inventory of [
+      { captureComplete: false, items: [{ status: "no_match" }] },
+      { captureComplete: true, items: [] },
+      { captureComplete: true, items: [{ status: "untradable" }, { status: "incomplete" }] },
+      { captureComplete: true, items: [{ status: "priced" }] },
+    ]) {
+      mocks.petInventory.mockReturnValueOnce(inventory);
+      await client.searchPets(valuationRecord(), new AbortController().signal);
+    }
+    expect(mocks.searchPetPricing).toHaveBeenCalledTimes(4);
+    expect(mocks.createPetSource).not.toHaveBeenCalled();
+    expect(mocks.closePetSource).not.toHaveBeenCalled();
+    expect(mocks.findPetCandidates).not.toHaveBeenCalled();
+    expect(mocks.readPetSource).not.toHaveBeenCalled();
+    expect(mocks.codexAccount).not.toHaveBeenCalled();
+    expect(mocks.codexModel).not.toHaveBeenCalled();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+  });
+
+  it("完整宝宝清单混有不可交易或资料不足项时仍查询待查宝宝", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    mocks.petInventory.mockReturnValueOnce({
+      captureComplete: true,
+      items: [{ status: "untradable" }, { status: "incomplete" }, { status: "no_match" }],
+    });
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    await client.searchPets(valuationRecord(), new AbortController().signal);
+    expect(mocks.createPetSource).toHaveBeenCalledOnce();
+    expect(mocks.searchPetPricing).toHaveBeenCalledOnce();
+    expect(mocks.closePetSource).toHaveBeenCalledOnce();
+  });
+
+  it("宝宝查价失败或source创建后取消仍关闭工作页，并隐藏失败凭据", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    mocks.searchPetPricing.mockRejectedValueOnce(
+      new Error("query error sk-mock-secret Bearer mock-secret"),
+    );
+    await expect(
+      client.searchPets(valuationRecord(), new AbortController().signal),
+    ).rejects.toThrow("query error [凭证已隐藏] Bearer [凭证已隐藏]");
+    expect(mocks.closePetSource).toHaveBeenCalledOnce();
+    const controller = new AbortController();
+    mocks.createPetSource.mockImplementationOnce(async () => {
+      controller.abort(new Error("已暂停"));
+      return {
+        findCandidates: mocks.findPetCandidates,
+        readSource: mocks.readPetSource,
+        close: mocks.closePetSource,
+      };
+    });
+    await expect(client.searchPets(valuationRecord(), controller.signal)).rejects.toThrow("已暂停");
+    expect(mocks.closePetSource).toHaveBeenCalledTimes(2);
+    expect(mocks.searchPetPricing).toHaveBeenCalledOnce();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+  });
+
+  it("已取消宝宝查价不创建工作页，浏览器连接失败不回退AI", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    const controller = new AbortController();
+    controller.abort(new Error("已暂停"));
+    await expect(client.searchPets(valuationRecord(), controller.signal)).rejects.toThrow("已暂停");
+    expect(mocks.createPetSource).not.toHaveBeenCalled();
+    mocks.createPetSource.mockRejectedValueOnce(new Error("藏宝阁需要扫码登录"));
+    await expect(
+      client.searchPets(valuationRecord(), new AbortController().signal),
+    ).rejects.toThrow("扫码登录");
+    expect(mocks.searchPetPricing).not.toHaveBeenCalled();
+    expect(mocks.closePetSource).not.toHaveBeenCalled();
+    expect(mocks.codexAccount).not.toHaveBeenCalled();
+    expect(mocks.codexModel).not.toHaveBeenCalled();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+    expect(mocks.requestCodex).not.toHaveBeenCalled();
+    expect(mocks.requestDeepSeek).not.toHaveBeenCalled();
+  });
+
+  it("DeepSeek装备查询使用已登录藏宝阁source，不访问Codex账号/模型或AI搜索，结束关闭source", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    mocks.codexAccount.mockResolvedValue(null);
+    mocks.codexModel.mockRejectedValue(new Error("ChatGPT未登录"));
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    const record = equipmentRecord(),
+      signal = new AbortController().signal;
+    const snapshot = await client.searchEquipment(record, signal);
+    expect(snapshot.provider).toBe("browser");
+    expect(mocks.createEquipmentSource).toHaveBeenCalledWith(signal);
+    expect(mocks.searchEquipmentPrices).toHaveBeenCalledWith(
+      record,
+      signal,
+      {
+        findCandidates: mocks.findCandidates,
+        readSource: mocks.readSource,
+        close: mocks.closeSource,
+      },
+      undefined,
+    );
+    expect(mocks.closeSource).toHaveBeenCalledOnce();
+    expect(mocks.codexAccount).not.toHaveBeenCalled();
+    expect(mocks.codexModel).not.toHaveBeenCalled();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+    expect(mocks.requestCodex).not.toHaveBeenCalled();
+    expect(mocks.requestDeepSeek).not.toHaveBeenCalled();
+  });
+
+  it("Codex装备查询也不重新访问Codex账号、模型或AI搜索", async () => {
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("codex", "other-model");
+    const accountCalls = mocks.codexAccount.mock.calls.length,
+      modelCalls = mocks.codexModel.mock.calls.length;
+    mocks.codexAccount.mockResolvedValue(null);
+    await client.searchEquipment(equipmentRecord(), new AbortController().signal);
+    expect(mocks.codexAccount).toHaveBeenCalledTimes(accountCalls);
+    expect(mocks.codexModel).toHaveBeenCalledTimes(modelCalls);
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+    expect(mocks.closeSource).toHaveBeenCalledOnce();
+  });
+
+  it("普通环装与待补默认价只走程序规则，不创建浏览器或触发扫码", async () => {
+    const { DEFAULT_SETTINGS } = await import("./analysis/profile");
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("codex");
+    const record = equipmentRecord();
+    const item = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
+    item.category = "人物装备 · 武器";
+    item.description = "等级：70\n命中：255\n伤害：220\n耐久：200\n修理失败：0";
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      servers: [
+        {
+          serverId: String(record.listing.serverId),
+          age: "older" as const,
+          rank: 70,
+          goldPrice: 210,
+          goldUnit: 30000000,
+          baselineUnitConfirmed: true,
+        },
+      ],
+    };
+    const signal = new AbortController().signal;
+    await client.searchEquipment(record, signal, settings);
+    item.description = item.description
+      .replace("70", "60")
+      .replace("255", "220")
+      .replace("伤害：220", "伤害：190");
+    await client.searchEquipment(record, signal, settings);
+    expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
+    expect(mocks.closeSource).not.toHaveBeenCalled();
+    expect(mocks.searchEquipmentPrices).toHaveBeenCalledTimes(2);
+    expect(mocks.searchEquipmentPrices.mock.calls[0][3]).toBe(settings);
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+  });
+
+  it("缺资料、明确空装备或均不可交易时不创建浏览器查询", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    const incomplete = equipmentRecord();
+    delete incomplete.detail!.equipmentCapture;
+    const bound = equipmentRecord();
+    bound.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description +=
+      "\n玩家123专用";
+    for (const record of [incomplete, equipmentRecord(true), bound])
+      await client.searchEquipment(record, new AbortController().signal);
+    expect(mocks.searchEquipmentPrices).toHaveBeenCalledTimes(3);
+    expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
+    expect(mocks.closeSource).not.toHaveBeenCalled();
+    expect(mocks.findCandidates).not.toHaveBeenCalled();
+    expect(mocks.readSource).not.toHaveBeenCalled();
+    expect(mocks.codexAccount).not.toHaveBeenCalled();
+    expect(mocks.codexModel).not.toHaveBeenCalled();
+  });
+
+  it("查询失败或source创建后取消也关闭浏览器工作页，失败信息隐藏密钥", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    mocks.searchEquipmentPrices.mockRejectedValueOnce(
+      new Error("query error sk-mock-secret Bearer mock-secret"),
+    );
+    await expect(
+      client.searchEquipment(equipmentRecord(), new AbortController().signal),
+    ).rejects.toThrow("query error [凭证已隐藏] Bearer [凭证已隐藏]");
+    expect(mocks.closeSource).toHaveBeenCalledOnce();
+    const controller = new AbortController();
+    mocks.createEquipmentSource.mockImplementationOnce(async () => {
+      controller.abort(new Error("已暂停"));
+      return {
+        findCandidates: mocks.findCandidates,
+        readSource: mocks.readSource,
+        close: mocks.closeSource,
+      };
+    });
+    await expect(client.searchEquipment(equipmentRecord(), controller.signal)).rejects.toThrow(
+      "已暂停",
+    );
+    expect(mocks.closeSource).toHaveBeenCalledTimes(2);
+    expect(mocks.searchEquipmentPrices).toHaveBeenCalledOnce();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+  });
+
+  it("已取消查询不创建工作页；浏览器连接失败不调用AI补报价", async () => {
+    mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("deepseek");
+    const controller = new AbortController();
+    controller.abort(new Error("已暂停"));
+    await expect(client.searchEquipment(equipmentRecord(), controller.signal)).rejects.toThrow(
+      "已暂停",
+    );
+    expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
+    mocks.createEquipmentSource.mockRejectedValueOnce(new Error("藏宝阁需要扫码登录"));
+    await expect(
+      client.searchEquipment(equipmentRecord(), new AbortController().signal),
+    ).rejects.toThrow("扫码登录");
+    expect(mocks.searchEquipmentPrices).not.toHaveBeenCalled();
+    expect(mocks.closeSource).not.toHaveBeenCalled();
+    expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
+  });
   it("默认跟随配置，手选模型传到真实调用，未知模型不会发起调用", async () => {
     const { aiModels, prepareAnalysisClient } = await import("./ai-connection");
     expect(await aiModels("codex")).toMatchObject({ defaultModel: "configured-model" });

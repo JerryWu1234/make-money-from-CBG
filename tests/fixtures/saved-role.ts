@@ -28,7 +28,7 @@ export function roleRecord(key: string, ready: boolean) {
       key === "a" && !ready
         ? null
         : {
-            captureVersion: 3,
+            captureVersion: 4,
             collectedAt: "2026-09-13T15:00:00.000Z",
             raw: { test: key },
             tabs: [

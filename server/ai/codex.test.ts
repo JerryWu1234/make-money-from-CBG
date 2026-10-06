@@ -157,4 +157,113 @@ describe("官方 Codex 登录与 SDK", () => {
     expect(mocks.run).toHaveBeenCalledWith("一件商品的完整原文", { signal, outputSchema: schema });
     expect(result.usage).toMatchObject({ input_tokens: 20, output_tokens: 10 });
   });
+
+  it("装备查价启用实时搜索并返回真实搜索事件，不把模型文本当查询记录", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "fixture-api-key");
+    vi.stubEnv("CODEX_API_KEY", "fixture-codex-key");
+    vi.stubEnv("OPENAI_BASE_URL", "https://fixture.invalid");
+    const searches = [
+      { id: "search-1", type: "web_search", query: "梦幻西游 100级 愤怒 腰带 藏宝阁" },
+      { id: "search-2", type: "web_search", query: "100级 愤怒 腰带 8锻 报价" },
+    ];
+    mocks.run.mockResolvedValue({
+      finalResponse: '  {"candidates":[]}  ',
+      usage: { input_tokens: 50, output_tokens: 10, cached_input_tokens: 0 },
+      items: [
+        searches[0],
+        { id: "message-1", type: "agent_message", text: "我搜索了另一个关键词" },
+        searches[1],
+      ],
+    });
+    const { requestCodexSearch } = await import("./codex");
+    const signal = new AbortController().signal;
+    const schema = { type: "object" };
+    const prompt = "100级愤怒腰带，8锻黑宝石";
+    expect(
+      await requestCodexSearch(prompt, signal, { model: "test-model", outputSchema: schema }),
+    ).toEqual({
+      text: '{"candidates":[]}',
+      usage: { input_tokens: 50, output_tokens: 10, cached_input_tokens: 0 },
+      queries: searches.map((item) => item.query),
+      searchItems: searches,
+    });
+    expect(mocks.startThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "test-model",
+        workingDirectory: "/private/tmp/cbg-codex-fixture",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+        webSearchMode: "live",
+      }),
+    );
+    const sdkOptions = mocks.options.mock.calls[0][0];
+    expect(sdkOptions.env.OPENAI_API_KEY).toBeUndefined();
+    expect(sdkOptions.env.CODEX_API_KEY).toBeUndefined();
+    expect(sdkOptions.env.OPENAI_BASE_URL).toBeUndefined();
+    expect(sdkOptions.config.features).toMatchObject({
+      shell_tool: false,
+      unified_exec: false,
+      hooks: false,
+      multi_agent: false,
+      apps: false,
+    });
+    expect(mocks.run).toHaveBeenCalledWith(expect.stringContaining(prompt), {
+      signal,
+      outputSchema: schema,
+    });
+    expect(mocks.rm).toHaveBeenCalledWith("/private/tmp/cbg-codex-fixture", {
+      recursive: true,
+      force: true,
+    });
+  });
+
+  it("没有真实搜索事件时保持空查询，交给上层判定查价失败", async () => {
+    mocks.run.mockResolvedValue({
+      finalResponse: '{"query":"声称已搜索","candidates":[]}',
+      items: [
+        { id: "message-1", type: "agent_message", text: "已搜索" },
+        { id: "search-1", type: "web_search", query: " " },
+      ],
+    });
+    const { requestCodexSearch } = await import("./codex");
+    const result = await requestCodexSearch("公开装备条件", new AbortController().signal, {
+      model: "test-model",
+      outputSchema: { type: "object" },
+    });
+    expect(result.queries).toEqual([]);
+    expect(result.usage).toBeNull();
+  });
+
+  it.each(["command_execution", "file_change", "mcp_tool_call"])(
+    "查价出现 %s 工具事件时拒绝使用结果",
+    async (type) => {
+      mocks.run.mockResolvedValue({
+        finalResponse: '{"candidates":[]}',
+        items: [{ id: "other-tool", type }],
+      });
+      const { requestCodexSearch } = await import("./codex");
+      await expect(
+        requestCodexSearch("公开装备条件", new AbortController().signal, {
+          model: "test-model",
+          outputSchema: { type: "object" },
+        }),
+      ).rejects.toThrow("搜索以外的工具");
+      expect(mocks.rm).toHaveBeenCalled();
+    },
+  );
+
+  it("查价 SDK 请求失败仍清理隔离目录并保留原错误", async () => {
+    mocks.run.mockRejectedValue(new Error("fixture search failed"));
+    const { requestCodexSearch } = await import("./codex");
+    await expect(
+      requestCodexSearch("公开装备条件", new AbortController().signal, {
+        model: "test-model",
+        outputSchema: { type: "object" },
+      }),
+    ).rejects.toThrow("fixture search failed");
+    expect(mocks.rm).toHaveBeenCalledWith("/private/tmp/cbg-codex-fixture", {
+      recursive: true,
+      force: true,
+    });
+  });
 });

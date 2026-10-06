@@ -79,7 +79,9 @@ export function SavedRoleDetail({ recordKey, running }: { recordKey: string; run
                 className={`record-badge ${record.status === "complete" ? "record-complete" : "record-pending"}`}
               >
                 {record.status === "complete"
-                  ? "详情已完整采集"
+                  ? record.detail?.valuation?.issues.length
+                    ? "估值资料待补齐"
+                    : "详情已完整采集"
                   : record.status === "failed"
                     ? "详情待重试"
                     : running
@@ -124,9 +126,14 @@ export function SavedRoleDetail({ recordKey, running }: { recordKey: string; run
           {record.status !== "complete" && record.detail && (
             <p className="detail-notice notice-warning">以下为上次保存的详情，本次尚未完整采集。</p>
           )}
-          {record.detail && record.detail.captureVersion !== 3 && (
+          {!!record.detail?.valuation?.issues.length && (
+            <p className="detail-notice notice-warning">
+              {record.detail.valuation.issues.join("；")}
+            </p>
+          )}
+          {record.detail && record.detail.captureVersion !== 4 && (
             <p className="detail-notice">
-              这是旧版采集结果；继续采集时会补充逐件装备与技能的属性。
+              这是旧版采集结果；点击“补齐已保存商品的估值资料”可补采坐骑、神器和靓号信息。
             </p>
           )}
           <div
@@ -229,6 +236,19 @@ export function SavedRoleDetail({ recordKey, running }: { recordKey: string; run
                     })}
                   </div>
                 </section>
+                {!!record.detail?.valuation?.fields.length && (
+                  <section className="overview-section">
+                    <h4>已核对的估值资料</h4>
+                    <dl className="detail-field-grid">
+                      {record.detail.valuation.fields.map((field, index) => (
+                        <div key={index}>
+                          <dt>{field.name}</dt>
+                          <dd>{field.value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </section>
+                )}
                 <section className="overview-section">
                   <h4>采集记录</h4>
                   <dl className="detail-field-grid">

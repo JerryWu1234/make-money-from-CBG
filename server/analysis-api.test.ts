@@ -70,7 +70,7 @@ describe("商品分析 HTTP 链路", () => {
       response() as unknown as ServerResponse,
       vi.fn(),
     );
-    expect(mocks.startAnalysis).toHaveBeenCalledWith("codex", false, true, undefined, 1);
+    expect(mocks.startAnalysis).toHaveBeenCalledWith("codex", false, true, undefined, 1, undefined);
   });
   it("开始请求指定提供方，刷新状态不会启动 SDK", async () => {
     mocks.startAnalysis.mockResolvedValue({ id: "run", provider: "deepseek" });
@@ -82,7 +82,14 @@ describe("商品分析 HTTP 链路", () => {
       res as unknown as ServerResponse,
       vi.fn(),
     );
-    expect(mocks.startAnalysis).toHaveBeenCalledWith("deepseek", false, false, undefined, 1);
+    expect(mocks.startAnalysis).toHaveBeenCalledWith(
+      "deepseek",
+      false,
+      false,
+      undefined,
+      1,
+      undefined,
+    );
     await apiMiddleware(
       request("/api/analysis/status?provider=deepseek&page=2&search=宝宝&filter=failed"),
       response() as unknown as ServerResponse,
@@ -104,7 +111,14 @@ describe("商品分析 HTTP 链路", () => {
       response() as unknown as ServerResponse,
       vi.fn(),
     );
-    expect(mocks.startAnalysis).toHaveBeenCalledWith("codex", false, true, "other-model", 1);
+    expect(mocks.startAnalysis).toHaveBeenCalledWith(
+      "codex",
+      false,
+      true,
+      "other-model",
+      1,
+      undefined,
+    );
     mocks.startAnalysis.mockClear();
     const invalid = response();
     await apiMiddleware(
@@ -127,7 +141,14 @@ describe("商品分析 HTTP 链路", () => {
       response() as unknown as ServerResponse,
       vi.fn(),
     );
-    expect(mocks.startAnalysis).toHaveBeenCalledWith("codex", false, true, "gpt-6-luna", 3);
+    expect(mocks.startAnalysis).toHaveBeenCalledWith(
+      "codex",
+      false,
+      true,
+      "gpt-6-luna",
+      3,
+      undefined,
+    );
     mocks.startAnalysis.mockClear();
     for (const sampleSize of [0, 4, 1.5, "3", null]) {
       const invalid = response();

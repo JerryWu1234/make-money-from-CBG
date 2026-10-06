@@ -16,6 +16,12 @@ import {
   requestDeepSeek,
 } from "./ai/deepseek";
 import type { AiConnectionStatus, AiModelOptions, AiProvider, AiStatus } from "./ai/types";
+import type { SavedRoleRecord } from "./crawler/types";
+import { equipmentPricingPlan, searchEquipmentPrices } from "./analysis/equipment-pricing";
+import type { ValuationSettings } from "./analysis/valuation-types";
+import { createEquipmentSource } from "./analysis/browser-equipment-source";
+import { petInventory, searchPetPricing } from "./analysis/pet-pricing";
+import { createPetSource } from "./analysis/browser-pet-source";
 
 export { startCodexLogin, codexLoginStatus, cancelCodexLogin } from "./ai/codex";
 
@@ -193,6 +199,64 @@ export async function shutdownAiConnections() {
   await shutdownCodex();
 }
 
+const unusedEquipmentSource = {
+  async findCandidates() {
+    throw new Error("装备资料不足或无需查价，不应发起浏览器查询");
+  },
+  async readSource() {
+    throw new Error("装备资料不足或无需查价，不应读取报价网页");
+  },
+};
+async function searchEquipment(
+  record: SavedRoleRecord,
+  signal: AbortSignal,
+  settings?: ValuationSettings,
+) {
+  try {
+    signal.throwIfAborted();
+    const plan = equipmentPricingPlan(record, settings);
+    if (
+      !plan.captureComplete ||
+      !plan.items.some((item) => item.status === "no_match" && !item.baselineEstimate)
+    )
+      return await searchEquipmentPrices(record, signal, unusedEquipmentSource, settings);
+    const source = await createEquipmentSource(signal);
+    try {
+      signal.throwIfAborted();
+      return await searchEquipmentPrices(record, signal, source, settings);
+    } finally {
+      await source.close();
+    }
+  } catch (error) {
+    throw new Error(publicError(error));
+  }
+}
+const unusedPetSource = {
+  async findCandidates() {
+    throw new Error("宝宝资料不足或无需查价，不应发起浏览器查询");
+  },
+  async readSource() {
+    throw new Error("宝宝资料不足或无需查价，不应读取报价网页");
+  },
+};
+async function searchPets(record: SavedRoleRecord, signal: AbortSignal) {
+  try {
+    signal.throwIfAborted();
+    const inventory = petInventory(record);
+    if (!inventory.captureComplete || !inventory.items.some((item) => item.status === "no_match"))
+      return await searchPetPricing(record, signal, unusedPetSource);
+    const source = await createPetSource(signal);
+    try {
+      signal.throwIfAborted();
+      return await searchPetPricing(record, signal, source);
+    } finally {
+      await source.close();
+    }
+  } catch (error) {
+    throw new Error(publicError(error));
+  }
+}
+
 /** Credentials remain inside the Node process; an analysis run fixes its provider and model. */
 export async function prepareAnalysisClient(provider: AiProvider, selectedModel?: string) {
   if (provider === "codex") {
@@ -203,6 +267,8 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
     const model = selectedModel || (await codexModel());
     return {
       model,
+      searchEquipment,
+      searchPets,
       async analyze(prompt: string, schema: unknown, signal: AbortSignal) {
         const current = await codexAccount();
         if (!current || current.email !== account.email)
@@ -223,6 +289,8 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
     throw new Error("DeepSeek 模型不可用，请重新选择");
   return {
     model,
+    searchEquipment,
+    searchPets,
     async analyze(prompt: string, _schema: unknown, signal: AbortSignal) {
       try {
         return await requestDeepSeek(key, model, prompt, signal, 8192);

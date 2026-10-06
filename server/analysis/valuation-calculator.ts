@@ -22,24 +22,46 @@ const PET_DEFENSE = [
   30, 40, 51, 65, 85, 115, 150, 190, 235, 285, 340, 400, 470, 610, 770, 950, 1150, 1320, 1500, 1740,
   2000,
 ];
+// NetEase's official toolbox cumulative experience (0→N), shared by role/pet training.
+// https://xyq.163.com/tools/; monetary values are our explicit supplemental model rule.
+const LOW_TRAINING_EXPERIENCE = [0, 150, 360, 650, 1040, 1550];
 export function trainingPrice(
   level: number,
   kind: "attack" | "defense" | "petAttack" | "petDefense",
 ) {
   if (level === 0) return 0;
-  if (!Number.isInteger(level) || level < 5 || level > 25) return null;
+  if (!Number.isInteger(level) || level < 1 || level > 25) return null;
+  if (level < 5) {
+    const base =
+      kind === "attack"
+        ? TRAINING[0]
+        : kind === "defense"
+          ? TRAINING[0] / 1.5
+          : kind === "petAttack"
+            ? PET_ATTACK[0]
+            : PET_DEFENSE[0];
+    return (base * LOW_TRAINING_EXPERIENCE[level]) / LOW_TRAINING_EXPERIENCE[5];
+  }
   if (kind === "defense") return level === 17 ? 230 : TRAINING[level - 5] / 1.5;
   return (kind === "attack" ? TRAINING : kind === "petAttack" ? PET_ATTACK : PET_DEFENSE)[
     level - 5
   ];
 }
+const trainingFormula = (level: number | null, regular: string) =>
+  level !== null && level >= 1 && level <= 4
+    ? "经验比例估算：原5级价格 × 官方0至" +
+      level +
+      "级累计经验" +
+      LOW_TRAINING_EXPERIENCE[level] +
+      " / 5级累计经验1550；这是补充模型规则，不是市场报价"
+    : regular;
 export const lifeSkillPrice = (level: number) => (level < 100 ? 0 : (level - 95) ** 1.175);
 export const strengthPrice = (level: number, mode: "single" | "cumulative") =>
   mode === "single" ? level ** 3 / 270 : ((level * (level + 1)) / 2) ** 2 / 270;
 export function schoolPrice(levels: number[], state: string, capConfirmed: boolean) {
   if (levels.length !== 7) return null;
   if (state === "已化圣")
-    return levels.every((level) => level === 180) ? (7 * 30 ** 3.5) / 215 : null;
+    return levels.every((level) => level >= 180) ? (7 * 30 ** 3.5) / 215 : null;
   if (state === "已渡劫")
     return levels.reduce((sum, level) => sum + (level > 150 ? (level - 150) ** 3.5 / 215 : 0), 0);
   if (state === "未飞升") {
@@ -157,12 +179,39 @@ export function purchase(value: number | null, asking: number | null, settings: 
             : "PASS";
   return {
     decision,
+    max_total_cost: limit !== null ? floorPrice(limit) : null,
     total_cost: round(cost),
     max_listing_price:
       limit !== null && settings.extraCost !== null ? floorPrice(limit - settings.extraCost) : null,
     ideal_listing_price:
       ideal !== null && settings.extraCost !== null ? floorPrice(ideal - settings.extraCost) : null,
     margin_of_safety: value !== null && value > 0 && cost !== null ? 1 - cost / value : null,
+  };
+}
+
+/** Compare the reference estimate with the listing snapshot; fees and buying policy are ignored. */
+export function compareListingPrice(value: number | null, asking: number | null) {
+  const known =
+    value !== null &&
+    Number.isFinite(value) &&
+    value > 0 &&
+    asking !== null &&
+    Number.isFinite(asking) &&
+    asking > 0;
+  const difference = known ? value - asking : null;
+  const decision: Decision =
+    difference === null ? "NEED_INFO" : difference > 0 ? "BUY" : difference < 0 ? "PASS" : "WATCH";
+  return {
+    comparison_mode: "listing-only" as const,
+    decision,
+    price_difference: round(difference),
+    price_difference_ratio: difference !== null ? difference / asking! : null,
+    extra_cost: null,
+    total_cost: null,
+    max_total_cost: null,
+    max_listing_price: null,
+    ideal_listing_price: null,
+    margin_of_safety: null,
   };
 }
 
@@ -197,9 +246,10 @@ export function calculateValuation(
   const asking = number(record.listing.price.replace(/[¥￥,\s]/g, ""));
   const empty: ValuationResult = {
     asking_price: asking,
-    extra_cost: settings.extraCost,
-    ...purchase(null, asking, settings),
+    ...compareListingPrice(null, asking),
     model_value: null,
+    bare_role_value: null,
+    price_comparison_scope: "裸号参考估值，不含装备、灵饰、召唤兽个体和锦衣",
     items,
     missing_fields: [],
     pending_rules: [],
@@ -223,6 +273,7 @@ export function calculateValuation(
       reason: "计价规则待同步，暂不能确认模型估值。",
       next_action: "同步服务端复算规则与 Prompt 的计价部分。",
     };
+  for (const issue of record.detail?.valuation?.issues || []) missing.add(issue);
   const stateFact = fact("飞升/渡劫/化圣", "人物/修炼");
   const stateLabel = stateFact?.raw.match(/未飞升|已飞升|已渡劫|已化圣|飞升|渡劫|化圣/)?.[0];
   const state = stateLabel
@@ -265,7 +316,7 @@ export function calculateValuation(
       .slice(0, 2)
       .map((value) => value?.raw || "未知")
       .join(" / "),
-    "攻击与法术取等级较高一项，按价表查价",
+    trainingFormula(knownMax, "攻击与法术取等级较高一项，按价表查价"),
     knownMax === null ? null : trainingPrice(knownMax, "attack"),
     humanFacts.slice(0, 2).flatMap((value) => value?.evidence || []),
     "人物攻法修炼缺失或等级未覆盖",
@@ -274,7 +325,7 @@ export function calculateValuation(
     add(
       humanLabels[index],
       humanFacts[index]?.raw || "未知",
-      "17级固定230；其余已列等级=攻法价/1.5",
+      trainingFormula(human[index], "17级固定230；其余已列等级=攻法价/1.5"),
       human[index] === null ? null : trainingPrice(human[index], "defense"),
       humanFacts[index]?.evidence,
       humanLabels[index] + "缺失或等级未覆盖",
@@ -285,10 +336,10 @@ export function calculateValuation(
     add(
       "召唤兽" + label,
       value?.raw || "未知",
-      "四项分别按召唤兽修炼价表查价",
+      trainingFormula(n, "四项分别按召唤兽修炼价表查价"),
       n === null ? null : trainingPrice(n, index < 2 ? "petAttack" : "petDefense"),
       value?.evidence,
-      label + "缺失或等级未覆盖（1—4级无定价）",
+      label + "缺失或等级未覆盖",
     );
   }
   const skillTabIndex = tabs.findIndex((tab) => tab.name === "技能"),
@@ -320,11 +371,15 @@ export function calculateValuation(
     !settings.schoolCapConfirmed
   )
     pending.add("确认未飞升技能超过130级时先封顶再代入多项式");
-  if (state === "已化圣" && schoolLevels.some((value) => value !== 180))
+  if (state === "已化圣" && schoolLevels.some((value) => value === null || value < 180))
     pending.add("化圣状态与七项180级技能存在冲突");
   if (
     state === "已飞升" &&
-    schoolLevels.some((value) => value !== null && (value > 150 || value < 56))
+    schoolLevels
+      .filter((value): value is number => value !== null)
+      .sort((a, b) => b - a)
+      .slice(0, 5)
+      .some((value) => value > 150 || value < 56)
   )
     pending.add("飞升师门技能公式出现反常溢价，需核实适用范围");
   if (!skillTab || !Array.isArray(skillTab.items))
@@ -342,8 +397,9 @@ export function calculateValuation(
       );
     });
   for (const name of ["强壮", "神速"]) {
+    const captured = fact(name, "技能");
     const index = skillItems.findIndex((item) => item.name === name),
-      n = index >= 0 ? number(skillItems[index].level) : null;
+      n = captured ? number(captured.raw) : index >= 0 ? number(skillItems[index].level) : null;
     const amount =
       n === 0
         ? 0
@@ -357,7 +413,7 @@ export function calculateValuation(
         ? "Σ i³/270，i=1…X"
         : "X³/270（计价次数待确认时不取值）",
       amount,
-      index >= 0 ? skillProof(index) : [],
+      captured?.evidence || (index >= 0 ? skillProof(index) : []),
     );
     if (n !== null && n > 0 && !settings.strengthMode)
       pending.add("确认强壮、神速按当前等级一次计价还是逐级累加");
@@ -398,7 +454,7 @@ export function calculateValuation(
     count = number(mountCount?.raw);
   const mountTabs = tabs.filter((tab) => /^坐骑\s*\//.test(tab.name));
   const mountSources = mountTabs.length ? mountTabs.map((tab) => tab.name) : ["坐骑"];
-  const mounts = Array.from({ length: count !== null && count <= 9 ? count : 0 }, (_, i) => {
+  const mounts = Array.from({ length: count !== null && count <= 100 ? count : 0 }, (_, i) => {
     const source = mountSources[i];
     const growthFact = fact(`坐骑${i + 1}成长`) || (source ? fact("成长", source) : null);
     const advanced = fact(`坐骑${i + 1}进阶状态`) || (source ? fact("进阶状态", source) : null);
@@ -439,7 +495,7 @@ export function calculateValuation(
   const mountComplete =
     count !== null &&
     Number.isInteger(count) &&
-    count <= 9 &&
+    count <= 100 &&
     mounts.every((mount) => mount.amount !== null);
   if (advancedMounts.length > 1 && !settings.sumAdvancedMounts)
     pending.add("多只进阶坐骑的累计方式尚未设置");
@@ -470,7 +526,8 @@ export function calculateValuation(
     175: 1000,
   };
   let levelPremium: number | null = state === "未飞升" || state === "已飞升" ? 0 : null;
-  if (state === "已渡劫" && level !== null) levelPremium = levelPrices[level] ?? null;
+  if (state === "已渡劫" && level !== null)
+    levelPremium = level < 170 ? 0 : (levelPrices[level] ?? null);
   if (state === "已化圣" && settings.holyLevelPremium !== null && level !== null)
     levelPremium = settings.holyLevelPremium ? (levelPrices[level] ?? null) : 0;
   if (state === "已化圣" && settings.holyLevelPremium === null)
@@ -541,10 +598,17 @@ export function calculateValuation(
     "土豪金ID",
     golden?.raw || "未知",
     "明确土豪金+1400；明确没有为0",
-    golden?.raw.includes("土豪金") ? 1400 : golden?.raw === "否" ? 0 : null,
+    ["否", "无土豪金", "梦幻西游"].includes(golden?.raw || "")
+      ? 0
+      : golden?.raw.includes("土豪金") && !/无|没有|不是|非/.test(golden.raw)
+        ? 1400
+        : null,
     golden?.evidence,
   );
-  const baseComplete = items.every((item) => item.confirmed) && pending.size === 0;
+  const baseComplete =
+    items.every((item) => item.confirmed) &&
+    pending.size === 0 &&
+    !record.detail?.valuation?.issues.length;
   const base = baseComplete ? items.reduce((sum, item) => sum + item.amount!, 0) : null;
   const opportunity = fact("月饼粽子机缘", "人物/修炼"),
     points = number(opportunity?.raw.split("/")[0]);
@@ -574,6 +638,10 @@ export function calculateValuation(
   const server = settings.servers.find((value) => value.serverId === record.listing.serverId);
   const summary = record.listing.summary as Record<string, unknown> | null;
   const coin = (key: string, label: string): Fact | null => {
+    if (record.detail?.valuation) {
+      const captured = fact(label);
+      if (captured) return captured;
+    }
     if (summary && (typeof summary[key] === "number" || typeof summary[key] === "string"))
       return {
         raw: String(summary[key]),
@@ -664,18 +732,11 @@ export function calculateValuation(
             : null;
     if (value === null) pending.add("确认区服调整只作用于角色本体还是同时作用于附带资产");
   }
-  if (settings.b === null) missing.add("最高买入系数b");
-  if (settings.extraCost === null) missing.add("全部额外购买成本F（明确无费用时填写0）");
-  if (asking === null) missing.add("挂牌价格");
+  if (asking === null || asking <= 0) missing.add("有效挂牌价格");
   if (level === null) missing.add("人物等级");
   if (value !== null && value <= 0) pending.add("完整模型估值不大于0，需要核实数据");
-  const purchased = purchase(value, asking, settings);
-  const decision =
-    purchased.decision === "PASS"
-      ? "PASS"
-      : missing.size || pending.size
-        ? "NEED_INFO"
-        : purchased.decision;
+  const comparison = compareListingPrice(value, asking);
+  const decision = missing.size || pending.size ? "NEED_INFO" : comparison.decision;
   const suggestions: string[] = [];
   if (artifactAmount === null)
     suggestions.push("补采神器资料：确认完整套数、每套是否填满12槽、五行组合和属性总分。");
@@ -685,8 +746,6 @@ export function calculateValuation(
     );
   if (golden?.raw === "是")
     suggestions.push("确认靓号特效的具体类型；只显示“是”不能直接按土豪金加1400元。");
-  if (settings.extraCost === null)
-    suggestions.push("在分析设置填写全部额外费用；确实没有费用时填0。");
   if (
     !server?.age ||
     server.rank === null ||
@@ -697,8 +756,6 @@ export function calculateValuation(
     );
   else if (server.age === "older" && !server.baselineUnitConfirmed)
     suggestions.push("确认金价与210元基准采用相同游戏币数量单位，避免金额被放大。");
-  if (settings.b === null)
-    suggestions.push("建议最高按裸号估值的八折买入；可在分析设置修改买入系数。");
   if (pending.size)
     suggestions.push("核实下方未确定的规则和异常资料；计价方式可在分析设置重新选择。");
   if (!suggestions.length && missing.size)
@@ -707,26 +764,23 @@ export function calculateValuation(
     amount === null ? "未算出" : "¥" + round(amount)!.toFixed(2);
   const reason =
     decision === "BUY"
-      ? `建议买入。总成本${moneyText(purchased.total_cost)}，在设定的买入上限内；裸号估值${moneyText(value)}。`
+      ? `挂牌低于裸号参考估值。估值${moneyText(value)}，挂牌价${moneyText(asking)}，相差${moneyText(comparison.price_difference)}。`
       : decision === "WATCH"
-        ? `先别买，等降价。总成本${moneyText(purchased.total_cost)}高于买入上限，但没有超过裸号估值${moneyText(value)}。`
+        ? `挂牌与裸号参考估值相同，均为${moneyText(value)}。`
         : decision === "PASS"
-          ? settings.budget !== null && (purchased.total_cost ?? asking ?? 0) > settings.budget
-            ? `不建议买入。当前价格或总成本已超过预算${moneyText(settings.budget)}。`
-            : purchased.total_cost !== null
-              ? `不建议买入，价格偏高。购买总成本${moneyText(purchased.total_cost)}，裸号估值${moneyText(value)}。`
-              : `不建议买入，价格偏高。挂牌价${moneyText(asking)}，裸号估值${moneyText(value)}。`
-          : "暂不建议买入，关键资料或购买条件还不完整。" +
+          ? `挂牌高于裸号参考估值。估值${moneyText(value)}，挂牌价${moneyText(asking)}，高出${moneyText(Math.abs(comparison.price_difference!))}。`
+          : "暂无法比较价格，关键资料或计价规则还不完整。" +
             (value !== null
-              ? `裸号估值${moneyText(value)}；补齐购买条件后再判断是否值得买。`
+              ? `裸号参考估值${moneyText(value)}；补齐挂牌价格后再比较。`
               : body !== null
                 ? `裸号本体已算出${moneyText(body)}，区服调整和附带资产需另行核实。`
-                : "请先补齐下面列出的资料，再判断价格是否合适。");
+                : "请先补齐下面列出的资料，再比较挂牌价格。");
   return {
     ...empty,
-    ...purchased,
+    ...comparison,
     decision,
     model_value: round(value),
+    bare_role_value: round(value),
     body_value: round(body),
     suggestions,
     missing_fields: [...missing],

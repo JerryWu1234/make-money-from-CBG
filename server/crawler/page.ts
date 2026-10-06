@@ -97,9 +97,10 @@ export async function readListings(page: Page): Promise<ListingPage> {
   });
   return {
     ...data,
-    items: data.items.map((item) =>
-      parseListing(item.href, item.attrs, item.summary, data.order, item.raw),
-    ),
+    items: data.items.map((item) => ({
+      ...parseListing(item.href, item.attrs, item.summary, data.order, item.raw),
+      serverAge: "older",
+    })),
   };
 }
 export async function waitList(page: Page, wanted: number) {

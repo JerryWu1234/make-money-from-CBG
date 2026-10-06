@@ -103,13 +103,20 @@ export function AnalysisResultDrawer({
       {!detail && !error && <p role="status">正在读取分析结果…</p>}
       {detail && (
         <>
-          <div className="analysis-detail-price">
-            <small>
-              分析时的挂牌价格 · {detail.provider === "codex" ? "Codex" : "DeepSeek"} ·{" "}
+          {detail.result?.valuation?.comparison_mode === "listing-only" ? (
+            <p>
+              {detail.listing.serverName} · {detail.provider === "codex" ? "Codex" : "DeepSeek"} ·{" "}
               {detail.model}
-            </small>
-            <strong>{detail.listing.price ? `¥${detail.listing.price}` : "未采集"}</strong>
-          </div>
+            </p>
+          ) : (
+            <div className="analysis-detail-price">
+              <small>
+                分析时的挂牌价格 · {detail.provider === "codex" ? "Codex" : "DeepSeek"} ·{" "}
+                {detail.model}
+              </small>
+              <strong>{detail.listing.price ? `¥${detail.listing.price}` : "未采集"}</strong>
+            </div>
+          )}
           {detail.reusedFrom && (
             <p className="analysis-pending-note">
               资料、模型与规则相同，本批次复用已有结论。下方保留首次生成该结论时的调用记录。

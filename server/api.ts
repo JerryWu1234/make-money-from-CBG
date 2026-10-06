@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { diagnostics } from "./diagnostics";
 import { ScheduleConfigError } from "./crawler/schedule-time";
+import { validateSampleSelection } from "./analysis/sample-selection";
 
 const getRoutes = new Set([
   "/api/browser/status",
@@ -20,6 +21,7 @@ const getRoutes = new Set([
 const postRoutes = new Set([
   "/api/browser/open",
   "/api/crawl/start",
+  "/api/crawl/backfill",
   "/api/crawl/stop",
   "/api/crawl/clear",
   "/api/scan/configure",
@@ -32,6 +34,8 @@ const postRoutes = new Set([
   "/api/analysis/pause",
   "/api/analysis/resume",
   "/api/analysis/retry",
+  "/api/analysis/equipment/check",
+  "/api/analysis/pet/check",
   "/api/analysis/settings/save",
 ]);
 
@@ -91,6 +95,26 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
           )
         : {};
     if (pathname.startsWith("/api/analysis/")) {
+      switch (pathname) {
+        case "/api/analysis/equipment/check":
+        case "/api/analysis/pet/check": {
+          if (res.destroyed) return;
+          const controller = new AbortController();
+          const cancel = () => controller.abort(new Error("查价请求已断开"));
+          res.once("close", cancel);
+          try {
+            const check =
+              pathname === "/api/analysis/pet/check"
+                ? (await import("./analysis/pet-check")).checkPet
+                : (await import("./analysis/equipment-check")).checkEquipment;
+            const result = await check(body as Record<string, unknown>, controller.signal);
+            if (!res.destroyed) res.end(JSON.stringify(result));
+          } finally {
+            res.removeListener("close", cancel);
+          }
+          return;
+        }
+      }
       const analysis = await import("./analysis/controller");
       const params = new URL(req.url!, expectedOrigin).searchParams;
       const input = body as Record<string, unknown>;
@@ -98,7 +122,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
       let result: unknown;
       switch (pathname) {
         case "/api/analysis/settings":
-          result = analysis.analysisSettings();
+          result = await analysis.analysisSettings();
           break;
         case "/api/analysis/settings/save":
           result = analysis.saveAnalysisSettings(input);
@@ -128,7 +152,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
           res.end(prompt ? detail.promptText : detail.inputText);
           return;
         }
-        case "/api/analysis/start":
+        case "/api/analysis/start": {
           if (
             input.sampleSize !== undefined &&
             (input.sample !== true ||
@@ -143,14 +167,21 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             (typeof input.model !== "string" || input.model.length > 200)
           )
             throw new Error("请选择有效的分析模型");
+          const productKeys = validateSampleSelection(
+            input.sample === true,
+            (input.sampleSize as number | undefined) ?? 1,
+            input.productKeys,
+          );
           result = await analysis.startAnalysis(
             (await import("./ai-connection")).aiProvider(input.provider),
             input.force === true,
             input.sample === true,
             (input.model as string | undefined) || undefined,
             (input.sampleSize as number | undefined) ?? 1,
+            productKeys,
           );
           break;
+        }
         case "/api/analysis/pause":
           result = await analysis.pauseAnalysis(runId || undefined);
           break;
@@ -238,8 +269,20 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
       let result: unknown;
       switch (pathname) {
         case "/api/crawl/start":
+        case "/api/crawl/backfill":
           {
-            const attempt = await crawler.startCrawl();
+            const keys = (body as Record<string, unknown>).keys;
+            if (
+              keys !== undefined &&
+              (!Array.isArray(keys) ||
+                keys.length > 100 ||
+                keys.some((key) => typeof key !== "string" || key.length > 100))
+            )
+              throw new Error("补采商品列表无效");
+            const attempt = await crawler.startCrawl("manual", undefined, {
+              backfillOnly: pathname === "/api/crawl/backfill",
+              keys: keys as string[] | undefined,
+            });
             if (attempt.started) (await import("./crawler/schedule")).disableScanSchedule();
             result = attempt.status;
           }
@@ -292,6 +335,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
     res.end(JSON.stringify(result));
   } catch (error) {
     diagnostics.record("api.error", { route: pathname, error });
+    if (res.destroyed) return;
     res.statusCode = error instanceof ScheduleConfigError ? 400 : 500;
     res.end(JSON.stringify({ error: error instanceof Error ? error.message : "请求失败" }));
   }

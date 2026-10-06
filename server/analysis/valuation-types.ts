@@ -2,6 +2,7 @@ import type { Evidence } from "./types";
 
 export type Decision = "BUY" | "WATCH" | "PASS" | "NEED_INFO" | "OUT_OF_SCOPE";
 export type ValuationSettings = {
+  equipmentBaselinePrices?: import("./equipment-baseline").EquipmentBaselinePrices;
   b: number | null;
   a: number | null;
   budget: number | null;
@@ -18,6 +19,7 @@ export type ValuationSettings = {
   adjustmentScope: "body" | "all" | null;
   servers: {
     serverId: string;
+    source?: "auto" | "manual";
     age: "one" | "three" | "older" | null;
     rank: number | null;
     goldPrice: number | null;
@@ -26,6 +28,9 @@ export type ValuationSettings = {
   }[];
 };
 export type AnalysisProfile = {
+  marketSources?: import("./market").MarketServer[];
+  equipmentSearch?: boolean;
+  petSearch?: boolean;
   version: "role-valuation-v1";
   template: string;
   promptHash: string;
@@ -36,6 +41,7 @@ export type AnalysisProfile = {
   hash: string;
 };
 export type ValuationItem = {
+  referenceBasis?: "baseline" | "excluded";
   name: string;
   input: string;
   formula: string;
@@ -51,10 +57,23 @@ export type ValuationFact = {
 };
 export type ValuationResult = {
   decision: Decision;
+  comparison_mode?: "listing-only";
+  price_difference?: number | null;
+  price_difference_ratio?: number | null;
+  price_comparison_scope?: string;
+  estimated_value?: number;
+  estimated_subtotal_value?: number;
+  estimated_value_range?: import("./pricing-estimate").PriceRange;
+  estimated_subtotal_range?: import("./pricing-estimate").PriceRange;
+  estimated_price_difference?: import("./pricing-estimate").PriceRange;
+  estimated_comparison?: "below" | "within" | "above";
+  estimate_missing_count?: number;
+  estimated_sources?: Array<"similar" | "baseline">;
   asking_price: number | null;
   extra_cost: number | null;
   total_cost: number | null;
   model_value: number | null;
+  max_total_cost?: number | null;
   max_listing_price: number | null;
   ideal_listing_price: number | null;
   margin_of_safety: number | null;
@@ -66,6 +85,11 @@ export type ValuationResult = {
   known_subtotal: number;
   calculation_version: string;
   body_value?: number | null;
+  bare_role_value?: number | null;
+  equipment_value?: number | null;
+  equipment_pricing?: import("./equipment-pricing").EquipmentPricingSnapshot;
+  pet_value?: number | null;
+  pet_pricing?: import("./pet-pricing").PetPricingSnapshot;
   suggestions?: string[];
   extracted_facts?: ValuationFact[];
   ai_explanation?: string;

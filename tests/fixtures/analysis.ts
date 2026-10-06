@@ -2,6 +2,125 @@ import type { SavedRoleRecord } from "../../server/crawler/types";
 import type { Dimension, ProductAnalysis } from "../../server/analysis/types";
 import { buildProductDocument } from "../../server/analysis/product-document";
 import { roleRecord } from "./saved-role";
+import type { EquipmentPricingSnapshot } from "../../server/analysis/equipment-pricing";
+import type { PetPricingSnapshot } from "../../server/analysis/pet-pricing";
+import { CAPTURE_VERSION } from "../../server/crawler/compact";
+
+/** Synthetic evidence for UI tests. No browser or search request is sent to this URL. */
+export function equipmentPricingFixture(incomplete = false): EquipmentPricingSnapshot {
+  const quote = "【模拟测试样本】测试铠甲，120级，防御200，耐久300/500可正常修理，挂牌价300元。";
+  const query = '【模拟测试筛选】全服 / 综合排序 / 测试铠甲 / {"level_min":120,"level_max":120}';
+  const helmetQuery =
+    '【模拟测试筛选】全服 / 综合排序 / 测试头盔 / {"level_min":120,"level_max":120}';
+  const searchItems = [
+    {
+      key: "armor-fixture",
+      act: "overall_search_equip",
+      args: { level_min: 120, level_max: 120 },
+      pages: 1,
+      rows: 2,
+      details: 2,
+      exhausted: true,
+    },
+    ...(incomplete
+      ? [
+          {
+            key: "no-match-fixture",
+            act: "overall_search_equip",
+            args: { level_min: 120, level_max: 120 },
+            pages: 1,
+            rows: 0,
+            details: 0,
+            exhausted: true,
+          },
+        ]
+      : []),
+  ];
+  return {
+    version: 1,
+    inputHash: "fixture-input-hash",
+    searchedAt: "2026-10-03T07:00:00.000Z",
+    provider: "browser",
+    model: "browser",
+    queries: [query, ...(incomplete ? [helmetQuery] : [])],
+    rawResponse: JSON.stringify(
+      { note: "【模拟测试查询记录】仅验证页面，不代表真实市场行情。", searchItems },
+      null,
+      2,
+    ),
+    searchItems,
+    captureComplete: !incomplete,
+    total: incomplete ? null : 300,
+    knownTotal: 300,
+    items: [
+      {
+        key: "armor-fixture",
+        name: "测试铠甲",
+        level: 120,
+        category: "装备",
+        description: "防御200",
+        query,
+        status: "priced",
+        referencePrice: 300,
+        candidates: [
+          {
+            url: "https://xyq.cbg.163.com/equip?s=367&eid=mock-price-ui",
+            title: "模拟测试装备挂牌样本",
+            price: 300,
+            priceType: "listing",
+            quote,
+            verified: true,
+            reason: "模拟样本的装备类型、等级和属性匹配，用于页面验证。",
+            differences: ["耐久300/500，可正常修理。"],
+            fetchedAt: "2026-10-03T07:01:00.000Z",
+            sourceHash: "fixture-page-hash",
+          },
+          {
+            url: "https://xyq.cbg.163.com/equip?s=367&eid=mock-rejected-ui",
+            title: "未匹配的模拟样本",
+            price: 999,
+            priceType: "listing",
+            quote: "【模拟测试样本】等级不同，不能采用。",
+            verified: false,
+            reason: "装备等级不同，不计入参考价。",
+            fetchedAt: "2026-10-03T07:02:00.000Z",
+            sourceHash: "fixture-unmatched-page-hash",
+          },
+        ],
+        issues: [],
+      },
+      ...(incomplete
+        ? [
+            {
+              key: "missing-fixture",
+              name: "待补采武器",
+              level: null,
+              category: "装备",
+              description: "属性未读取完整",
+              query: "",
+              status: "incomplete" as const,
+              referencePrice: null,
+              candidates: [],
+              issues: ["未采到武器伤害属性，不能匹配报价。"],
+            },
+            {
+              key: "no-match-fixture",
+              name: "测试头盔",
+              level: 120,
+              category: "装备",
+              description: "防御80",
+              query: helmetQuery,
+              status: "no_match" as const,
+              referencePrice: null,
+              candidates: [],
+              issues: ["已搜索，但没有找到属性匹配且有明确挂牌价的网页。"],
+            },
+          ]
+        : []),
+    ],
+    issues: incomplete ? ["装备属性尚未完整，300元只是已核实小计。"] : [],
+  };
+}
 
 export function analysisRecord(key = "a"): SavedRoleRecord {
   const record = roleRecord(key, true);
@@ -15,8 +134,74 @@ export function analysisRecord(key = "a"): SavedRoleRecord {
       orderTime: null,
       attrs: {},
     },
-    detail: { ...record.detail!, url: record.listing.url, formatVersion: 3 },
+    detail: {
+      ...record.detail!,
+      url: record.listing.url,
+      formatVersion: 3,
+      captureVersion: CAPTURE_VERSION,
+      equipmentCapture: {
+        version: 1,
+        collectedAt: record.detail!.collectedAt,
+        complete: true,
+        issues: [],
+      },
+      petCapture: {
+        version: 1,
+        collectedAt: record.detail!.collectedAt,
+        complete: true,
+        issues: [],
+      },
+    },
   } as SavedRoleRecord;
+}
+/** Synthetic pet quote, kept separate from real search evidence. */
+export function petPricingFixture(): PetPricingSnapshot {
+  const base = equipmentPricingFixture();
+  const quote =
+    "【模拟测试宝宝样本】画魂，119级，成长1.25，技能高级魔之心、须弥真言，无内丹，无装备，挂牌价800元。";
+  return {
+    ...base,
+    provider: "codex",
+    model: "fixture-pet-model",
+    inputHash: "fixture-pet-hash",
+    total: 800,
+    knownTotal: 800,
+    queries: ["梦幻西游电脑版 藏宝阁 全服 画魂 须弥真言 成长1.25"],
+    rawResponse: "【模拟测试宝宝搜索回复】仅验证页面，不代表真实市场行情。",
+    searchItems: [
+      {
+        type: "web_search",
+        query: "梦幻西游电脑版 藏宝阁 全服 画魂 须弥真言 成长1.25",
+        simulated: true,
+      },
+    ],
+    items: [
+      {
+        ...base.items[0],
+        key: "pet-fixture",
+        name: "测试画魂",
+        level: 119,
+        category: "召唤兽（含已核对随身装备）",
+        description: "成长1.25，技能高级魔之心、须弥真言，无内丹，无装备",
+        query: "梦幻西游电脑版 藏宝阁 全服 画魂 须弥真言 成长1.25",
+        referencePrice: 800,
+        fields: [{ name: "类型", value: "画魂" }],
+        skills: ["高级魔之心", "须弥真言"],
+        innerSkills: [],
+        equipment: [],
+        candidates: [
+          {
+            ...base.items[0].candidates[0],
+            url: "https://xyq.cbg.163.com/equip?s=367&eid=mock-pet-ui",
+            title: "模拟测试宝宝挂牌样本",
+            price: 800,
+            quote,
+            differences: [],
+          },
+        ],
+      },
+    ],
+  };
 }
 export function valuationRecord(key = "a"): SavedRoleRecord {
   const record = analysisRecord(key);
