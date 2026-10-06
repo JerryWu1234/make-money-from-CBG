@@ -120,12 +120,10 @@ describe("装备联网查价的来源核对", () => {
     });
     expect(first.searchComplete).toBe(false);
     expect(first.items.map((item) => item.searchState)).toEqual(["completed", "pending"]);
-    const secondSearch = vi
-      .fn()
-      .mockResolvedValue({
-        queries: ["second"],
-        items: [{ key: keys[1], candidates: [candidate(200)], searchState: "completed" }],
-      });
+    const secondSearch = vi.fn().mockResolvedValue({
+      queries: ["second"],
+      items: [{ key: keys[1], candidates: [candidate(200)], searchState: "completed" }],
+    });
     const second = await searchEquipmentPrices(
       record,
       new AbortController().signal,
