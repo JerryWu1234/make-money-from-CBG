@@ -27,6 +27,9 @@ const assetIdentity = (item: PricingItem) =>
       ? {
           fields: item.fields,
           skills: item.skills,
+          ...("skillObservations" in item && item.skillObservations
+            ? { skillObservations: item.skillObservations }
+            : {}),
           innerSkills: item.innerSkills,
           equipment: item.equipment,
         }

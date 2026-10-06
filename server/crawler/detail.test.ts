@@ -309,6 +309,10 @@ describe("装备局部补采", () => {
       expect(detail.petCapture).toMatchObject({ complete: true, issues: [] });
       expect(snapshot.petCount).toBe(1);
       expect(snapshot.pets![0].skills.map((skill) => skill.name)).toEqual(["鬼魂术", "死亡召唤"]);
+      expect(snapshot.pets![0].skills.map((skill) => skill.skillObservation)).toEqual([
+        { rawName: "鬼魂术", type: "cifu", section: "技能", state: "current" },
+        { rawName: "死亡召唤", type: "cifu", section: "技能", state: "current" },
+      ]);
       expect(snapshot.pets![0].equipment[0].description).toBe("等级 80\n速度 +20");
       expect(snapshot.pets![0].innerSkills[0].level).toBe("5");
     } finally {

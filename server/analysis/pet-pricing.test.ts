@@ -555,6 +555,23 @@ describe("宝宝来源核对与挂牌比价", () => {
     expect(search).toHaveBeenCalledOnce();
     expect(read).toHaveBeenCalledOnce();
   });
+  it("技能状态和官方ID进入库存哈希与报价身份，不能复用另一技能状态的快照", async () => {
+    const record = recordWithPets();
+    const pet = record.detail!.tabs.find((tab) => tab.name === "召唤兽/孩子")!.pets![0];
+    pet.skills[0].skillObservation = {
+      rawName: pet.skills[0].name,
+      id: "1",
+      type: "cifu",
+      section: "技能",
+      state: "current",
+    };
+    const { snapshot } = await pricing(record);
+    const before = petInventory(record).inputHash;
+    expect(snapshot.items[0].skillObservations).toEqual([pet.skills[0].skillObservation]);
+    pet.skills[0].skillObservation.state = "future";
+    expect(petInventory(record).inputHash).not.toBe(before);
+    expect(combinePetPricing(upstream(), record, snapshot).pet_value).toBeNull();
+  });
 
   it("没有实际查询、结果格式错误或网页读取失败都不产出宝宝价格", async () => {
     const record = recordWithPets();
