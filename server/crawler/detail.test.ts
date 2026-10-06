@@ -59,8 +59,9 @@ const fixture = (
   petHtml = "<p>召唤兽(0/10)</p>",
   iconKindId?: string,
   nonEquipmentHtml = "",
+  equipmentDescription = "",
 ) => {
-  const gear = `<p>道具和法宝</p><div id="RoleEquip"><a data_kindid="999" data_equip_name="新武器" data_equip_desc="" data_equip_category="武器" data_tip_box="RoleEquipTipsBox"><img ${iconKindId ? `data_kindid="${iconKindId}"` : ""} width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseout="document.getElementById('RoleEquipTipsBox').style.display='none'" onmouseover="${missingTooltip ? "" : "document.getElementById('RoleEquipTipsBox').style.display='block';document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'"}"></a></div>`;
+  const gear = `<p>道具和法宝</p><div id="RoleEquip"><a data_kindid="999" data_equip_name="新武器" data_equip_desc="${equipmentDescription}" data_equip_category="武器" data_tip_box="RoleEquipTipsBox"><img ${iconKindId ? `data_kindid="${iconKindId}"` : ""} width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseout="document.getElementById('RoleEquipTipsBox').style.display='none'" onmouseover="${missingTooltip ? "" : "document.getElementById('RoleEquipTipsBox').style.display='block';document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'"}"></a></div>`;
   return `<meta charset="utf-8"><section><nav>${MAIN_TABS.map(
     (name) =>
       `<button onclick="show(${JSON.stringify(name).replaceAll('"', "&quot;")})">${name}</button>`,
@@ -198,6 +199,41 @@ describe("装备局部补采", () => {
       await page.close();
     }
   }, 15000);
+  it.each([false, true])(
+    "只有等级的非空描述仍读取提示框，提示框缺失=%s",
+    async (missingTooltip) => {
+      const page = await browser.newPage();
+      try {
+        await page.route(url, (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: fixture(missingTooltip, undefined, undefined, "", "等级 70"),
+          }),
+        );
+        const detail = await collectValuationDetail(
+          page,
+          listing,
+          previous(),
+          new AbortController().signal,
+        );
+        const item = detail.tabs.find((entry) => entry.name === "道具/法宝")!.items![0];
+        if (missingTooltip) {
+          expect(item.description).toBe("等级 70");
+          expect(detail.equipmentCapture?.complete).toBe(false);
+          expect(detail.equipmentCapture?.issues).toContain(
+            "道具/法宝：新武器 的装备属性未完整读取",
+          );
+        } else {
+          expect(item.description).toContain("伤害 +420");
+          expect(item.description).toContain("魔力 +20");
+          expect(detail.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+        }
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
   it("kindid仅读取装备图标自身原值，父节点的编号不覆盖图标", async () => {
     const page = await browser.newPage();
     try {

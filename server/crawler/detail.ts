@@ -123,7 +123,16 @@ async function inspectItems(
     const rawYupo =
       item.category === "上古玉魄" &&
       /^\s*\{\s*"minghun"\s*:\s*\{|<json>/i.test(attrs.data_equip_desc || "");
-    if ((attrs.data_equip_desc?.trim() && !rawYupo) || attrs.data_skill_type) {
+    const incompleteEquipment =
+      item.kind === "equipment" &&
+      /^道具\/法宝(?:\s*\/|$)/.test(snapshot.name) &&
+      !equipmentCaptureSummary([{ ...snapshot, items: [item] }], snapshot.collectedAt || "")
+        .complete;
+    // 官网元素可能只有等级；缺属性时仍须悬停，不能把非空描述当作已读完整。
+    if (
+      (attrs.data_equip_desc?.trim() && !rawYupo && !incompleteEquipment) ||
+      attrs.data_skill_type
+    ) {
       if (!item.name.startsWith("图标 ")) snapshot.items!.push(item);
       continue;
     }
