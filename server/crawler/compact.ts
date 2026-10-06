@@ -112,19 +112,23 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
           } as Record<string, string>
         )[skillType] || "技能",
       ...(level ? { level } : {}),
-      skillObservation: {
-        rawName: name,
-        type: skillType,
-        ...(/^\d{1,8}$/.test(attrs.data_skill_id || "") ? { id: attrs.data_skill_id } : {}),
-        ...(attrs.data_cbg_skill_section ? { section: attrs.data_cbg_skill_section } : {}),
-        state: /[（(]进化后获得[）)]/.test(name)
-          ? "future"
-          : /赐福/.test(attrs.data_cbg_skill_section || "")
-            ? "conditional"
-            : /^(?:召唤兽)?技能$/.test(attrs.data_cbg_skill_section || "")
-              ? "current"
-              : "unknown",
-      },
+      ...(skillType === "cifu"
+        ? {
+            skillObservation: {
+              rawName: name,
+              type: skillType,
+              ...(/^\d{1,8}$/.test(attrs.data_skill_id || "") ? { id: attrs.data_skill_id } : {}),
+              ...(attrs.data_cbg_skill_section ? { section: attrs.data_cbg_skill_section } : {}),
+              state: /[（(]进化后获得[）)]/.test(name)
+                ? "future"
+                : /赐福/.test(attrs.data_cbg_skill_section || "")
+                  ? "conditional"
+                  : /^(?:召唤兽)?技能$/.test(attrs.data_cbg_skill_section || "")
+                    ? "current"
+                    : "unknown",
+            },
+          }
+        : {}),
     };
   const attributes: Record<string, string> = {};
   const labels: Record<string, string> = {
