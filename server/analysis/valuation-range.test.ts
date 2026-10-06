@@ -306,16 +306,36 @@ describe("默认装备参考价与挂牌比较", () => {
 });
 
 describe("相近配置报价与完整区间", () => {
-  it("相近装备给出挂牌中位数，少量或分散样本保留提示和原范围", () => {
+  it("相近装备统一至少3个不同商品，最高最低1.5倍以内才给参考价", () => {
+    for (const prices of [[350], [350, 371]]) {
+      const estimate = buildEquipmentEstimate(candidates(prices));
+      expect(estimate).toMatchObject({ status: "insufficient", range: null });
+      expect(estimate.median).toBeUndefined();
+    }
     expect(buildEquipmentEstimate(candidates([350, 370, 568.1]))).toMatchObject({
-      median: 370,
+      status: "dispersed",
       sampleCount: 3,
-      range: { min: 350, max: 568.1 },
+      range: null,
     });
-    const one = buildEquipmentEstimate(candidates([350]));
-    expect(one.median).toBe(350);
-    expect(one.issues.join(" ")).toContain("仅1条");
-    expect(buildEquipmentEstimate(candidates([350, 371])).median).toBe(360.5);
+    expect(buildEquipmentEstimate(candidates([100, 120, 150]))).toMatchObject({
+      status: "range",
+      median: 120,
+      sampleCount: 3,
+      range: { min: 100, max: 150 },
+    });
+    expect(buildEquipmentEstimate(candidates([100, 120, 150.01]))).toMatchObject({
+      status: "dispersed",
+      range: null,
+    });
+    const duplicate = candidates([100, 120, 130]);
+    duplicate[2].url = duplicate[1].url;
+    duplicate[2].price = 120;
+    duplicate[2].quote = "挂牌价：120";
+    expect(buildEquipmentEstimate(duplicate)).toMatchObject({
+      status: "insufficient",
+      sampleCount: 2,
+      range: null,
+    });
     expect(
       buildEquipmentEstimate(candidates().map((row) => ({ ...row, verified: false }))).median,
     ).toBeUndefined();

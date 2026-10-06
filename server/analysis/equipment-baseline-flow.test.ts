@@ -195,7 +195,7 @@ describe("普通装备默认价格的批次冻结", () => {
     prices["90"].weapon = 100000;
     const changed = createProfile(template, { ...base.settings, equipmentBaselinePrices: prices });
     expect(changed.calculationCompatible).toBe(true);
-    expect(changed.calculationVersion).toBe("price-comparison-v9");
+    expect(changed.calculationVersion).toBe("price-comparison-v10");
     expect(changed.settingsHash).not.toBe(base.settingsHash);
     expect(changed.hash).not.toBe(base.hash);
     expect(base.settings.equipmentBaselinePrices!["90"].weapon).toBeNull();

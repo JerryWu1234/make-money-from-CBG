@@ -146,7 +146,7 @@ describe("装备联网查价的来源核对", () => {
     expect(mixed.total).toBe(110);
   });
 
-  it("离线重放20329459的已保存报价，符石、套装等差异不再让四组核心装备全部缺价", () => {
+  it("离线重放已保存报价，核心属性匹配后仍须满足样本门槛", () => {
     const record = recordWithEquipment();
     record.detail!.tabs.at(-1)!.items = savedComparables.items.map(({ target }) => ({
       ...target,
@@ -174,8 +174,10 @@ describe("装备联网查价的来源核对", () => {
       expect(
         estimate.status,
         item.name + ": " + verified.map((row) => row.reason).join(" / "),
-      ).toBe("range");
-      expect(estimate.median).toBeGreaterThan(0);
+      ).toBe("dispersed");
+      expect(estimate.sampleCount).toBeGreaterThanOrEqual(3);
+      expect(estimate.range).toBeNull();
+      expect(estimate.median).toBeUndefined();
       expect(
         verified.filter((row) => row.verified).every((row) => row.matchType === "similar"),
       ).toBe(true);
