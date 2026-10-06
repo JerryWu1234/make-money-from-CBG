@@ -261,6 +261,44 @@ try {
         assert.equal(result.queries.length, 1);
       });
   });
+  await check("官网编码描述经页面解码器再解析，仍绑定可见主属性与价格", async () => {
+    for (const detail of [
+      { encodedJson: true },
+      {
+        encodedJson: true,
+        noPanelId: true,
+        recommendationFirst: true,
+        recommendationMainIds: true,
+      },
+    ])
+      await withSource({}, detail, async ({ source, detailPage, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.total, 368.6);
+        assert.equal(result.items[0].candidates[0].verified, true);
+        assert.ok(await detailPage.evaluate(() => window.decodeCalls > 0));
+      });
+  });
+  await check("缺少解码器、解码失败或解码后JSON损坏保留读取失败", async () => {
+    for (const detail of [
+      { encodedJson: true, missingDecoder: true },
+      { encodedJson: true, decoderFailure: true },
+      { encodedJson: true, malformedDecoded: true },
+    ])
+      await withSource({}, detail, async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.total, null);
+        assert.match(result.items[0].candidates[0].reason, /JSON详情未识别/);
+        const failure = result.searchItems[0].detailFailures[0];
+        assert.ok(failure);
+        assert.deepEqual(failure.diagnostics.descriptionFormat, [
+          {
+            length: "@Sfixture@".length,
+            encoded: true,
+            decoderAvailable: !detail.missingDecoder,
+          },
+        ]);
+      });
+  });
   await check("技能/内丹/随身装备不完整或主JSON缺失不产出价格", async () => {
     for (const detail of [
       { missingSkill: true },
