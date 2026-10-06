@@ -283,6 +283,16 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
           jsonInputs: Array.from(document.querySelectorAll("#equip_desc_value")).filter(
             (node) => !node.closest(excluded),
           ).length,
+          descriptionFormat: Array.from(
+            document.querySelectorAll<HTMLInputElement>("#equip_desc_value"),
+          )
+            .filter((node) => !node.closest(excluded))
+            .map((node) => ({
+              length: node.value.length,
+              encoded: node.value.startsWith("@"),
+              decoderAvailable:
+                typeof (window as unknown as Record<string, unknown>).decode_desc === "function",
+            })),
           mainPrices: Array.from(document.querySelectorAll<HTMLElement>("#info_panel .price"))
             .filter(
               (node) =>
@@ -430,7 +440,10 @@ async function readMainPet(page: Page, signal: AbortSignal) {
     const input = inputs.length === 1 ? inputs[0] : null;
     let pet: Record<string, any>;
     try {
-      pet = JSON.parse(input?.value || "");
+      const description = input?.value || "";
+      const decoded =
+        typeof g.decode_desc === "function" ? g.decode_desc(description) : description;
+      pet = JSON.parse(decoded);
     } catch {
       throw new Error("官网主宝宝JSON详情未识别");
     }

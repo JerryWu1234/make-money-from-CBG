@@ -68,6 +68,10 @@ export function petDetailDocument(options = {}) {
     duplicatePanel: false,
     noPanelId: false,
     footerStatus: "",
+    encodedJson: false,
+    missingDecoder: false,
+    decoderFailure: false,
+    malformedDecoded: false,
     ...options,
   };
   const pet = {
@@ -130,8 +134,9 @@ export function petDetailDocument(options = {}) {
   const visibleMain = s.panelDelay ? '<div id="delayed-main"></div>' : main;
   return `<meta charset="utf-8"><title>独立宝宝详情结构模拟页</title>
 ${s.recommendationFirst ? recommendation + visibleMain : visibleMain + recommendation}
-<input type="hidden" id="equip_desc_value" value="${escape(JSON.stringify(pet))}">
+<input type="hidden" id="equip_desc_value" value="${escape(s.encodedJson ? "@Sfixture@" : JSON.stringify(pet))}">
 <script>window.IsLogin=1;window.StorageStype={pet:2,role:3};window.equip={storage_type:2,equip_name:${encoded(s.rawName)},price:${encoded(s.rawPrice)},eid:${s.rawEid ? encoded(s.rawEid) : "new URL(location.href).searchParams.get('eid')"},server_id:1,is_selling:${encoded(s.selling)}};window.CBG_GAME_CONFIG={pet_info:{2001:'画魂'},pet_skill_desc:{1:{name:'须弥真言'},2:{name:'高级法术暴击'}}};
+${s.encodedJson && !s.missingDecoder ? `window.decodeCalls=0;window.decode_desc=value=>{window.decodeCalls++;if(value!=='@Sfixture@' || ${encoded(s.decoderFailure)})throw new Error('SIMULATED decode failure');return ${encoded(s.malformedDecoded ? "not JSON" : JSON.stringify(pet))};};` : ""}
 ${s.jsonDelay ? `const json=document.getElementById('equip_desc_value'), jsonValue=json.value;json.value='';setTimeout(()=>json.value=jsonValue,${s.jsonDelay});` : ""}
 function delayParts(){
  ${s.infoDelay ? `const info=document.querySelector('#info_panel'), content=info.innerHTML;info.innerHTML='';setTimeout(()=>info.innerHTML=content,${s.infoDelay});` : ""}
