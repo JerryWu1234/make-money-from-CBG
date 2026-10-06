@@ -7,6 +7,53 @@ import {
 } from "./compact";
 
 describe("有官网证据的角色装备分类", () => {
+  it("保留技能官方ID、原类别与可见区块，cifu类别本身不代表未来或赐福", () => {
+    const current = itemFromAttributes(
+      {
+        data_store_name: "高级冥思",
+        data_skill_type: "cifu",
+        data_skill_id: "315",
+        data_cbg_skill_section: "技能",
+      },
+      0,
+    );
+    expect(current).toMatchObject({
+      name: "高级冥思",
+      kind: "skill",
+      skillObservation: {
+        rawName: "高级冥思",
+        type: "cifu",
+        id: "315",
+        section: "技能",
+        state: "current",
+      },
+    });
+    const future = itemFromAttributes(
+      {
+        data_store_name: "超级冥思（进化后获得）",
+        data_skill_type: "cifu",
+        data_skill_id: "900",
+        data_cbg_skill_section: "技能",
+      },
+      1,
+    );
+    expect(future.name).toBe("超级冥思（进化后获得）");
+    expect(future.skillObservation?.state).toBe("future");
+    expect(
+      itemFromAttributes({ data_store_name: "高级冥思", data_skill_type: "cifu" }, 0)
+        .skillObservation?.state,
+    ).toBe("unknown");
+    expect(
+      itemFromAttributes(
+        {
+          data_store_name: "高级冥思",
+          data_skill_type: "cifu",
+          data_cbg_skill_section: "赐福技能",
+        },
+        0,
+      ).skillObservation?.state,
+    ).toBe("conditional");
+  });
   it("官网宝宝饰品保留纯外观说明，不要求含战斗属性", () => {
     expect(
       itemFromAttributes(

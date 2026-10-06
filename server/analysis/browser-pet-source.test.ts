@@ -112,6 +112,58 @@ describe("官网宝宝查询参数", () => {
   it("目录没有类型时明确拒绝宽泛查询；未知技能不猜ID，仍须详情核对", () => {
     expect(() => petQuery({ ...item(), name: "未知类型" }, config)).toThrow(/类型目录/);
     expect(petQuery({ ...item(), skills: ["未公开技能"] }, config)).not.toHaveProperty("skill");
+    expect(petQuery({ ...item(), skills: ["未公开技能"] }, config)).not.toHaveProperty("skill_num");
+  });
+  it("真实九个可见技能只映射五个时，不发送九技能的误筛选，也不推断当前技能数是五", () => {
+    const target = {
+      ...item(),
+      skills: [
+        "慧根",
+        "落岩",
+        "高级冥思",
+        "地狱烈火",
+        "上古灵符",
+        "超级隐身（进化后获得）",
+        "超级感知（进化后获得）",
+        "超级冥思（进化后获得）",
+        "超级壁垒击破（进化后获得）",
+      ],
+    };
+    const skills: PetSearchConfig["skills"] = [
+      [553, "慧根"],
+      [429, "落岩"],
+      [315, "高级冥思"],
+      [327, "地狱烈火"],
+      [410, "上古灵符"],
+    ];
+    const query = petQuery(target, { ...config, skills });
+    expect(query.skill).toBe("553,429,315,327,410");
+    expect(query).not.toHaveProperty("skill_num");
+    expect(target.skills).toHaveLength(9);
+  });
+  it("技能ID须与官网名称目录相符，未来/赐福技能不被当当前技能数量", () => {
+    const target = item();
+    target.skillObservations = target.skills.map((rawName, index) => ({
+      rawName,
+      id: String(index + 1),
+      type: "cifu",
+      section: "技能",
+      state: "current",
+    }));
+    expect(petQuery(target, config)).toMatchObject({ skill: "1,2", skill_num: 2 });
+    for (const state of ["future", "conditional", "unknown"] as const) {
+      target.skillObservations[0].state = state;
+      expect(petQuery(target, config)).toMatchObject({ skill: "2" });
+      expect(petQuery(target, config)).not.toHaveProperty("skill_num");
+    }
+    target.skillObservations[0].state = "current";
+    target.skillObservations[0].id = "99";
+    expect(petQuery(target, config)).not.toHaveProperty("skill_num");
+    target.skillObservations[0].id = "1";
+    delete target.skillObservations[1].id;
+    expect(
+      petQuery(target, { ...config, skills: [...config.skills, [3, "高级法术暴击"]] }),
+    ).not.toHaveProperty("skill_num");
   });
   it("等级0可查询；不把否宝宝改成1，也不将资质的base+bonus相加", () => {
     const target = { ...item(), level: 0, fields: [...fields, { name: "是否宝宝", value: "否" }] };
