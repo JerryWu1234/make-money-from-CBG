@@ -149,6 +149,9 @@ export function parseEquipmentAttributes(description: string): EquipmentAttribut
   const unknownLines: string[] = [];
   let refining = false;
   let runeCombination = false;
+  // Jewelry set bonuses follow its named effect, not its primary/added stat rows.
+  const jewelry = /精炼等级/.test(text);
+  let effectBonus = false;
   for (const line of text
     .split(/\n/)
     .map((value) => value.trim())
@@ -174,11 +177,13 @@ export function parseEquipmentAttributes(description: string): EquipmentAttribut
         if (value) (fields[match[1]] ||= []).push(value);
       }
       refining = false;
+      effectBonus = false;
       continue;
     }
     const melt = line.match(/^(?:【)?熔炼(?:效果)?[：:】\s]*(.*)$/);
     if (melt) {
       refining = true;
+      effectBonus = false;
       if (melt[1]) (fields.熔炼 ||= []).push(melt[1]);
       continue;
     }
@@ -200,6 +205,7 @@ export function parseEquipmentAttributes(description: string): EquipmentAttribut
         "$1$3:$2 ",
       );
     const matches = [...content.matchAll(fieldPattern)];
+    if (!content.trim()) continue;
     if (!matches.length) {
       if (
         /^(?:法术|物理|封印|抗|治疗|格挡|抵抗|固定|狂暴|穿刺|气血|附加|熔炼|星位|星相|[+＋−-]\d)/.test(
@@ -218,7 +224,14 @@ export function parseEquipmentAttributes(description: string): EquipmentAttribut
       // Headers such as “附加属性：力量+20 敏捷+20” contain no separate value.
       if (!value) continue;
       const name = aliases[match[1]] || match[1];
-      (fields[name] ||= []).push(value);
+      if (jewelry && effectBonus && statLabels.includes(name)) {
+        const active = /[（(]已生效[）)]$/.test(value);
+        const bonus = active ? value.replace(/[（(]已生效[）)]$/, "").trim() : value;
+        (fields[active ? "已生效套装加成" : "特效加成"] ||= []).push(name + ":" + bonus);
+      } else {
+        (fields[name] ||= []).push(value);
+      }
+      if (jewelry && name === "特效") effectBonus = true;
     }
   }
   const restrictions = [
