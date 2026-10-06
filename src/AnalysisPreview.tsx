@@ -192,7 +192,7 @@ export function AnalysisPreview() {
         ? "正在查价…"
         : "正在分析…"
       : run && !sameProfile
-        ? "按新规则开始分析"
+        ? "按当前设置重新分析"
         : run && !sameModel
           ? "按新模型开始分析"
           : run?.status === "paused"
@@ -331,7 +331,7 @@ export function AnalysisPreview() {
                       ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
                       : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
                     : run && !sameProfile
-                      ? "所选批次使用旧规则，点击上方按钮按当前 Prompt 开始新分析。"
+                      ? "本批次的 Prompt 或参数与当前设置不同，重新分析将使用当前设置。"
                       : run && !sameModel
                         ? "模型选择已更改，开始时创建新批次；旧批次保留原来的模型和结果。"
                         : run?.status === "paused"
@@ -423,20 +423,7 @@ export function AnalysisPreview() {
           </div>
         </div>
         <div className="analysis-workspace">
-          <section className="analysis-results" aria-labelledby="analysis-results-title">
-            <div className="analysis-section-heading">
-              <div>
-                <span className="analysis-kicker">RESULTS / 结果区</span>
-                <h2 id="analysis-results-title">分析结果</h2>
-                <p>
-                  {valuationMode
-                    ? listingComparison
-                      ? "推荐榜展示挂牌低于完整参考估值的商品；全部商品可查看价格差额、比例和待补齐项。"
-                      : "本历史批次保留当时的买入建议和设置；新批次直接比较估值与挂牌价。"
-                    : "本历史批次按配置参考分排序；新批次使用裸号估值规则。"}
-                </p>
-              </div>
-            </div>
+          <section className="analysis-results" aria-label="商品分析结果">
             {!!data?.runs.length && (
               <label className="analysis-run-selector">
                 分析批次
@@ -489,13 +476,17 @@ export function AnalysisPreview() {
                 </div>
                 {!data?.ranking.length && (
                   <div className="analysis-start-empty">
-                    <strong>暂无可排序的分析结果</strong>
+                    <strong>
+                      {run?.completed
+                        ? valuationMode
+                          ? "暂无符合推荐条件的商品"
+                          : "暂无可排序的结果"
+                        : "暂无分析结果"}
+                    </strong>
                     <p>
-                      {valuationMode
-                        ? listingComparison
-                          ? "完成完整估值且挂牌低于参考价的商品会出现在这里。其他结果可在全部商品查看。"
-                          : "本历史批次符合当时购买条件的商品会出现在这里。其他结论可在全部商品查看。"
-                        : "开始分析后，有完整评分的商品会出现在这里。资料不足的结论可在全部商品查看。"}
+                      {run?.completed
+                        ? `已有 ${run.completed} 件分析结果，可在全部商品查看。`
+                        : "开始分析后，结果会保存在这里。"}
                     </p>
                   </div>
                 )}
@@ -616,7 +607,9 @@ export function AnalysisPreview() {
                                 : item.state === "completed" &&
                                     item.valuation?.decision === "NEED_INFO"
                                   ? "分析完成 · 待补齐"
-                                  : labels[item.state]}
+                                  : item.state === "ready" && run
+                                    ? "本批次未分析"
+                                    : labels[item.state]}
                             </span>
                             {item.error && <small>{item.error}</small>}
                           </td>
