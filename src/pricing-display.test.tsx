@@ -56,6 +56,15 @@ const snapshot = (items = [item()]): EquipmentPricingSnapshot => ({
   items,
   issues: [],
 });
+it.each(["pending", "read_failed"] as const)("页面将%s与未找到报价区分", (state) => {
+  const html = renderToStaticMarkup(
+    <EquipmentPricingView
+      snapshot={snapshot([{ ...item(), baselineEstimate: undefined, searchState: state }])}
+    />,
+  );
+  expect(html).toContain(state === "pending" ? "查价未完成，继续时重试" : "详情读取失败，需重试");
+  expect(html).not.toContain("未找到可靠报价");
+});
 const valuation = (override: Partial<ValuationResult> = {}): ValuationResult => ({
   comparison_mode: "listing-only",
   decision: "NEED_INFO",

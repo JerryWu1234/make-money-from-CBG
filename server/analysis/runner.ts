@@ -16,8 +16,13 @@ export type AnalysisClient = {
     record: SavedRoleRecord,
     signal: AbortSignal,
     settings?: ValuationSettings,
+    previous?: EquipmentPricingSnapshot,
   ) => Promise<EquipmentPricingSnapshot>;
-  searchPets?: (record: SavedRoleRecord, signal: AbortSignal) => Promise<PetPricingSnapshot>;
+  searchPets?: (
+    record: SavedRoleRecord,
+    signal: AbortSignal,
+    previous?: PetPricingSnapshot,
+  ) => Promise<PetPricingSnapshot>;
   analyze: (
     prompt: string,
     schema: unknown,
@@ -160,15 +165,32 @@ export class AnalysisRunner {
         this.store.setRun(id, "completed", null, owner);
         return;
       }
-      if (task.profile?.equipmentSearch && !task.equipmentPricing) {
+      if (
+        task.profile?.equipmentSearch &&
+        (!task.equipmentPricing || task.equipmentPricing.searchComplete === false)
+      ) {
         const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
         try {
           this.store.beginEquipmentSearch(task, owner);
           if (!client.searchEquipment) throw new Error("装备联网查价尚未连接");
-          const snapshot = await client.searchEquipment(task.record, signal, task.profile.settings);
+          const snapshot = await client.searchEquipment(
+            task.record,
+            signal,
+            task.profile.settings,
+            task.equipmentPricing,
+          );
           signal.throwIfAborted();
           if (!this.store.owns(owner)) return;
           task = this.store.saveEquipmentPricing(task, snapshot, owner);
+          if (snapshot.searchComplete === false) {
+            this.store.setRun(
+              id,
+              "paused",
+              "装备查价尚未完成或详情读取失败，已保存逐件进度；继续时重试未完成装备",
+              owner,
+            );
+            return;
+          }
         } catch (error) {
           if (!this.store.owns(owner)) return;
           this.store.abortEquipmentSearch(task, owner);
@@ -183,15 +205,27 @@ export class AnalysisRunner {
           return;
         }
       }
-      if (task.profile?.petSearch && !task.petPricing) {
+      if (
+        task.profile?.petSearch &&
+        (!task.petPricing || task.petPricing.searchComplete === false)
+      ) {
         const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
         try {
           this.store.beginPetSearch(task, owner);
           if (!client.searchPets) throw new Error("宝宝联网查价尚未连接");
-          const snapshot = await client.searchPets(task.record, signal);
+          const snapshot = await client.searchPets(task.record, signal, task.petPricing);
           signal.throwIfAborted();
           if (!this.store.owns(owner)) return;
           task = this.store.savePetPricing(task, snapshot, owner);
+          if (snapshot.searchComplete === false) {
+            this.store.setRun(
+              id,
+              "paused",
+              "宝宝查价尚未完成或详情读取失败，已保存逐件进度；继续时重试未完成宝宝",
+              owner,
+            );
+            return;
+          }
         } catch (error) {
           if (!this.store.owns(owner)) return;
           this.store.abortPetSearch(task, owner);
