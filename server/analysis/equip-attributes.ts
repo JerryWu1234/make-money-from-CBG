@@ -148,10 +148,21 @@ export function parseEquipmentAttributes(description: string): EquipmentAttribut
   const fields: Record<string, string[]> = {};
   const unknownLines: string[] = [];
   let refining = false;
+  let runeCombination = false;
   for (const line of text
     .split(/\n/)
     .map((value) => value.trim())
     .filter(Boolean)) {
+    if (
+      runeCombination &&
+      /^(?:门派条件[：:]|部位条件[：:]|物理攻击时|物理攻击有|法术攻击时|遭受法术攻击时|提升自身|增加门派技能)/.test(
+        line,
+      )
+    ) {
+      fields.符石组合.push(line);
+      continue;
+    }
+    runeCombination = false;
     const conditions = [...line.matchAll(conditionPattern)];
     if (conditions[0]?.index === 0) {
       for (let index = 0; index < conditions.length; index++) {
@@ -176,6 +187,12 @@ export function parseEquipmentAttributes(description: string): EquipmentAttribut
       continue;
     }
     refining = false;
+    const enhancement = line.match(/^(符石组合|符石|星位|星相互合|星相)[：:]\s*(.+)$/);
+    if (enhancement) {
+      (fields[enhancement[1]] ||= []).push(enhancement[2]);
+      runeCombination = enhancement[1] === "符石组合";
+      continue;
+    }
     const content = line
       .replace(/^(?:【)?附加属性[：:】\s]*/, "")
       .replace(

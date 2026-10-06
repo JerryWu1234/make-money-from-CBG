@@ -71,6 +71,8 @@ export function EquipmentPricingView({
       )}
       {hasBaseline && snapshot.total === null && snapshot.knownTotal === 0 ? (
         <p>本次没有已核实同配置挂牌参考价；默认参考价另列。</p>
+      ) : snapshot.total === null && snapshot.knownTotal === 0 ? (
+        <p>尚无同配置挂牌价；相近商品的参考价和未定价项目见下方。</p>
       ) : (
         <p>
           {snapshot.total !== null
@@ -135,9 +137,11 @@ export function EquipmentPricingView({
                         : baseline.amount !== null
                           ? valuationMoney(baseline.amount)
                           : "默认参考价待补"
-                      : item.similarEstimate?.range
-                        ? valuationRangeMoney(item.similarEstimate.range)
-                        : label(item.status)}
+                      : item.similarEstimate?.median !== undefined
+                        ? valuationMoney(item.similarEstimate.median)
+                        : item.similarEstimate?.range
+                          ? valuationRangeMoney(item.similarEstimate.range)
+                          : label(item.status)}
               </span>
             </header>
             <p>
@@ -145,9 +149,11 @@ export function EquipmentPricingView({
                 ? "默认参考价已失效"
                 : baseline
                   ? baselineLabel
-                  : item.similarEstimate?.range
-                    ? "相近配置参考区间"
-                    : label(item.status)}
+                  : item.similarEstimate?.median !== undefined
+                    ? "相近装备参考价（挂牌中位数）"
+                    : item.similarEstimate?.range
+                      ? "相近配置参考区间"
+                      : label(item.status)}
             </p>
             {baseline && (
               <>
@@ -219,11 +225,16 @@ export function EquipmentPricingView({
                 <p className="analysis-pending-note">仅1条挂牌样本，参考范围有限。</p>
               )}
             {item.similarEstimate && (
-              <ul>
-                {item.similarEstimate.issues.map((issue) => (
-                  <li key={issue}>{issue}</li>
-                ))}
-              </ul>
+              <>
+                {item.similarEstimate.median !== undefined && item.similarEstimate.range && (
+                  <p>样本挂牌范围：{valuationRangeMoney(item.similarEstimate.range)}。</p>
+                )}
+                <ul>
+                  {item.similarEstimate.issues.map((issue) => (
+                    <li key={issue}>{issue}</li>
+                  ))}
+                </ul>
+              </>
             )}
             <p>
               {item.category} · {item.description}

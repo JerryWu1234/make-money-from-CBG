@@ -60,6 +60,10 @@ const pricing = await moduleUrl("server/analysis/equipment-pricing.ts", {
   "./equipment-match": matcher,
   "./pricing-estimate": estimate,
   "./pricing-integrity": integrity,
+  "./equipment-baseline": await moduleUrl("server/analysis/equipment-baseline.ts", {
+    "../crawler/compact": compact,
+    "./equip-attributes": attributes,
+  }),
   "./valuation-calculator": await moduleUrl("server/analysis/valuation-calculator.ts", {
     "./valuation-facts": await moduleUrl("server/analysis/valuation-facts.ts"),
   }),
@@ -226,12 +230,20 @@ try {
       assert.equal(query.front_status, "pass_fair_show");
       assert.equal(query.act, "overall_search_equip");
       assert.equal(query.serverid, undefined);
-      assert.equal(query.server_type, undefined);
+      assert.equal(query.server_type, "3");
+      assert.equal(result.searchItems[0].serverAge, "3年以上服");
       assert.equal(await searchPage.evaluate(() => window.historyWrites), 0);
       assert.equal(
         await role.evaluate(() => localStorage.getItem("saved_overall_search_equip_query")),
         "unchanged",
       );
+    }),
+  );
+
+  await check("官网组件丢失3年以上服参数时拒绝使用报价", () =>
+    withSource({ dropServerType: true }, {}, async ({ source, control }) => {
+      await assert.rejects(source.findCandidates([item()], control.signal), /3年以上服条件/);
+      assert.deepEqual(detailVisits, []);
     }),
   );
 
@@ -318,9 +330,7 @@ try {
       kindId: "20",
       level: "100",
       description:
-        i % 2
-          ? description + "\n锻炼等级 7 镶嵌宝石 光芒石"
-          : description.replace("气血 +176", "气血 +475"),
+        i % 2 ? description + "\n特效：简易" : description.replace("气血 +176", "气血 +475"),
     }));
     return withSource(
       {
@@ -344,7 +354,7 @@ try {
     );
   });
 
-  await check("带宝石目标在列表排除不同锻炼等级，不把总属性套成初值", () =>
+  await check("不同宝石等级保留为相近候选，同配优先且不把总属性套成初值", () =>
     withSource(
       {
         pages: [
@@ -358,11 +368,18 @@ try {
           ],
         ],
       },
-      {},
+      (eid) => ({
+        modelId: 2912,
+        description:
+          eid === "other-gem"
+            ? equipmentDescription.replace("锻炼等级：8", "锻炼等级：7")
+            : equipmentDescription,
+      }),
       async ({ source, searchPage, control }) => {
-        const result = await source.findCandidates([item()], control.signal);
-        assert.deepEqual(detailVisits, ["matching"]);
+        const result = await source.findCandidates([item({ modelId: "2912" })], control.signal);
+        assert.deepEqual(detailVisits, ["matching", "other-gem"]);
         assert.equal(result.items[0].candidates[0].verified, true);
+        assert.equal(result.items[0].candidates[1].matchType, "similar");
         const [query] = await searchPage.evaluate(() => window.calls);
         assert.equal(query.gem_level, 8);
         assert.equal(query.init_defense, undefined);
@@ -406,7 +423,7 @@ try {
               eid: "wrong-list",
               name,
               kindId: "62",
-              description: description.replace("法术伤害 +9[+28]", "法术伤害 +10[+28]"),
+              description: description.replace("法术伤害 +9[+28]", "法术伤害 +30[+28]"),
             },
             { eid: "matching", name, kindId: "62", description },
           ],
@@ -527,9 +544,9 @@ try {
     ),
   );
 
-  await check("同配为空后实际使用95%下限并保留相近差异与查询模式", () => {
+  await check("同配为空后使用80%下限、3年以上服，取得3条相近样本后停止", () => {
     const description = "等级100\n气血176 防御50\n耐久300\n修理失败0";
-    const health = [172, 174, 178];
+    const health = [172, 174, 178, 179, 180];
     return withSource(
       {
         pages: [[]],
@@ -559,8 +576,11 @@ try {
           result.searchItems[0].modes.map((mode) => mode.mode),
           ["exact", "similar"],
         );
-        assert.equal((await searchPage.evaluate(() => window.calls))[1].init_hp, 168);
+        const calls = await searchPage.evaluate(() => window.calls);
+        assert.equal(calls[1].init_hp, 141);
+        assert(calls.every((call) => call.server_type === "3"));
         assert.equal(result.items[0].candidates.length, 3);
+        assert.equal(detailVisits.length, 3);
         assert(
           result.items[0].candidates.every(
             (candidate) =>
@@ -701,7 +721,7 @@ try {
         const result = await source.findCandidates([item()], control.signal);
         assert.deepEqual(
           (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
-          [1, 2],
+          [1, 1, 2],
         );
         assert.equal(result.items[0].candidates[0].verified, true);
         assert.match(result.items[0].note, /已读完/);
@@ -789,7 +809,7 @@ try {
       {},
       async ({ source, searchPage, control }) => {
         const result = await source.findCandidates([item()], control.signal);
-        assert.equal((await searchPage.evaluate(() => window.calls)).length, 2);
+        assert.equal((await searchPage.evaluate(() => window.calls)).length, 3);
         assert.match(result.items[0].note, /60个列表候选/);
         assert.deepEqual(detailVisits, []);
       },
@@ -800,7 +820,7 @@ try {
     await withSource(
       {
         pages: Array.from({ length: 3 }, (_, page) =>
-          Array.from({ length: 8 }, (_, row) => ({
+          Array.from({ length: 25 }, (_, row) => ({
             eid: `${page}-${row}`,
             name: equipmentName,
           })),

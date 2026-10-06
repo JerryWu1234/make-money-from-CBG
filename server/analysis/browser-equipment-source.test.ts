@@ -92,10 +92,10 @@ describe("官方装备搜索条件", () => {
     ["变身术之噬天虎", "1060"],
     ["变化咒之蛟龙", "2035"],
     ["炼气化神", "4013"],
-  ])("套装%s按官网对应类别准确取ID，近似查询保留同一套装", (suit, id) => {
+  ])("套装%s按官网对应类别准确取ID，相近查询允许套装差异", (suit, id) => {
     const target = item({ description: "等级100\n灵力56\n套装效果：" + suit });
     expect(equipmentQuery(target, suitConfig).args.suit_effect).toBe(id);
-    expect(equipmentQuery(target, suitConfig, "similar").args.suit_effect).toBe(id);
+    expect(equipmentQuery(target, suitConfig, "similar").args).not.toHaveProperty("suit_effect");
   });
 
   it("有类别的同名套装只使用对应表，未指明类别或表内多ID不取首项", () => {
@@ -143,7 +143,7 @@ describe("官方装备搜索条件", () => {
       ).args,
     ).not.toHaveProperty("suit_effect");
   });
-  it("同配查询保持原下限，相近查询只放宽公开数值下限至95%，宝石/修理状态不变", () => {
+  it("同配查询保持原下限，相近查询允许20%数值差和宝石/修理差异，保持同级同类型核心效果", () => {
     const target = item({
       category: "腰带",
       description: "等级70\n气血176 防御37\n耐久0\n修理失败3次",
@@ -155,9 +155,9 @@ describe("官方装备搜索条件", () => {
       repair_fail: 3,
     });
     expect(equipmentQuery(target, config, "similar").args).toMatchObject({
-      init_hp: 168,
-      init_defense: 36,
-      repair_fail: 3,
+      init_hp: 141,
+      init_defense: 30,
+      server_type: "3",
       level_min: 70,
       level_max: 70,
       kindid: "20",
@@ -169,12 +169,13 @@ describe("官方装备搜索条件", () => {
         "similar",
       ).args,
     ).toMatchObject({
-      damage: 337,
-      all_wakan: 85,
-      gem_level: 8,
-      gem_value: "6",
+      damage: 284,
+      all_wakan: 72,
       special_effect: "3",
     });
+    const args = equipmentQuery(target, config, "similar").args;
+    for (const key of ["repair_fail", "gem_level", "gem_value"])
+      expect(args).not.toHaveProperty(key);
   });
   it("从公开装备字段构造全服查询，保留修理失败0，不加入费用或区服", () => {
     const result = equipmentQuery(item(), config);
@@ -189,9 +190,10 @@ describe("官方装备搜索条件", () => {
         special_mode: "and",
         gem_value: "6",
         gem_level: 8,
+        server_type: "3",
       },
     });
-    for (const field of ["serverid", "server_type", "cross_buy_serverid", "price_min", "price_max"])
+    for (const field of ["serverid", "cross_buy_serverid", "price_min", "price_max"])
       expect(result.args).not.toHaveProperty(field);
   });
 
@@ -208,7 +210,7 @@ describe("官方装备搜索条件", () => {
   it("同时筛选多个特效，保留官方复合特技ID", () => {
     const result = equipmentQuery(
       item({
-        description: "等级：100\n特效：愤怒、永不磨损\n特技：乾坤斩",
+        description: "等级：100\n特效：愤怒 永不磨损\n特技：乾坤斩",
       }),
       config,
     );
@@ -243,6 +245,7 @@ describe("官方装备搜索条件", () => {
         kindid: "64",
         jinglian_level: 6,
         repair_fail: 0,
+        server_type: "3",
       },
     });
     expect(jewelry.args).not.toHaveProperty("level_min");
@@ -561,8 +564,7 @@ describe("官网列表前置排除", () => {
 
   it.each([
     ["气血 +475 防御 +43", "气血"],
-    ["气血 +176 防御 +40", "防御"],
-    ["气血 +176 防御 +37\n锻炼等级 7 镶嵌宝石 光芒石", "锻炼等级"],
+    ["气血 +176 防御 +45", "防御"],
     ["气血 +176 防御 +37\n特效：简易", "特效"],
   ])("列表已明确%s时不再打开详情", (description, field) => {
     expect(
@@ -570,9 +572,13 @@ describe("官网列表前置排除", () => {
     ).toContain(field);
   });
 
-  it("列表5%内同结构数值差留给详情作为相近候选，不提前排除", () => {
+  it("列表20%内数值差和宝石差异留给详情作为相近候选，不提前排除", () => {
     expect(
-      equipmentListingMismatch(target, { description: "等级70\n气血176 防御38" }, args),
+      equipmentListingMismatch(
+        target,
+        { description: "等级70\n气血176 防御40\n锻炼等级7 镶嵌宝石光芒石" },
+        args,
+      ),
     ).toBeNull();
   });
 
@@ -595,7 +601,7 @@ describe("官网列表前置排除", () => {
     ).toBeNull();
   });
 
-  it("灵饰部分列表缺一条相同属性不判不符，明确不同附加值才排除", () => {
+  it("灵饰部分列表允许相近附加值，超过20%的已知词条仍排除", () => {
     const jewelry = item({
       description: "等级 80\n法术伤害 +16\n法术伤害 +8\n法术伤害 +9",
       level: 80,
@@ -604,7 +610,7 @@ describe("官网列表前置排除", () => {
       equipmentListingMismatch(jewelry, { description: "等级 80\n法术伤害 +8" }, {}),
     ).toBeNull();
     expect(
-      equipmentListingMismatch(jewelry, { description: "等级 80\n法术伤害 +10" }, {}),
+      equipmentListingMismatch(jewelry, { description: "等级 80\n法术伤害 +30" }, {}),
     ).toContain("法术伤害");
   });
 });

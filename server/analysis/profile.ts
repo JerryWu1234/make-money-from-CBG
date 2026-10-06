@@ -5,7 +5,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { textHash } from "./contract";
 import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { marketServers } from "./market";
-import { SIMILAR_POLICY_VERSION } from "./pricing-estimate";
+import { EQUIPMENT_SIMILAR_POLICY_VERSION, SIMILAR_POLICY_VERSION } from "./pricing-estimate";
 import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "./valuation-settings";
 import {
   DEFAULT_EQUIPMENT_BASELINE_PRICES,
@@ -168,6 +168,7 @@ export function createProfile(
         CALCULATION_VERSION,
         "valuation-schema-v4",
         SIMILAR_POLICY_VERSION,
+        EQUIPMENT_SIMILAR_POLICY_VERSION,
         EQUIPMENT_BASELINE_POLICY_VERSION,
         equipmentSearch,
         petSearch,

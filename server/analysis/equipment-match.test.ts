@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import { parseEquipmentAttributes } from "./equip-attributes";
-import { matchEquipmentAttributes } from "./equipment-match";
+import { matchComparableEquipmentAttributes, matchEquipmentAttributes } from "./equipment-match";
 const gear =
   "等级 100\n五行 水\n防御 +100\n气血 +400\n耐久度 300\n修理失败 0\n宝石 黑宝石\n锻炼等级 8\n特效 愤怒\n套装 变身术之葫芦宝贝";
 const match = (source: string, target = gear) =>
@@ -67,6 +67,53 @@ describe("有界同配置与相近装备匹配", () => {
     expect(
       matchEquipmentAttributes(target, parseEquipmentAttributes("等级100\n锻炼等级9"), true)
         .matchType,
+    ).toBeNull();
+  });
+});
+
+describe("同核心装备粗略参考价匹配", () => {
+  const comparable = (source: string, target = gear) =>
+    matchComparableEquipmentAttributes(
+      parseEquipmentAttributes(target),
+      parseEquipmentAttributes(source),
+    );
+  it("套装、宝石、熔炼和双加差异保留为相近配置，不能冒充同配置", () => {
+    const result = comparable(
+      gear
+        .replace("防御 +100", "防御 +120")
+        .replace("锻炼等级 8", "锻炼等级 7")
+        .replace("葫芦宝贝", "净瓶女娲") + "\n熔炼效果：+3防御\n力量 +10\n符石: 防御 +3",
+    );
+    expect(result.matchType).toBe("similar");
+    for (const field of ["防御", "锻炼等级", "套装", "熔炼", "力量", "符石"])
+      expect(result.differences.some((difference) => difference.startsWith(field))).toBe(true);
+  });
+  it.each([
+    gear.replace("防御 +100", "防御 +121"),
+    gear.replace("等级 100", "等级 90"),
+    gear.replace("特效 愤怒", "特效 愤怒 简易"),
+    gear + "\n特技 晶清诀",
+    gear + "\n玩家123专用",
+    gear + "\n抗未知属性 +1",
+    gear.replace("气血 +400\n", ""),
+  ])("核心属性、未知属性和限制不符仍排除：%s", (source) => {
+    expect(comparable(source).matchType).toBeNull();
+  });
+  it("灵饰相近数值和精炼差异可用，但完整详情不能漏词条", () => {
+    const target = "等级80\n精炼等级7\n法术伤害16\n法术伤害8[+28]\n法术伤害9[+28]";
+    expect(
+      comparable("等级80\n精炼等级6\n法术伤害16\n法术伤害9[+24]\n法术伤害10[+24]", target)
+        .matchType,
+    ).toBe("similar");
+    expect(
+      comparable("等级80\n精炼等级7\n法术伤害16\n法术伤害8[+28]", target).matchType,
+    ).toBeNull();
+    expect(
+      matchComparableEquipmentAttributes(
+        parseEquipmentAttributes(target),
+        parseEquipmentAttributes("等级80\n法术伤害10[+24]"),
+        true,
+      ).reason,
     ).toBeNull();
   });
 });

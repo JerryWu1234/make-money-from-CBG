@@ -9,7 +9,7 @@ import {
   type EquipmentPricingSnapshot,
 } from "./equipment-pricing";
 import { petInventory, combinePetPricing, type PetPricingSnapshot } from "./pet-pricing";
-import { buildSimilarEstimate } from "./pricing-estimate";
+import { buildEquipmentEstimate, buildSimilarEstimate } from "./pricing-estimate";
 import { createProfile, DEFAULT_SETTINGS, PROMPT_FILE } from "./profile";
 import { calculateValuation } from "./valuation-calculator";
 import { applyValuationRange } from "./valuation-range";
@@ -306,6 +306,45 @@ describe("默认装备参考价与挂牌比较", () => {
 });
 
 describe("相近配置报价与完整区间", () => {
+  it("相近装备给出挂牌中位数，少量或分散样本保留提示和原范围", () => {
+    expect(buildEquipmentEstimate(candidates([350, 370, 568.1]))).toMatchObject({
+      median: 370,
+      sampleCount: 3,
+      range: { min: 350, max: 568.1 },
+    });
+    const one = buildEquipmentEstimate(candidates([350]));
+    expect(one.median).toBe(350);
+    expect(one.issues.join(" ")).toContain("仅1条");
+    expect(buildEquipmentEstimate(candidates([350, 371])).median).toBe(360.5);
+    expect(
+      buildEquipmentEstimate(candidates().map((row) => ({ ...row, verified: false }))).median,
+    ).toBeUndefined();
+  });
+  it("新装备参考中位数进入参考总值，保持精确金额和挂牌范围分开", () => {
+    const { equipment, combine, bare } = fixture();
+    equipment.items[0].similarEstimate = buildEquipmentEstimate(equipment.items[0].candidates);
+    const result = combine();
+    expect(result.estimated_value).toBe(bare.model_value! + 120);
+    expect(result.estimated_value_range).toEqual({
+      min: bare.model_value! + 100,
+      max: bare.model_value! + 140,
+    });
+    expect(result.known_subtotal).toBe(bare.model_value);
+    expect(result.model_value).toBeNull();
+    equipment.items[0].similarEstimate.median = 999;
+    expect(combine().estimated_value).toBeUndefined();
+  });
+  it("有装备参考价但宝宝未查到时只给小计，缺项不按零元补总价", () => {
+    const { equipment, pet, combine, bare } = fixture();
+    equipment.items[0].similarEstimate = buildEquipmentEstimate(equipment.items[0].candidates);
+    pet.captureComplete = false;
+    const result = combine();
+    expect(result.estimated_subtotal_value).toBe(bare.model_value! + 120);
+    expect(result.estimated_value).toBeUndefined();
+    expect(result.estimated_value_range).toBeUndefined();
+    expect(result.estimate_missing_count).toBeGreaterThan(0);
+    expect(result.reason).toContain("不能作为完整估值");
+  });
   it("同一商品路径的伪造查询别名不能凑足3件，非商品URL不能提供完整区间", () => {
     const source = candidates([100, 100, 100]);
     const duplicates = source.map((value, index) => ({

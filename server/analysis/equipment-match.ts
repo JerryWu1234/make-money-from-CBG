@@ -151,3 +151,122 @@ export function matchEquipmentAttributes(
     reason: null,
   };
 }
+
+const comparableDifferences = new Set([
+  "五行",
+  "套装",
+  "宝石",
+  "锻炼等级",
+  "精炼等级",
+  "熔炼",
+  "修理失败",
+  "开运孔数",
+  "开运",
+  "符石",
+  "符石组合",
+  "星位",
+  "星相",
+  "星相互合",
+  "力量",
+  "体质",
+  "魔力",
+  "耐力",
+  "敏捷",
+]);
+const baseNumbers = (values: string[]) => {
+  const matches = values.map((value) =>
+    value.trim().match(/^([+＋−-]?\d+(?:\.\d+)?)(?:点|级)?(?:\s*\[[+＋−-]?\d+(?:\.\d+)?\])?$/),
+  );
+  return matches.every(Boolean)
+    ? matches
+        .map((match) => Number(match![1].replace("＋", "+").replace("−", "-")))
+        .sort((a, b) => a - b)
+    : null;
+};
+
+/** Same core equipment may provide a rough reference; differences never become exact prices. */
+export function matchComparableEquipmentAttributes(
+  target: EquipmentAttributes,
+  source: EquipmentAttributes,
+  partial = false,
+): Match {
+  const strict = matchEquipmentAttributes(target, source, partial);
+  if (!strict.reason) return strict;
+  const reject = (reason: string): Match => ({
+    matchType: null,
+    similarityScore: Infinity,
+    differences: [],
+    reason,
+  });
+  const restrictions = compareEquipmentAttributes(
+    { ...target, fields: {}, ...(partial ? { unknownLines: [] } : {}) },
+    { ...source, fields: {}, ...(partial ? { unknownLines: [] } : {}) },
+  );
+  if (restrictions) return reject(restrictions);
+  const differences: string[] = [];
+  let score = 0;
+  const names = partial
+    ? Object.keys(source.fields)
+    : [...new Set([...Object.keys(target.fields), ...Object.keys(source.fields)])];
+  for (const name of names) {
+    if (name === "耐久") continue;
+    const left = target.fields[name] || [],
+      right = source.fields[name] || [];
+    if (sameField(name, left, right)) continue;
+    if (["特技", "特效"].includes(name)) {
+      const tokens = (values: string[]) =>
+        values
+          .flatMap((value) => value.split(/[、，,；;\s]+/))
+          .filter(Boolean)
+          .sort();
+      if (JSON.stringify(tokens(left)) === JSON.stringify(tokens(right))) continue;
+    }
+    const unrestricted =
+      ["门派条件", "部位条件"].includes(name) &&
+      [...left, ...right].every((value) => /^(?:无|不限)$/.test(value.trim()));
+    if (unrestricted) continue;
+    if (comparableDifferences.has(name)) {
+      differences.push(
+        name + "：" + (left.join("、") || "未标明") + " → " + (right.join("、") || "未标明"),
+      );
+      score += 10;
+      continue;
+    }
+    if (!left.length || !right.length)
+      return reject("关键属性“" + name + "”缺失或多出，不能作为相近参考");
+    if (!smallNumericDifferences.has(name)) return reject("关键属性“" + name + "”不匹配");
+    let a = baseNumbers(left);
+    const b = baseNumbers(right);
+    if (!a || !b || (!partial && a.length !== b.length) || b.length > a.length)
+      return reject("价格相关属性“" + name + "”条目结构不一致");
+    if (partial && a.length > b.length) {
+      const remaining = [...a];
+      a = b.map((value) => {
+        const choices = remaining
+          .map((expected, index) => ({
+            index,
+            delta:
+              expected === value
+                ? 0
+                : expected === 0
+                  ? Infinity
+                  : Math.abs(value - expected) / Math.abs(expected),
+          }))
+          .sort((left, right) => left.delta - right.delta);
+        return remaining.splice(choices[0].index, 1)[0];
+      });
+    }
+    const deltas = a.map((value, index) =>
+      value === b[index]
+        ? 0
+        : value === 0
+          ? Infinity
+          : Math.abs(b[index] - value) / Math.abs(value),
+    );
+    if (deltas.some((delta) => delta > 0.2 + 1e-10))
+      return reject("关键属性“" + name + "”差异超过20%，不作为相近参考");
+    differences.push(name + "：" + left.join("、") + " → " + right.join("、"));
+    score += 1 + deltas.reduce((sum, delta) => sum + delta * 100, 0);
+  }
+  return { matchType: "similar", similarityScore: score, differences, reason: null };
+}

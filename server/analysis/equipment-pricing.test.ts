@@ -12,6 +12,8 @@ import {
 } from "./equipment-pricing";
 import { createProfile, DEFAULT_SETTINGS, PROMPT_FILE } from "./profile";
 import { calculateValuation } from "./valuation-calculator";
+import savedComparables from "../../tests/fixtures/equipment-comparables-20329459.json";
+import { buildEquipmentEstimate } from "./pricing-estimate";
 
 const equipmentName = "测试腰带";
 const description =
@@ -100,7 +102,7 @@ async function matchedPricing(record = recordWithEquipment()) {
 }
 
 describe("装备联网查价的来源核对", () => {
-  it("3条有官方型号证据的相近报价只生成范围，同配报价优先计入金额", async () => {
+  it("3条相近报价生成参考中位数和范围，同配报价优先计入金额", async () => {
     const record = recordWithEquipment();
     record.detail!.tabs.at(-1)!.items![0].modelId = "2912";
     const descriptions = [48, 49, 52].map((value) =>
@@ -126,7 +128,12 @@ describe("装备联网查价的来源核对", () => {
     expect(result).toMatchObject({ total: null, knownTotal: 0 });
     expect(result.items[0]).toMatchObject({
       referencePrice: null,
-      similarEstimate: { status: "range", sampleCount: 3, range: { min: 100, max: 140 } },
+      similarEstimate: {
+        status: "range",
+        sampleCount: 3,
+        median: 120,
+        range: { min: 100, max: 140 },
+      },
     });
     expect(
       result.items[0].candidates.every((value) => value.verified && value.matchType === "similar"),
@@ -137,6 +144,42 @@ describe("装备联网查价的来源核对", () => {
     const mixed = await searchEquipmentPrices(record, new AbortController().signal, source);
     expect(mixed.items[0]).toMatchObject({ status: "priced", referencePrice: 110 });
     expect(mixed.total).toBe(110);
+  });
+
+  it("离线重放20329459的已保存报价，符石、套装等差异不再让四组核心装备全部缺价", () => {
+    const record = recordWithEquipment();
+    record.detail!.tabs.at(-1)!.items = savedComparables.items.map(({ target }) => ({
+      ...target,
+      kind: "equipment",
+      attributes: target.attributes as Record<string, string>,
+    }));
+    const inventory = equipmentInventory(record);
+    for (const group of savedComparables.items) {
+      const item = inventory.items.find((item) => item.name === group.target.name)!;
+      const verified = group.candidates.map((source) => {
+        // Reconstruct the primary-product boundary only for offline matching regression.
+        const observedDescription = source.quote
+          .slice(item.name.length)
+          .replace(/\n挂牌价：¥[\d.]+$/, "")
+          .replace(/在售$/, "");
+        const html = `<main data-cbg-model-id="${item.modelId}"><h1>${item.name}</h1><pre>${observedDescription}</pre><p>在售\n挂牌价：¥${source.price}</p></main>`;
+        return verifyEquipmentCandidate(
+          item,
+          { ...candidate(source.price, source.url), quote: source.quote },
+          html,
+          new Date().toISOString(),
+        );
+      });
+      const estimate = buildEquipmentEstimate(verified);
+      expect(
+        estimate.status,
+        item.name + ": " + verified.map((row) => row.reason).join(" / "),
+      ).toBe("range");
+      expect(estimate.median).toBeGreaterThan(0);
+      expect(
+        verified.filter((row) => row.verified).every((row) => row.matchType === "similar"),
+      ).toBe(true);
+    }
   });
 
   it("相近样本官方型号不一致或缺证据都拒绝，关键特效不放宽", () => {
@@ -850,7 +893,7 @@ describe("装备联网查价的来源核对", () => {
     expect(result.verified).toBe(false);
   });
 
-  it.each(["特技：罗汉金钟", "力量：20", "法术暴击等级：10", "封印命中等级：10"])(
+  it.each(["特技：罗汉金钟", "法术暴击等级：10", "封印命中等级：10"])(
     "报价额外多出%s时不能套用到当前装备",
     (extra) => {
       const item = equipmentInventory(recordWithEquipment()).items[0];
@@ -865,6 +908,29 @@ describe("装备联网查价的来源核对", () => {
       expect(result.reason).toContain("多出");
     },
   );
+
+  it("有官方类型证据的额外双加可作相近参考，但0耐久修理次数不放宽", () => {
+    const item = { ...equipmentInventory(recordWithEquipment()).items[0], modelId: "2912" };
+    const desc = description + "\n力量：20";
+    const verified = verifyEquipmentCandidate(
+      item,
+      { ...candidate(), quote: quote(100, desc) },
+      '<main data-cbg-model-id="2912">' + sourcePage(100, desc) + "</main>",
+      new Date().toISOString(),
+    );
+    expect(verified).toMatchObject({ verified: true, matchType: "similar", price: 100 });
+    expect(verified.differences?.join(" ")).toContain("力量");
+    const broken = description.replace("耐久：300", "耐久：0");
+    const changed = broken.replace("修理失败：0", "修理失败：3");
+    const rejected = verifyEquipmentCandidate(
+      { ...item, description: broken },
+      { ...candidate(), quote: quote(100, changed) },
+      '<main data-cbg-model-id="2912">' + sourcePage(100, changed) + "</main>",
+      new Date().toISOString(),
+    );
+    expect(rejected).toMatchObject({ verified: false });
+    expect(rejected.reason).toContain("修理失败次数不一致");
+  });
 
   it.each(["<table><tr><td>特效</td><td>愤怒</td></tr></table>", "<p>【特效】愤怒</p>"])(
     "额外特效没有冒号但由表格或括号分隔，也不能漏检：%s",

@@ -1647,6 +1647,59 @@ body:has(.analysis-page) #root {
   gap: 16px;
   margin: 24px 0;
 }
+.analysis-valuation-price {
+  margin-top: 1.5rem;
+  padding: 1.25rem;
+  border: 1px solid rgba(94, 234, 212, 0.25);
+  border-radius: 12px;
+  background: rgba(45, 212, 191, 0.07);
+}
+.analysis-valuation-price small,
+.analysis-valuation-price strong {
+  display: block;
+}
+.analysis-valuation-price small {
+  color: #8ebeb8;
+}
+.analysis-valuation-price strong {
+  margin-top: 0.4rem;
+  color: #a5f8e6;
+  font-size: clamp(1.5rem, 5vw, 2.2rem);
+  overflow-wrap: anywhere;
+}
+.analysis-valuation-price p {
+  margin: 0.65rem 0 0;
+}
+.analysis-valuation-price .analysis-valuation-comparison {
+  color: #dce8f4;
+}
+.analysis-valuation-breakdown {
+  margin: 1.25rem 0 0;
+}
+.analysis-valuation-breakdown > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+.analysis-valuation-breakdown dt {
+  color: #adbdce;
+  font-size: 0.86rem;
+}
+.analysis-valuation-breakdown dd {
+  margin: 0;
+  color: #dce8f4;
+  text-align: right;
+  font-size: 0.9rem;
+}
+.analysis-valuation-scope {
+  color: #8da2b5;
+}
+.analysis-valuation-details {
+  padding-top: 0.5rem;
+}
 .analysis-valuation-metrics > div {
   background: #162d3f;
   padding: 16px;

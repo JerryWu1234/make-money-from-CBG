@@ -2,6 +2,25 @@ import { describe, expect, it } from "vite-plus/test";
 import { compareEquipmentAttributes, parseEquipmentAttributes } from "./equip-attributes";
 
 describe("装备价敏字段的结构化比较", () => {
+  it("符石和星相的加成保留在独立字段，不冒充装备基础属性或未知行", () => {
+    const attributes = parseEquipmentAttributes(
+      "等级60\n防御 +110\n符石: 敏捷 +1 防御 +3\n星相互合：力量 +2\n符石组合: 无懈可击\n门派条件：无\n部位条件：无\n遭受法术攻击时有20%几率抵挡20点伤害",
+    );
+    expect(attributes.fields.防御).toEqual(["+110"]);
+    expect(attributes.fields.符石).toEqual(["敏捷 +1 防御 +3"]);
+    expect(attributes.fields.星相互合).toEqual(["力量 +2"]);
+    expect(attributes.fields.符石组合).toContain("遭受法术攻击时有20%几率抵挡20点伤害");
+    expect(attributes.fields.门派条件).toBeUndefined();
+    expect(attributes.unknownLines).toEqual([]);
+  });
+  it("符石组合的门派限制独立保留，真正的装备门派和角色限制仍识别", () => {
+    const attributes = parseEquipmentAttributes(
+      "等级70\n符石组合: 气吞山河符石\n门派条件：凌波城\n部位条件：铠甲/女衣/坤斧\n增加门派技能气吞山河等级2级\n【装备角色】男\n【门派条件】大唐官府",
+    );
+    expect(attributes.fields.符石组合).toContain("门派条件：凌波城");
+    expect(attributes.fields.门派条件).toEqual(["大唐官府"]);
+    expect(attributes.fields.装备角色).toEqual(["男"]);
+  });
   it.each([
     "固定伤害",
     "狂暴等级",

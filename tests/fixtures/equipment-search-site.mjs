@@ -58,6 +58,7 @@ window.ajax_with_recommend=function(options){
 };
 window.overall_search=function(args,page,order){
  const data={act:OverallSearchAct,page:page||1,...args};if(order.key)data.order_by=order.key+' '+order.sort;
+ if(settings.dropServerType)delete data.server_type;
  calls.push(JSON.parse(JSON.stringify(data)));
  ajax_with_recommend({data,
   onRequest(){document.querySelector('#loading_img').style.display='';document.querySelector('#search_result').innerHTML='';document.querySelector('#pager').innerHTML='';},

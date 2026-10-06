@@ -80,6 +80,35 @@ const valuation = (override: Partial<ValuationResult> = {}): ValuationResult => 
 });
 
 describe("普通装备默认价显示（仅模拟快照，无市场查询）", () => {
+  it("相近装备显示一个参考中位数，报价范围留在依据中；缺项时主金额仍叫小计", () => {
+    const gear = item();
+    delete gear.baselineEstimate;
+    gear.similarEstimate = {
+      policyVersion: "same-core-equipment-v2",
+      status: "range",
+      median: 370,
+      range: { min: 350, max: 568.1 },
+      sampleCount: 3,
+      issues: [],
+    };
+    const html = renderToStaticMarkup(<EquipmentPricingView snapshot={snapshot([gear])} />);
+    expect(html).toContain("相近装备参考价（挂牌中位数）");
+    expect(html).toContain("¥370.00");
+    expect(html).toContain("样本挂牌范围：¥350.00—¥568.10");
+    expect(html).not.toContain("¥0.00");
+    const result = renderToStaticMarkup(
+      <ValuationResultView
+        result={valuation({
+          estimated_value_range: undefined,
+          estimated_subtotal_range: { min: 1350, max: 1568.1 },
+          estimated_subtotal_value: 1370,
+        })}
+      />,
+    );
+    expect(result).toContain("已算参考小计");
+    expect(result).toContain("¥1,370.00");
+    expect(result).toContain("还有未定价项目");
+  });
   it("失效默认价保留身份和出处，不显示旧金额/说明，也不计入默认小计或待补数", () => {
     const invalidPriced = {
       ...item(baseline({ amount: 9.99, gameCurrency: 999999, note: "旧正常默认说明A" })),
@@ -265,6 +294,92 @@ describe("普通装备默认价显示（仅模拟快照，无市场查询）", (
 });
 
 describe("默认价设置和整体估值显示", () => {
+  it("没有装备和宝宝时显示总估值及空资产，不把零资产显示为报价", () => {
+    const empty = { ...snapshot([]), total: 0 };
+    const html = renderToStaticMarkup(
+      <ValuationResultView
+        result={valuation({
+          decision: "PASS",
+          asking_price: 17555,
+          model_value: 14903.41,
+          bare_role_value: 14903.41,
+          known_subtotal: 14903.41,
+          equipment_value: 0,
+          pet_value: 0,
+          equipment_pricing: empty,
+          pet_pricing: { ...empty, items: [] },
+          price_difference: -2651.59,
+          price_difference_ratio: -0.1510447,
+          estimated_value_range: undefined,
+          estimated_sources: undefined,
+        })}
+      />,
+    );
+    const overview = html.split('<details class="analysis-valuation-details">')[0];
+    expect(overview).toContain("总估值");
+    expect(overview).toContain("¥14,903.41");
+    expect(overview).toContain("无装备");
+    expect(overview).toContain("无宝宝");
+    expect(overview).toContain("卖家要价比估值高 ¥2,651.59");
+    expect(overview).not.toContain("¥0.00");
+    expect(overview).not.toContain("¥-2,651.59");
+    expect(html).toContain("查看估值依据与查价记录");
+  });
+  it("宝宝缺报价时显示已算小计和未定价，不把小计当作总估值", () => {
+    const html = renderToStaticMarkup(
+      <ValuationResultView
+        result={valuation({
+          asking_price: 26999,
+          bare_role_value: 19495.33,
+          known_subtotal: 19495.33,
+          equipment_value: 0,
+          equipment_pricing: { ...snapshot([]), total: 0 },
+          pet_value: null,
+          pet_pricing: {
+            ...snapshot(),
+            items: [
+              {
+                ...item(),
+                baselineEstimate: undefined,
+                fields: [],
+                skills: [],
+                innerSkills: [],
+                equipment: [],
+              },
+            ],
+          },
+          estimated_value_range: undefined,
+          estimated_sources: undefined,
+        })}
+      />,
+    );
+    const overview = html.split('<details class="analysis-valuation-details">')[0];
+    expect(overview).toContain("已算小计");
+    expect(overview).toContain("¥19,495.33");
+    expect(overview).toContain("未定价");
+    expect(overview).toContain("总估值暂无法计算");
+    expect(overview).not.toContain("<small>总估值</small>");
+    expect(overview).not.toContain("无宝宝");
+    expect(overview).not.toContain("¥0.00");
+  });
+  it("资产尚未采齐时不把空数组解释为没有装备或宝宝", () => {
+    const incomplete = { ...snapshot([]), captureComplete: false };
+    const html = renderToStaticMarkup(
+      <ValuationResultView
+        result={valuation({
+          equipment_pricing: incomplete,
+          pet_pricing: { ...incomplete, items: [] },
+          equipment_value: null,
+          pet_value: null,
+          estimated_value_range: undefined,
+          estimated_sources: undefined,
+        })}
+      />,
+    );
+    expect(html).toContain("资料未采齐");
+    expect(html).not.toContain("无装备");
+    expect(html).not.toContain("无宝宝");
+  });
   it("默认60/90/100留空，70/80历史值保留，梦幻币输入只接受正整数", () => {
     const html = renderToStaticMarkup(<EquipmentBaselinePriceFields onChange={() => {}} />);
     expect((html.match(/value=""/g) || []).length).toBe(6);
@@ -286,7 +401,7 @@ describe("默认价设置和整体估值显示", () => {
   });
   it("完整/部分参考区间实际含默认价时明确未实时核实，纯相似文案保持", () => {
     const full = renderToStaticMarkup(<ValuationResultView result={valuation()} />);
-    expect(full).toContain("完整参考估值区间（含默认参考价）");
+    expect(full).toContain("总估值区间（含默认参考价）");
     expect(full).toContain("未实时核实藏宝阁报价");
     expect(full).not.toContain("基于相近配置挂牌样本的完整参考区间");
     const partial = renderToStaticMarkup(
@@ -297,7 +412,7 @@ describe("默认价设置和整体估值显示", () => {
         })}
       />,
     );
-    expect(partial).toContain("部分参考价区间（含默认参考价，仍有缺项）");
+    expect(partial).toContain("已算小计区间（含默认参考价）");
     expect(partial).toContain("未实时核实藏宝阁报价");
     const similar = renderToStaticMarkup(
       <ValuationResultView result={valuation({ estimated_sources: ["similar"] })} />,

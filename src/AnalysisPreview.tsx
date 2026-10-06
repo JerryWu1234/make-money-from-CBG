@@ -7,6 +7,7 @@ import { AnalysisSettings } from "./AnalysisSettings";
 import {
   valuationDecisionLabel,
   valuationMoney,
+  valuationPriceDifferenceText,
   valuationPriceSummary,
   valuationSummaryText,
 } from "./ValuationResultView";
@@ -523,7 +524,8 @@ export function AnalysisPreview() {
                       <span>
                         {item.valuation
                           ? item.valuation.comparison_mode === "listing-only"
-                            ? `估值与挂牌差额 ${valuationMoney(item.valuation.price_difference)}`
+                            ? valuationPriceDifferenceText(item.valuation) ||
+                              valuationDecisionLabel(item.valuation)
                             : `最高买入 ${valuationMoney(item.valuation.max_listing_price)}`
                           : `配置参考分 ${item.score}`}
                       </span>
@@ -623,20 +625,21 @@ export function AnalysisPreview() {
                                 </small>
                                 {item.valuation.comparison_mode === "listing-only" &&
                                   item.valuation.price_difference != null && (
+                                    <small>{valuationPriceDifferenceText(item.valuation)}</small>
+                                  )}
+                                {item.valuation.comparison_mode !== "listing-only" &&
+                                  item.valuation.estimated_price_difference && (
                                     <small>
-                                      差额 {valuationMoney(item.valuation.price_difference)}
-                                      {item.valuation.price_difference_ratio != null
-                                        ? ` · ${(item.valuation.price_difference_ratio * 100).toFixed(2)}%`
-                                        : ""}
+                                      差额区间{" "}
+                                      {valuationMoney(
+                                        item.valuation.estimated_price_difference.min,
+                                      )}
+                                      —
+                                      {valuationMoney(
+                                        item.valuation.estimated_price_difference.max,
+                                      )}
                                     </small>
                                   )}
-                                {item.valuation.estimated_price_difference && (
-                                  <small>
-                                    差额区间{" "}
-                                    {valuationMoney(item.valuation.estimated_price_difference.min)}—
-                                    {valuationMoney(item.valuation.estimated_price_difference.max)}
-                                  </small>
-                                )}
                                 {item.valuation.comparison_mode !== "listing-only" &&
                                   item.valuation.max_listing_price !== null && (
                                     <small>
@@ -780,7 +783,7 @@ export function AnalysisPreview() {
                     <span>3</span>
                     <div>
                       <strong>比较价格，展示搜索依据</strong>
-                      <p>展示估值与挂牌的差额和比例；资料或报价不足时说明缺什么、怎么补。</p>
+                      <p>展示总估值、价格组成和卖家要价；资料或报价不足时说明缺什么、怎么补。</p>
                     </div>
                   </li>
                 </ol>

@@ -5,8 +5,8 @@ import { compareListingPrice } from "./valuation-calculator";
 import { inventoryMatchesSnapshot, validateExactPricing } from "./pricing-integrity";
 import { parseEquipmentAttributes } from "./equip-attributes";
 import { observedEquipmentCategory } from "../crawler/compact";
-import { matchEquipmentAttributes } from "./equipment-match";
-import { buildSimilarEstimate, type SimilarEstimate } from "./pricing-estimate";
+import { matchComparableEquipmentAttributes, matchEquipmentAttributes } from "./equipment-match";
+import { buildEquipmentEstimate, type SimilarEstimate } from "./pricing-estimate";
 import {
   makeEquipmentBaseline,
   validateEquipmentBaseline,
@@ -303,7 +303,7 @@ export async function readEquipmentSource(url: string, signal: AbortSignal) {
   return new TextDecoder("utf-8").decode(bytes);
 }
 
-/** Verify current price and exact price-sensitive attributes against fetched source. */
+/** Verify the primary-product price and exact or comparable attributes against the read page. */
 export function verifyEquipmentCandidate(
   item: EquipmentPricingItem,
   candidate: EquipmentCandidate,
@@ -368,6 +368,8 @@ export function verifyEquipmentCandidate(
       !/^\d+\s*次?$/.test(sourceFailures[0])
     )
       return reject("0耐久装备需要双方明确的修理失败次数，不能推断破损程度");
+    if (parseInt(targetFailures[0], 10) !== parseInt(sourceFailures[0], 10))
+      return reject("0耐久装备的修理失败次数不一致，不能作为相近参考");
   }
   if (jade) {
     const sourceDescription = html.match(
@@ -386,7 +388,10 @@ export function verifyEquipmentCandidate(
     )
       return reject("玉魄初始/附加属性、灵尘、效形或奇袭/到期条件不完全一致");
   }
-  const match = matchEquipmentAttributes(targetAttributes, sourceAttributes);
+  const match = (jade ? matchEquipmentAttributes : matchComparableEquipmentAttributes)(
+    targetAttributes,
+    sourceAttributes,
+  );
   if (match.reason) return reject(match.reason);
   if (
     match.matchType === "similar" &&
@@ -583,10 +588,10 @@ export async function searchEquipmentPrices(
       item.status = "priced";
       if (verified.length === 1) item.issues.push("仅1条挂牌样本，参考范围有限");
     } else {
-      item.similarEstimate = buildSimilarEstimate(item.candidates);
+      item.similarEstimate = buildEquipmentEstimate(item.candidates);
       item.issues.push(
         item.similarEstimate.status === "range"
-          ? "暂无完全同配置报价，展示相近配置的原挂牌参考区间"
+          ? "暂无完全同配置报价，采用相近装备挂牌中位数作为参考价，并保留报价范围和配置差异"
           : "可靠的同配或相近样本不足，暂不自动定价",
       );
     }

@@ -8,7 +8,7 @@ import { buildPageState } from "../page-state";
 import { readStableSnapshot } from "../workflow";
 import { cleanDescription, jewelryDescriptionSections } from "../crawler/compact";
 import { parseEquipmentAttributes } from "./equip-attributes";
-import { matchEquipmentAttributes } from "./equipment-match";
+import { matchComparableEquipmentAttributes, matchEquipmentAttributes } from "./equipment-match";
 import { jadeQuery, JADE_SEARCH_URL, type JadeSearchConfig } from "./jade-query";
 import {
   equipmentIdentity,
@@ -90,8 +90,18 @@ export function equipmentQuery(
   const jewelry = isJewelry(item);
   const fields = parseEquipmentAttributes(item.description).fields;
   const args: Query = jewelry
-    ? { equip_level_min: item.level, equip_level_max: item.level, pass_fair_show: "1" }
-    : { level_min: item.level, level_max: item.level, front_status: "pass_fair_show" };
+    ? {
+        equip_level_min: item.level,
+        equip_level_max: item.level,
+        pass_fair_show: "1",
+        server_type: "3",
+      }
+    : {
+        level_min: item.level,
+        level_max: item.level,
+        front_status: "pass_fair_show",
+        server_type: "3",
+      };
   const category = item.category.replace("配饰", "佩饰");
   const kind =
     config.kinds.find(([id]) => item.kindId !== undefined && Number(id) === Number(item.kindId)) ||
@@ -197,7 +207,7 @@ export function equipmentQuery(
       ["宝石", "gem_value", config.gems],
     ] as const) {
       const values = (fields[field] || []).flatMap((value) =>
-        value.split(/[、，,；;]/).map((part) => part.trim()),
+        value.split(/[、，,；;\s]+/).map((part) => part.trim()),
       );
       const matched = values.flatMap((value) => choices.filter(([, label]) => value === label));
       if (matched.length) args[key] = matched.map(([id]) => String(id)).join(",");
@@ -205,7 +215,9 @@ export function equipmentQuery(
     if (args.special_effect) args.special_mode = "and";
   }
   if (mode === "similar") {
-    // All of these official inputs are minima, not exact values. Other filters remain strict.
+    // Keep level, type and core skills/effects; rank optional configuration differences in details.
+    for (const key of ["suit_effect", "gem_level", "gem_value", "jinglian_level", "repair_fail"])
+      delete args[key];
     for (const key of [
       "init_defense",
       "init_hp",
@@ -219,7 +231,7 @@ export function equipmentQuery(
       "anti_fengyin",
       "speed",
     ])
-      if (typeof args[key] === "number" && args[key] > 0) args[key] = Math.ceil(args[key] * 0.95);
+      if (typeof args[key] === "number" && args[key] > 0) args[key] = Math.ceil(args[key] * 0.8);
   }
   return { jewelry, args };
 }
@@ -238,7 +250,9 @@ export function equipmentListingMismatch(
   const source = parseEquipmentAttributes(
     row.description.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]+>/g, ""),
   );
-  return matchEquipmentAttributes(target, source, true).reason;
+  return (
+    item.category === "上古玉魄" ? matchEquipmentAttributes : matchComparableEquipmentAttributes
+  )(target, source, true).reason;
 }
 
 /** Read only the principal equipment description and price, never recommendations. */
@@ -758,9 +772,10 @@ export function equipmentSourceFromPages(
               };
             })
           : null;
-        const exactArgs = jade
-          ? jadeQuery(item, jadeConfig!).args
-          : equipmentQuery(item, config).args;
+        const exactArgs: Query = {
+          ...(jade ? jadeQuery(item, jadeConfig!).args : equipmentQuery(item, config).args),
+          server_type: "3",
+        };
         const act = jade
           ? "yupo_search"
           : jewelry
@@ -800,6 +815,7 @@ export function equipmentSourceFromPages(
                 onSuccess(result: Record<string, any>) {
                   g.__cbgEquipmentResult = {
                     page: Number(options.data?.page),
+                    serverType: String(options.data?.server_type || ""),
                     ok: result.status === 0 && Array.isArray(result.msg),
                     count: Array.isArray(result.msg) ? result.msg.length : -1,
                     error: typeof result.msg === "string" ? result.msg.slice(0, 200) : "",
@@ -822,12 +838,19 @@ export function equipmentSourceFromPages(
         for (const { mode, args } of queryModes) {
           if (
             mode === "similar" &&
-            (candidates.length || JSON.stringify(args) === JSON.stringify(exactArgs))
+            (candidates.length ||
+              similar.length >= 3 ||
+              JSON.stringify(args) === JSON.stringify(exactArgs))
           )
             break;
           if (count >= MAX_ROWS || details >= MAX_DETAILS || Date.now() >= deadline) break;
           const query =
-            "全服 / 综合排序 / " + item.name + " / " + mode + " / " + JSON.stringify(args);
+            "全服 / 3年以上服 / 综合排序 / " +
+            item.name +
+            " / " +
+            mode +
+            " / " +
+            JSON.stringify(args);
           queries.push(query);
           itemQueries.push(query);
           exhausted = false;
@@ -840,7 +863,7 @@ export function equipmentSourceFromPages(
                 : MAX_PAGES - actualModes.reduce((sum, entry) => sum + entry.pages, 0)) &&
             count < MAX_ROWS &&
             details < MAX_DETAILS &&
-            candidates.length < 3 &&
+            candidates.length + similar.length < 3 &&
             Date.now() < deadline;
             pageNumber++
           ) {
@@ -901,6 +924,8 @@ export function equipmentSourceFromPages(
               };
               const result = (window as unknown as Record<string, any>).__cbgEquipmentResult;
               if (!result?.ok) throw new Error(result?.error || "官网装备查询未成功");
+              if (result.serverType !== "3")
+                throw new Error("装备查询未确认3年以上服条件，报价未采用");
               const root = document.querySelector<HTMLElement>("#search_result");
               if (!root?.checkVisibility()) throw new Error("装备列表尚未加载");
               const rows = Array.from(root.querySelectorAll<HTMLAnchorElement>("a.soldImg[href]"))
@@ -951,8 +976,9 @@ export function equipmentSourceFromPages(
                   source = parseEquipmentAttributes(
                     row.description.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]+>/g, ""),
                   );
-                const full = matchEquipmentAttributes(target, source),
-                  partial = full.reason ? matchEquipmentAttributes(target, source, true) : full;
+                const match = jade ? matchEquipmentAttributes : matchComparableEquipmentAttributes;
+                const full = match(target, source),
+                  partial = full.reason ? match(target, source, true) : full;
                 return {
                   row,
                   score: full.reason ? 500 + partial.similarityScore : full.similarityScore,
@@ -1044,7 +1070,7 @@ export function equipmentSourceFromPages(
                       : null,
                 });
               }
-              if (count >= MAX_ROWS || candidates.length >= 3) {
+              if (count >= MAX_ROWS || candidates.length + similar.length >= 3) {
                 pageFullyRead = rowIndex === rankedRows.length - 1;
                 break;
               }
@@ -1067,6 +1093,7 @@ export function equipmentSourceFromPages(
         records.push({
           key: item.key,
           act,
+          serverAge: "3年以上服",
           args: exactArgs,
           modes: actualModes,
           pages: actualModes.reduce((sum, mode) => sum + mode.pages, 0),
