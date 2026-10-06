@@ -38,6 +38,17 @@ export function applyValuationRange(
   let missing = bare.model_value === null ? 1 : 0;
   let similar = 0;
   let baseline = 0;
+  const missingFields = [...bare.missing_fields];
+  const missingAsset = (item: EquipmentPricingItem | PetPricingItem, reason?: string) => {
+    missingFields.push(
+      item.name +
+        "（" +
+        item.key +
+        "）：" +
+        (reason || item.baselineInvalidReason || item.issues.join("；") || "缺少可核验价格"),
+    );
+    missing++;
+  };
   const baselineSources = new Set<"historical" | "preset" | "excluded">();
   const include = (
     snapshot: EquipmentPricingSnapshot | PetPricingSnapshot | undefined,
@@ -45,6 +56,7 @@ export function applyValuationRange(
     captured: boolean,
     inventoryItems: Array<EquipmentPricingItem | PetPricingItem>,
     allowBaseline = false,
+    inventoryIssues: string[] = [],
   ) => {
     const age = snapshot ? Date.now() - Date.parse(snapshot.searchedAt) : Infinity;
     if (
@@ -57,8 +69,14 @@ export function applyValuationRange(
       !Number.isFinite(age)
     ) {
       missing += Math.max(1, inventoryItems.length);
+      missingFields.push(...inventoryIssues, ...(snapshot?.issues || []));
+      missingFields.push(
+        (allowBaseline ? "装备" : "宝宝") +
+          "资料或查价快照未通过完整性、身份或时效核验，需要补采或重新查价",
+      );
       return;
     }
+    missingFields.push(...snapshot.issues);
     for (const item of snapshot.items) {
       if (
         item.status === "priced" &&
@@ -84,7 +102,7 @@ export function applyValuationRange(
           referenceValue = round(referenceValue + estimate.amount);
           baseline++;
           baselineSources.add(estimate.source.basis);
-        } else missing++;
+        } else missingAsset(item);
         continue;
       }
       const equipmentReference =
@@ -108,7 +126,7 @@ export function applyValuationRange(
           equipmentReferences++;
         } else allReferencesHaveValue = false;
         similar++;
-      } else missing++;
+      } else missingAsset(item);
     }
   };
   if (profile.equipmentSearch) {
@@ -119,13 +137,31 @@ export function applyValuationRange(
       inventory.captureComplete,
       inventory.items,
       true,
+      inventory.issues,
     );
   }
   if (profile.petSearch) {
     const inventory = petInventory(record);
-    include(result.pet_pricing, inventory.inputHash, inventory.captureComplete, inventory.items);
+    include(
+      result.pet_pricing,
+      inventory.inputHash,
+      inventory.captureComplete,
+      inventory.items,
+      false,
+      inventory.issues,
+    );
   }
-  if (!similar && !baseline) return result;
+  const finalMissing = [...new Set(missingFields)];
+  const pendingSuggestions = missing
+    ? ["逐项查看剩余未定价资产的资料、实际筛选条件与候选拒绝原因，再补采或补查。"]
+    : [];
+  if (!similar && !baseline)
+    return {
+      ...result,
+      missing_fields: finalMissing,
+      suggestions: [...new Set([...(bare.suggestions || []), ...pendingSuggestions])],
+      next_action: [...(bare.suggestions || []), ...pendingSuggestions].join(""),
+    };
   const sources: Array<"similar" | "baseline"> = [
     ...(similar ? ["similar" as const] : []),
     ...(baseline ? ["baseline" as const] : []),
@@ -144,6 +180,8 @@ export function applyValuationRange(
         (baselineSources.has("excluded") ? "低值排除不代表其市场售价为0。" : "")
       : "");
   const suggestions = [
+    ...(bare.suggestions || []),
+    ...pendingSuggestions,
     ...(similar ? ["查看相近样本的配置差异与来源；挂牌价不代表成交价。"] : []),
     ...(baseline
       ? [
@@ -164,6 +202,7 @@ export function applyValuationRange(
   if (missing)
     return {
       ...result,
+      missing_fields: finalMissing,
       estimated_subtotal_range: subtotal,
       ...(referenceAmount !== undefined ? { estimated_subtotal_value: referenceAmount } : {}),
       estimated_sources: sources,
@@ -176,7 +215,8 @@ export function applyValuationRange(
         missing +
         "项，不能作为完整估值比较挂牌价。" +
         disclosure,
-      suggestions: [...new Set([...(result.suggestions || []), ...suggestions])],
+      suggestions: [...new Set(suggestions)],
+      next_action: [...new Set(suggestions)].join(""),
     };
   const asking = result.asking_price;
   const difference =
@@ -198,6 +238,7 @@ export function applyValuationRange(
         : "挂牌落在参考区间内";
   return {
     ...result,
+    missing_fields: finalMissing,
     estimated_value_range: total,
     estimated_subtotal_range: subtotal,
     ...(referenceAmount !== undefined

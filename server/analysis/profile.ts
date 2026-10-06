@@ -168,6 +168,7 @@ export function createProfile(
         CALCULATION_VERSION,
         "valuation-schema-v4",
         "pricing-progress-v1",
+        "final-assets-v1",
         SIMILAR_POLICY_VERSION,
         EQUIPMENT_SIMILAR_POLICY_VERSION,
         EQUIPMENT_BASELINE_POLICY_VERSION,

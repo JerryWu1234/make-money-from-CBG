@@ -159,6 +159,34 @@ function baselineFixture(level = 70, withGold = true) {
     );
   return { ...value, equipment, profile, bare, combine };
 }
+it("采用参考区间后按最终资产身份重建缺项，同名另一件仍保留", () => {
+  const value = fixture();
+  const tab = value.record.detail!.tabs.find((row) => row.name === "道具/法宝")!;
+  tab.items!.push({ ...tab.items![0], index: 1 });
+  const inventory = equipmentInventory(value.record);
+  value.equipment.inputHash = inventory.inputHash;
+  value.equipment.items.push(inventory.items[1]);
+  const partial = value.combine();
+  expect(partial.estimate_missing_count).toBe(1);
+  expect(partial.missing_fields).toHaveLength(1);
+  expect(partial.missing_fields[0]).toContain("测试腰带（道具/法宝:1）");
+  expect(partial.missing_fields[0]).not.toContain("道具/法宝:0");
+  const output = validateValuation(
+    JSON.stringify({ decision: "NEED_INFO", reason: "只剩第二件缺价", extracted_facts: [] }),
+    buildProductDocument(value.record),
+    value.record,
+    value.profile,
+    value.equipment,
+    value.pet,
+  );
+  expect(output.missingData).toEqual(partial.missing_fields);
+  value.equipment.items[1].candidates = candidates();
+  value.equipment.items[1].similarEstimate = buildSimilarEstimate(candidates());
+  const complete = value.combine();
+  expect(complete.estimate_missing_count).toBe(0);
+  expect(complete.missing_fields).toEqual(value.bare.missing_fields);
+  expect(complete.next_action).not.toContain("剩余未定价");
+});
 
 describe("默认装备参考价与挂牌比较", () => {
   it("普通环装默认价只形成注明来源的参考总价，不冒充同配报价或已核实小计", () => {
