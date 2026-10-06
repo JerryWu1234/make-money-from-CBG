@@ -191,19 +191,17 @@ it("宝宝详情读取失败与真实空结果分别保存，恢复会重试读�
   const record = recordWithPets();
   const signal = new AbortController().signal;
   const failed = await searchPetPricing(record, signal, {
-    findCandidates: vi
-      .fn()
-      .mockResolvedValue({
-        ...response([]),
-        items: [
-          {
-            key: "召唤兽/孩子:1",
-            candidates: [],
-            searchState: "read_failed",
-            note: "18个独立详情读取失败",
-          },
-        ],
-      }),
+    findCandidates: vi.fn().mockResolvedValue({
+      ...response([]),
+      items: [
+        {
+          key: "召唤兽/孩子:1",
+          candidates: [],
+          searchState: "read_failed",
+          note: "18个独立详情读取失败",
+        },
+      ],
+    }),
     readSource: vi.fn(),
   });
   expect(failed).toMatchObject({ searchComplete: false, total: null });
