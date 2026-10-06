@@ -167,6 +167,7 @@ export function createProfile(
         settingsHash,
         CALCULATION_VERSION,
         "valuation-schema-v4",
+        "pet-region-v2",
         SIMILAR_POLICY_VERSION,
         EQUIPMENT_SIMILAR_POLICY_VERSION,
         EQUIPMENT_BASELINE_POLICY_VERSION,
