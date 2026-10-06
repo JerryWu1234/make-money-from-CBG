@@ -224,6 +224,16 @@ export async function collectPets(
         )
           continue;
         icon.setAttribute("data-cbg-pet-item", "true");
+        const section = selected
+          .filter(
+            (node) => (node.compareDocumentPosition(icon) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+          )
+          .map((node) => node.textContent?.trim() || "")
+          .filter((text) => /^(?:赐福技能|(?:召唤兽)?技能|内丹)(?:\s*[（(]\d+[）)])?$/.test(text))
+          .at(-1)
+          ?.replace(/\s*[（(]\d+[）)]$/, "");
+        if (section) icon.setAttribute("data_cbg_skill_section", section);
+        else icon.removeAttribute("data_cbg_skill_section");
         const attrs: Record<string, string> = {};
         let current: Element | null = icon;
         for (

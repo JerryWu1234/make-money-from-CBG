@@ -68,6 +68,13 @@ export interface DetailItem {
   modelId?: string;
   location?: string;
   level?: string;
+  skillObservation?: {
+    rawName: string;
+    id?: string;
+    type: string;
+    section?: string;
+    state: "current" | "future" | "conditional" | "unknown";
+  };
 }
 export interface ValuationCapture {
   version: 1;

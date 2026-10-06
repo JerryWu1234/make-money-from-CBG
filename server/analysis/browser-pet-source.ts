@@ -86,11 +86,23 @@ export function petQuery(
   if (growth && /^\d\.\d{1,3}$/.test(growth)) args.growth = Math.round(Number(growth) * 1000);
   if (["是否宝宝", "宝宝"].some((name) => /^(?:是|1)$/.test(fields.get(name) || "")))
     args.is_baobao = 1;
-  const skills = item.skills.flatMap((name) =>
-    config.skills.filter(([, label]) => label === name).map(([id]) => String(id)),
-  );
+  const mappedSkills = item.skills.map((name) => {
+    const observed = item.skillObservations?.find((skill) => skill.rawName === name);
+    if (observed && observed.state !== "current") return [];
+    const matches = config.skills.filter(([, label]) => label === name);
+    if (observed?.id)
+      return matches.filter(([id]) => String(id) === observed.id).map(([id]) => String(id));
+    return matches.length === 1 ? [String(matches[0][0])] : [];
+  });
+  const skills = mappedSkills.flat();
   if (skills.length) args.skill = [...new Set(skills)].join(",");
-  if (item.skills.length) args.skill_num = item.skills.length;
+  // Partial names, future/conditional skills and ambiguous IDs cannot establish a current count.
+  if (
+    item.skills.length &&
+    mappedSkills.every((ids) => ids.length === 1) &&
+    new Set(skills).size === item.skills.length
+  )
+    args.skill_num = item.skills.length;
   for (const [key, choices] of [
     ["high_neidan", config.highNeidans],
     ["low_neidan", config.lowNeidans],

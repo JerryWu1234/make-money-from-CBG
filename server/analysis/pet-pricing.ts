@@ -20,6 +20,7 @@ export type PetEquipment = { name: string; description: string; accessory?: bool
 export type PetPricingItem = EquipmentPricingItem & {
   fields: PetSnapshot["fields"];
   skills: string[];
+  skillObservations?: NonNullable<DetailItem["skillObservation"]>[];
   innerSkills: { name: string; level: string }[];
   equipment: PetEquipment[];
   diagnosticSources?: EquipmentCandidate[];
@@ -142,6 +143,9 @@ export function petInventory(record: SavedRoleRecord) {
       const level = /^\d{1,3}$/.test(levelText) ? Number(levelText) : null;
       if (level === null) itemIssues.push("宝宝等级未识别");
       const skills = pet.skills.map((skill) => skill.name.trim()).sort();
+      const skillObservations = pet.skills.flatMap((skill) =>
+        skill.skillObservation ? [skill.skillObservation] : [],
+      );
       if (!skills.length && !capture?.complete) itemIssues.push("完整技能列表未采齐");
       if (
         skills.some((name) => !name || /^图标|^技能\s*\d+$/.test(name)) ||
@@ -184,6 +188,7 @@ export function petInventory(record: SavedRoleRecord) {
         issues: bound ? [...itemIssues, "绑定或不可交易宝宝不能套用可交易价格"] : itemIssues,
         fields,
         skills,
+        ...(skillObservations.length ? { skillObservations } : {}),
         innerSkills,
         equipment,
       });
@@ -195,14 +200,17 @@ export function petInventory(record: SavedRoleRecord) {
       collectedAt: capture?.collectedAt,
       captureComplete,
       issues,
-      items: items.map(({ key, name, fields, skills, innerSkills, equipment }) => ({
-        key,
-        name,
-        fields,
-        skills,
-        innerSkills,
-        equipment,
-      })),
+      items: items.map(
+        ({ key, name, fields, skills, skillObservations, innerSkills, equipment }) => ({
+          key,
+          name,
+          fields,
+          skills,
+          ...(skillObservations ? { skillObservations } : {}),
+          innerSkills,
+          equipment,
+        }),
+      ),
     }),
   );
   return { items, issues, captureComplete, inputHash };

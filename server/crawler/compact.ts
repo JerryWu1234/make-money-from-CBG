@@ -1,6 +1,6 @@
 import type { DetailItem, Listing, RoleDetail } from "./types";
 
-export const CAPTURE_VERSION = 7;
+export const CAPTURE_VERSION = 8;
 export function cleanDescription(value: string) {
   return value
     .replace(/#r/g, "\n")
@@ -91,7 +91,11 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
   const skillType = attrs.data_skill_type || attrs["data-skill-type"] || "";
   const skill = !!skillType;
   const name =
-    attrs.data_equip_name || attrs["data-equip-name"] || attrs.alt || `图标 ${index + 1}`;
+    attrs.data_equip_name ||
+    attrs["data-equip-name"] ||
+    attrs.data_store_name ||
+    attrs.alt ||
+    `图标 ${index + 1}`;
   const level = attrs.data_equip_level || attrs.data_visible_level;
   if (skill)
     return {
@@ -108,6 +112,23 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
           } as Record<string, string>
         )[skillType] || "技能",
       ...(level ? { level } : {}),
+      ...(skillType === "cifu"
+        ? {
+            skillObservation: {
+              rawName: name,
+              type: skillType,
+              ...(/^\d{1,8}$/.test(attrs.data_skill_id || "") ? { id: attrs.data_skill_id } : {}),
+              ...(attrs.data_cbg_skill_section ? { section: attrs.data_cbg_skill_section } : {}),
+              state: /[（(]进化后获得[）)]/.test(name)
+                ? "future"
+                : /赐福/.test(attrs.data_cbg_skill_section || "")
+                  ? "conditional"
+                  : /^(?:召唤兽)?技能$/.test(attrs.data_cbg_skill_section || "")
+                    ? "current"
+                    : "unknown",
+            },
+          }
+        : {}),
     };
   const attributes: Record<string, string> = {};
   const labels: Record<string, string> = {
