@@ -159,6 +159,153 @@ function baselineFixture(level = 70, withGold = true) {
     );
   return { ...value, equipment, profile, bare, combine };
 }
+it("采用参考区间后按最终资产身份重建缺项，同名另一件仍保留", () => {
+  const value = fixture();
+  const tab = value.record.detail!.tabs.find((row) => row.name === "道具/法宝")!;
+  tab.items!.push({ ...tab.items![0], index: 1 });
+  const inventory = equipmentInventory(value.record);
+  value.equipment.inputHash = inventory.inputHash;
+  value.equipment.items.push(inventory.items[1]);
+  const partial = value.combine();
+  expect(partial.estimate_missing_count).toBe(1);
+  expect(partial.missing_fields).toHaveLength(1);
+  expect(partial.missing_fields[0]).toContain("测试腰带（道具/法宝:1）");
+  expect(partial.missing_fields[0]).not.toContain("道具/法宝:0");
+  const output = validateValuation(
+    JSON.stringify({ decision: "NEED_INFO", reason: "只剩第二件缺价", extracted_facts: [] }),
+    buildProductDocument(value.record),
+    value.record,
+    value.profile,
+    value.equipment,
+    value.pet,
+  );
+  expect(output.missingData).toEqual(partial.missing_fields);
+  value.equipment.items[1].candidates = candidates();
+  value.equipment.items[1].similarEstimate = buildSimilarEstimate(candidates());
+  const complete = value.combine();
+  expect(complete.estimate_missing_count).toBe(0);
+  expect(complete.missing_fields).toEqual(value.bare.missing_fields);
+  expect(complete.next_action).not.toContain("剩余未定价");
+  expect(complete.suggestions).not.toContain(
+    "查看装备查价模块的候选与匹配原因；可靠同类报价不足时继续保留未定价。",
+  );
+});
+
+describe("最终缺项的恢复建议与数量", () => {
+  it.each(["equipment-expired", "equipment-capture", "pet-expired", "pet-capture"])(
+    "保留查价层可执行的恢复建议：%s",
+    (change) => {
+      const value = fixture();
+      let action: string;
+      if (change === "equipment-expired") {
+        value.equipment.searchedAt = new Date(Date.now() - 25 * 3600_000).toISOString();
+        action = "开始新批次重新联网查价；继续旧批次会保留当时的搜索快照。";
+      } else if (change === "equipment-capture") {
+        value.record.detail!.equipmentCapture!.complete = false;
+        action = "先在采集页补齐当前装备资料，再开始联网分析。";
+      } else if (change === "pet-expired") {
+        value.pet.searchedAt = new Date(Date.now() - 25 * 3600_000).toISOString();
+        action = "开始新批次重新查宝宝价格；旧批次保留当时快照。";
+      } else {
+        value.record.detail!.petCapture!.complete = false;
+        action = "先补采完整宝宝数量、技能、资质、内丹及随身装备，再开始分析。";
+      }
+      const result = value.combine();
+      expect(result.suggestions).toContain(action);
+      expect(result.next_action).toContain(action);
+      expect(result.estimate_missing_count).toBeGreaterThan(0);
+      if (change.startsWith("pet-")) {
+        expect(result.estimated_subtotal_range).toBeDefined();
+        expect(result.suggestions).not.toContain(
+          "查看装备查价模块的候选与匹配原因；可靠同类报价不足时继续保留未定价。",
+        );
+      } else expect(result.estimated_subtotal_range).toBeUndefined();
+    },
+  );
+
+  it("宝宝参考价已全部采用时，只移除宝宝缺价提示，装备仍提示查价", () => {
+    const value = fixture();
+    value.equipment.items[0].candidates = [];
+    value.equipment.items[0].similarEstimate = undefined;
+    const tab = value.record.detail!.tabs.find((row) => row.name === "召唤兽/孩子")!;
+    tab.petCount = 1;
+    tab.pets = [
+      {
+        index: 0,
+        name: "泡泡",
+        fields: Object.entries({
+          类型: "泡泡",
+          等级: "0",
+          成长: "1.2",
+          攻击资质: "1200",
+          防御资质: "1200",
+          体力资质: "3000",
+          法力资质: "1500",
+          速度资质: "1000",
+          躲闪资质: "1000",
+        }).map(([name, value]) => ({ name, value })),
+        skills: [],
+        innerSkills: [],
+        equipment: [],
+      },
+    ];
+    const inventory = petInventory(value.record);
+    Object.assign(value.pet, {
+      inputHash: inventory.inputHash,
+      total: null,
+      items: inventory.items.map((item) => ({
+        ...item,
+        candidates: candidates(),
+        similarEstimate: buildSimilarEstimate(candidates()),
+      })),
+    });
+    const result = value.combine();
+    expect(result.estimated_subtotal_range).toBeDefined();
+    expect(result.estimate_missing_count).toBe(1);
+    expect(result.suggestions).not.toContain(
+      "查看宝宝查价的匹配原因；未找到可靠同类报价的宝宝保留未定价。",
+    );
+    expect(result.suggestions).toContain(
+      "查看装备查价模块的候选与匹配原因；可靠同类报价不足时继续保留未定价。",
+    );
+  });
+
+  it("默认参考价失效仍提示重新建批次", () => {
+    const value = baselineFixture();
+    value.profile.settings.equipmentBaselinePrices![70].weapon! += 10_000;
+    const result = value.combine();
+    const action = "默认参考价已失效，请开始新批次按当前资料和设置重新分析。";
+    expect(result.suggestions).toContain(action);
+    expect(result.next_action).toContain(action);
+    expect(result.estimate_missing_count).toBe(1);
+    expect(result.estimated_value_range).toBeUndefined();
+  });
+
+  it("只有精确报价和未定价资产时，剩余数量与最终缺项一致", () => {
+    const value = fixture();
+    const tab = value.record.detail!.tabs.find((row) => row.name === "道具/法宝")!;
+    tab.items!.push({ ...tab.items![0], index: 1 });
+    const inventory = equipmentInventory(value.record);
+    value.equipment.inputHash = inventory.inputHash;
+    Object.assign(value.equipment.items[0], {
+      status: "priced",
+      referencePrice: 100,
+      candidates: [{ ...candidates()[0], matchType: "exact" }],
+      similarEstimate: undefined,
+    });
+    value.equipment.items.push(inventory.items[1]);
+    value.equipment.knownTotal = 100;
+    const result = value.combine();
+    expect(result.model_value).toBeNull();
+    expect(result.estimated_subtotal_range).toBeUndefined();
+    expect(result.known_subtotal).toBe(value.bare.model_value! + 100);
+    expect(result.missing_fields).toEqual(["测试腰带（道具/法宝:1）：缺少可核验价格"]);
+    expect(result.estimate_missing_count).toBe(1);
+    expect(result.suggestions).toContain(
+      "查看装备查价模块的候选与匹配原因；可靠同类报价不足时继续保留未定价。",
+    );
+  });
+});
 
 describe("默认装备参考价与挂牌比较", () => {
   it("普通环装默认价只形成注明来源的参考总价，不冒充同配报价或已核实小计", () => {
