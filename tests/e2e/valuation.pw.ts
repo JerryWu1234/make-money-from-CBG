@@ -49,6 +49,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
   let legacyView = false;
   let rangeView = false;
   let searchingView = false;
+  let incompleteSearchView: "pending" | "read_failed" | undefined;
   let searchPhase: "equipment_search" | "pet_search" = "equipment_search";
   const displayed = (valuation: ValuationResult | undefined, key: string) => {
     if (!valuation) return valuation;
@@ -69,6 +70,11 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     }
     if (key !== "a" && key !== "b") return valuation;
     const pricing = equipmentPricingFixture(key === "a");
+    if (key === "a" && incompleteSearchView) {
+      pricing.searchComplete = false;
+      pricing.items.find((item) => item.key === "no-match-fixture")!.searchState =
+        incompleteSearchView;
+    }
     const pets = key === "b" ? petPricingFixture() : undefined;
     const value =
       pricing.total !== null && valuation.bare_role_value != null
@@ -275,8 +281,12 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await expect(row).toContainText("分析完成 · 待补齐");
     await row.getByRole("button", { name: "查看分析", exact: true }).click();
     const result = page.getByRole("dialog", { name: "角色a" });
-    await expect(result.getByText("估值与挂牌价比较", { exact: true })).toBeVisible();
-    await expect(result.getByText("已算部分（非完整估值）", { exact: true })).toBeVisible();
+    await expect(result.getByText("已算小计", { exact: true })).toBeVisible();
+    await expect(
+      result.getByText("还有未定价项目，总估值暂无法计算。", { exact: true }),
+    ).toBeVisible();
+    await result.getByText("查看估值依据与查价记录", { exact: true }).click();
+    await expect(result).toContainText("当前金额是已算部分");
     await expect(result.getByRole("heading", { name: "建议怎么补齐", exact: true })).toBeVisible();
     await expect(result.getByText("理想买入价", { exact: true })).not.toBeVisible();
     await expect(result.getByRole("heading", { name: "估值明细", exact: true })).toBeVisible();
@@ -307,21 +317,23 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
       failed: 0,
       model: "other-model",
     });
-    await expect(page.getByRole("row").filter({ hasText: "角色d" })).toContainText("待分析");
+    await expect(page.getByRole("row").filter({ hasText: "角色d" })).toContainText("本批次未分析");
     const buyRow = page.getByRole("row").filter({ hasText: "角色b" });
     await expect(buyRow.getByText("挂牌低于估值", { exact: true })).toBeVisible();
-    await expect(buyRow).toContainText("裸号、装备和宝宝参考估值");
-    await expect(buyRow).toContainText("差额");
+    await expect(buyRow).toContainText("总估值");
+    await expect(buyRow).toContainText("卖家要价比估值低");
     await expect(page.getByRole("row").filter({ hasText: "角色c" })).toContainText("挂牌高于估值");
     rangeView = true;
     await page.reload();
     await page.getByRole("tab", { name: /全部商品/ }).click();
     await expect(buyRow).toContainText("分析完成 · 参考区间");
     await expect(buyRow).toContainText("挂牌低于参考区间");
-    await expect(buyRow).toContainText("完整参考估值区间");
+    await expect(buyRow).toContainText("总估值区间");
     await buyRow.getByRole("button", { name: "查看分析", exact: true }).click();
     const rangeResult = page.getByRole("dialog", { name: "角色b" });
-    await expect(rangeResult).toContainText("估值区间与挂牌差额");
+    await expect(rangeResult.getByText("总估值区间", { exact: true })).toBeVisible();
+    await rangeResult.getByText("查看估值依据与查价记录", { exact: true }).click();
+    await expect(rangeResult).toContainText("估值区间与卖家要价的差额");
     await expect(rangeResult).toContainText("不能视为精确成交价值");
     await expect(
       rangeResult.getByRole("button", { name: "去补充分析设置", exact: true }),
@@ -339,14 +351,14 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     });
     await buyRow.getByRole("button", { name: "查看分析", exact: true }).click();
     const buyResult = page.getByRole("dialog", { name: "角色b" });
-    await expect(buyResult.getByText("挂牌低于估值", { exact: true })).toBeVisible();
-    await expect(buyResult.getByText("裸号参考估值", { exact: true })).toBeVisible();
-    await expect(buyResult.getByText("估值与挂牌价差额", { exact: true })).toBeVisible();
-    await expect(buyResult.getByText("差异比例（以挂牌价为基准）", { exact: true })).toBeVisible();
+    await expect(buyResult.getByText("总估值", { exact: true })).toBeVisible();
+    await expect(buyResult).toContainText("卖家要价比估值低");
+    await buyResult.getByText("查看估值依据与查价记录", { exact: true }).click();
+    await expect(buyResult).toContainText("与卖家要价的差异比例");
     await expect(
       buyResult.getByRole("heading", { name: "宝宝联网查价", exact: true }),
     ).toBeVisible();
-    await expect(buyResult.getByText("宝宝挂牌参考价", { exact: true })).toBeVisible();
+    await expect(buyResult).toContainText("宝宝参考价合计");
     const petPricing = buyResult.getByRole("region", { name: "宝宝联网查价", exact: true });
     await expect(petPricing.getByText("查看搜索关键词", { exact: true })).toBeVisible();
     await expect(petPricing.getByText("查看完整搜索回复", { exact: true })).toBeVisible();
@@ -415,8 +427,9 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     ).toBeVisible();
     const pricedWithoutFees = page.getByRole("row").filter({ hasText: "角色b" });
     await pricedWithoutFees.getByRole("button", { name: "查看分析", exact: true }).click();
-    await expect(buyResult.getByText("裸号参考估值", { exact: true })).toBeVisible();
-    await expect(buyResult.getByText("估值与挂牌价差额", { exact: true })).toBeVisible();
+    await expect(buyResult.getByText("总估值", { exact: true })).toBeVisible();
+    await expect(buyResult).toContainText("卖家要价比估值低");
+    await buyResult.getByText("查看估值依据与查价记录", { exact: true }).click();
     await expect(
       buyResult.getByText("建议最高总成本（含费用）", { exact: true }),
     ).not.toBeVisible();
@@ -442,6 +455,24 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await page.reload();
     await expect(page.getByText("正在联网查宝宝价格 · 角色b", { exact: true })).toBeVisible();
     searchingView = false;
+    for (const [state, label] of [
+      ["pending", "查价未完成，继续时重试"],
+      ["read_failed", "详情读取失败，需重试"],
+    ] as const) {
+      incompleteSearchView = state;
+      await page.reload();
+      await page.getByRole("tab", { name: /全部商品/ }).click();
+      await row.getByRole("button", { name: "查看分析", exact: true }).click();
+      await result.getByText("查看估值依据与查价记录", { exact: true }).click();
+      const failedAsset = result
+        .getByRole("region", { name: "装备联网查价", exact: true })
+        .locator("section")
+        .filter({ hasText: "测试头盔" });
+      await expect(failedAsset).toContainText(label);
+      await expect(failedAsset).not.toContainText("未找到可靠报价");
+      await result.getByRole("button", { name: "关闭分析详情" }).click();
+    }
+    incompleteSearchView = undefined;
     legacyView = true;
     await page.reload();
     await page.getByRole("tab", { name: /全部商品/ }).click();
