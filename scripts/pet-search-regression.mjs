@@ -48,6 +48,9 @@ const attributes = await moduleUrl("server/analysis/equip-attributes.ts", {
   "../crawler/compact": compact,
 });
 const integrity = await moduleUrl("server/analysis/pricing-integrity.ts");
+const progress = await moduleUrl("server/analysis/pricing-progress.ts", {
+  "./pricing-integrity": integrity,
+});
 const estimate = await moduleUrl("server/analysis/pricing-estimate.ts", {
   "./pricing-integrity": integrity,
 });
@@ -55,6 +58,7 @@ const matcher = await moduleUrl("server/analysis/equipment-match.ts", {
   "./equip-attributes": attributes,
 });
 const pricing = await moduleUrl("server/analysis/equipment-pricing.ts", {
+  "./pricing-progress": progress,
   "./pricing-estimate": estimate,
   "./pricing-integrity": integrity,
   "./equipment-match": matcher,
@@ -69,6 +73,7 @@ const pacedPage = inline(
   `export {assertAvailable} from ${JSON.stringify(crawlerPage)};export async function pace(signal){signal.throwIfAborted();}`,
 );
 const petPricing = await moduleUrl("server/analysis/pet-pricing.ts", {
+  "./pricing-progress": progress,
   "./pricing-estimate": estimate,
   "./pricing-integrity": integrity,
   "../crawler/compact": compact,
