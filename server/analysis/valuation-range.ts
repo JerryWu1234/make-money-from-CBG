@@ -39,6 +39,7 @@ export function applyValuationRange(
   let similar = 0;
   let baseline = 0;
   const missingFields = [...bare.missing_fields];
+  const recoverySuggestions = new Set([...(result.suggestions || []), ...(bare.suggestions || [])]);
   const missingAsset = (item: EquipmentPricingItem | PetPricingItem, reason?: string) => {
     missingFields.push(
       item.name +
@@ -76,6 +77,7 @@ export function applyValuationRange(
       );
       return;
     }
+    const previousMissing = missing;
     missingFields.push(...snapshot.issues);
     for (const item of snapshot.items) {
       if (
@@ -128,6 +130,12 @@ export function applyValuationRange(
         similar++;
       } else missingAsset(item);
     }
+    if (missing === previousMissing)
+      recoverySuggestions.delete(
+        allowBaseline
+          ? "查看装备查价模块的候选与匹配原因；可靠同类报价不足时继续保留未定价。"
+          : "查看宝宝查价的匹配原因；未找到可靠同类报价的宝宝保留未定价。",
+      );
   };
   if (profile.equipmentSearch) {
     const inventory = equipmentInventory(record);
@@ -155,12 +163,14 @@ export function applyValuationRange(
   const pendingSuggestions = missing
     ? ["逐项查看剩余未定价资产的资料、实际筛选条件与候选拒绝原因，再补采或补查。"]
     : [];
+  const finalSuggestions = [...new Set([...recoverySuggestions, ...pendingSuggestions])];
   if (!similar && !baseline)
     return {
       ...result,
       missing_fields: finalMissing,
-      suggestions: [...new Set([...(bare.suggestions || []), ...pendingSuggestions])],
-      next_action: [...(bare.suggestions || []), ...pendingSuggestions].join(""),
+      estimate_missing_count: missing,
+      suggestions: finalSuggestions,
+      next_action: finalSuggestions.join(""),
     };
   const sources: Array<"similar" | "baseline"> = [
     ...(similar ? ["similar" as const] : []),
@@ -180,8 +190,7 @@ export function applyValuationRange(
         (baselineSources.has("excluded") ? "低值排除不代表其市场售价为0。" : "")
       : "");
   const suggestions = [
-    ...(bare.suggestions || []),
-    ...pendingSuggestions,
+    ...finalSuggestions,
     ...(similar ? ["查看相近样本的配置差异与来源；挂牌价不代表成交价。"] : []),
     ...(baseline
       ? [
