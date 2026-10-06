@@ -116,4 +116,28 @@ describe("同核心装备粗略参考价匹配", () => {
       ).reason,
     ).toBeNull();
   });
+  it("真实灵饰的空标题不制造未知属性，特效加成不混入基础速度", () => {
+    const description =
+      "等级 60\n速度 +12\n耐久度 23 修理失败 2次\n精炼等级 4\n附加属性：\n防御 +12 [+32]\n气血 +44 [+112]\n特效：健步如飞（2级）\n速度 +2\n速度+7（已生效）\n装备条件：等级60";
+    const target = parseEquipmentAttributes(description);
+    expect(target.unknownLines).toEqual([]);
+    expect(target.fields.速度).toEqual(["+12"]);
+    expect(target.fields.特效加成).toEqual(["速度:+2"]);
+    expect(target.fields.已生效套装加成).toEqual(["速度:+7"]);
+    const source = parseEquipmentAttributes(description.replace("附加属性：\n", ""));
+    expect(matchEquipmentAttributes(target, source).matchType).toBe("exact");
+    expect(
+      matchComparableEquipmentAttributes(target, parseEquipmentAttributes("等级60\n速度12"), true)
+        .reason,
+    ).toBeNull();
+    for (const changed of [
+      description.replace("健步如飞（2级）", "宿敌·无底洞（2级）"),
+      description.replace("速度+7（已生效）", "速度+6（已生效）"),
+      description.replace("速度+7（已生效）", "速度+7"),
+      description + "\n抵抗未知属性+1",
+    ])
+      expect(
+        matchComparableEquipmentAttributes(target, parseEquipmentAttributes(changed)).matchType,
+      ).toBeNull();
+  });
 });

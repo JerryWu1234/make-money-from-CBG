@@ -14,7 +14,7 @@ import {
 } from "./equipment-baseline";
 
 export const PROMPT_FILE = resolve("prompts/role-valuation.md");
-export const CALCULATION_VERSION = "price-comparison-v9";
+export const CALCULATION_VERSION = "price-comparison-v10";
 // Update alongside the calculator when changing pricing sections III through VIII.
 const PRICING_HASH = "0b29ddcd68d656a7749b447604eb1c5eae6903c72d74fc3cb1876336a55f5ddf";
 export const DEFAULT_SETTINGS: ValuationSettings = {
@@ -168,6 +168,7 @@ export function createProfile(
         CALCULATION_VERSION,
         "valuation-schema-v4",
         "final-assets-v1",
+        "pet-region-v2",
         SIMILAR_POLICY_VERSION,
         EQUIPMENT_SIMILAR_POLICY_VERSION,
         EQUIPMENT_BASELINE_POLICY_VERSION,

@@ -66,6 +66,7 @@ export function petDetailDocument(options = {}) {
     recommendationMainIds: false,
     splitRegions: false,
     duplicatePanel: false,
+    noPanelId: false,
     footerStatus: "",
     ...options,
   };
@@ -119,7 +120,7 @@ export function petDetailDocument(options = {}) {
     )
     .join("");
   const info = `<ul id="info_panel"><li>服务器：测试区 ID：${escape(s.nickname)} 等级：119</li><li>状态：${escape(s.status)}</li><li>价格：<span class="price">￥${s.price}（元）</span><span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul>`;
-  const panel = `<div class="attribute"><div id="equip_desc_panel"><p>名字：${escape(s.nickname)} 等级：119</p><table>${table}</table><h4>赐福技能</h4>${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div></div>`;
+  const panel = `<div class="attribute"><div${s.noPanelId ? "" : ' id="equip_desc_panel"'}><p>名字：${escape(s.nickname)} 等级：119</p><table>${table}</table><h4>赐福技能</h4>${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div></div>`;
   const main = s.splitRegions
     ? `<section>${info}</section><section>${panel}</section>`
     : `<div class="${escape(s.wrapperClass)}">${info}${panel}${s.duplicatePanel ? panel : ""}${s.footerStatus ? `<footer>${escape(s.footerStatus)}</footer>` : ""}</div>`;
