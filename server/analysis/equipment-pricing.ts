@@ -13,6 +13,13 @@ import {
   type BaselineEstimate,
 } from "./equipment-baseline";
 import type { ValuationSettings } from "./valuation-types";
+import {
+  finishPricingSearch,
+  resumePricingItems,
+  saveSearchAttempt,
+  type PricingSearchAttempt,
+  type PricingSearchState,
+} from "./pricing-progress";
 
 export type EquipmentCandidate = {
   url: string;
@@ -44,6 +51,7 @@ export type EquipmentPricingItem = {
   similarEstimate?: SimilarEstimate;
   baselineEstimate?: BaselineEstimate;
   baselineInvalidReason?: string;
+  searchState?: PricingSearchState;
 };
 export type EquipmentPricingSnapshot = {
   version: 1;
@@ -62,6 +70,8 @@ export type EquipmentPricingSnapshot = {
   knownTotal: number;
   items: EquipmentPricingItem[];
   issues: string[];
+  searchComplete?: boolean;
+  searchAttempts?: PricingSearchAttempt[];
 };
 export type EquipmentSource = {
   findCandidates: (
@@ -69,7 +79,13 @@ export type EquipmentSource = {
     signal: AbortSignal,
   ) => Promise<{
     queries: string[];
-    items: Array<{ key: string; candidates: EquipmentCandidate[]; note?: string; query?: string }>;
+    items: Array<{
+      key: string;
+      candidates: EquipmentCandidate[];
+      note?: string;
+      query?: string;
+      searchState?: PricingSearchState;
+    }>;
     searchItems?: unknown[];
   }>;
   readSource: (url: string, signal: AbortSignal) => Promise<string>;
@@ -477,17 +493,13 @@ export async function searchEquipmentPrices(
   signal: AbortSignal,
   source: EquipmentSource,
   settings?: ValuationSettings,
+  previous?: EquipmentPricingSnapshot,
 ): Promise<EquipmentPricingSnapshot> {
-  const snapshot = equipmentPricingPlan(record, settings);
+  const snapshot = resumePricingItems(equipmentPricingPlan(record, settings), previous);
   signal.throwIfAborted();
-  if (!snapshot.captureComplete) return snapshot;
-  const searchable = snapshot.items.filter(
-    (item) => item.status === "no_match" && !item.baselineEstimate,
-  );
-  if (!searchable.length) {
-    snapshot.total = snapshot.items.length ? null : 0;
-    return snapshot;
-  }
+  if (!snapshot.captureComplete) return finishPricingSearch(snapshot);
+  const searchable = snapshot.items.filter((item) => item.searchState === "pending");
+  if (!searchable.length) return finishPricingSearch(snapshot);
   const lookupItems = searchable.map((item) => ({
     ...item,
     candidates: [],
@@ -500,15 +512,25 @@ export async function searchEquipmentPrices(
   const response = await source.findCandidates(lookupItems, signal);
   signal.throwIfAborted();
   snapshot.rawResponse = JSON.stringify(response);
-  snapshot.searchItems = response.searchItems;
-  snapshot.queries = [...new Set(response.queries.filter((query) => query.trim()))];
-  if (!snapshot.queries.length) {
+  saveSearchAttempt(snapshot, response);
+  if (!response.queries.some((query) => query.trim())) {
+    for (const item of searchable)
+      if (
+        Array.isArray(response.items) &&
+        response.items.find((entry) => entry?.key === item.key)?.searchState === "unsupported"
+      ) {
+        item.searchState = "unsupported";
+        item.status = "unsupported";
+        item.issues.push(
+          response.items.find((entry) => entry.key === item.key)?.note || "查询入口不支持此装备",
+        );
+      }
     snapshot.issues.push("本次检索没有实际查询记录，返回价格未采纳");
-    return snapshot;
+    return finishPricingSearch(snapshot);
   }
   if (!Array.isArray(response.items) || response.items.length > 100) {
     snapshot.issues.push("查价结果格式错误");
-    return snapshot;
+    return finishPricingSearch(snapshot);
   }
   const results = new Map<string, Record<string, unknown>>();
   for (const entry of response.items) {
@@ -520,7 +542,7 @@ export async function searchEquipmentPrices(
       results.has(entry.key)
     ) {
       snapshot.issues.push("查价结果有未知或重复的装备ID");
-      return snapshot;
+      return finishPricingSearch(snapshot);
     }
     results.set(entry.key, entry);
   }
@@ -532,9 +554,16 @@ export async function searchEquipmentPrices(
       continue;
     }
     item.query = typeof result.query === "string" ? result.query : "";
+    item.searchState = ["pending", "read_failed", "unsupported"].includes(
+      String(result.searchState),
+    )
+      ? (result.searchState as PricingSearchState)
+      : "completed";
+    if (item.searchState === "unsupported") item.status = "unsupported";
     if (typeof result.note === "string" && result.note.trim())
       item.issues.push(result.note.slice(0, 500));
     const urls = new Set<string>();
+    let readFailed = false;
     for (const raw of result.candidates) {
       if (
         !raw ||
@@ -573,6 +602,7 @@ export async function searchEquipmentPrices(
       } catch (error) {
         signal.throwIfAborted();
         candidate.reason = error instanceof Error ? error.message : "无法核对来源";
+        readFailed = true;
       }
       item.candidates.push(candidate);
     }
@@ -586,8 +616,10 @@ export async function searchEquipmentPrices(
         prices.length % 2 ? prices[mid] : (prices[mid - 1] + prices[mid]) / 2,
       );
       item.status = "priced";
+      item.searchState = "completed";
       if (verified.length === 1) item.issues.push("仅1条挂牌样本，参考范围有限");
     } else {
+      if (readFailed) item.searchState = "read_failed";
       item.similarEstimate = buildEquipmentEstimate(item.candidates);
       item.issues.push(
         item.similarEstimate.status === "range"
@@ -602,7 +634,7 @@ export async function searchEquipmentPrices(
   snapshot.total = snapshot.items.every((item) => item.status === "priced")
     ? snapshot.knownTotal
     : null;
-  return snapshot;
+  return finishPricingSearch(snapshot);
 }
 
 export function combineEquipmentPricing(

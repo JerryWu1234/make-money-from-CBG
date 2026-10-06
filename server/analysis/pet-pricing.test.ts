@@ -187,6 +187,46 @@ async function pricing(
   });
   return { snapshot, search, read };
 }
+it("宝宝详情读取失败与真实空结果分别保存，恢复会重试读取失败", async () => {
+  const record = recordWithPets();
+  const signal = new AbortController().signal;
+  const failed = await searchPetPricing(record, signal, {
+    findCandidates: vi
+      .fn()
+      .mockResolvedValue({
+        ...response([]),
+        items: [
+          {
+            key: "召唤兽/孩子:1",
+            candidates: [],
+            searchState: "read_failed",
+            note: "18个独立详情读取失败",
+          },
+        ],
+      }),
+    readSource: vi.fn(),
+  });
+  expect(failed).toMatchObject({ searchComplete: false, total: null });
+  expect(failed.items[0].searchState).toBe("read_failed");
+  const find = vi.fn().mockResolvedValue(response([]));
+  const empty = await searchPetPricing(
+    record,
+    signal,
+    { findCandidates: find, readSource: vi.fn() },
+    failed,
+  );
+  expect(find).toHaveBeenCalledOnce();
+  expect(empty).toMatchObject({ searchComplete: true, total: null });
+  expect(empty.items[0].searchState).toBe("completed");
+  expect(empty.items[0].issues).not.toContain("18个独立详情读取失败");
+  expect(empty.searchAttempts).toHaveLength(2);
+  const readFailure = await searchPetPricing(record, signal, {
+    findCandidates: vi.fn().mockResolvedValue(response()),
+    readSource: vi.fn().mockRejectedValue(new Error("主商品区域未识别")),
+  });
+  expect(readFailure.items[0].searchState).toBe("read_failed");
+  expect(readFailure.searchComplete).toBe(false);
+});
 const upstream = (value: number | null = 2000): ValuationResult => ({
   ...compareListingPrice(value, 4000),
   model_value: value,

@@ -605,6 +605,7 @@ export function petSourceFromPages(
           results.push({
             key: item.key,
             candidates: [],
+            searchState: "unsupported",
             note: "目标宝宝含赐福字段，独立模板暂无法完整核对，保留未定价",
           });
           continue;
@@ -613,6 +614,7 @@ export function petSourceFromPages(
           results.push({
             key: item.key,
             candidates: [],
+            searchState: "pending",
             note: "达到本件商品查价时间上限，未完成所有宝宝查询",
           });
           continue;
@@ -657,6 +659,7 @@ export function petSourceFromPages(
           results.push({
             key: item.key,
             candidates: [],
+            searchState: "unsupported",
             note: error instanceof Error ? error.message : "官网宝宝类型未识别",
           });
           continue;
@@ -668,6 +671,7 @@ export function petSourceFromPages(
           rejected: EquipmentCandidate[] = [],
           diagnosticSources: EquipmentCandidate[] = [];
         let similarAttempted = false;
+        let failedDetails = 0;
         const allSeen = new Set<string>();
         let count = 0,
           details = 0;
@@ -908,6 +912,7 @@ export function petSourceFromPages(
                       ? error.petDiagnostics
                       : null,
                 });
+                failedDetails++;
               }
               if (count >= MAX_ROWS || acceptedCount() >= sampleLimit) {
                 pageFullyRead = rowIndex === listing.rows.length - 1;
@@ -945,6 +950,15 @@ export function petSourceFromPages(
         results.push({
           key: item.key,
           query: item.query,
+          searchState:
+            candidates.some((candidate) => candidate.matchType !== "similar") ||
+            candidates.length >= 3
+              ? "completed"
+              : failedDetails
+                ? "read_failed"
+                : Date.now() >= deadline
+                  ? "pending"
+                  : "completed",
           candidates: [...distinct.values()].slice(0, 10),
           similarAttempted,
           diagnosticSources,

@@ -317,6 +317,32 @@ describe("持久化的商品分析队列", () => {
     const taskId = store.overview({ runId: id }).records.items[0].taskId!;
     expect(store.detail(taskId)?.result?.valuation?.equipment_pricing).toEqual(pricing);
   });
+  it.each(["equipment", "pet"] as const)(
+    "%s未完成快照入库后暂停，不调用AI；恢复传递原进度并覆盖快照",
+    async (module) => {
+      const { store, runner, analyze, profile, pricing, petPricing, searchEquipment, searchPets } =
+        await valuationSetup();
+      const search = module === "equipment" ? searchEquipment : searchPets;
+      const snapshot = module === "equipment" ? pricing : petPricing;
+      const partial = { ...snapshot, searchComplete: false };
+      if (module === "equipment")
+        searchEquipment.mockResolvedValueOnce({ ...pricing, searchComplete: false });
+      else searchPets.mockResolvedValueOnce({ ...petPricing, searchComplete: false });
+      const id = await runner.start("codex", true, profile);
+      await runner.settled();
+      expect(store.run(id)).toMatchObject({ status: "paused", completed: 0, queued: 1 });
+      expect(analyze).not.toHaveBeenCalled();
+      expect(store.next(id)![module === "equipment" ? "equipmentPricing" : "petPricing"]).toEqual(
+        partial,
+      );
+      await runner.resume(id);
+      await runner.settled();
+      expect(search).toHaveBeenCalledTimes(2);
+      expect(search.mock.calls[1].at(-1)).toEqual(partial);
+      expect(analyze).toHaveBeenCalledOnce();
+      expect(store.run(id)).toMatchObject({ status: "completed", completed: 1, failed: 0 });
+    },
+  );
 
   it("未提供联网查价客户端时暂停队列，显示可识别错误", async () => {
     const { store, runner, analyze, connect, profile } = await valuationSetup();

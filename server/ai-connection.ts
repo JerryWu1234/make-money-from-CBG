@@ -17,10 +17,14 @@ import {
 } from "./ai/deepseek";
 import type { AiConnectionStatus, AiModelOptions, AiProvider, AiStatus } from "./ai/types";
 import type { SavedRoleRecord } from "./crawler/types";
-import { equipmentPricingPlan, searchEquipmentPrices } from "./analysis/equipment-pricing";
+import {
+  equipmentPricingPlan,
+  searchEquipmentPrices,
+  type EquipmentPricingSnapshot,
+} from "./analysis/equipment-pricing";
 import type { ValuationSettings } from "./analysis/valuation-types";
 import { createEquipmentSource } from "./analysis/browser-equipment-source";
-import { petInventory, searchPetPricing } from "./analysis/pet-pricing";
+import { petInventory, searchPetPricing, type PetPricingSnapshot } from "./analysis/pet-pricing";
 import { createPetSource } from "./analysis/browser-pet-source";
 
 export { startCodexLogin, codexLoginStatus, cancelCodexLogin } from "./ai/codex";
@@ -211,6 +215,7 @@ async function searchEquipment(
   record: SavedRoleRecord,
   signal: AbortSignal,
   settings?: ValuationSettings,
+  previous?: EquipmentPricingSnapshot,
 ) {
   try {
     signal.throwIfAborted();
@@ -219,11 +224,11 @@ async function searchEquipment(
       !plan.captureComplete ||
       !plan.items.some((item) => item.status === "no_match" && !item.baselineEstimate)
     )
-      return await searchEquipmentPrices(record, signal, unusedEquipmentSource, settings);
+      return await searchEquipmentPrices(record, signal, unusedEquipmentSource, settings, previous);
     const source = await createEquipmentSource(signal);
     try {
       signal.throwIfAborted();
-      return await searchEquipmentPrices(record, signal, source, settings);
+      return await searchEquipmentPrices(record, signal, source, settings, previous);
     } finally {
       await source.close();
     }
@@ -239,16 +244,20 @@ const unusedPetSource = {
     throw new Error("宝宝资料不足或无需查价，不应读取报价网页");
   },
 };
-async function searchPets(record: SavedRoleRecord, signal: AbortSignal) {
+async function searchPets(
+  record: SavedRoleRecord,
+  signal: AbortSignal,
+  previous?: PetPricingSnapshot,
+) {
   try {
     signal.throwIfAborted();
     const inventory = petInventory(record);
     if (!inventory.captureComplete || !inventory.items.some((item) => item.status === "no_match"))
-      return await searchPetPricing(record, signal, unusedPetSource);
+      return await searchPetPricing(record, signal, unusedPetSource, previous);
     const source = await createPetSource(signal);
     try {
       signal.throwIfAborted();
-      return await searchPetPricing(record, signal, source);
+      return await searchPetPricing(record, signal, source, previous);
     } finally {
       await source.close();
     }

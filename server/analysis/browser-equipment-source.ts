@@ -665,6 +665,7 @@ export function equipmentSourceFromPages(
           results.push({
             key: item.key,
             candidates: [],
+            searchState: "pending",
             note: "达到本件商品查价时间上限，未完成所有装备查询",
           });
           continue;
@@ -1106,6 +1107,14 @@ export function equipmentSourceFromPages(
         results.push({
           key: item.key,
           query,
+          searchState:
+            candidates.length || similar.length >= 3
+              ? "completed"
+              : detailFailures.length
+                ? "read_failed"
+                : Date.now() >= deadline
+                  ? "pending"
+                  : "completed",
           candidates: [
             ...candidates,
             ...similar.sort((a, b) => (a.similarityScore || 0) - (b.similarityScore || 0)),

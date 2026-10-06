@@ -6,6 +6,12 @@ import { inventoryMatchesSnapshot, validateExactPricing } from "./pricing-integr
 import type { ValuationResult } from "./valuation-types";
 import { buildSimilarEstimate } from "./pricing-estimate";
 import {
+  finishPricingSearch,
+  resumePricingItems,
+  saveSearchAttempt,
+  type PricingSearchState,
+} from "./pricing-progress";
+import {
   equipmentIdentity,
   listingPrices,
   pageText,
@@ -40,6 +46,7 @@ export type PetSource = {
       query?: string;
       similarAttempted?: boolean;
       diagnosticSources?: EquipmentCandidate[];
+      searchState?: PricingSearchState;
     }>;
     searchItems?: unknown[];
   }>;
@@ -511,6 +518,7 @@ export async function searchPetPricing(
   record: SavedRoleRecord,
   signal: AbortSignal,
   source: PetSource,
+  previous?: PetPricingSnapshot,
 ): Promise<PetPricingSnapshot> {
   const inventory = petInventory(record);
   const snapshot: PetPricingSnapshot = {
@@ -527,13 +535,11 @@ export async function searchPetPricing(
     items: inventory.items,
     issues: inventory.issues,
   };
+  resumePricingItems(snapshot, previous);
   signal.throwIfAborted();
-  if (!inventory.captureComplete) return snapshot;
-  const searchable = snapshot.items.filter((item) => item.status === "no_match");
-  if (!searchable.length) {
-    snapshot.total = snapshot.items.length ? null : 0;
-    return snapshot;
-  }
+  if (!inventory.captureComplete) return finishPricingSearch(snapshot);
+  const searchable = snapshot.items.filter((item) => item.searchState === "pending");
+  if (!searchable.length) return finishPricingSearch(snapshot);
   const lookupItems = searchable.map((item) => ({
     ...item,
     candidates: [],
@@ -544,9 +550,8 @@ export async function searchPetPricing(
   const response = await source.findCandidates(lookupItems, signal);
   signal.throwIfAborted();
   snapshot.rawResponse = JSON.stringify(response);
-  snapshot.searchItems = response.searchItems;
-  snapshot.queries = [...new Set(response.queries.filter((query) => query.trim()))];
-  if (!snapshot.queries.length) {
+  saveSearchAttempt(snapshot, response);
+  if (!response.queries.some((query) => query.trim())) {
     snapshot.issues.push("本次检索没有实际查询记录，宝宝价格未采纳");
     for (const item of searchable) {
       const result = Array.isArray(response.items)
@@ -554,12 +559,16 @@ export async function searchPetPricing(
         : undefined;
       if (typeof result?.note === "string" && result.note.trim())
         item.issues.push(result.note.slice(0, 500));
+      if (result?.searchState === "unsupported") {
+        item.searchState = "unsupported";
+        item.status = "unsupported";
+      }
     }
-    return snapshot;
+    return finishPricingSearch(snapshot);
   }
   if (!Array.isArray(response.items) || response.items.length > 100) {
     snapshot.issues.push("宝宝查价结果格式错误");
-    return snapshot;
+    return finishPricingSearch(snapshot);
   }
   const results = new Map<string, Record<string, unknown>>();
   for (const entry of response.items) {
@@ -571,7 +580,7 @@ export async function searchPetPricing(
       results.has(entry.key)
     ) {
       snapshot.issues.push("查价结果有未知或重复的宝宝ID");
-      return snapshot;
+      return finishPricingSearch(snapshot);
     }
     results.set(entry.key, entry);
   }
@@ -583,9 +592,16 @@ export async function searchPetPricing(
       continue;
     }
     item.query = typeof result.query === "string" ? result.query : "";
+    item.searchState = ["pending", "read_failed", "unsupported"].includes(
+      String(result.searchState),
+    )
+      ? (result.searchState as PricingSearchState)
+      : "completed";
+    if (item.searchState === "unsupported") item.status = "unsupported";
     if (typeof result.note === "string" && result.note.trim())
       item.issues.push(result.note.slice(0, 500));
     const seen = new Set<string>();
+    let readFailed = false;
     const rawEntries = [
       ...result.candidates.map((raw) => ({ raw, diagnostic: false })),
       ...(Array.isArray(result.diagnosticSources) && result.diagnosticSources.length <= 3
@@ -638,6 +654,7 @@ export async function searchPetPricing(
       } catch (error) {
         signal.throwIfAborted();
         candidate.reason = error instanceof Error ? error.message : "无法核对宝宝报价来源";
+        readFailed = true;
       }
       if (diagnostic)
         (item.diagnosticSources ||= []).push({
@@ -657,8 +674,18 @@ export async function searchPetPricing(
         prices.length % 2 ? prices[middle] : (prices[middle - 1] + prices[middle]) / 2,
       );
       item.status = "priced";
+      item.searchState = "completed";
       item.issues = verified.length === 1 ? ["仅1条挂牌样本，参考范围有限"] : [];
-    } else item.issues.push("没有已核对的同配置宝宝挂牌报价，暂不自动定价");
+    } else {
+      if (readFailed) item.searchState = "read_failed";
+      item.issues.push(
+        item.searchState === "read_failed"
+          ? "宝宝独立详情读取失败，尚未完成查价；继续时重试"
+          : item.searchState === "pending"
+            ? "宝宝查价尚未完成；继续时重试"
+            : "没有已核对的同配置宝宝挂牌报价，暂不自动定价",
+      );
+    }
     if (
       item.query.includes("/ similar /") ||
       result.similarAttempted === true ||
@@ -674,7 +701,7 @@ export async function searchPetPricing(
   snapshot.total = snapshot.items.every((item) => item.status === "priced")
     ? snapshot.knownTotal
     : null;
-  return snapshot;
+  return finishPricingSearch(snapshot);
 }
 
 /** Compose after equipment pricing; this preserves its value, sources and partial subtotal. */
