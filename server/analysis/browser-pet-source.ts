@@ -29,6 +29,9 @@ export type PetSearchConfig = {
   lowNeidans: Choices;
   officialTypeIds?: string[];
 };
+class UnsupportedPetDescriptionError extends Error {
+  override name = "UnsupportedPetDescriptionError";
+}
 const MAX_PAGES = 3,
   MAX_ROWS = 60,
   MAX_DETAILS = 20;
@@ -281,6 +284,20 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
           jsonInputs: Array.from(document.querySelectorAll("#equip_desc_value")).filter(
             (node) => !node.closest(excluded),
           ).length,
+          descriptionFormat: Array.from(
+            document.querySelectorAll<HTMLInputElement>("#equip_desc_value"),
+          )
+            .filter((node) => !node.closest(excluded))
+            .map((node) => ({
+              length: node.value.length,
+              semicolonFields: node.value.split(";").length,
+              attributeParserAvailable:
+                typeof (window as unknown as Record<string, unknown>).get_pet_attrs_info ===
+                "function",
+              encoded: node.value.startsWith("@"),
+              decoderAvailable:
+                typeof (window as unknown as Record<string, unknown>).decode_desc === "function",
+            })),
           mainPrices: Array.from(document.querySelectorAll<HTMLElement>("#info_panel .price"))
             .filter(
               (node) =>
@@ -428,9 +445,20 @@ async function readMainPet(page: Page, signal: AbortSignal) {
     const input = inputs.length === 1 ? inputs[0] : null;
     let pet: Record<string, any>;
     try {
-      pet = JSON.parse(input?.value || "");
+      const description = input?.value || "";
+      const decoded =
+        typeof g.decode_desc === "function" ? g.decode_desc(description) : description;
+      // Only legacy delimited descriptions use the site's pet.js parser.
+      pet =
+        typeof decoded === "string" &&
+        !decoded.trimStart().startsWith("{") &&
+        !decoded.trimStart().startsWith("[") &&
+        decoded.split(";").length >= 29 &&
+        typeof g.get_pet_attrs_info === "function"
+          ? g.get_pet_attrs_info(decoded, { only_basic_attr: true })
+          : JSON.parse(decoded);
     } catch {
-      throw new Error("官网主宝宝JSON详情未识别");
+      throw new Error("官网主宝宝描述详情未识别");
     }
     const hasValues = (value: unknown) =>
       Array.isArray(value)
@@ -440,12 +468,12 @@ async function readMainPet(page: Page, signal: AbortSignal) {
           : typeof value === "string"
             ? value.trim() !== "" && value.trim() !== "0"
             : !!value;
-    if (
-      [pet?.evol_skill_list, pet?.evol_skills, pet?.other?.EvolSkill, pet?.other?.evol_skills].some(
-        hasValues,
-      )
-    )
-      throw new Error("主宝宝含赐福配置，独立模板可见信息尚未核对，报价未采用");
+    const unsupportedDescription = [
+      pet?.evol_skill_list,
+      pet?.evol_skills,
+      pet?.other?.EvolSkill,
+      pet?.other?.evol_skills,
+    ].some(hasValues);
     if (
       !pet ||
       !Array.isArray(pet.all_skills) ||
@@ -463,9 +491,10 @@ async function readMainPet(page: Page, signal: AbortSignal) {
     const fields: { name: string; value: string }[] = [];
     const add = (name: string, value: string) => {
       name = fieldName(name);
-      value = value.trim();
+      value = value.replace(/\s+/g, " ").trim();
       if (name && value) fields.push({ name, value });
     };
+    const structuredRegions = new Set<HTMLElement>();
     for (const label of panel.querySelectorAll<HTMLElement>("th, td, dt")) {
       const value = label.nextElementSibling;
       if (
@@ -474,18 +503,27 @@ async function readMainPet(page: Page, signal: AbortSignal) {
         visible(value) &&
         /^(?:TD|DD)$/.test(value.tagName) &&
         (label.tagName === "TH" || label.tagName === "DT" || /[：:]\s*$/.test(label.innerText))
-      )
+      ) {
         add(label.innerText, value.innerText);
+        const region = label.closest<HTMLElement>("table, dl");
+        if (region) structuredRegions.add(region);
+      }
     }
-    const fieldText = panel.innerText.split(
+    // Parsed tables already include bonus spans; the text fallback would split them into conflicting values.
+    let fallbackText = panel.innerText;
+    for (const region of structuredRegions)
+      fallbackText = fallbackText.replace(region.innerText, "");
+    const fieldText = fallbackText.split(
       /(?:^|\n)\s*(?:赐福技能|技能|内丹|(?:召唤兽|宝宝)?装备)\s*(?:[（(:：]|\n|$)/,
     )[0];
     for (const match of fieldText
       .replace(/[ \t]+(?=[^\s：:\n]{1,20}[：:])/g, "\n")
       .matchAll(/(?:^|[\n\t；])([^：:\n\t；]{1,30})[：:]\s*([^\n\t；]+)/g))
       add(match[1], match[2]);
-    const headingLevel = panel.innerText.match(/(?:^|\s)等级\s*[：:]\s*(\d{1,3})(?:\s|$)/)?.[1];
-    if (headingLevel && !fields.some((field) => field.name === "等级")) add("等级", headingLevel);
+    // The bound product information region may hold the only visible level.
+    for (const region of [panel, info])
+      for (const match of region.innerText.matchAll(/(?:^|\s)等级\s*[：:]\s*(\d{1,3})(?=\s|$)/g))
+        add("等级", match[1]);
     const type = g.CBG_GAME_CONFIG?.pet_info?.[String(pet.type_id)];
     if (typeof type !== "string" || !type) throw new Error("官网主宝宝类型目录未识别");
     const parsedFields = [
@@ -576,6 +614,7 @@ async function readMainPet(page: Page, signal: AbortSignal) {
       })
       .join("\n");
     return {
+      unsupportedDescription,
       productId: raw.eid,
       serverId: raw.serverid ?? raw.server_id,
       productName: raw.equip_name,
@@ -605,7 +644,13 @@ async function readMainPet(page: Page, signal: AbortSignal) {
     };
   }, excluded);
   signal.throwIfAborted();
-  return petObservationSource(observed, page.url());
+  const source = petObservationSource(observed, page.url());
+  // A supported base payload must be complete and bound before a configuration is terminal.
+  if (observed.unsupportedDescription)
+    throw new UnsupportedPetDescriptionError(
+      "主宝宝含赐福配置，独立模板可见信息尚未核对，报价未采用",
+    );
+  return source;
 }
 
 /** Separate work pages share the existing login; they never navigate the role list. */
@@ -726,7 +771,8 @@ export function petSourceFromPages(
           rejected: EquipmentCandidate[] = [],
           diagnosticSources: EquipmentCandidate[] = [];
         let similarAttempted = false;
-        let failedDetails = 0;
+        let failedDetails = 0,
+          unsupportedDetails = 0;
         const allSeen = new Set<string>();
         let count = 0,
           details = 0;
@@ -775,6 +821,7 @@ export function petSourceFromPages(
             "全服 / 综合排序 / " + item.name + " / " + matchType + " / " + JSON.stringify(args);
           const seen = new Set<string>();
           const detailFailures: { url: string; reason: string; diagnostics: unknown }[] = [];
+          const unsupportedDescriptions: typeof detailFailures = [];
           let rows = 0,
             readDetails = 0,
             lastPage = 0,
@@ -958,7 +1005,7 @@ export function petSourceFromPages(
                   ...candidate,
                   reason: error instanceof Error ? error.message : "无法读取宝宝详情",
                 });
-                detailFailures.push({
+                const failure = {
                   url: row.url,
                   reason:
                     error instanceof Error ? error.message.split("\n")[0] : "无法读取宝宝详情",
@@ -966,8 +1013,14 @@ export function petSourceFromPages(
                     error && typeof error === "object" && "petDiagnostics" in error
                       ? error.petDiagnostics
                       : null,
-                });
-                failedDetails++;
+                };
+                if (error instanceof UnsupportedPetDescriptionError) {
+                  unsupportedDescriptions.push(failure);
+                  unsupportedDetails++;
+                } else {
+                  detailFailures.push(failure);
+                  failedDetails++;
+                }
               }
               if (count >= MAX_ROWS || acceptedCount() >= sampleLimit) {
                 pageFullyRead = rowIndex === listing.rows.length - 1;
@@ -995,6 +1048,7 @@ export function petSourceFromPages(
             details: readDetails,
             exhausted,
             detailFailures,
+            unsupportedDetails: unsupportedDescriptions,
           });
         }
         const distinct = new Map<string, EquipmentCandidate>();
@@ -1013,11 +1067,17 @@ export function petSourceFromPages(
                 ? "read_failed"
                 : Date.now() >= deadline
                   ? "pending"
-                  : "completed",
+                  : unsupportedDetails
+                    ? "unsupported"
+                    : "completed",
           candidates: [...distinct.values()].slice(0, 10),
           similarAttempted,
           diagnosticSources,
-          note: notes.join(" "),
+          note:
+            notes.join(" ") +
+            (unsupportedDetails
+              ? " 查询结果含尚未支持核验的赐福配置样本，未采用这些报价；缺价原因保留，可在新批次再次查询。"
+              : ""),
         });
       }
       return { queries, items: results, searchItems: records };
