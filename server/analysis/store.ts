@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import type { AiProvider } from "../ai/types";
 import type { Listing, SavedRoleRecord } from "../crawler/types";
 import { analysisPrompt, RULE_VERSION, textHash } from "./contract";
 import { buildProductDocument } from "./product-document";
-import { valuationPrompt } from "./valuation-contract";
+import { valuationPrompt, validateValuation } from "./valuation-contract";
+import { validateExactPricing } from "./pricing-integrity";
 import type { AnalysisProfile } from "./valuation-types";
 import type { ProductDocument } from "./product-document";
 import { equipmentInventory, type EquipmentPricingSnapshot } from "./equipment-pricing";
@@ -60,6 +62,7 @@ export class AnalysisStore {
     );
     CREATE INDEX IF NOT EXISTS analysis_tasks_run ON analysis_tasks(run_id,ordinal);
     CREATE INDEX IF NOT EXISTS analysis_tasks_input ON analysis_tasks(input_hash,status);
+    CREATE INDEX IF NOT EXISTS analysis_tasks_listing ON analysis_tasks(listing_key,status,completed_at DESC);
     CREATE TABLE IF NOT EXISTS analysis_attempts (
       id TEXT PRIMARY KEY, task_id TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL,
       finished_at TEXT, raw_response TEXT, usage_json TEXT, error TEXT
@@ -200,6 +203,96 @@ export class AnalysisStore {
       )
       .run(state, error, now(), id, owner, Date.now());
   }
+  private reusableResult(
+    provider: AiProvider,
+    model: string,
+    record: SavedRoleRecord,
+    document: ProductDocument,
+    prompt: string,
+    profile?: AnalysisProfile,
+  ) {
+    // Other servers and source bookkeeping do not change this role's calculation.
+    const scope = (value: AnalysisProfile | null) =>
+      value && {
+        version: value.version,
+        template: value.template,
+        calculationVersion: value.calculationVersion,
+        calculationCompatible: value.calculationCompatible,
+        equipmentSearch: !!value.equipmentSearch,
+        petSearch: !!value.petSearch,
+        settings: {
+          ...value.settings,
+          servers: value.settings.servers.filter(
+            (server) => server.serverId === record.listing.serverId,
+          ),
+        },
+      };
+    const previous = this.db
+      .prepare(`SELECT t.*,r.profile_json FROM analysis_tasks t
+      JOIN analysis_runs r ON t.run_id=r.id
+      WHERE t.listing_key=? AND t.input_hash=? AND t.status='completed'
+      AND r.provider=? AND r.model=? AND r.rule_version=?
+      AND coalesce((${expiredPricingSql}),0)=0 ORDER BY t.completed_at DESC,t.id DESC`)
+      .all(
+        document.productKey,
+        document.contentHash,
+        provider,
+        model,
+        profile?.version || RULE_VERSION,
+      );
+    for (const row of previous) {
+      try {
+        const savedProfile = row.profile_json
+          ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
+          : null;
+        if (!isDeepStrictEqual(scope(savedProfile), scope(profile || null))) continue;
+        if (!profile) {
+          if (row.prompt_hash === textHash(prompt)) return row;
+          continue;
+        }
+        const equipment: EquipmentPricingSnapshot | undefined = row.equipment_pricing_json
+          ? JSON.parse(String(row.equipment_pricing_json))
+          : undefined;
+        const pets: PetPricingSnapshot | undefined = row.pet_pricing_json
+          ? JSON.parse(String(row.pet_pricing_json))
+          : undefined;
+        if (
+          profile.equipmentSearch &&
+          (equipment?.searchComplete !== true ||
+            !validateExactPricing(equipment, equipmentInventory(record).items))
+        )
+          continue;
+        if (
+          profile.petSearch &&
+          (pets?.searchComplete !== true || !validateExactPricing(pets, petInventory(record).items))
+        )
+          continue;
+        const attempt = this.db
+          .prepare(`SELECT raw_response FROM analysis_attempts
+          WHERE task_id=? AND state='completed' ORDER BY finished_at DESC LIMIT 1`)
+          .get(row.source_task_id || row.id);
+        if (!attempt?.raw_response) continue;
+        const replayed = validateValuation(
+          String(attempt.raw_response),
+          document,
+          record,
+          profile,
+          equipment,
+          pets,
+        );
+        if (
+          isDeepStrictEqual(
+            JSON.parse(JSON.stringify(replayed)),
+            JSON.parse(String(row.result_json)),
+          )
+        )
+          return row;
+      } catch {
+        // Missing or incompatible saved evidence requires a fresh analysis.
+      }
+    }
+    return undefined;
+  }
   createRun(
     provider: AiProvider,
     model: string,
@@ -249,8 +342,9 @@ export class AnalysisStore {
       }
       if (!rows.length) throw new Error("暂无详情完整的商品，请先采集商品详情");
       const insert = this.db.prepare(
-        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       );
+      let inserted = 0;
       rows.forEach((row, index) => {
         const record: SavedRoleRecord = {
           listing: JSON.parse(String(row.listing_json)),
@@ -263,21 +357,11 @@ export class AnalysisStore {
         const prompt = profile
           ? valuationPrompt(document, record, profile)
           : analysisPrompt(document);
-        const previous =
-          force || profile?.equipmentSearch || profile?.petSearch
-            ? undefined
-            : this.db
-                .prepare(
-                  `SELECT t.id,t.source_task_id,t.result_json,t.completed_at FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id WHERE t.input_hash=? AND t.prompt_hash=? AND t.status='completed' AND r.provider=? AND r.model=? AND r.rule_version=? AND coalesce(json_extract(r.profile_json,'$.hash'),'')=? ORDER BY t.completed_at DESC LIMIT 1`,
-                )
-                .get(
-                  document.contentHash,
-                  textHash(prompt),
-                  provider,
-                  model,
-                  profile?.version || RULE_VERSION,
-                  profile?.hash || "",
-                );
+        const previous = force
+          ? undefined
+          : this.reusableResult(provider, model, record, document, prompt, profile);
+        if (previous && !sample) return;
+        inserted++;
         insert.run(
           randomUUID(),
           id,
@@ -285,8 +369,8 @@ export class AnalysisStore {
           String(row.key),
           document.contentHash,
           document.text,
-          textHash(prompt),
-          prompt,
+          previous?.prompt_hash || textHash(prompt),
+          previous?.prompt_text || prompt,
           String(row.listing_json),
           String(row.detail_json),
           document.collectedAt,
@@ -295,8 +379,19 @@ export class AnalysisStore {
           previous?.result_json ?? null,
           previous?.completed_at ?? null,
           previous ? previous.source_task_id || previous.id : null,
+          previous?.equipment_pricing_json ?? null,
+          previous?.pet_pricing_json ?? null,
         );
       });
+      if (!inserted) {
+        this.db.prepare("DELETE FROM analysis_runs WHERE id=?").run(id);
+        const latest = this.db
+          .prepare(`SELECT id FROM analysis_runs
+          WHERE provider=? AND model=? AND rule_version=? ORDER BY created_at DESC,id DESC LIMIT 1`)
+          .get(provider, model, profile?.version || RULE_VERSION)!;
+        this.db.exec("COMMIT");
+        return String(latest.id);
+      }
       this.db.exec("COMMIT");
       return id;
     } catch (error) {
@@ -603,6 +698,7 @@ export class AnalysisStore {
       provider?: AiProvider;
       runId?: string;
       page?: number;
+      resultsPage?: number;
       search?: string;
       filter?: string;
     } = {},
@@ -613,10 +709,21 @@ export class AnalysisStore {
       )
       .all(...(options.provider ? [options.provider] : []));
     const runs = ids.map((row) => this.run(String(row.id))!);
-    const run = options.runId ? this.run(options.runId) : runs[0] || null;
-    const source = `SELECT l.key,l.listing_json,l.collected_at,l.status collection_status,t.id task_id,t.result_json,t.error task_error,${stateSql} state FROM listings l LEFT JOIN analysis_tasks t ON t.listing_key=l.key AND t.run_id=?`;
+    const activeRun = this.activeRun();
+    const run = options.runId ? this.run(options.runId) : activeRun || runs[0] || null;
+    const sourceValues = options.runId ? [run?.id || ""] : [];
+    const taskSelection = options.runId
+      ? "t.listing_key=l.key AND t.run_id=?"
+      : `t.id=(
+      SELECT candidate.id FROM analysis_tasks candidate JOIN analysis_runs r ON r.id=candidate.run_id
+      WHERE candidate.listing_key=l.key ORDER BY
+        CASE WHEN candidate.status='completed' AND candidate.source_listing_json=l.listing_json
+          AND candidate.source_detail_json=l.detail_json
+          AND coalesce((${expiredPricingSql.replaceAll("t.", "candidate.")}),0)=0 THEN 0 ELSE 1 END,
+        r.created_at DESC,candidate.ordinal DESC,candidate.id DESC LIMIT 1)`;
+    const source = `SELECT l.key,l.listing_json,l.collected_at,l.status collection_status,t.id task_id,t.result_json,t.error task_error,${stateSql} state FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection}`;
     const conditions: string[] = [],
-      values: string[] = [run?.id || ""];
+      values: string[] = [...sourceValues];
     if (options.search?.trim()) {
       conditions.push("instr(lower(listing_json),lower(?))>0");
       values.push(options.search.trim().slice(0, 200));
@@ -637,7 +744,7 @@ export class AnalysisStore {
       .prepare(
         `WITH products AS (${source}) SELECT * FROM products WHERE state='completed' AND (json_extract(result_json,'$.valuation.decision')='BUY' OR (json_extract(result_json,'$.valuation') IS NULL AND json_extract(result_json,'$.score') IS NOT NULL)) ORDER BY coalesce(json_extract(result_json,'$.valuation.price_difference_ratio'),json_extract(result_json,'$.valuation.margin_of_safety')) DESC,json_extract(result_json,'$.score') DESC,key ASC LIMIT 10`,
       )
-      .all(run?.id || "")
+      .all(...sourceValues)
       .map((row) => this.item(row));
     const history = this.db
       .prepare(
@@ -653,14 +760,53 @@ export class AnalysisStore {
         finishedAt: nullable(row.finished_at),
         error: nullable(row.error),
       }));
+    const resultsSource = `FROM listings l JOIN analysis_tasks t ON t.id=(
+      SELECT completed.id FROM analysis_tasks completed JOIN analysis_runs r ON r.id=completed.run_id
+      WHERE completed.listing_key=l.key AND completed.status='completed' AND completed.result_json IS NOT NULL
+      ${options.runId ? "AND completed.run_id=?" : ""}
+      ORDER BY completed.completed_at DESC,r.created_at DESC,completed.id DESC LIMIT 1)
+      JOIN analysis_runs r ON r.id=t.run_id`;
+    const resultTotal = Number(
+      this.db.prepare(`SELECT count(*) n ${resultsSource}`).get(...sourceValues)!.n,
+    );
+    const resultTotalPages = Math.max(1, Math.ceil(resultTotal / 20));
+    const resultPage = Math.max(
+      1,
+      Math.min(resultTotalPages, Math.trunc(options.resultsPage || 1)),
+    );
+    const results = this.db
+      .prepare(`SELECT t.id task_id,t.source_listing_json,t.result_json,t.completed_at,
+      r.provider,r.model,${stateSql} state ${resultsSource}
+      ORDER BY t.completed_at DESC,t.id DESC LIMIT 20 OFFSET ?`)
+      .all(...sourceValues, (resultPage - 1) * 20)
+      .map((row) => {
+        const listing = JSON.parse(String(row.source_listing_json)) as Listing;
+        return {
+          taskId: String(row.task_id),
+          name: listing.name,
+          server: listing.serverName || listing.serverId,
+          price: listing.price,
+          provider: String(row.provider) as AiProvider,
+          model: String(row.model),
+          completedAt: String(row.completed_at),
+          stale: row.state !== "completed",
+          result: JSON.parse(String(row.result_json)) as ProductAnalysis,
+        };
+      });
     return {
       counts: this.counts(),
       run,
-      activeRun: this.activeRun(),
+      activeRun,
       runs,
       ranking,
       records: { page, totalPages, total, items: records },
       history,
+      results: {
+        page: resultPage,
+        totalPages: resultTotalPages,
+        total: resultTotal,
+        items: results,
+      },
     };
   }
 }

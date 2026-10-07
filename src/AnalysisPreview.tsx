@@ -119,7 +119,6 @@ export function AnalysisPreview() {
         if (controller.signal.aborted) return;
         if (firstLoad.current && next.activeRun && !runId) {
           setProvider(next.activeRun.provider);
-          setRunId(next.activeRun.id);
           const executing = next.activeRun;
           setSelectedModels((previous) => ({ ...previous, [executing.provider]: executing.model }));
         }
@@ -151,7 +150,7 @@ export function AnalysisPreview() {
     try {
       const next = await request<AnalysisRun | null>(path, body);
       if (next) {
-        setRunId(next.id);
+        setRunId(null);
         setProvider(next.provider);
         setModelChanged(false);
       }
