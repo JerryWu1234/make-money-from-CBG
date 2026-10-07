@@ -53,7 +53,7 @@ export function CrawlPanel({
       clearTimeout(timer);
     };
   }, [onRunning, selectRecord]);
-  const action = async (command: "start" | "stop" | "backfill") => {
+  const action = async (command: "start" | "stop") => {
     setBusy(true);
     setError("");
     try {
@@ -78,7 +78,7 @@ export function CrawlPanel({
       <h2>详情采集与续采</h2>
       <p className="status-note">
         逐条悬停核对商品，读取详情标签及装备、召唤兽资料，并自动翻页保存到
-        SQLite。已采集商品跳过详情。
+        SQLite。开始或继续采集时会先补采未完成或旧版资料，资料完整的商品跳过详情。
         每个角色的全部标签处理完才会保存，当前页所有角色处理完后自动进入下一页。
       </p>
       <div className="crawl-actions">
@@ -88,13 +88,6 @@ export function CrawlPanel({
           onClick={() => void action("start")}
         >
           {status?.checkpoint ? "继续采集 / 检查新增" : "开始采集详情"}
-        </button>
-        <button
-          className="btn-secondary"
-          disabled={busy || !!status?.running || !ready}
-          onClick={() => void action("backfill")}
-        >
-          补齐已保存商品的估值资料
         </button>
         <button
           className="btn-secondary"
