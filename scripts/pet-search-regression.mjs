@@ -404,6 +404,49 @@ try {
       assert.deepEqual(detailVisits, []);
     });
   });
+  await check("进化后获得的预览技能与当前技能分别核验，未支持配置保留未知价", async () => {
+    for (const detail of [
+      { evolSkills: [{ skill_type: "1" }] },
+      { legacyDescription: true, noPanelId: true, panelLevel: null, bonusLineBreak: true },
+    ])
+      await withSource(
+        {},
+        {
+          ...detail,
+          previewSkills: [
+            "高级吸血（进化后获得）",
+            "高级偷袭（进化后获得）",
+            "超级奔雷咒（进化后获得）",
+          ],
+        },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          assert.equal(result.total, null);
+          assert.equal(result.items[0].referencePrice, null);
+          assert.equal(result.items[0].searchState, "unsupported");
+          assert.equal(result.searchComplete, true);
+          assert.ok(result.searchItems.some((item) => item.unsupportedDetails.length > 0));
+          assert.ok(result.searchItems.every((item) => item.detailFailures.length === 0));
+        },
+      );
+  });
+  await check("未来预览不能补足缺失的当前技能，额外当前技能仍拒绝", async () => {
+    for (const detail of [
+      { previewSkills: ["须弥真言（进化后获得）"], missingSkill: true },
+      { previewSkills: ["额外当前技能"] },
+    ])
+      await withSource(
+        {},
+        { evolSkills: [{ skill_type: "1" }], ...detail },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          assert.equal(result.total, null);
+          assert.equal(result.searchComplete, false);
+          assert.equal(result.items[0].searchState, "read_failed");
+          assert.ok(result.searchItems.some((item) => item.detailFailures.length > 0));
+        },
+      );
+  });
   await check("同一赐福详情必须先通过商品绑定、完整字段和可见价格核验", async () => {
     for (const broken of [
       { missingPayloadField: "all_skills" },
@@ -418,7 +461,7 @@ try {
     ])
       await withSource(
         {},
-        { evolSkills: [{ skill_type: "1" }], ...broken },
+        { evolSkills: [{ skill_type: "1" }], previewSkills: ["须弥真言（进化后获得）"], ...broken },
         async ({ source, control }) => {
           const result = await searchPetPricing(record(), control.signal, source);
           assert.equal(result.total, null);
