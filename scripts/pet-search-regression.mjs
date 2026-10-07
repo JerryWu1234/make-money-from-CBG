@@ -529,6 +529,31 @@ try {
           },
         );
   });
+  await check("装备仅内联等级时仍悬停补齐完整属性", () =>
+    withSource(
+      {},
+      { equipment: petGear, lazyGear: true, partialInlineGear: true },
+      async ({ source, control }) => {
+        const result = await searchPetPricing(record(petGear), control.signal, source);
+        assert.equal(result.total, 368.6, JSON.stringify(result.searchItems));
+        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].candidates[0].verified, true);
+      },
+    ),
+  );
+  await check("仅CSS类名的装备提示也与宝宝主属性隔离", async () => {
+    for (const partialInlineGear of [false, true])
+      await withSource(
+        {},
+        { equipment: petGear, lazyGear: true, classOnlyGearTooltip: true, partialInlineGear },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(petGear), control.signal, source);
+          assert.equal(result.total, 368.6, JSON.stringify(result.searchItems));
+          assert.equal(result.searchComplete, true);
+          assert.equal(result.items[0].candidates[0].verified, true);
+        },
+      );
+  });
   await check("装备提示不完整时仍保留读取失败，不用隐藏描述代替可见资料", () =>
     withSource(
       {},

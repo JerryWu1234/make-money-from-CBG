@@ -56,6 +56,8 @@ export function petDetailDocument(options = {}) {
     missingGear: false,
     lazyGear: false,
     brokenGearTooltip: false,
+    partialInlineGear: false,
+    classOnlyGearTooltip: false,
     incompleteJson: false,
     cifuDecoration: true,
     previewSkills: [],
@@ -160,7 +162,13 @@ export function petDetailDocument(options = {}) {
       if (!s.lazyGear)
         return `<img width="40" height="40" src="${src}" data_equip_name="${escape(gear.name)}" data_equip_desc="${escape(gear.description)}">`;
       const text = `${gear.name}\n${s.brokenGearTooltip ? "未加载" : gear.description}`;
-      return `<img width="40" height="40" src="${src}" data_tip_box="gear${index}TipsBox" onmouseenter="document.getElementById('gear${index}TipsBox').style.display='block'" onmouseleave="document.getElementById('gear${index}TipsBox').style.display='none'"><pre id="gear${index}TipsBox" role="tooltip" style="display:none">${escape(text)}</pre>`;
+      const tipId = `gear${index}${s.classOnlyGearTooltip ? "Tip" : "TipsBox"}`;
+      const inline = s.partialInlineGear
+        ? `data_equip_name="${escape(gear.name)}" data_equip_desc="等级：80"`
+        : "";
+      const linked = s.classOnlyGearTooltip ? "" : `data_tip_box="${tipId}"`;
+      const tipKind = s.classOnlyGearTooltip ? 'class="equip_tips"' : 'role="tooltip"';
+      return `<img width="40" height="40" src="${src}" ${inline} ${linked} onmouseenter="document.getElementById('${tipId}').style.display='block'" onmouseleave="document.getElementById('${tipId}').style.display='none'"><pre id="${tipId}" ${tipKind} style="display:none">${escape(text)}</pre>`;
     })
     .join("");
   const info = `<ul id="info_panel"><li>服务器：测试区 ID：${escape(s.nickname)} 等级：${escape(s.infoLevel)}</li><li>状态：${escape(s.status)}</li><li>价格：<span class="price">￥${s.price}（元）</span><span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul>`;
