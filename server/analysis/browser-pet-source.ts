@@ -448,7 +448,8 @@ async function readMainPet(page: Page, signal: AbortSignal) {
       // Only legacy delimited descriptions use the site's pet.js parser.
       pet =
         typeof decoded === "string" &&
-        !/^\s*[\[{]/.test(decoded) &&
+        !decoded.trimStart().startsWith("{") &&
+        !decoded.trimStart().startsWith("[") &&
         decoded.split(";").length >= 29 &&
         typeof g.get_pet_attrs_info === "function"
           ? g.get_pet_attrs_info(decoded, { only_basic_attr: true })
