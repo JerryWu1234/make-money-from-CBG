@@ -566,6 +566,26 @@ try {
       },
     ),
   );
+  await check("装备背景说明不作为镶嵌属性，官网装备仍逐项核验", async () => {
+    const gear = [
+      {
+        name: "嵌宝金环",
+        description:
+          "等级 95\n速度 +29 伤害 +45\n耐久度 307 修理失败 1次\n镶嵌效果\n+30速度 镶嵌等级：5",
+      },
+    ];
+    for (const detail of [{}, { legacyDescription: true, lazyGear: true }])
+      await withSource(
+        {},
+        { ...detail, equipment: gear, gearFlavor: "镶嵌着宝物的金环，可以提高速度。\n" },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(gear), control.signal, source);
+          assert.equal(result.total, 368.6, JSON.stringify(result.searchItems));
+          assert.equal(result.searchComplete, true);
+          assert.equal(result.items[0].candidates[0].verified, true);
+        },
+      );
+  });
   await check("相同宝宝装备包价只计一次，饰品保留身份和可见描述不补战斗属性", async () => {
     for (const gear of [
       petGear,

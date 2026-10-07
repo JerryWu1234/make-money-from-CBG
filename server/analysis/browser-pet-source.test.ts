@@ -359,6 +359,30 @@ describe("主宝宝商品来源核对", () => {
       ).verified,
     ).toBe(true);
   });
+  it("装备背景文案不造成官网属性误差，实际数值差异仍拒绝", () => {
+    const gear = [
+      {
+        name: "嵌宝金环",
+        description:
+          "等级 95\n速度 +29 伤害 +45\n耐久度 307 修理失败 1次\n镶嵌效果\n+30速度 镶嵌等级：5",
+      },
+    ];
+    const observed = {
+      ...observation(),
+      equipment: [
+        { ...gear[0], description: "镶嵌着宝物的金环，可以提高速度。\n" + gear[0].description },
+      ],
+      expectedEquipment: gear,
+    };
+    expect(petObservationSource(observed, url).price).toBe(368.6);
+    for (const description of [
+      gear[0].description.replace("+29", "+30"),
+      gear[0].description.replace("+30速度", "+31速度"),
+    ])
+      expect(() =>
+        petObservationSource({ ...observed, equipment: [{ ...gear[0], description }] }, url),
+      ).toThrow(/随身装备/);
+  });
   it("官网饰品无需战斗属性，但可见身份、完整描述和官方饰品图标配置必须一致", () => {
     const gear = [
       { name: "吸血鬼饰品", description: "修理失败 2次\n可爱的小裙子", accessory: true },

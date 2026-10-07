@@ -55,6 +55,7 @@ export function petDetailDocument(options = {}) {
     missingInner: false,
     missingGear: false,
     lazyGear: false,
+    gearFlavor: "",
     brokenGearTooltip: false,
     partialInlineGear: false,
     classOnlyGearTooltip: false,
@@ -160,8 +161,8 @@ export function petDetailDocument(options = {}) {
     .map((gear, index) => {
       const src = `https://xyq.cbg.163.com/images/${gear.shipin ? "pet_shipin" : "equip"}/small/1.gif`;
       if (!s.lazyGear)
-        return `<img width="40" height="40" src="${src}" data_equip_name="${escape(gear.name)}" data_equip_desc="${escape(gear.description)}">`;
-      const text = `${gear.name}\n${s.brokenGearTooltip ? "未加载" : gear.description}`;
+        return `<img width="40" height="40" src="${src}" data_equip_name="${escape(gear.name)}" data_equip_desc="${escape(s.gearFlavor + gear.description)}">`;
+      const text = `${gear.name}\n${s.brokenGearTooltip ? "未加载" : s.gearFlavor + gear.description}`;
       const tipId = `gear${index}${s.classOnlyGearTooltip ? "Tip" : "TipsBox"}`;
       const inline = s.partialInlineGear
         ? `data_equip_name="${escape(gear.name)}" data_equip_desc="等级：80"`

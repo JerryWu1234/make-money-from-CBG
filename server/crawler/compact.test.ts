@@ -213,3 +213,11 @@ describe("灵饰主属性和附加属性分段", () => {
     ).toBeNull();
   });
 });
+
+it("装备背景说明不是镶嵌属性，镶嵌宝石、效果和等级仍保留", () => {
+  const attributes =
+    "等级 95\n速度 +29 伤害 +45\n耐久度 307 修理失败 1次\n镶嵌宝石 红玛瑙\n镶嵌效果\n+30速度 镶嵌等级：5\n镶嵌等级 5";
+  expect(coreEquipmentDescription("镶嵌着宝物的金环，可以提高速度。\n" + attributes)).toBe(
+    attributes,
+  );
+});
