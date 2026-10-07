@@ -172,7 +172,14 @@ export function petObservationSource(observed: PetObservation, url: string) {
     else if (visible === undefined) throw new Error("主宝宝关键属性未显示：" + field.name);
   }
   if (!same(observed.skills, observed.expectedSkills))
-    throw new Error("主宝宝完整技能未显示或与商品数据不一致");
+    throw Object.assign(new Error("主宝宝完整技能未显示或与商品数据不一致"), {
+      petDiagnostics: {
+        skillComparison: {
+          visibleSkills: observed.skills,
+          expectedSkills: observed.expectedSkills,
+        },
+      },
+    });
   const innerKey = (skill: { name: string; level: string }) => skill.name + skill.level + "层";
   if (
     observed.innerSkills.some((skill) => !skill.name || !/^[1-5]$/.test(skill.level)) ||
@@ -314,7 +321,12 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
       error instanceof Error && error.name !== "TimeoutError"
         ? error
         : new Error("主宝宝属性、商品信息或价格区域未加载完成");
-    throw Object.assign(failure, { petDiagnostics: diagnostics });
+    throw Object.assign(failure, {
+      petDiagnostics: {
+        ...diagnostics,
+        ...(failure as Error & { petDiagnostics?: Record<string, unknown> }).petDiagnostics,
+      },
+    });
   }
 }
 
