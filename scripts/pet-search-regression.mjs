@@ -90,6 +90,7 @@ const { searchPetPricing } = await import(petPricing);
 const { petSourceFromPages } = await import(
   await moduleUrl("server/analysis/browser-pet-source.ts", {
     "../session": session,
+    "../viewport": viewport,
     "../crawler/controller": inline(
       "export function crawlDatabase(){throw new Error('Fixture must not open the application database');}",
     ),
@@ -404,6 +405,49 @@ try {
       assert.deepEqual(detailVisits, []);
     });
   });
+  await check("进化后获得的预览技能与当前技能分别核验，未支持配置保留未知价", async () => {
+    for (const detail of [
+      { evolSkills: [{ skill_type: "1" }] },
+      { legacyDescription: true, noPanelId: true, panelLevel: null, bonusLineBreak: true },
+    ])
+      await withSource(
+        {},
+        {
+          ...detail,
+          previewSkills: [
+            "高级吸血（进化后获得）",
+            "高级偷袭（进化后获得）",
+            "超级奔雷咒（进化后获得）",
+          ],
+        },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          assert.equal(result.total, null);
+          assert.equal(result.items[0].referencePrice, null);
+          assert.equal(result.items[0].searchState, "unsupported");
+          assert.equal(result.searchComplete, true);
+          assert.ok(result.searchItems.some((item) => item.unsupportedDetails.length > 0));
+          assert.ok(result.searchItems.every((item) => item.detailFailures.length === 0));
+        },
+      );
+  });
+  await check("未来预览不能补足缺失的当前技能，额外当前技能仍拒绝", async () => {
+    for (const detail of [
+      { previewSkills: ["须弥真言（进化后获得）"], missingSkill: true },
+      { previewSkills: ["额外当前技能"] },
+    ])
+      await withSource(
+        {},
+        { evolSkills: [{ skill_type: "1" }], ...detail },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          assert.equal(result.total, null);
+          assert.equal(result.searchComplete, false);
+          assert.equal(result.items[0].searchState, "read_failed");
+          assert.ok(result.searchItems.some((item) => item.detailFailures.length > 0));
+        },
+      );
+  });
   await check("同一赐福详情必须先通过商品绑定、完整字段和可见价格核验", async () => {
     for (const broken of [
       { missingPayloadField: "all_skills" },
@@ -418,7 +462,7 @@ try {
     ])
       await withSource(
         {},
-        { evolSkills: [{ skill_type: "1" }], ...broken },
+        { evolSkills: [{ skill_type: "1" }], previewSkills: ["须弥真言（进化后获得）"], ...broken },
         async ({ source, control }) => {
           const result = await searchPetPricing(record(), control.signal, source);
           assert.equal(result.total, null);
@@ -462,6 +506,63 @@ try {
         const result = await searchPetPricing(record(), control.signal, source);
         assert.equal(result.total, null);
         assert.match(result.items[0].candidates[0].reason, /可见属性不一致/);
+      },
+    ),
+  );
+  await check("独立宝宝装备通过悬停显示后核对名称、属性和饰品身份", async () => {
+    for (const gear of [
+      petGear,
+      [
+        ...petGear,
+        { name: "画魂饰品", description: "玄天灵力 529", shipin: true, location: "RolePetShipin" },
+      ],
+    ])
+      for (const detail of [{}, { legacyDescription: true, noPanelId: true, panelLevel: null }])
+        await withSource(
+          {},
+          { ...detail, equipment: gear, lazyGear: true },
+          async ({ source, control }) => {
+            const result = await searchPetPricing(record(gear), control.signal, source);
+            assert.equal(result.total, 368.6, JSON.stringify(result.searchItems));
+            assert.equal(result.searchComplete, true);
+            assert.equal(result.items[0].candidates[0].verified, true);
+          },
+        );
+  });
+  await check("装备仅内联等级时仍悬停补齐完整属性", () =>
+    withSource(
+      {},
+      { equipment: petGear, lazyGear: true, partialInlineGear: true },
+      async ({ source, control }) => {
+        const result = await searchPetPricing(record(petGear), control.signal, source);
+        assert.equal(result.total, 368.6, JSON.stringify(result.searchItems));
+        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].candidates[0].verified, true);
+      },
+    ),
+  );
+  await check("仅CSS类名的装备提示也与宝宝主属性隔离", async () => {
+    for (const partialInlineGear of [false, true])
+      await withSource(
+        {},
+        { equipment: petGear, lazyGear: true, classOnlyGearTooltip: true, partialInlineGear },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(petGear), control.signal, source);
+          assert.equal(result.total, 368.6, JSON.stringify(result.searchItems));
+          assert.equal(result.searchComplete, true);
+          assert.equal(result.items[0].candidates[0].verified, true);
+        },
+      );
+  });
+  await check("装备提示不完整时仍保留读取失败，不用隐藏描述代替可见资料", () =>
+    withSource(
+      {},
+      { equipment: petGear, lazyGear: true, brokenGearTooltip: true },
+      async ({ source, control }) => {
+        const result = await searchPetPricing(record(petGear), control.signal, source);
+        assert.equal(result.total, null);
+        assert.equal(result.searchComplete, false);
+        assert.equal(result.items[0].searchState, "read_failed");
       },
     ),
   );

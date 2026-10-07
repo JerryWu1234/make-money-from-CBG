@@ -232,7 +232,12 @@ describe("主宝宝商品来源核对", () => {
   it("读取前等待主商品渲染；等待期间取消保持原原因且不采诊断", async () => {
     const read = vi.fn().mockResolvedValue(observation());
     const wait = vi.fn().mockResolvedValue(undefined);
-    const page = { waitForFunction: wait, evaluate: read, url: () => url } as unknown as Page;
+    const page = {
+      waitForFunction: wait,
+      evaluate: read,
+      locator: vi.fn(() => ({ evaluateAll: vi.fn(async () => 0) })),
+      url: () => url,
+    } as unknown as Page;
     expect((await petPageSource(page, new AbortController().signal)).price).toBe(368.6);
     expect(wait).toHaveBeenCalledWith(expect.any(Function), expect.any(String), { timeout: 5000 });
     expect(wait.mock.invocationCallOrder[0]).toBeLessThan(read.mock.invocationCallOrder[0]);
@@ -469,6 +474,7 @@ describe("宝宝查询使用独立后台页", () => {
     const detail = {
       close: vi.fn(async () => {}),
       waitForFunction: vi.fn(async () => {}),
+      locator: vi.fn(() => ({ evaluateAll: vi.fn(async () => 0) })),
       goto: vi.fn(async (url: string) => {
         currentUrl = url;
       }),

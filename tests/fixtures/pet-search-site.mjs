@@ -54,8 +54,13 @@ export function petDetailDocument(options = {}) {
     missingSkill: false,
     missingInner: false,
     missingGear: false,
+    lazyGear: false,
+    brokenGearTooltip: false,
+    partialInlineGear: false,
+    classOnlyGearTooltip: false,
     incompleteJson: false,
     cifuDecoration: true,
+    previewSkills: [],
     recommendation: true,
     wrapperClass: "infoList goodsInfo",
     panelDelay: 0,
@@ -139,6 +144,12 @@ export function petDetailDocument(options = {}) {
         `<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/${index + 1}.gif" data_store_name="${escape(name)}">`,
     )
     .join("");
+  const previewImages = s.previewSkills
+    .map(
+      (name) =>
+        `<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif" data_equip_name="${escape(name)}" data_skill_type="cifu">`,
+    )
+    .join("");
   const innerImages = (s.missingInner ? [] : s.innerSkills)
     .map(
       ({ name, level }) =>
@@ -146,13 +157,22 @@ export function petDetailDocument(options = {}) {
     )
     .join("");
   const gearImages = (s.missingGear ? [] : s.equipment)
-    .map(
-      (gear) =>
-        `<img width="40" height="40" src="https://xyq.cbg.163.com/images/${gear.shipin ? "pet_shipin" : "equip"}/small/1.gif" data_equip_name="${escape(gear.name)}" data_equip_desc="${escape(gear.description)}">`,
-    )
+    .map((gear, index) => {
+      const src = `https://xyq.cbg.163.com/images/${gear.shipin ? "pet_shipin" : "equip"}/small/1.gif`;
+      if (!s.lazyGear)
+        return `<img width="40" height="40" src="${src}" data_equip_name="${escape(gear.name)}" data_equip_desc="${escape(gear.description)}">`;
+      const text = `${gear.name}\n${s.brokenGearTooltip ? "未加载" : gear.description}`;
+      const tipId = `gear${index}${s.classOnlyGearTooltip ? "Tip" : "TipsBox"}`;
+      const inline = s.partialInlineGear
+        ? `data_equip_name="${escape(gear.name)}" data_equip_desc="等级：80"`
+        : "";
+      const linked = s.classOnlyGearTooltip ? "" : `data_tip_box="${tipId}"`;
+      const tipKind = s.classOnlyGearTooltip ? 'class="equip_tips"' : 'role="tooltip"';
+      return `<img width="40" height="40" src="${src}" ${inline} ${linked} onmouseenter="document.getElementById('${tipId}').style.display='block'" onmouseleave="document.getElementById('${tipId}').style.display='none'"><pre id="${tipId}" ${tipKind} style="display:none">${escape(text)}</pre>`;
+    })
     .join("");
   const info = `<ul id="info_panel"><li>服务器：测试区 ID：${escape(s.nickname)} 等级：${escape(s.infoLevel)}</li><li>状态：${escape(s.status)}</li><li>价格：<span class="price">￥${s.price}（元）</span><span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul>`;
-  const panel = `<div class="attribute"><div${s.noPanelId ? "" : ' id="equip_desc_panel"'}><p>名字：${escape(s.nickname)}${s.panelLevel === null ? "" : ` 等级：${escape(s.panelLevel)}`}</p><table>${table}</table><h4>赐福技能</h4>${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div></div>`;
+  const panel = `<div class="attribute"><div${s.noPanelId ? "" : ' id="equip_desc_panel"'}><p>名字：${escape(s.nickname)}${s.panelLevel === null ? "" : ` 等级：${escape(s.panelLevel)}`}</p><table>${table}</table><h4>赐福技能</h4>${previewImages}${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div></div>`;
   const main = s.splitRegions
     ? `<section>${info}</section><section>${panel}</section>`
     : `<div class="${escape(s.wrapperClass)}">${info}${panel}${s.duplicatePanel ? panel : ""}${s.footerStatus ? `<footer>${escape(s.footerStatus)}</footer>` : ""}</div>`;
