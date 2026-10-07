@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { SavedRoleRecord } from "../server/crawler/types";
+import { CAPTURE_VERSION } from "../server/crawler/compact";
 import { RoleItems } from "./RoleItems";
 import { detailFields } from "./detail-view";
 import { displayTime } from "./SavedRoleList";
@@ -131,9 +132,9 @@ export function SavedRoleDetail({ recordKey, running }: { recordKey: string; run
               {record.detail.valuation.issues.join("；")}
             </p>
           )}
-          {record.detail && record.detail.captureVersion !== 4 && (
+          {record.detail && (record.detail.captureVersion ?? 0) < CAPTURE_VERSION && (
             <p className="detail-notice">
-              这是旧版采集结果；点击“补齐已保存商品的估值资料”可补采坐骑、神器和靓号信息。
+              这是旧版采集结果；开始或继续采集时会自动优先补采所需资料。
             </p>
           )}
           <div
