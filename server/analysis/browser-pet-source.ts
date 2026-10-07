@@ -289,6 +289,10 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
             .filter((node) => !node.closest(excluded))
             .map((node) => ({
               length: node.value.length,
+              semicolonFields: node.value.split(";").length,
+              attributeParserAvailable:
+                typeof (window as unknown as Record<string, unknown>).get_pet_attrs_info ===
+                "function",
               encoded: node.value.startsWith("@"),
               decoderAvailable:
                 typeof (window as unknown as Record<string, unknown>).decode_desc === "function",
@@ -443,9 +447,16 @@ async function readMainPet(page: Page, signal: AbortSignal) {
       const description = input?.value || "";
       const decoded =
         typeof g.decode_desc === "function" ? g.decode_desc(description) : description;
-      pet = JSON.parse(decoded);
+      // Only legacy delimited descriptions use the site's pet.js parser.
+      pet =
+        typeof decoded === "string" &&
+        !/^\s*[\[{]/.test(decoded) &&
+        decoded.split(";").length >= 29 &&
+        typeof g.get_pet_attrs_info === "function"
+          ? g.get_pet_attrs_info(decoded, { only_basic_attr: true })
+          : JSON.parse(decoded);
     } catch {
-      throw new Error("官网主宝宝JSON详情未识别");
+      throw new Error("官网主宝宝描述详情未识别");
     }
     const hasValues = (value: unknown) =>
       Array.isArray(value)

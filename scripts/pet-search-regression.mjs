@@ -273,6 +273,36 @@ try {
         assert.ok(await detailPage.evaluate(() => window.decodeCalls > 0));
       });
   });
+  await check("官网分号描述经页面属性解析器读取，仍核对完整可见属性与随身装备", async () => {
+    for (const detail of [
+      { legacyDescription: true },
+      { legacyDescription: true, encodedJson: true, noPanelId: true, equipment: petGear },
+    ])
+      await withSource({}, detail, async ({ source, detailPage, control }) => {
+        const result = await searchPetPricing(
+          record(detail.equipment || []),
+          control.signal,
+          source,
+        );
+        assert.equal(result.total, 368.6);
+        assert.equal(result.items[0].candidates[0].verified, true);
+        assert.ok(await detailPage.evaluate(() => window.petParseCalls > 0));
+      });
+  });
+  await check("分号描述缺少官网解析器、解析失败或完整列表缺失时保留读取失败", async () => {
+    for (const detail of [
+      { legacyDescription: true, missingPetParser: true },
+      { legacyDescription: true, petParserFailure: true },
+      { legacyDescription: true, incompleteJson: true },
+    ])
+      await withSource({}, detail, async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.total, null);
+        assert.ok(result.searchItems[0].detailFailures.length > 0);
+        assert.equal(result.items[0].candidates[0].verified, false);
+      });
+  });
+
   await check("缺少解码器、解码失败或解码后JSON损坏保留读取失败", async () => {
     for (const detail of [
       { encodedJson: true, missingDecoder: true },
@@ -282,12 +312,14 @@ try {
       await withSource({}, detail, async ({ source, control }) => {
         const result = await searchPetPricing(record(), control.signal, source);
         assert.equal(result.total, null);
-        assert.match(result.items[0].candidates[0].reason, /JSON详情未识别/);
+        assert.match(result.items[0].candidates[0].reason, /描述详情未识别/);
         const failure = result.searchItems[0].detailFailures[0];
         assert.ok(failure);
         assert.deepEqual(failure.diagnostics.descriptionFormat, [
           {
             length: "@Sfixture@".length,
+            semicolonFields: 1,
+            attributeParserAvailable: false,
             encoded: true,
             decoderAvailable: !detail.missingDecoder,
           },

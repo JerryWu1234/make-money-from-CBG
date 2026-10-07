@@ -69,6 +69,9 @@ export function petDetailDocument(options = {}) {
     noPanelId: false,
     footerStatus: "",
     encodedJson: false,
+    legacyDescription: false,
+    missingPetParser: false,
+    petParserFailure: false,
     missingDecoder: false,
     decoderFailure: false,
     malformedDecoded: false,
@@ -97,6 +100,21 @@ export function petDetailDocument(options = {}) {
   if (s.incompleteJson) delete pet.equip_list;
   if (s.evolSkills !== undefined) pet.evol_skill_list = s.evolSkills;
   if (s.evolSkillMap !== undefined) pet.evol_skills = s.evolSkillMap;
+  const legacyParts = Array.from({ length: 35 }, () => "0");
+  legacyParts[0] = s.nickname;
+  legacyParts[1] = "2001";
+  legacyParts[2] = "119";
+  legacyParts[20] = "1550";
+  legacyParts[21] = "1400";
+  legacyParts[22] = "5000";
+  legacyParts[23] = "2800";
+  legacyParts[24] = "1200";
+  legacyParts[25] = "1100";
+  legacyParts[26] = "1280";
+  legacyParts[27] = "1|2";
+  legacyParts[34] = '(["summon_core":([])])';
+  const legacy = legacyParts.join(";");
+  const description = s.legacyDescription ? legacy : JSON.stringify(pet);
   const rows = s.fields.filter(({ name }) => name !== "类型" && name !== "等级");
   const table = rows
     .map((field, index) =>
@@ -134,9 +152,10 @@ export function petDetailDocument(options = {}) {
   const visibleMain = s.panelDelay ? '<div id="delayed-main"></div>' : main;
   return `<meta charset="utf-8"><title>独立宝宝详情结构模拟页</title>
 ${s.recommendationFirst ? recommendation + visibleMain : visibleMain + recommendation}
-<input type="hidden" id="equip_desc_value" value="${escape(s.encodedJson ? "@Sfixture@" : JSON.stringify(pet))}">
+<input type="hidden" id="equip_desc_value" value="${escape(s.encodedJson ? "@Sfixture@" : description)}">
 <script>window.IsLogin=1;window.StorageStype={pet:2,role:3};window.equip={storage_type:2,equip_name:${encoded(s.rawName)},price:${encoded(s.rawPrice)},eid:${s.rawEid ? encoded(s.rawEid) : "new URL(location.href).searchParams.get('eid')"},server_id:1,is_selling:${encoded(s.selling)}};window.CBG_GAME_CONFIG={pet_info:{2001:'画魂'},pet_skill_desc:{1:{name:'须弥真言'},2:{name:'高级法术暴击'}}};
-${s.encodedJson && !s.missingDecoder ? `window.decodeCalls=0;window.decode_desc=value=>{window.decodeCalls++;if(value!=='@Sfixture@' || ${encoded(s.decoderFailure)})throw new Error('SIMULATED decode failure');return ${encoded(s.malformedDecoded ? "not JSON" : JSON.stringify(pet))};};` : ""}
+${s.encodedJson && !s.missingDecoder ? `window.decodeCalls=0;window.decode_desc=value=>{window.decodeCalls++;if(value!=='@Sfixture@' || ${encoded(s.decoderFailure)})throw new Error('SIMULATED decode failure');return ${encoded(s.malformedDecoded ? "not JSON" : description)};};` : ""}
+${s.legacyDescription && !s.missingPetParser ? `window.petParseCalls=0;window.get_pet_attrs_info=(value, options)=>{window.petParseCalls++;if(value!==${encoded(legacy)} || !options.only_basic_attr || ${encoded(s.petParserFailure)})throw new Error('SIMULATED legacy parser failure');return ${encoded(pet)};};` : ""}
 ${s.jsonDelay ? `const json=document.getElementById('equip_desc_value'), jsonValue=json.value;json.value='';setTimeout(()=>json.value=jsonValue,${s.jsonDelay});` : ""}
 function delayParts(){
  ${s.infoDelay ? `const info=document.querySelector('#info_panel'), content=info.innerHTML;info.innerHTML='';setTimeout(()=>info.innerHTML=content,${s.infoDelay});` : ""}
