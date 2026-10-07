@@ -265,6 +265,48 @@ describe("持久化的商品分析队列", () => {
     expect(analyze.mock.calls[0][0]).toContain(pricing.inputHash);
   });
 
+  it("装备和宝宝多轮查价原文保留在数据库，但不进入AI输入", async () => {
+    const { store, runner, analyze, profile, pricing, petPricing } = await valuationSetup();
+    for (const [kind, snapshot] of [
+      ["equipment", pricing],
+      ["pet", petPricing],
+    ] as const) {
+      const internal = "internal-search-" + kind;
+      snapshot.queries = [kind + "-verified-filters"];
+      snapshot.requestText = internal + "-current-request";
+      snapshot.rawResponse = internal + "-current-response";
+      snapshot.searchItems = [{ id: internal + "-current-items" }];
+      snapshot.searchAttempts = [1, 2].map((attempt) => ({
+        searchedAt: snapshot.searchedAt,
+        queries: snapshot.queries,
+        requestText: internal + "-request-" + attempt,
+        requestHash: internal + "-hash-" + attempt,
+        rawResponse: internal + "-response-" + attempt,
+        searchItems: [{ id: internal + "-items-" + attempt }],
+      }));
+    }
+    const id = await runner.start("codex", true, profile);
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({ completed: 1, failed: 0 });
+    expect(analyze).toHaveBeenCalledOnce();
+    const prompt = analyze.mock.calls[0][0];
+    expect(prompt).not.toContain('"searchAttempts"');
+    for (const [kind, snapshot] of [
+      ["equipment", pricing],
+      ["pet", petPricing],
+    ] as const) {
+      expect(prompt).not.toContain("internal-search-" + kind);
+      expect(prompt).toContain(snapshot.inputHash);
+      expect(prompt).toContain(JSON.stringify(snapshot.queries));
+    }
+    const taskId = store.overview({ runId: id }).records.items[0].taskId!;
+    expect(store.detail(taskId)).toMatchObject({ equipmentPricing: pricing, petPricing });
+    expect(store.detail(taskId)?.result?.valuation).toMatchObject({
+      equipment_pricing: pricing,
+      pet_pricing: petPricing,
+    });
+  });
+
   it("分析校验重试复用查价快照，不重复联网搜索", async () => {
     const { store, runner, analyze, profile, pricing, searchEquipment } = await valuationSetup();
     analyze.mockResolvedValueOnce({ text: "invalid-json" });
@@ -335,7 +377,25 @@ describe("持久化的商品分析队列", () => {
       expect(store.next(id)![module === "equipment" ? "equipmentPricing" : "petPricing"]).toEqual(
         partial,
       );
+      let release!: () => void;
+      const resumedSearch = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      if (module === "equipment")
+        searchEquipment.mockImplementationOnce(async (_record, signal) => {
+          await Promise.race([resumedSearch, untilAborted(signal)]);
+          return pricing;
+        });
+      else
+        searchPets.mockImplementationOnce(async (_record, signal) => {
+          await Promise.race([resumedSearch, untilAborted(signal)]);
+          return petPricing;
+        });
       await runner.resume(id);
+      await vi.waitFor(() => expect(search).toHaveBeenCalledTimes(2));
+      expect(store.run(id)?.phase).toBe(module === "equipment" ? "equipment_search" : "pet_search");
+      expect(analyze).not.toHaveBeenCalled();
+      release();
       await runner.settled();
       expect(search).toHaveBeenCalledTimes(2);
       expect(search.mock.calls[1].at(-1)).toEqual(partial);
