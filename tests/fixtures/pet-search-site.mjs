@@ -102,6 +102,7 @@ export function petDetailDocument(options = {}) {
     sp_skill_id: "0",
   };
   if (s.incompleteJson) delete pet.equip_list;
+  if (s.missingPayloadField) delete pet[s.missingPayloadField];
   if (s.evolSkills !== undefined) pet.evol_skill_list = s.evolSkills;
   if (s.evolSkillMap !== undefined) pet.evol_skills = s.evolSkillMap;
   const legacyParts = Array.from({ length: 35 }, () => "0");
