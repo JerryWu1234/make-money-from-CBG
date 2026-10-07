@@ -192,7 +192,22 @@ export function petObservationSource(observed: PetObservation, url: string) {
     observed.equipment.some((gear) => !gear.name || !petEquipmentDescription(gear)) ||
     !same(observed.equipment.map(gearKey), observed.expectedEquipment.map(gearKey))
   )
-    throw new Error("主宝宝随身装备未完整显示或与商品数据不一致");
+    throw Object.assign(new Error("主宝宝随身装备未完整显示或与商品数据不一致"), {
+      petDiagnostics: {
+        equipmentComparison: {
+          visible: observed.equipment.map((gear) => ({
+            name: gear.name,
+            description: petEquipmentDescription(gear),
+            accessory: gear.accessory,
+          })),
+          expected: observed.expectedEquipment.map((gear) => ({
+            name: gear.name,
+            description: petEquipmentDescription(gear),
+            accessory: gear.accessory,
+          })),
+        },
+      },
+    });
   const prices = [
     ...new Set(
       observed.prices.flatMap((value) => {
