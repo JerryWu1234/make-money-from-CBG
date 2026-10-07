@@ -13,13 +13,17 @@ vi.mock("node:fs/promises", () => ({ readFile }));
 vi.mock("./work-transport", () => ({ openWorkTransport }));
 
 beforeEach(() => {
+  Reflect.deleteProperty(globalThis, Symbol.for("cbg.browser-session.v1"));
   vi.resetModules();
   vi.clearAllMocks();
   readFile.mockResolvedValue("9345\n/devtools/browser/test\n");
   openWorkTransport.mockResolvedValue(transport);
 });
 
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  Reflect.deleteProperty(globalThis, Symbol.for("cbg.browser-session.v1"));
+  vi.unstubAllEnvs();
+});
 
 describe("日常浏览器连接", () => {
   it("从用户配置发布的地址连接，支持非默认端口", () => {
@@ -56,6 +60,38 @@ describe("日常浏览器连接", () => {
     expect(openWorkTransport).toHaveBeenCalledExactlyOnceWith(
       "ws://127.0.0.1:9345/devtools/browser/test",
     );
+  });
+  it("服务模块重载仍复用同一连接，不重复请求 Chrome 授权", async () => {
+    const first = await import("./session");
+    const browser = { on: vi.fn(), isConnected: () => true };
+    connectOverCDP.mockResolvedValue(browser);
+    expect(await first.getBrowser(true)).toBe(browser);
+    vi.resetModules();
+    const reloaded = await import("./session");
+    expect(await reloaded.getBrowser()).toBe(browser);
+    expect(connectOverCDP).toHaveBeenCalledOnce();
+    expect(openWorkTransport).toHaveBeenCalledOnce();
+  });
+  it("连接建立中重载不会启动第二次握手，断开后仍必须显式重连", async () => {
+    const first = await import("./session");
+    const browser = { on: vi.fn(), isConnected: () => true };
+    let finish!: (value: typeof browser) => void;
+    connectOverCDP.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const initial = first.getBrowser(true);
+    await vi.waitFor(() => expect(connectOverCDP).toHaveBeenCalledOnce());
+    vi.resetModules();
+    const reloaded = await import("./session");
+    const resumed = reloaded.getBrowser(true);
+    finish(browser);
+    expect(await Promise.all([initial, resumed])).toEqual([browser, browser]);
+    expect(openWorkTransport).toHaveBeenCalledOnce();
+    browser.on.mock.calls.find(([event]) => event === "disconnected")![1]();
+    await expect(reloaded.getBrowser()).rejects.toThrow("浏览器未连接");
+    expect(reloaded.getCbgPage()).toBeNull();
   });
   it("握手成功后的初始化超时不会误报为等待 Chrome 授权", async () => {
     const { getBrowser } = await import("./session");
@@ -115,8 +151,13 @@ describe("日常浏览器连接", () => {
     expect(detach).not.toHaveBeenCalled();
     expect(await createBackgroundPage(browser)).toBe(worker);
     expect(send).toHaveBeenCalledOnce();
+    vi.resetModules();
+    const reloaded = await import("./session");
+    expect(reloaded.getCbgPage()).toBe(worker);
+    expect(await reloaded.createBackgroundPage(browser)).toBe(worker);
+    expect(send).toHaveBeenCalledOnce();
     closed.mockReturnValue(true);
-    expect(getCbgPage()).toBeNull();
+    expect(reloaded.getCbgPage()).toBeNull();
     expect(context.newCDPSession).not.toHaveBeenCalledWith(oldPage);
   });
 });

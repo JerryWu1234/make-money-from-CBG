@@ -4,31 +4,40 @@ import { isNavigationTransition, readStableSnapshot, runFixedWorkflow } from "./
 import type { OpenCbgResult } from "./types";
 import { diagnostics, watchWorkPage, workflowDiagnostic } from "./diagnostics";
 
-let state: OpenCbgResult = {
-  ...disconnectedState("点击开始，在本页扫码并进入角色列表。"),
-  running: false,
-  workflowStep: "idle",
+type WorkflowCache = {
+  state: OpenCbgResult;
+  task: Promise<void> | null;
+  lastDiagnostic: string;
 };
-let task: Promise<void> | null = null;
-let lastDiagnostic = "";
+const workflowKey = Symbol.for("cbg.workflow-state.v1");
+const runtime = globalThis as typeof globalThis & { [workflowKey]?: WorkflowCache };
+const cache = (runtime[workflowKey] ??= {
+  state: {
+    ...disconnectedState("点击开始，在本页扫码并进入角色列表。"),
+    running: false,
+    workflowStep: "idle",
+  },
+  task: null,
+  lastDiagnostic: "",
+});
 function recordState() {
-  const data = workflowDiagnostic(state);
+  const data = workflowDiagnostic(cache.state);
   const signature = JSON.stringify(data);
-  if (signature !== lastDiagnostic) diagnostics.record("workflow.state", data);
-  lastDiagnostic = signature;
+  if (signature !== cache.lastDiagnostic) diagnostics.record("workflow.state", data);
+  cache.lastDiagnostic = signature;
 }
 
 export function openCbg(): OpenCbgResult {
-  if (task) return state;
+  if (cache.task) return cache.state;
   diagnostics.record("workflow.start");
   const started = Date.now();
-  state = {
+  cache.state = {
     ...disconnectedState("正在连接日常 Chrome，请留意首次连接的浏览器授权提示…"),
     running: true,
     workflowStep: "connecting",
   };
   recordState();
-  task = (async () => {
+  cache.task = (async () => {
     diagnostics.record("browser.connect_start");
     const browser = await getBrowser(true);
     diagnostics.record("browser.connected", { durationMs: Date.now() - started });
@@ -36,9 +45,9 @@ export function openCbg(): OpenCbgResult {
     const page = await createBackgroundPage(browser);
     watchWorkPage(page, "list");
     diagnostics.record("page.ready", { kind: "list" });
-    state = { ...state, connected: true };
-    state = await runFixedWorkflow(page, (update) => {
-      state = { ...state, ...update };
+    cache.state = { ...cache.state, connected: true };
+    cache.state = await runFixedWorkflow(page, (update) => {
+      cache.state = { ...cache.state, ...update };
       recordState();
     });
     recordState();
@@ -46,14 +55,14 @@ export function openCbg(): OpenCbgResult {
   })()
     .catch((error: unknown) => {
       const detail = error instanceof Error ? error.message : "流程执行失败";
-      const code = `CBG_${(state.workflowStep || "unknown").toUpperCase()}`;
+      const code = `CBG_${(cache.state.workflowStep || "unknown").toUpperCase()}`;
       diagnostics.record("workflow.error", { code, error, durationMs: Date.now() - started });
       const message = /Timeout/i.test(detail)
         ? "网站响应超时，请重试当前流程。"
         : detail.split("\n")[0];
       // 错误按步骤保留，不会被下一次状态轮询的“未连接”覆盖。
-      state = {
-        ...state,
+      cache.state = {
+        ...cache.state,
         running: false,
         workflowStep: "error",
         message,
@@ -70,38 +79,38 @@ export function openCbg(): OpenCbgResult {
       console.error(`[${code}] ${detail}`);
     })
     .finally(() => {
-      task = null;
+      cache.task = null;
     });
-  return state;
+  return cache.state;
 }
 
 export async function checkCbgStatus(): Promise<OpenCbgResult> {
   // 长时间等待扫码或导航时直接返回进度，不把 HTTP 请求挂在登录操作之后。
-  if (task || state.workflowStep !== "completed") return state;
+  if (cache.task || cache.state.workflowStep !== "completed") return cache.state;
   const page = getCbgPage();
   if (!page) {
-    state = {
+    cache.state = {
       ...disconnectedState("后台工作页已关闭，请重新开始。"),
       workflowStep: "idle",
       running: false,
     };
     recordState();
-    return state;
+    return cache.state;
   }
   try {
     const auth = buildPageState(await readStableSnapshot(page, 1500));
     if (!auth.isLoggedIn)
-      state = {
+      cache.state = {
         ...auth,
         running: false,
         workflowStep: "idle",
         message: "登录已失效，请重新开始。",
       };
     else
-      state = {
-        ...state,
+      cache.state = {
+        ...cache.state,
         ...auth,
-        message: state.message,
+        message: cache.state.message,
         nickname: auth.nickname,
         accountUrs: auth.accountUrs,
         selectedRoleId: auth.selectedRoleId,
@@ -109,7 +118,7 @@ export async function checkCbgStatus(): Promise<OpenCbgResult> {
   } catch (error) {
     if (!isNavigationTransition(error)) {
       diagnostics.record("workflow.status_error", { error });
-      state = {
+      cache.state = {
         ...disconnectedState("无法读取后台工作页，请重新开始。"),
         running: false,
         workflowStep: "idle",
@@ -117,5 +126,5 @@ export async function checkCbgStatus(): Promise<OpenCbgResult> {
     }
   }
   recordState();
-  return state;
+  return cache.state;
 }
