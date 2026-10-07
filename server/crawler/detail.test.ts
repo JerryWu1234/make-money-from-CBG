@@ -4,6 +4,7 @@ import {
   collectDetail,
   collectValuationDetail,
   equipmentCaptureSummary,
+  isOnShelf,
   MAIN_TABS,
 } from "./detail";
 import { CAPTURE_VERSION, itemFromAttributes } from "./compact";
@@ -80,6 +81,30 @@ describe("装备局部补采", () => {
   afterAll(async () => {
     await browser?.close();
   });
+  it.each([
+    ["已上架", "已下架", true],
+    ["已下架", "已上架", false],
+    ["", "已上架", false],
+  ])(
+    "锚点只按主文档上架状态 %s 核对，忽略辅助 shadow body 的 %s",
+    async (state, auxiliary, expected) => {
+      const page = await browser.newPage();
+      try {
+        await page.route(url, (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `<meta charset="utf-8"><p>${state ? `是否上架：${state}` : "商品详情"}</p><browser-mcp-container></browser-mcp-container><script>const auxiliaryBody = document.createElement('body'); auxiliaryBody.innerText = '是否上架：${auxiliary}'; document.querySelector('browser-mcp-container').attachShadow({mode:'open'}).append(auxiliaryBody);</script>`,
+          }),
+        );
+        await page.goto(url);
+        expect(await page.locator("body").count()).toBe(2);
+        expect(await isOnShelf(page, listing, new AbortController().signal)).toBe(expected);
+      } finally {
+        await page.close();
+      }
+    },
+  );
+
   it("官网时间锁徽章不计装备图标，其他同尺寸未知图片仍报告缺失", async () => {
     const page = await browser.newPage();
     try {
