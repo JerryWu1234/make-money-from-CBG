@@ -1,7 +1,5 @@
-import { randomUUID } from "node:crypto";
 import type { Page } from "playwright-core";
 import { createHiddenPage, getBrowser } from "../session";
-import { crawlDatabase } from "../crawler/controller";
 import { assertAvailable, pace } from "../crawler/page";
 import { hoverForInspection } from "../viewport";
 import { buildPageState } from "../page-state";
@@ -1130,50 +1128,17 @@ export function equipmentSourceFromPages(
 
 export async function createEquipmentSource(signal: AbortSignal) {
   signal.throwIfAborted();
-  const db = crawlDatabase(),
-    owner = "equipment-" + randomUUID();
-  const acquire = () =>
-    db
-      .prepare(
-        "INSERT INTO crawl_lock VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at WHERE crawl_lock.expires_at < ? OR crawl_lock.owner=?",
-      )
-      .run(owner, Date.now() + 120000, Date.now(), owner).changes === 1;
-  if (!acquire()) throw new Error("角色采集正在使用浏览器，请先暂停采集再查装备价格");
-  const lease = new AbortController();
-  const combined = AbortSignal.any([signal, lease.signal]);
-  const timer = setInterval(() => {
-    try {
-      if (!acquire()) lease.abort(new Error("装备查询锁已失效，请重试"));
-    } catch (error) {
-      lease.abort(error);
-    }
-  }, 30000);
   let searchPage: Page | undefined, detailPage: Page | undefined;
-  const release = () => {
-    clearInterval(timer);
-    db.prepare("DELETE FROM crawl_lock WHERE owner=?").run(owner);
-  };
   try {
     const browser = await getBrowser();
-    combined.throwIfAborted();
+    signal.throwIfAborted();
     searchPage = await createHiddenPage(browser);
-    combined.throwIfAborted();
+    signal.throwIfAborted();
     detailPage = await createHiddenPage(browser);
-    combined.throwIfAborted();
-    const source = equipmentSourceFromPages(searchPage, detailPage, combined);
-    return {
-      ...source,
-      close: async () => {
-        try {
-          await source.close();
-        } finally {
-          release();
-        }
-      },
-    };
+    signal.throwIfAborted();
+    return equipmentSourceFromPages(searchPage, detailPage, signal);
   } catch (error) {
     await Promise.allSettled([searchPage?.close(), detailPage?.close()]);
-    release();
     throw error;
   }
 }

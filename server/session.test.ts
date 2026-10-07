@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { Browser, Page } from "playwright-core";
 import { parseDevToolsEndpoint } from "./chrome";
 
@@ -18,6 +18,8 @@ beforeEach(() => {
   readFile.mockResolvedValue("9345\n/devtools/browser/test\n");
   openWorkTransport.mockResolvedValue(transport);
 });
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe("日常浏览器连接", () => {
   it("从用户配置发布的地址连接，支持非默认端口", () => {
@@ -116,5 +118,88 @@ describe("日常浏览器连接", () => {
     closed.mockReturnValue(true);
     expect(getCbgPage()).toBeNull();
     expect(context.newCDPSession).not.toHaveBeenCalledWith(oldPage);
+  });
+});
+
+describe("并发创建后台页", () => {
+  const browserPages = (firstViewport: () => Promise<void>) => {
+    const pages: Page[] = [];
+    const workers: Page[] = [];
+    const context = {
+      pages: () => pages,
+      newCDPSession: vi.fn(async (page: Page) => ({
+        send: vi.fn(async () => ({ targetInfo: { targetId: String(workers.indexOf(page)) } })),
+        detach: vi.fn(),
+      })),
+    };
+    const createSession = vi.fn(async () => ({
+      send: vi.fn(async () => {
+        const index = workers.length;
+        const page = {
+          isClosed: () => false,
+          context: () => context,
+          once: vi.fn(),
+          viewportSize: () => null,
+          setViewportSize: vi.fn(async () => {
+            if (index === 0) await firstViewport();
+          }),
+        } as unknown as Page;
+        workers.push(page);
+        pages.push(page);
+        return { targetId: String(index) };
+      }),
+      detach: vi.fn(),
+    }));
+    return {
+      browser: {
+        contexts: () => [context],
+        newBrowserCDPSession: createSession,
+      } as unknown as Browser,
+      createSession,
+      workers,
+    };
+  };
+  it.each([undefined, "original"])(
+    "采集和查价同时建页时分别返回自己的页，并恢复兼容开关 %s",
+    async (previous) => {
+      vi.stubEnv("PW_CHROMIUM_ATTACH_TO_OTHER", previous);
+      const { createHiddenPage } = await import("./session");
+      let entered!: () => void, finish!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      const { browser, createSession, workers } = browserPages(async () => {
+        entered();
+        await gate;
+      });
+      const collecting = createHiddenPage(browser);
+      const pricing = createHiddenPage(browser);
+      await ready;
+      expect(createSession).toHaveBeenCalledOnce();
+      expect(process.env.PW_CHROMIUM_ATTACH_TO_OTHER).toBe("1");
+      finish();
+      expect(await Promise.all([collecting, pricing])).toEqual(workers);
+      expect(workers).toHaveLength(2);
+      expect(process.env.PW_CHROMIUM_ATTACH_TO_OTHER).toBe(previous);
+    },
+  );
+  it("创建失败后仍执行下一次创建，兼容开关不残留", async () => {
+    vi.stubEnv("PW_CHROMIUM_ATTACH_TO_OTHER", undefined);
+    const { createHiddenPage } = await import("./session");
+    const { browser, createSession, workers } = browserPages(async () => {});
+    createSession.mockResolvedValueOnce({
+      send: vi.fn(async () => {
+        throw new Error("创建失败");
+      }),
+      detach: vi.fn(),
+    });
+    const failed = expect(createHiddenPage(browser)).rejects.toThrow("创建失败");
+    const next = createHiddenPage(browser);
+    await failed;
+    expect(await next).toBe(workers[0]);
+    expect(process.env.PW_CHROMIUM_ATTACH_TO_OTHER).toBeUndefined();
   });
 });
