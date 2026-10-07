@@ -156,10 +156,12 @@ export function ValuationResultView({
   result,
   onConfigure,
   previousSettings = false,
+  expanded = false,
 }: {
   result: ValuationResult;
   onConfigure?: () => void;
   previousSettings?: boolean;
+  expanded?: boolean;
 }) {
   const amount = valuationPriceSummary(result);
   const hasBaseline =
@@ -223,7 +225,7 @@ export function ValuationResultView({
           </div>
         </>
       )}
-      <details className="analysis-valuation-details" open={!comparison}>
+      <details className="analysis-valuation-details" open={expanded || !comparison}>
         <summary>查看估值依据与查价记录</summary>
         {comparison && <p>{result.reason}</p>}
         {comparison && result.price_difference_ratio != null && (

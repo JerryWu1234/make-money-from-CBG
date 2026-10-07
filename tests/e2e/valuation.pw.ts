@@ -183,6 +183,16 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
                     },
                   }
                 : {}),
+              results: {
+                ...overview.results,
+                items: overview.results.items.map((entry) => ({
+                  ...entry,
+                  result: {
+                    ...entry.result,
+                    valuation: displayed(entry.result.valuation, entry.result.productKey),
+                  },
+                })),
+              },
               ranking: overview.ranking.map((item) => ({
                 ...item,
                 valuation: displayed(item.valuation, item.key),
@@ -199,12 +209,13 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
                 version: profile.version,
                 promptHash: profile.promptHash,
                 calculationCompatible: profile.calculationCompatible,
+                calculationVersion: profile.calculationVersion,
               },
             };
             break;
           }
           case "/api/analysis/start":
-            expect(input.sample).toBe(true);
+            expect(input.sample).toBeUndefined();
             expect(input.model).toBe("other-model");
             body = store.run(
               await runner.start(
@@ -268,13 +279,26 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await settings.getByRole("button", { name: "保存设置", exact: true }).click();
     await expect(settings).not.toBeVisible();
     await expect(
-      page.getByText("设置已保存。新批次使用新设置，旧批次仍保留原来的 Prompt 和参数。"),
+      page.getByText("设置已保存。下次分析将更新受影响的商品，已有结果保留。"),
     ).toBeVisible();
     expect(calls).toBe(0);
     expect(profile.settings).toMatchObject({ b: 0.8, extraCost: null });
     await expect(page.getByLabel("分析模型")).toHaveValue("");
     await page.getByLabel("分析模型").selectOption("other-model");
-    await page.getByRole("button", { name: "先分析 1 件", exact: true }).click();
+    await page.getByRole("button", { name: "开始分析已有商品", exact: true }).click();
+    const completedRecords = page.getByRole("tabpanel", { name: "分析记录" });
+    await expect(completedRecords.getByRole("article")).toHaveCount(4);
+    await expect(
+      completedRecords
+        .getByRole("article", { name: /角色a/ })
+        .getByRole("heading", { name: "装备联网查价", exact: true }),
+    ).toBeVisible();
+    await expect(
+      completedRecords
+        .getByRole("article", { name: /角色b/ })
+        .getByRole("heading", { name: "宝宝联网查价", exact: true }),
+    ).toBeVisible();
+    await page.getByRole("tab", { name: /全部商品/ }).click();
     await expect(page.getByRole("tabpanel", { name: "全部商品" })).toBeVisible();
     const row = page.getByRole("row").filter({ hasText: "角色a" });
     await expect(row).toContainText("暂无法比较");
@@ -299,25 +323,28 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await result.screenshot({ path: testInfo.outputPath("valuation-result.png") });
     await result.getByText("查看本次使用的 Prompt 模板", { exact: true }).click();
     await expect(result).toContainText("请简洁说明主要待确认项。");
-    expect(calls).toBe(1);
-    expect(store.overview().run).toMatchObject({ total: 1, completed: 1, model: "other-model" });
+    expect(calls).toBe(4);
+    expect(store.overview().run).toMatchObject({ total: 4, completed: 4, model: "other-model" });
     await result.getByRole("button", { name: "去补充分析设置", exact: true }).click();
     await expect(result).not.toBeVisible();
     await expect(settings).toBeVisible();
     await settings.getByRole("button", { name: "关闭分析设置" }).click();
-    await page.getByLabel("试分析数量").selectOption("3");
-    await page.getByRole("button", { name: "先分析 3 件", exact: true }).click();
+    await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
     await expect(
-      page.getByText("本批次完成：3 件成功，0 件失败，0 件复用已有结果。", { exact: true }),
-    ).toBeVisible();
+      page.getByRole("button", { name: "分析新增或已更新商品", exact: true }),
+    ).toBeEnabled();
     expect(calls).toBe(4);
+    expect(store.overview().runs).toHaveLength(1);
     expect(store.overview().run).toMatchObject({
-      total: 3,
-      completed: 3,
+      total: 4,
+      completed: 4,
       failed: 0,
       model: "other-model",
     });
-    await expect(page.getByRole("row").filter({ hasText: "角色d" })).toContainText("本批次未分析");
+    await page.getByRole("tab", { name: /全部商品/ }).click();
+    await expect(page.getByRole("row").filter({ hasText: "角色d" })).toContainText(
+      "分析完成 · 待补齐",
+    );
     const buyRow = page.getByRole("row").filter({ hasText: "角色b" });
     await expect(buyRow.getByText("挂牌低于估值", { exact: true })).toBeVisible();
     await expect(buyRow).toContainText("总估值");
@@ -343,10 +370,9 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     rangeView = false;
     await page.reload();
     await page.getByRole("tab", { name: /全部商品/ }).click();
-    await page.getByLabel("试分析数量").selectOption("3");
     await page.getByLabel("分析模型").selectOption("other-model");
     await page.screenshot({
-      path: testInfo.outputPath("valuation-three-completed-fixture.png"),
+      path: testInfo.outputPath("valuation-incremental-completed-fixture.png"),
       fullPage: true,
     });
     await buyRow.getByRole("button", { name: "查看分析", exact: true }).click();
@@ -421,10 +447,11 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     );
     await expect(settings.getByLabel("热度排名 r", { exact: true })).toHaveValue("13");
     await settings.getByRole("button", { name: "保存设置", exact: true }).click();
-    await page.getByRole("button", { name: "先分析 3 件", exact: true }).click();
+    await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
     await expect(
-      page.getByText("本批次完成：3 件成功，0 件失败，0 件复用已有结果。", { exact: true }),
-    ).toBeVisible();
+      page.getByRole("button", { name: "分析新增或已更新商品", exact: true }),
+    ).toBeEnabled();
+    await page.getByRole("tab", { name: /全部商品/ }).click();
     const pricedWithoutFees = page.getByRole("row").filter({ hasText: "角色b" });
     await pricedWithoutFees.getByRole("button", { name: "查看分析", exact: true }).click();
     await expect(buyResult.getByText("总估值", { exact: true })).toBeVisible();
