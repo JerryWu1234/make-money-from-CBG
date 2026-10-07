@@ -219,6 +219,26 @@ describe("持久化的商品分析队列", () => {
     expect(analyze).toHaveBeenCalledTimes(2);
   });
 
+  it("全部已完成但结果分散在多个任务时，不新建任务且两个商品都仍展示", async () => {
+    const { store, runner, analyze } = setup();
+    const first = await runner.start("codex", true, undefined, true, undefined, 1);
+    await runner.settled();
+    const second = await runner.start("codex");
+    await runner.settled();
+    expect(first).not.toBe(second);
+    expect(store.run(second)).toMatchObject({ total: 1, completed: 1 });
+    const noop = await runner.start("codex");
+    await runner.settled();
+    expect(noop).toBe(second);
+    expect(store.overview().runs).toHaveLength(2);
+    expect(store.overview().records.items.map((item) => [item.key, item.state])).toEqual([
+      ["a", "completed"],
+      ["b", "completed"],
+    ]);
+    expect(store.overview().results.total).toBe(2);
+    expect(analyze).toHaveBeenCalledTimes(2);
+  });
+
   it("结果按商品去重并分页，重分析后仍保留完整依据和旧调用", async () => {
     const keys = Array.from({ length: 23 }, (_, index) => `product-${index}`);
     const { store, runner, analyze } = setup(keys);

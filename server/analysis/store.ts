@@ -345,7 +345,6 @@ export class AnalysisStore {
         `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       );
       let inserted = 0;
-      let previousRun: string | undefined;
       rows.forEach((row, index) => {
         const record: SavedRoleRecord = {
           listing: JSON.parse(String(row.listing_json)),
@@ -361,10 +360,7 @@ export class AnalysisStore {
         const previous = force
           ? undefined
           : this.reusableResult(provider, model, record, document, prompt, profile);
-        if (previous && !sample) {
-          previousRun = String(previous.run_id);
-          return;
-        }
+        if (previous && !sample) return;
         inserted++;
         insert.run(
           randomUUID(),
@@ -387,10 +383,14 @@ export class AnalysisStore {
           previous?.pet_pricing_json ?? null,
         );
       });
-      if (!inserted && previousRun) {
+      if (!inserted) {
         this.db.prepare("DELETE FROM analysis_runs WHERE id=?").run(id);
+        const latest = this.db
+          .prepare(`SELECT id FROM analysis_runs
+          WHERE provider=? AND model=? AND rule_version=? ORDER BY created_at DESC,id DESC LIMIT 1`)
+          .get(provider, model, profile?.version || RULE_VERSION)!;
         this.db.exec("COMMIT");
-        return previousRun;
+        return String(latest.id);
       }
       this.db.exec("COMMIT");
       return id;
