@@ -18,6 +18,7 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
   let automatic = false;
   let calls = 0;
   let verified = false;
+  let settingsChangedByCollection = false;
   const runner = new AnalysisRunner(store, async (_provider, model) => ({
     model: model || "test-model",
     analyze: async (prompt, _schema, signal) => {
@@ -77,13 +78,25 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
             body = { state: "connected", model: "deepseek-flash", response: "READY" };
             break;
           case "/api/analysis/status":
-            body = store.overview({
-              provider: url.searchParams.get("provider") as "codex" | "deepseek",
-              runId: url.searchParams.get("runId") || undefined,
-              page: Number(url.searchParams.get("page") || 1),
-              search: url.searchParams.get("search") || undefined,
-              filter: url.searchParams.get("filter") || undefined,
-            });
+            body = {
+              ...store.overview({
+                provider: url.searchParams.get("provider") as "codex" | "deepseek",
+                runId: url.searchParams.get("runId") || undefined,
+                page: Number(url.searchParams.get("page") || 1),
+                search: url.searchParams.get("search") || undefined,
+                filter: url.searchParams.get("filter") || undefined,
+              }),
+              ...(settingsChangedByCollection
+                ? {
+                    profile: {
+                      hash: "new-server-market",
+                      version: "role-valuation-v1",
+                      promptHash: "unchanged-prompt",
+                      calculationCompatible: true,
+                    },
+                  }
+                : {}),
+            };
             break;
           case "/api/analysis/start":
             expect(input.model).toBe("deepseek-v4-pro");
@@ -151,6 +164,13 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     await page.getByRole("button", { name: "暂停分析" }).click();
     await expect(page.getByRole("button", { name: "继续分析" })).toBeEnabled();
     expect(store.activeRun()).toBeNull();
+    const pausedRunId = store.overview().run!.id;
+    settingsChangedByCollection = true;
+    await page.reload();
+    await expect(page.getByRole("button", { name: "继续分析", exact: true })).toBeEnabled();
+    await expect(
+      page.getByText("本批次的 Prompt 或参数与当前设置不同，重新分析将使用当前设置。"),
+    ).not.toBeVisible();
     await page.getByLabel("分析模型").selectOption("deepseek-flash");
     await expect(page.getByRole("button", { name: "按新模型开始分析" })).toBeEnabled();
     expect(calls).toBe(2);
@@ -158,7 +178,10 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     await page.getByRole("button", { name: "继续分析" }).click();
     await expect(page.getByRole("button", { name: "分析新增或已更新商品" })).toBeEnabled();
     expect(calls).toBe(3);
+    expect(store.overview().run?.id).toBe(pausedRunId);
+    expect(store.overview().runs).toHaveLength(1);
     expect(store.overview().run?.model).toBe("deepseek-v4-pro");
+    await page.getByRole("tab", { name: /推荐榜/ }).click();
     await expect(page.getByRole("tabpanel", { name: "推荐榜" }).getByRole("article")).toHaveCount(
       2,
     );
