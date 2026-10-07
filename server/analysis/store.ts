@@ -47,6 +47,24 @@ const stateSql = `CASE WHEN l.status!='complete' OR l.detail_json IS NULL THEN '
   WHEN t.status='completed' AND (${expiredPricingSql}) THEN 'stale'
   ELSE t.status END`;
 
+function profileScope(value: AnalysisProfile | null | undefined, serverId: string) {
+  // Only this role's server affects its calculation; other servers and source bookkeeping do not.
+  return value
+    ? {
+        version: value.version,
+        template: value.template,
+        calculationVersion: value.calculationVersion,
+        calculationCompatible: value.calculationCompatible,
+        equipmentSearch: !!value.equipmentSearch,
+        petSearch: !!value.petSearch,
+        settings: {
+          ...value.settings,
+          servers: value.settings.servers.filter((server) => server.serverId === serverId),
+        },
+      }
+    : null;
+}
+
 export class AnalysisStore {
   constructor(readonly db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS analysis_runs (
@@ -211,22 +229,6 @@ export class AnalysisStore {
     prompt: string,
     profile?: AnalysisProfile,
   ) {
-    // Other servers and source bookkeeping do not change this role's calculation.
-    const scope = (value: AnalysisProfile | null) =>
-      value && {
-        version: value.version,
-        template: value.template,
-        calculationVersion: value.calculationVersion,
-        calculationCompatible: value.calculationCompatible,
-        equipmentSearch: !!value.equipmentSearch,
-        petSearch: !!value.petSearch,
-        settings: {
-          ...value.settings,
-          servers: value.settings.servers.filter(
-            (server) => server.serverId === record.listing.serverId,
-          ),
-        },
-      };
     const previous = this.db
       .prepare(`SELECT t.*,r.profile_json FROM analysis_tasks t
       JOIN analysis_runs r ON t.run_id=r.id
@@ -245,7 +247,13 @@ export class AnalysisStore {
         const savedProfile = row.profile_json
           ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
           : null;
-        if (!isDeepStrictEqual(scope(savedProfile), scope(profile || null))) continue;
+        if (
+          !isDeepStrictEqual(
+            profileScope(savedProfile, record.listing.serverId),
+            profileScope(profile, record.listing.serverId),
+          )
+        )
+          continue;
         if (!profile) {
           if (row.prompt_hash === textHash(prompt)) return row;
           continue;
@@ -626,13 +634,17 @@ export class AnalysisStore {
       )
       .run(runId);
   }
-  detail(id: string): AnalysisDetail | null {
+  detail(id: string, currentProfile?: AnalysisProfile): AnalysisDetail | null {
     const row = this.db
       .prepare(
         "SELECT t.*,r.provider,r.model,r.rule_version,r.profile_json FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id WHERE t.id=?",
       )
       .get(id);
     if (!row) return null;
+    const listing = JSON.parse(String(row.source_listing_json)) as Listing;
+    const savedProfile = row.profile_json
+      ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
+      : null;
     const attempts = this.db
       .prepare("SELECT * FROM analysis_attempts WHERE task_id=? ORDER BY created_at ASC,rowid ASC")
       .all(row.source_task_id || id)
@@ -653,7 +665,7 @@ export class AnalysisStore {
       provider: String(row.provider) as AiProvider,
       model: String(row.model),
       ruleVersion: String(row.rule_version),
-      listing: JSON.parse(String(row.source_listing_json)),
+      listing,
       state: String(row.status),
       inputHash: String(row.input_hash),
       inputText: String(row.input_text),
@@ -663,7 +675,13 @@ export class AnalysisStore {
       completedAt: nullable(row.completed_at),
       error: nullable(row.error),
       reusedFrom: nullable(row.source_task_id),
-      profile: row.profile_json ? JSON.parse(String(row.profile_json)) : null,
+      profile: savedProfile,
+      profileChanged:
+        !!currentProfile &&
+        !isDeepStrictEqual(
+          profileScope(savedProfile, listing.serverId),
+          profileScope(currentProfile, listing.serverId),
+        ),
       equipmentPricing: row.equipment_pricing_json
         ? JSON.parse(String(row.equipment_pricing_json))
         : null,
@@ -699,6 +717,7 @@ export class AnalysisStore {
       runId?: string;
       page?: number;
       resultsPage?: number;
+      currentProfile?: AnalysisProfile;
       search?: string;
       filter?: string;
     } = {},
@@ -776,11 +795,14 @@ export class AnalysisStore {
     );
     const results = this.db
       .prepare(`SELECT t.id task_id,t.source_listing_json,t.result_json,t.completed_at,
-      r.provider,r.model,${stateSql} state ${resultsSource}
+      r.provider,r.model,r.profile_json,${stateSql} state ${resultsSource}
       ORDER BY t.completed_at DESC,t.id DESC LIMIT 20 OFFSET ?`)
       .all(...sourceValues, (resultPage - 1) * 20)
       .map((row) => {
         const listing = JSON.parse(String(row.source_listing_json)) as Listing;
+        const savedProfile = row.profile_json
+          ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
+          : null;
         return {
           taskId: String(row.task_id),
           name: listing.name,
@@ -790,6 +812,13 @@ export class AnalysisStore {
           model: String(row.model),
           completedAt: String(row.completed_at),
           stale: row.state !== "completed",
+          profileHash: savedProfile?.hash || null,
+          profileChanged:
+            !!options.currentProfile &&
+            !isDeepStrictEqual(
+              profileScope(savedProfile, listing.serverId),
+              profileScope(options.currentProfile, listing.serverId),
+            ),
           result: JSON.parse(String(row.result_json)) as ProductAnalysis,
         };
       });
