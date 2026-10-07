@@ -294,6 +294,34 @@ try {
         assert.ok(await detailPage.evaluate(() => window.petParseCalls > 0));
       });
   });
+  await check("绑定的商品信息区提供等级，基础资质与换行加成只读取一次", async () => {
+    for (const detail of [
+      { legacyDescription: true, noPanelId: true, panelLevel: null },
+      { legacyDescription: true, noPanelId: true, bonusLineBreak: true },
+      { legacyDescription: true, noPanelId: true, panelLevel: null, bonusLineBreak: true },
+    ])
+      await withSource({}, detail, async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.total, 368.6);
+        assert.equal(result.items[0].candidates[0].verified, true);
+        assert.equal(result.searchItems[0].detailFailures.length, 0);
+        assert.match(result.items[0].candidates[0].quote, /攻击资质：1550 \+22/);
+      });
+  });
+  await check("商品信息等级或重复的结构化资质冲突仍拒绝采用", async () => {
+    for (const detail of [
+      { panelLevel: null, infoLevel: "120" },
+      { panelLevel: null, infoLevel: "" },
+      { panelLevel: "120", infoLevel: "119" },
+      { duplicateFields: [{ name: "攻击资质", value: "1551 +22" }] },
+    ])
+      await withSource({}, detail, async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.total, null);
+        assert.equal(result.items[0].candidates[0].verified, false);
+        assert.ok(result.searchItems[0].detailFailures.length > 0);
+      });
+  });
   await check("分号描述缺少官网解析器、解析失败或完整列表缺失时保留读取失败", async () => {
     for (const detail of [
       { legacyDescription: true, missingPetParser: true },
@@ -359,6 +387,13 @@ try {
         const result = await searchPetPricing(record(), control.signal, source);
         assert.equal(result.total, null);
         assert.match(result.items[0].candidates[0].reason, /赐福配置/);
+        assert.equal(result.items[0].searchState, "unsupported");
+        assert.equal(result.items[0].status, "unsupported");
+        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].referencePrice, null);
+        assert.equal(result.items[0].similarEstimate.range, null);
+        assert.ok(result.searchItems.some((item) => item.unsupportedDetails.length > 0));
+        assert.ok(result.searchItems.every((item) => item.detailFailures.length === 0));
       });
     await withSource({}, {}, async ({ source, control }) => {
       const input = record();
@@ -369,6 +404,27 @@ try {
       assert.deepEqual(detailVisits, []);
     });
   });
+  await check("查询同时含赐福样本与真正的描述读取故障时，故障仍待重试", () =>
+    withSource(
+      {
+        pages: [
+          [
+            { eid: "cifu", name: "宝宝昵称", type: "2001" },
+            { eid: "broken", name: "宝宝昵称", type: "2001" },
+          ],
+        ],
+      },
+      (id) => (id === "cifu" ? { evolSkills: [{ skill_type: "1" }] } : { incompleteJson: true }),
+      async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.total, null);
+        assert.equal(result.searchComplete, false);
+        assert.equal(result.items[0].searchState, "read_failed");
+        assert.ok(result.searchItems.some((item) => item.detailFailures.length > 0));
+        assert.ok(result.searchItems.some((item) => item.unsupportedDetails.length > 0));
+      },
+    ),
+  );
   await check("明确base+bonus与合计不同，资质冲突不套价", () =>
     withSource(
       {},

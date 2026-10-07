@@ -72,6 +72,10 @@ export function petDetailDocument(options = {}) {
     legacyDescription: false,
     missingPetParser: false,
     petParserFailure: false,
+    panelLevel: "119",
+    infoLevel: "119",
+    bonusLineBreak: false,
+    duplicateFields: [],
     missingDecoder: false,
     decoderFailure: false,
     malformedDecoded: false,
@@ -116,10 +120,15 @@ export function petDetailDocument(options = {}) {
   const legacy = legacyParts.join(";");
   const description = s.legacyDescription ? legacy : JSON.stringify(pet);
   const rows = s.fields.filter(({ name }) => name !== "类型" && name !== "等级");
-  const table = rows
+  const valueMarkup = (value) =>
+    s.bonusLineBreak
+      ? escape(value).replace(/ \+(\d+)/, '<span style="display:block">+$1</span>')
+      : escape(value);
+  const tableRows = [...rows, ...s.duplicateFields];
+  const table = tableRows
     .map((field, index) =>
       index % 2 === 0
-        ? `<tr><th>${field.name === "成长" ? "成　　长" : escape(field.name)}：</th><td>${escape(field.value)}</td>${rows[index + 1] ? `<th>${escape(rows[index + 1].name)}：</th><td>${escape(rows[index + 1].value)}</td>` : ""}</tr>`
+        ? `<tr><th>${field.name === "成长" ? "成　　长" : escape(field.name)}：</th><td>${valueMarkup(field.value)}</td>${tableRows[index + 1] ? `<th>${escape(tableRows[index + 1].name)}：</th><td>${valueMarkup(tableRows[index + 1].value)}</td>` : ""}</tr>`
         : "",
     )
     .join("");
@@ -141,8 +150,8 @@ export function petDetailDocument(options = {}) {
         `<img width="40" height="40" src="https://xyq.cbg.163.com/images/${gear.shipin ? "pet_shipin" : "equip"}/small/1.gif" data_equip_name="${escape(gear.name)}" data_equip_desc="${escape(gear.description)}">`,
     )
     .join("");
-  const info = `<ul id="info_panel"><li>服务器：测试区 ID：${escape(s.nickname)} 等级：119</li><li>状态：${escape(s.status)}</li><li>价格：<span class="price">￥${s.price}（元）</span><span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul>`;
-  const panel = `<div class="attribute"><div${s.noPanelId ? "" : ' id="equip_desc_panel"'}><p>名字：${escape(s.nickname)} 等级：119</p><table>${table}</table><h4>赐福技能</h4>${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div></div>`;
+  const info = `<ul id="info_panel"><li>服务器：测试区 ID：${escape(s.nickname)} 等级：${escape(s.infoLevel)}</li><li>状态：${escape(s.status)}</li><li>价格：<span class="price">￥${s.price}（元）</span><span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul>`;
+  const panel = `<div class="attribute"><div${s.noPanelId ? "" : ' id="equip_desc_panel"'}><p>名字：${escape(s.nickname)}${s.panelLevel === null ? "" : ` 等级：${escape(s.panelLevel)}`}</p><table>${table}</table><h4>赐福技能</h4>${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div></div>`;
   const main = s.splitRegions
     ? `<section>${info}</section><section>${panel}</section>`
     : `<div class="${escape(s.wrapperClass)}">${info}${panel}${s.duplicatePanel ? panel : ""}${s.footerStatus ? `<footer>${escape(s.footerStatus)}</footer>` : ""}</div>`;
