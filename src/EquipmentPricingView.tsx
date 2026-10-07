@@ -119,6 +119,12 @@ export function EquipmentPricingView({
             ? safeLink(baseline.source.url)
             : null;
         const baselineLabel = baseline?.kind === "ignored" ? "低值未计入" : "默认参考价";
+        const searchLabel =
+          item.searchState === "read_failed"
+            ? "详情读取失败，需重试"
+            : item.searchState === "pending"
+              ? "查价未完成，继续时重试"
+              : label(item.status);
         return (
           <section key={item.key} className="analysis-evidence-card">
             <header>
@@ -141,7 +147,7 @@ export function EquipmentPricingView({
                         ? valuationMoney(item.similarEstimate.median)
                         : item.similarEstimate?.range
                           ? valuationRangeMoney(item.similarEstimate.range)
-                          : label(item.status)}
+                          : searchLabel}
               </span>
             </header>
             <p>
@@ -153,7 +159,7 @@ export function EquipmentPricingView({
                     ? "相近装备参考价（挂牌中位数）"
                     : item.similarEstimate?.range
                       ? "相近配置参考区间"
-                      : label(item.status)}
+                      : searchLabel}
             </p>
             {baseline && (
               <>

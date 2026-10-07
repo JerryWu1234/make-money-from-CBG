@@ -88,6 +88,8 @@ export function AnalysisPreview() {
   const searchAsset = active?.phase === "pet_search" ? "宝宝" : "装备";
   const finished = (run?.completed || 0) + (run?.failed || 0);
   const sameProfile = !data?.profile || run?.profileHash === data.profile.hash;
+  const sameCalculation =
+    !run?.calculationVersion || run.calculationVersion === data?.profile?.calculationVersion;
   const selectedModel = selectedModels[provider];
   const effectiveModel = selectedModel || defaultModels[provider];
   const sameModel = !modelChanged || !effectiveModel || run?.model === effectiveModel;
@@ -164,7 +166,7 @@ export function AnalysisPreview() {
   const start = useCallback(
     async (selected: AiProvider) => {
       if (data?.profile) setTab("all");
-      if (sameProfile && sameModel && run?.provider === selected && run.status === "paused")
+      if (sameCalculation && sameModel && run?.provider === selected && run.status === "paused")
         await mutate("/api/analysis/resume", { runId: run.id });
       else
         await mutate("/api/analysis/start", {
@@ -172,7 +174,7 @@ export function AnalysisPreview() {
           model: selectedModels[selected] || undefined,
         });
     },
-    [run, mutate, sameProfile, sameModel, selectedModels, data?.profile],
+    [run, mutate, sameCalculation, sameModel, selectedModels, data?.profile],
   );
   const changeProvider = (selected: AiProvider) => {
     setProvider(selected);
@@ -192,10 +194,10 @@ export function AnalysisPreview() {
       ? searchingEquipment
         ? "正在查价…"
         : "正在分析…"
-      : run && !sameProfile
-        ? "按当前设置重新分析"
-        : run && !sameModel
-          ? "按新模型开始分析"
+      : run && !sameModel
+        ? "按新模型开始分析"
+        : run && !sameCalculation
+          ? "按新规则开始分析"
           : run?.status === "paused"
             ? "继续分析"
             : run?.status === "completed"
@@ -287,7 +289,7 @@ export function AnalysisPreview() {
                   暂停分析
                 </button>
               )}
-              {!running && !!run?.failed && (
+              {!running && sameCalculation && !!run?.failed && (
                 <button
                   className="analysis-button analysis-button-outline"
                   disabled={busy}
@@ -331,12 +333,12 @@ export function AnalysisPreview() {
                     ? searchingEquipment
                       ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
                       : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
-                    : run && !sameProfile
-                      ? "本批次的 Prompt 或参数与当前设置不同，重新分析将使用当前设置。"
-                      : run && !sameModel
-                        ? "模型选择已更改，开始时创建新批次；旧批次保留原来的模型和结果。"
+                    : run && !sameModel
+                      ? "模型选择已更改，开始时创建新批次；旧批次保留原来的模型和结果。"
+                      : run && !sameCalculation
+                        ? "估值规则已更新，开始分析会使用新规则；旧批次和已完成结果保留。"
                         : run?.status === "paused"
-                          ? `已暂停，已完成结果保留；继续时沿用 ${run.model}。选择模型可开始新批次。`
+                          ? "分析已暂停，已完成结果保留；继续分析会沿用本批次设置。"
                           : run?.status === "completed"
                             ? `本批次完成：${run.completed} 件成功，${run.failed} 件失败，${run.reused} 件复用已有结果。`
                             : `${data.counts.complete} 件资料完整，可以开始分析；${data.counts.waitingDetail} 件等待补采。`}

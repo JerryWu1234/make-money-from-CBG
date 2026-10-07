@@ -50,11 +50,15 @@ const matcher = await moduleUrl("server/analysis/equipment-match.ts", {
   "./equip-attributes": attributes,
 });
 const integrity = await moduleUrl("server/analysis/pricing-integrity.ts");
+const progress = await moduleUrl("server/analysis/pricing-progress.ts", {
+  "./pricing-integrity": integrity,
+});
 const estimate = await moduleUrl("server/analysis/pricing-estimate.ts", {
   "./pricing-integrity": integrity,
 });
 const jade = await moduleUrl("server/analysis/jade-query.ts", { "../crawler/compact": compact });
 const pricing = await moduleUrl("server/analysis/equipment-pricing.ts", {
+  "./pricing-progress": progress,
   "../crawler/compact": compact,
   "./equip-attributes": attributes,
   "./equipment-match": matcher,

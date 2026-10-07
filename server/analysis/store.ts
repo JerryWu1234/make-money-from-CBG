@@ -151,7 +151,11 @@ export class AnalysisStore {
       coalesce(sum(t.status='completed'),0) completed,coalesce(sum(t.status='failed'),0) failed,
       coalesce(sum(t.status='queued'),0) queued,coalesce(sum(t.reused),0) reused,
       (SELECT json_extract(source_listing_json,'$.name') FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current,
-      (SELECT CASE WHEN equipment_pricing_json IS NULL AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search' WHEN pet_pricing_json IS NULL AND json_extract(r.profile_json,'$.petSearch')=1 THEN 'pet_search' ELSE 'analysis' END FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) phase
+      (SELECT CASE
+        WHEN (equipment_pricing_json IS NULL OR json_type(equipment_pricing_json,'$.searchComplete')='false') AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search'
+        WHEN (pet_pricing_json IS NULL OR json_type(pet_pricing_json,'$.searchComplete')='false') AND json_extract(r.profile_json,'$.petSearch')=1 THEN 'pet_search'
+        ELSE 'analysis'
+      END FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) phase
       FROM analysis_runs r LEFT JOIN analysis_tasks t ON t.run_id=r.id WHERE r.id=? GROUP BY r.id`)
       .get(id);
     return row
@@ -338,9 +342,10 @@ export class AnalysisStore {
     if (
       this.db
         .prepare(
-          "UPDATE analysis_tasks SET status='running',error=NULL WHERE id=? AND status='queued' AND equipment_pricing_json IS NULL",
+          "UPDATE analysis_tasks SET status='running',error=NULL WHERE id=? AND status='queued' AND equipment_pricing_json IS ?",
         )
-        .run(task.id).changes !== 1
+        .run(task.id, task.equipmentPricing ? JSON.stringify(task.equipmentPricing) : null)
+        .changes !== 1
     )
       throw new Error("装备查价任务状态已变化");
   }
@@ -367,9 +372,15 @@ export class AnalysisStore {
       if (
         this.db
           .prepare(
-            "UPDATE analysis_tasks SET equipment_pricing_json=?,prompt_text=?,prompt_hash=?,status='queued',error=NULL WHERE id=? AND status='running' AND equipment_pricing_json IS NULL",
+            "UPDATE analysis_tasks SET equipment_pricing_json=?,prompt_text=?,prompt_hash=?,status='queued',error=NULL WHERE id=? AND status='running' AND equipment_pricing_json IS ?",
           )
-          .run(JSON.stringify(snapshot), prompt, textHash(prompt), task.id).changes !== 1
+          .run(
+            JSON.stringify(snapshot),
+            prompt,
+            textHash(prompt),
+            task.id,
+            task.equipmentPricing ? JSON.stringify(task.equipmentPricing) : null,
+          ).changes !== 1
       )
         throw new Error("装备查价任务状态已变化");
       this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
@@ -384,7 +395,7 @@ export class AnalysisStore {
     if (!this.owns(owner)) throw new Error("分析锁已失效");
     this.db
       .prepare(
-        "UPDATE analysis_tasks SET status='queued' WHERE id=? AND status='running' AND equipment_pricing_json IS NULL AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')",
+        "UPDATE analysis_tasks SET status='queued' WHERE id=? AND status='running' AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')",
       )
       .run(task.id, task.id);
   }
@@ -393,9 +404,9 @@ export class AnalysisStore {
     if (
       this.db
         .prepare(
-          "UPDATE analysis_tasks SET status='running',error=NULL WHERE id=? AND status='queued' AND pet_pricing_json IS NULL",
+          "UPDATE analysis_tasks SET status='running',error=NULL WHERE id=? AND status='queued' AND pet_pricing_json IS ?",
         )
-        .run(task.id).changes !== 1
+        .run(task.id, task.petPricing ? JSON.stringify(task.petPricing) : null).changes !== 1
     )
       throw new Error("宝宝查价任务状态已变化");
   }
@@ -415,9 +426,15 @@ export class AnalysisStore {
       if (
         this.db
           .prepare(
-            "UPDATE analysis_tasks SET pet_pricing_json=?,prompt_text=?,prompt_hash=?,status='queued',error=NULL WHERE id=? AND status='running' AND pet_pricing_json IS NULL",
+            "UPDATE analysis_tasks SET pet_pricing_json=?,prompt_text=?,prompt_hash=?,status='queued',error=NULL WHERE id=? AND status='running' AND pet_pricing_json IS ?",
           )
-          .run(JSON.stringify(snapshot), prompt, textHash(prompt), task.id).changes !== 1
+          .run(
+            JSON.stringify(snapshot),
+            prompt,
+            textHash(prompt),
+            task.id,
+            task.petPricing ? JSON.stringify(task.petPricing) : null,
+          ).changes !== 1
       )
         throw new Error("宝宝查价任务状态已变化");
       this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
@@ -432,7 +449,7 @@ export class AnalysisStore {
     if (!this.owns(owner)) throw new Error("分析锁已失效");
     this.db
       .prepare(
-        "UPDATE analysis_tasks SET status='queued' WHERE id=? AND status='running' AND pet_pricing_json IS NULL AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')",
+        "UPDATE analysis_tasks SET status='queued' WHERE id=? AND status='running' AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')",
       )
       .run(task.id, task.id);
   }

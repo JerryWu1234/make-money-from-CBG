@@ -102,6 +102,57 @@ async function matchedPricing(record = recordWithEquipment()) {
 }
 
 describe("装备联网查价的来源核对", () => {
+  it("预算中断保存逐件进度，继续只重查未完成装备并保留完整来源", async () => {
+    const record = recordWithEquipment();
+    record.detail!.tabs.at(-1)!.items!.push({ ...record.detail!.tabs.at(-1)!.items![0], index: 1 });
+    const keys = equipmentInventory(record).items.map((item) => item.key);
+    const read = vi.fn().mockResolvedValue(sourcePage(100));
+    const firstSearch = vi.fn().mockResolvedValue({
+      queries: ["first"],
+      items: [
+        { key: keys[0], candidates: [candidate()], searchState: "completed" },
+        { key: keys[1], candidates: [], searchState: "pending", note: "时间预算耗尽" },
+      ],
+    });
+    const first = await searchEquipmentPrices(record, new AbortController().signal, {
+      findCandidates: firstSearch,
+      readSource: read,
+    });
+    expect(first.searchComplete).toBe(false);
+    expect(first.items.map((item) => item.searchState)).toEqual(["completed", "pending"]);
+    const secondSearch = vi.fn().mockResolvedValue({
+      queries: ["second"],
+      items: [{ key: keys[1], candidates: [candidate(200)], searchState: "completed" }],
+    });
+    const second = await searchEquipmentPrices(
+      record,
+      new AbortController().signal,
+      { findCandidates: secondSearch, readSource: async () => sourcePage(200) },
+      undefined,
+      first,
+    );
+    expect(secondSearch.mock.calls[0][0].map((item: { key: string }) => item.key)).toEqual([
+      keys[1],
+    ]);
+    expect(second).toMatchObject({
+      searchComplete: true,
+      knownTotal: 300,
+      total: 300,
+      queries: ["first", "second"],
+    });
+    expect(second.items[0]).toEqual(first.items[0]);
+    expect(second.searchAttempts).toHaveLength(2);
+    expect(JSON.parse(second.searchAttempts![0].rawResponse).items[1].searchState).toBe("pending");
+    const expired = { ...first, searchedAt: "2000-01-01T00:00:00.000Z" };
+    await searchEquipmentPrices(
+      record,
+      new AbortController().signal,
+      { findCandidates: firstSearch, readSource: read },
+      undefined,
+      expired,
+    );
+    expect(firstSearch.mock.calls.at(-1)![0]).toHaveLength(2);
+  });
   it("3条相近报价生成参考中位数和范围，同配报价优先计入金额", async () => {
     const record = recordWithEquipment();
     record.detail!.tabs.at(-1)!.items![0].modelId = "2912";

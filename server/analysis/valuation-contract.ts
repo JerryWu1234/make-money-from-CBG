@@ -142,6 +142,7 @@ export function valuationPrompt(
               rawResponse: undefined,
               requestText: undefined,
               searchItems: undefined,
+              searchAttempts: undefined,
               usage: undefined,
             },
           }
@@ -153,6 +154,7 @@ export function valuationPrompt(
               rawResponse: undefined,
               requestText: undefined,
               searchItems: undefined,
+              searchAttempts: undefined,
               usage: undefined,
             },
           }
