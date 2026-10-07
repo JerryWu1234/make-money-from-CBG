@@ -11,7 +11,7 @@ export type SimilarEstimate = {
   median?: number;
   issues: string[];
 };
-export const SIMILAR_POLICY_VERSION = "same-level-comparables-v1";
+export const SIMILAR_POLICY_VERSION = "partial-current-skills-v2";
 export const EQUIPMENT_SIMILAR_POLICY_VERSION = "same-core-gem-bands-v4";
 
 export function buildEquipmentEstimate(candidates: EquipmentCandidate[]): SimilarEstimate {

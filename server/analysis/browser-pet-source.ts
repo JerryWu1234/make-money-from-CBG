@@ -6,6 +6,14 @@ import { buildPageState } from "../page-state";
 import { readStableSnapshot } from "../workflow";
 import { cleanDescription } from "../crawler/compact";
 import {
+  currentPetSkills,
+  petSkillState,
+  protectedPetSkills,
+  petLevelBounds,
+  PET_APTITUDE_TOLERANCE,
+  PET_GROWTH_TOLERANCE,
+} from "./pet-match";
+import {
   equipmentIdentity,
   safeEquipmentUrl,
   pageText,
@@ -75,20 +83,26 @@ export function petQuery(
     const base = value?.match(/^([0-9]+)(?:\s*\+\s*[0-9]+)?$/)?.[1];
     if (base !== undefined && Number(base) <= 10000) {
       const tolerance =
-        matchType === "similar" && name.endsWith("资质") ? (name === "速度资质" ? 0.1 : 0.05) : 0;
+        matchType === "similar" && name.endsWith("资质") ? PET_APTITUDE_TOLERANCE : 0;
       args[parameter] = Math.ceil(Number(base) * (1 - tolerance));
     }
   }
   if (args.speed_aptitude_min !== undefined) {
     const speed = Number(fields.get("速度资质")?.match(/^([0-9]+)/)?.[1]);
     args.speed_aptitude_max =
-      matchType === "similar" ? Math.min(10000, Math.floor(speed * 1.1)) : args.speed_aptitude_min;
+      matchType === "similar"
+        ? Math.min(10000, Math.floor(speed * (1 + PET_APTITUDE_TOLERANCE)))
+        : args.speed_aptitude_min;
   }
   const growth = fields.get("成长");
-  if (growth && /^\d\.\d{1,3}$/.test(growth)) args.growth = Math.round(Number(growth) * 1000);
+  if (growth && /^\d\.\d{1,3}$/.test(growth))
+    args.growth = Math.round(
+      (Number(growth) - (matchType === "similar" ? PET_GROWTH_TOLERANCE : 0)) * 1000,
+    );
   if (["是否宝宝", "宝宝"].some((name) => /^(?:是|1)$/.test(fields.get(name) || "")))
     args.is_baobao = 1;
-  const mappedSkills = item.skills.map((name) => {
+  const targetSkills = currentPetSkills(item);
+  const mappedSkills = targetSkills.map((name) => {
     const observed = item.skillObservations?.find((skill) => skill.rawName === name);
     if (observed && observed.state !== "current") return [];
     const matches = config.skills.filter(([, label]) => label === name);
@@ -100,11 +114,13 @@ export function petQuery(
   if (skills.length) args.skill = [...new Set(skills)].join(",");
   // Partial names, future/conditional skills and ambiguous IDs cannot establish a current count.
   if (
-    item.skills.length &&
+    matchType === "exact" &&
+    targetSkills.length &&
+    !item.skills.some((name) => ["conditional", "unknown"].includes(petSkillState(name, item))) &&
     mappedSkills.every((ids) => ids.length === 1) &&
-    new Set(skills).size === item.skills.length
+    new Set(skills).size === targetSkills.length
   )
-    args.skill_num = item.skills.length;
+    args.skill_num = targetSkills.length;
   for (const [key, choices] of [
     ["high_neidan", config.highNeidans],
     ["low_neidan", config.lowNeidans],
@@ -112,9 +128,52 @@ export function petQuery(
     const matched = item.innerSkills.flatMap((skill) =>
       choices.filter(([, name]) => name === skill.name).map(([id]) => String(id)),
     );
-    if (matched.length) args[key] = matched.join(",");
+    if (matchType === "exact" && matched.length) args[key] = matched.join(",");
   }
   return args;
+}
+
+/** Same-level comparables first, then bounded nearby levels; query IDs always come from the official directory. */
+export function petQueries(item: PetPricingItem, config: PetSearchConfig) {
+  const exact = { matchType: "exact" as const, args: petQuery(item, config, "exact") };
+  const current = currentPetSkills(item);
+  const protectedSkills = protectedPetSkills(current);
+  const ordinary = current
+    .filter((name) => !protectedSkills.includes(name))
+    .sort((left, right) => Number(right.startsWith("高级")) - Number(left.startsWith("高级")));
+  const needed = Math.max(2, Math.ceil(current.length * 0.6), protectedSkills.length);
+  const subsets = [current];
+  if (current.length > needed && ordinary.length) {
+    for (let start = 0; start < Math.min(ordinary.length, 3); start++) {
+      const rotated = [...ordinary.slice(start), ...ordinary.slice(0, start)];
+      subsets.push([
+        ...protectedSkills,
+        ...rotated.slice(0, Math.max(0, needed - protectedSkills.length)),
+      ]);
+    }
+  }
+  const similar = subsets.map((skills) => ({
+    matchType: "similar" as const,
+    args: petQuery({ ...item, skills }, config, "similar"),
+  }));
+  if (item.level !== null && item.level > 0) {
+    const [level_min, level_max] = petLevelBounds(item.level);
+    similar.push({
+      matchType: "similar",
+      args: { ...similar[similar.length - 1].args, level_min, level_max },
+    });
+  }
+  const seen = new Set<string>();
+  return [
+    exact,
+    ...similar.filter(({ args }) => {
+      const key = JSON.stringify(args);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }),
+    { matchType: "diagnostic" as const, args: petQuery(item, config, "diagnostic") },
+  ];
 }
 
 type PetObservation = {
@@ -132,6 +191,9 @@ type PetObservation = {
   parsedFields: { name: string; value: string }[];
   skills: string[];
   expectedSkills: string[];
+  unsupportedDescription?: boolean;
+  futureSkills?: string[];
+  expectedFutureSkills?: string[];
   innerSkills: { name: string; level: string }[];
   expectedInner: { name: string; level: string }[];
   equipment: PetEquipment[];
@@ -181,6 +243,12 @@ export function petObservationSource(observed: PetObservation, url: string) {
         },
       },
     });
+  if (
+    !observed.unsupportedDescription &&
+    (observed.futureSkills?.length || observed.expectedFutureSkills?.length) &&
+    !same(observed.futureSkills || [], observed.expectedFutureSkills || [])
+  )
+    throw new Error("主宝宝未来技能预览与官方配置不一致，不能当作当前技能");
   const innerKey = (skill: { name: string; level: string }) => skill.name + skill.level + "层";
   if (
     observed.innerSkills.some((skill) => !skill.name || !/^[1-5]$/.test(skill.level)) ||
@@ -248,6 +316,7 @@ export function petObservationSource(observed: PetObservation, url: string) {
     "召唤兽",
     ...[...fields].map(([name, value]) => name + "：" + value),
     "技能：" + (observed.skills.join("、") || "无"),
+    ...(observed.futureSkills?.length ? ["未来技能：" + observed.futureSkills.join("、")] : []),
     "内丹：" +
       (observed.innerSkills.map((skill) => skill.name + "(" + skill.level + "层)").join("、") ||
         "无"),
@@ -259,6 +328,9 @@ export function petObservationSource(observed: PetObservation, url: string) {
     "<main><pre>" +
     escape(text) +
     "</pre>" +
+    [...observed.skills, ...(observed.futureSkills || [])]
+      .map((name) => '<img data_skill_type="cifu" data_equip_name="' + escape(name) + '">')
+      .join("") +
     observed.equipment
       .map(
         (gear) =>
@@ -602,12 +674,34 @@ async function readMainPet(page: Page, signal: AbortSignal) {
           : typeof value === "string"
             ? value.trim() !== "" && value.trim() !== "0"
             : !!value;
-    const unsupportedDescription = [
+    const evolutionPayloads = [
       pet?.evol_skill_list,
       pet?.evol_skills,
       pet?.other?.EvolSkill,
       pet?.other?.evol_skills,
-    ].some(hasValues);
+    ].filter(hasValues);
+    // Only a complete ID list with known official names can establish future configuration.
+    // Unknown maps/conditional formats remain unsupported instead of being silently discarded.
+    const supportedEvolution = evolutionPayloads.every(
+      (value) =>
+        Array.isArray(value) &&
+        value.every(
+          (id) =>
+            (typeof id === "number" || typeof id === "string") &&
+            /^\d+$/.test(String(id)) &&
+            !!g.CBG_GAME_CONFIG?.pet_skill_desc?.[String(id)]?.name,
+        ),
+    );
+    const expectedFutureSkills = supportedEvolution
+      ? [
+          ...new Set(
+            evolutionPayloads
+              .flat()
+              .map((id) => g.CBG_GAME_CONFIG.pet_skill_desc[String(id)].name + "（进化后获得）"),
+          ),
+        ]
+      : [];
+    const unsupportedDescription = !supportedEvolution;
     if (
       !pet ||
       !Array.isArray(pet.all_skills) ||
@@ -760,7 +854,10 @@ async function readMainPet(page: Page, signal: AbortSignal) {
       })
       .join("\n");
     return {
-      unsupportedDescription: unsupportedDescription || futureSkills.length > 0,
+      unsupportedDescription:
+        unsupportedDescription || (futureSkills.length > 0 && expectedFutureSkills.length === 0),
+      futureSkills,
+      expectedFutureSkills,
       productId: raw.eid,
       serverId: raw.serverid ?? raw.server_id,
       productName: raw.equip_name,
@@ -955,14 +1052,19 @@ export function petSourceFromPages(
             );
           };
         });
-        for (const matchType of ["exact", "similar", "diagnostic"] as const) {
+        for (const { matchType, args: queryArgs } of petQueries(item, config)) {
           if (
             matchType === "similar" &&
             candidates.some((candidate) => candidate.matchType !== "similar")
           )
             break;
-          if (matchType === "diagnostic" && count > 0) break;
-          args = petQuery(item, config, matchType);
+          if (
+            matchType === "similar" &&
+            candidates.filter((candidate) => candidate.matchType === "similar").length >= 3
+          )
+            break;
+          if (matchType === "diagnostic" && candidates.length) break;
+          args = queryArgs;
           query =
             "全服 / 综合排序 / " + item.name + " / " + matchType + " / " + JSON.stringify(args);
           const seen = new Set<string>();
@@ -1098,7 +1200,13 @@ export function petSourceFromPages(
                 continue;
               }
               const sourceCached = cache.has(safeEquipmentUrl(row.url));
-              if ((!sourceCached && details >= MAX_DETAILS) || Date.now() >= deadline) {
+              if (
+                (!sourceCached &&
+                  (details >= MAX_DETAILS ||
+                    readDetails >=
+                      (matchType === "exact" ? 6 : matchType === "similar" ? 5 : 3))) ||
+                Date.now() >= deadline
+              ) {
                 pageFullyRead = false;
                 break;
               }
@@ -1141,8 +1249,10 @@ export function petSourceFromPages(
                     verified: false,
                     reason: "仅用于真实独立详情诊断，不计价：" + candidate.reason,
                   });
-                else if (candidate.verified) candidates.push(candidate);
-                else rejected.push(candidate);
+                else if (candidate.verified) {
+                  if (!candidates.some((saved) => equipmentIdentity(saved.url) === identity))
+                    candidates.push(candidate);
+                } else rejected.push(candidate);
               } catch (error) {
                 requestSignal.throwIfAborted();
                 if (error instanceof Error && /登录|安全验证|频繁|网站繁忙/.test(error.message))

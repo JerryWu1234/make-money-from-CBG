@@ -6,6 +6,7 @@ import {
   petObservationSource,
   petPageSource,
   petQuery,
+  petQueries,
   petSourceFromPages,
   type PetSearchConfig,
 } from "./browser-pet-source";
@@ -115,7 +116,7 @@ describe("官网宝宝查询参数", () => {
     expect(petQuery({ ...item(), skills: ["未公开技能"] }, config)).not.toHaveProperty("skill");
     expect(petQuery({ ...item(), skills: ["未公开技能"] }, config)).not.toHaveProperty("skill_num");
   });
-  it("真实九个可见技能只映射五个时，不发送九技能的误筛选，也不推断当前技能数是五", () => {
+  it("五个当前技能与四个明确未来技能分别计数，不发送九技能误筛选", () => {
     const target = {
       ...item(),
       skills: [
@@ -139,7 +140,7 @@ describe("官网宝宝查询参数", () => {
     ];
     const query = petQuery(target, { ...config, skills });
     expect(query.skill).toBe("553,429,315,327,410");
-    expect(query).not.toHaveProperty("skill_num");
+    expect(query.skill_num).toBe(5);
     expect(target.skills).toHaveLength(9);
   });
   it("技能ID须与官网名称目录相符，未来/赐福技能不被当当前技能数量", () => {
@@ -155,7 +156,8 @@ describe("官网宝宝查询参数", () => {
     for (const state of ["future", "conditional", "unknown"] as const) {
       target.skillObservations[0].state = state;
       expect(petQuery(target, config)).toMatchObject({ skill: "2" });
-      expect(petQuery(target, config)).not.toHaveProperty("skill_num");
+      if (state === "future") expect(petQuery(target, config).skill_num).toBe(1);
+      else expect(petQuery(target, config)).not.toHaveProperty("skill_num");
     }
     target.skillObservations[0].state = "current";
     target.skillObservations[0].id = "99";
@@ -177,22 +179,22 @@ describe("官网宝宝查询参数", () => {
     target.fields.push({ name: "宝宝", value: "是" });
     expect(petQuery(target, config)).toHaveProperty("is_baobao", 1);
   });
-  it("相似筛选保持等级/成长/技能/内丹，有限调整主要资质下限及速度窗口", () => {
+  it("相似筛选优先同级，有限成长资质窗口，不强制完整技能数和内丹", () => {
     expect(petQuery(item(), config, "similar")).toMatchObject({
       type: "2001,2002",
       level_min: 119,
       level_max: 119,
-      attack_aptitude: 1473,
-      defence_aptitude: 1330,
-      physical_aptitude: 4750,
-      magic_aptitude: 2660,
-      speed_aptitude_min: 1080,
-      speed_aptitude_max: 1320,
-      growth: 1280,
+      attack_aptitude: 1318,
+      defence_aptitude: 1190,
+      physical_aptitude: 4250,
+      magic_aptitude: 2380,
+      speed_aptitude_min: 1020,
+      speed_aptitude_max: 1380,
+      growth: 1250,
       skill: "1,2",
-      skill_num: 2,
-      high_neidan: "9",
     });
+    expect(petQuery(item(), config, "similar")).not.toHaveProperty("skill_num");
+    expect(petQuery(item(), config, "similar")).not.toHaveProperty("high_neidan");
     const max = item();
     max.fields = fields.map((field) =>
       field.name === "速度资质" ? { ...field, value: "10000" } : field,
@@ -544,8 +546,8 @@ describe("宝宝查询使用独立后台页", () => {
       });
       expect(calls[1]).toMatchObject({
         level_min: 119,
-        speed_aptitude_min: 1080,
-        speed_aptitude_max: 1320,
+        speed_aptitude_min: 1020,
+        speed_aptitude_max: 1380,
       });
       expect(detail.goto).toHaveBeenCalledTimes(3);
       expect(result.items[0].candidates).toHaveLength(3);
@@ -564,6 +566,66 @@ describe("宝宝查询使用独立后台页", () => {
       await source.close();
     }
   });
+  it("不同技能子集重复命中同两个商品时，继续查询直到三个独立相近样本", async () => {
+    const { source, search, detail } = queryPages(false);
+    const skills = ["须弥真言", "高级法术暴击", "高级魔之心", "高级法术连击", "地狱烈火", "慧根"];
+    const directory = {
+      ...config,
+      skills: skills.map((name, index) => [index + 1, name] as [number, string]),
+    };
+    const original = search.evaluate.getMockImplementation()!;
+    let queryCount = 0;
+    search.evaluate.mockImplementation(async (fn: Function, arg: unknown) => {
+      if (typeof arg === "string") return directory;
+      if (arg && typeof arg === "object" && "args" in arg) queryCount++;
+      if (typeof arg === "number") {
+        const indices = queryCount === 1 ? [] : queryCount <= 3 ? [0, 1] : [0, 1, 2];
+        const rows = indices.map((index) => ({
+          url: `https://xyq.cbg.163.com/equip?s=1&eid=sample-${index}`,
+          name: "模拟宝宝",
+          type: "2001",
+        }));
+        return { rows, empty: !rows.length, hasNext: false };
+      }
+      return original(fn, arg);
+    });
+    detail.evaluate.mockImplementation(async () => {
+      const currentUrl = detail.goto.mock.calls.at(-1)![0];
+      const index = Number(currentUrl.match(/sample-(\d)/)?.[1]);
+      const sampleFields = fields.map((field) =>
+        field.name === "速度资质" ? { ...field, value: "1280" } : field,
+      );
+      return {
+        ...observation(),
+        productId: "sample-" + index,
+        rawPrice: 300 + index * 30,
+        prices: ["￥" + (300 + index * 30)],
+        fields: sampleFields.filter((field) => field.name !== "类型"),
+        parsedFields: sampleFields,
+        skills,
+        expectedSkills: skills,
+      };
+    });
+    try {
+      const result = await source.findCandidates(
+        [{ ...item(), skills }],
+        new AbortController().signal,
+      );
+      expect(queryCount).toBe(4);
+      expect(result.items[0].candidates).toHaveLength(3);
+      expect(new Set(result.items[0].candidates.map((entry) => entry.url)).size).toBe(3);
+      expect(
+        result.items[0].candidates.every(
+          (entry) => entry.verified && entry.matchType === "similar",
+        ),
+      ).toBe(true);
+      expect(detail.goto).toHaveBeenCalledTimes(3);
+      expect(result.items[0].searchState).toBe("completed");
+    } finally {
+      await source.close();
+    }
+  });
+
   it("找到严格样本后不再放宽，不把exact金额混入similar", async () => {
     const { source, calls } = queryPages(true);
     try {
@@ -582,8 +644,9 @@ describe("宝宝查询使用独立后台页", () => {
     const { source, calls, detail } = queryPages(false, new AbortController(), true);
     try {
       const result = await source.findCandidates([item()], new AbortController().signal);
-      expect(calls).toHaveLength(3);
-      expect(calls[2]).toEqual({ type: "2001,2002", level_min: 119, level_max: 119 });
+      expect(calls).toHaveLength(4);
+      expect(calls[2]).toMatchObject({ level_min: 114, level_max: 124 });
+      expect(calls[3]).toEqual({ type: "2001,2002", level_min: 119, level_max: 119 });
       expect(detail.goto).toHaveBeenCalledTimes(3);
       expect(result.items[0].candidates).toEqual([]);
       expect(result.items[0].diagnosticSources).toHaveLength(3);
@@ -699,4 +762,63 @@ describe("宝宝查询使用独立后台页", () => {
       await source.close();
     }
   });
+});
+
+it("正式相近查询按普通技能子集保留受保护技能，同级先于有限附近等级", () => {
+  const skills = ["须弥真言", "高级魔之心", "高级法术连击", "法术暴击", "地狱烈火", "慧根"];
+  const target = {
+    ...item(),
+    skills,
+    level: 99,
+    skillObservations: skills.map((rawName) => ({
+      rawName,
+      type: "cifu",
+      state: "current" as const,
+    })),
+  };
+  const directory = {
+    ...config,
+    skills: skills.map((name, index) => [index + 1, name] as [number, string]),
+  };
+  const queries = petQueries(target, directory);
+  const similar = queries.filter((query) => query.matchType === "similar");
+  expect(queries[0].matchType).toBe("exact");
+  expect(similar.some((query) => String(query.args.skill).split(",").length === 4)).toBe(true);
+  for (const query of similar) {
+    expect(String(query.args.skill).split(",")).toContain("1");
+    expect(query.args).not.toHaveProperty("skill_num");
+    expect(query.args).not.toHaveProperty("high_neidan");
+  }
+  expect(similar[0].args).toMatchObject({ level_min: 99, level_max: 99 });
+  expect(similar[similar.length - 1].args).toMatchObject({ level_min: 94, level_max: 104 });
+});
+
+it("明确未来预览独立核对并保留，不能伪装成当前技能或丢弃配置状态", () => {
+  const futureSkills = ["超级法术连击（进化后获得）"];
+  const value = { ...observation(), futureSkills, expectedFutureSkills: [...futureSkills] };
+  const source = petObservationSource(value, url);
+  expect(source.text).toContain("未来技能：超级法术连击（进化后获得）");
+  expect(source.text).toContain("技能：须弥真言、高级法术暴击\n");
+  expect(() => petObservationSource({ ...value, expectedFutureSkills: [] }, url)).toThrow(
+    /未来技能预览/,
+  );
+  const target = { ...item(), skills: [...item().skills, ...futureSkills] };
+  expect(
+    verifyPetCandidate(
+      target,
+      {
+        url,
+        title: "画魂",
+        price: source.price,
+        priceType: "listing",
+        quote: source.text,
+        verified: false,
+        reason: "",
+        fetchedAt: null,
+        sourceHash: null,
+      },
+      source.html,
+      new Date().toISOString(),
+    ).verified,
+  ).toBe(true);
 });

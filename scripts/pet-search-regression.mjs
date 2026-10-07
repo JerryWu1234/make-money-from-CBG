@@ -76,7 +76,9 @@ const pricing = await moduleUrl("server/analysis/equipment-pricing.ts", {
 const pacedPage = inline(
   `export {assertAvailable} from ${JSON.stringify(crawlerPage)};export async function pace(signal){signal.throwIfAborted();}`,
 );
+const petMatcher = await moduleUrl("server/analysis/pet-match.ts");
 const petPricing = await moduleUrl("server/analysis/pet-pricing.ts", {
+  "./pet-match": petMatcher,
   "./pricing-progress": progress,
   "./pricing-estimate": estimate,
   "./pricing-integrity": integrity,
@@ -89,6 +91,7 @@ const petPricing = await moduleUrl("server/analysis/pet-pricing.ts", {
 const { searchPetPricing } = await import(petPricing);
 const { petSourceFromPages } = await import(
   await moduleUrl("server/analysis/browser-pet-source.ts", {
+    "./pet-match": petMatcher,
     "../session": session,
     "../viewport": viewport,
     "../crawler/controller": inline(

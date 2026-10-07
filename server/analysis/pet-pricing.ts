@@ -6,6 +6,14 @@ import { inventoryMatchesSnapshot, validateExactPricing } from "./pricing-integr
 import type { ValuationResult } from "./valuation-types";
 import { buildSimilarEstimate } from "./pricing-estimate";
 import {
+  currentPetSkills,
+  petSkillState,
+  similarPetSkills,
+  petLevelBounds,
+  PET_APTITUDE_TOLERANCE,
+  PET_GROWTH_TOLERANCE,
+} from "./pet-match";
+import {
   finishPricingSearch,
   resumePricingItems,
   saveSearchAttempt,
@@ -60,7 +68,8 @@ const fieldName = (value: string) =>
   value
     .trim()
     .replace(/^成长率$/, "成长")
-    .replace(/^躲避资质$/, "躲闪资质");
+    .replace(/^躲避资质$/, "躲闪资质")
+    .replace(/^已用幻色丹$/, "已使用幻色丹");
 const ignoredField =
   /^(?:名称|名字|昵称|经验|当前经验|升级经验|忠诚|忠诚度|寿命|剩余寿命|气血|当前气血|魔法|当前魔法)$/;
 const mandatory = [
@@ -387,7 +396,7 @@ function similarFieldDifference(
   if (mainAptitudes.has(field.name) || secondaryAptitudes.has(field.name)) {
     const target = aptitudeParts(field.value),
       observed = aptitudeParts(source);
-    const tolerance = mainAptitudes.has(field.name) ? 0.05 : 0.1;
+    const tolerance = PET_APTITUDE_TOLERANCE;
     if (
       !target ||
       !observed ||
@@ -397,6 +406,22 @@ function similarFieldDifference(
       return null;
     return `${field.name}：目标 ${field.value}，样本 ${source}（基础值差异≤${tolerance * 100}%，加成一致）`;
   }
+  if (field.name === "等级" || field.name === "成长") {
+    if (!/^\d+(?:\.\d+)?$/.test(field.value) || !/^\d+(?:\.\d+)?$/.test(source)) return null;
+    const target = Number(field.value),
+      observed = Number(source);
+    if (field.name === "等级") {
+      const [min, max] = petLevelBounds(target);
+      if (!Number.isInteger(observed) || observed < min || observed > max) return null;
+    } else if (Math.abs(observed - target) > PET_GROWTH_TOLERANCE + 1e-9) return null;
+    return `${field.name}：目标 ${field.value}，样本 ${source}（有限相近范围，未推测折价）`;
+  }
+  if (
+    /^(?:五行|已用元宵|已用千金露|已用炼兽珍经|已使用?幻色丹|已用清灵仙露|历史灵性值)$/.test(
+      field.name,
+    )
+  )
+    return `${field.name}：目标 ${field.value}，样本 ${source}（使用历史或普通配置不同）`;
   if (allocationFields.has(field.name) || performanceFields.has(field.name)) {
     if (
       !/^\d+(?:\.\d+)?$/.test(field.value) ||
@@ -405,12 +430,7 @@ function similarFieldDifference(
       !Number.isFinite(Number(source))
     )
       return null;
-    if (
-      performanceFields.has(field.name) &&
-      Math.abs(Number(source) - Number(field.value)) > Number(field.value) * 0.1
-    )
-      return null;
-    return `${field.name}：目标 ${field.value}，样本 ${source}（${allocationFields.has(field.name) ? "普通加点不同，未据此折价" : "衍生性能差异≤10%"}）`;
+    return `${field.name}：目标 ${field.value}，样本 ${source}（${allocationFields.has(field.name) ? "普通加点不同，未据此折价" : "衍生性能不同，含普通加点与随身装备影响"}）`;
   }
   return null;
 }
@@ -470,7 +490,24 @@ export function verifyPetCandidate(
     : skillSection === null
       ? null
       : tokens(skillSection);
-  if (sourceSkills === null || !equalSet(item.skills, sourceSkills))
+  if (sourceSkills === null) return reject("来源完整技能列表未确认");
+  const targetSkills = currentPetSkills(item);
+  const sourceCurrent = currentPetSkills({ skills: sourceSkills });
+  if (item.skills.some((name) => ["conditional", "unknown"].includes(petSkillState(name, item))))
+    return reject("目标条件或未知技能状态未核对，不能当作永久技能报价");
+  const targetFuture = item.skills.filter((name) => petSkillState(name, item) === "future");
+  const sourceFuture = sourceSkills.filter((name) => petSkillState(name) === "future");
+  if (!equalSet(targetFuture, sourceFuture)) {
+    if (matchType !== "similar") return reject("未来进化技能配置不同，不能作为完全同配置报价");
+    differences.push(
+      `未来进化技能预览：目标 ${targetFuture.join("、") || "无"}；样本 ${sourceFuture.join("、") || "无"}；分别保留状态，不计当前技能或额外加价`,
+    );
+  }
+  if (matchType === "similar") {
+    const skills = similarPetSkills(targetSkills, sourceCurrent);
+    if (!skills.accepted) return reject(skills.reason || "宝宝当前技能相似性不足");
+    differences.push(...(skills.differences || []));
+  } else if (!equalSet(targetSkills, sourceCurrent))
     return reject("无法核对完整同名技能组合；技能数量相同也不能套价");
   const innerIcons = icons.filter((icon) => icon.kind === "innerSkill");
   const innerSection = section(text, "内丹");
@@ -479,14 +516,14 @@ export function verifyPetCandidate(
     : innerSection === null
       ? null
       : tokens(innerSection);
-  if (
-    sourceInner === null ||
-    !equalSet(
-      item.innerSkills.map((skill) => skill.name + skill.level + "层"),
-      sourceInner,
-    )
-  )
-    return reject("内丹名称或层数不匹配，或未确认内丹是否为空");
+  if (sourceInner === null) return reject("来源完整内丹列表未确认");
+  const targetInner = item.innerSkills.map((skill) => skill.name + skill.level + "层");
+  if (!equalSet(targetInner, sourceInner)) {
+    if (matchType !== "similar") return reject("内丹名称或层数不匹配，或未确认内丹是否为空");
+    differences.push(
+      `内丹：目标 ${targetInner.join("、") || "无"}；样本 ${sourceInner.join("、") || "无"}（包价包含样本内丹，未折价）`,
+    );
+  }
   const sourceGear = icons
     .filter((icon) => icon.kind === "equipment")
     .map((icon) => ({
@@ -499,8 +536,14 @@ export function verifyPetCandidate(
     return reject("网页未证明随身宝宝装备完整，不能混用含装备报价");
   const gearKey = (gear: PetEquipment) =>
     normalize((gear.accessory ? "饰品" : "装备") + "\n" + gear.name + "\n" + gear.description);
-  if (!equalSet(item.equipment.map(gearKey), sourceGear.map(gearKey)))
-    return reject("随身宝宝装备不匹配；包价不能另外重复加装备钱");
+  if (!equalSet(item.equipment.map(gearKey), sourceGear.map(gearKey))) {
+    if (matchType !== "similar") return reject("随身宝宝装备不匹配；包价不能另外重复加装备钱");
+    const describe = (gear: PetEquipment[]) =>
+      gear.map((value) => value.name + "：" + value.description).join("；") || "无";
+    differences.push(
+      `随身装备包价差异：目标 ${describe(item.equipment)}；样本 ${describe(sourceGear)}；不额外加装备价，不推测差异折价`,
+    );
+  }
   if (!candidate.quote || !normalize(text).includes(normalize(candidate.quote)))
     return reject("候选引用不能在原始网页逐字核对");
   const prices = [...new Set(listingPrices(text))];
@@ -514,7 +557,7 @@ export function verifyPetCandidate(
     matchType: differences.length ? "similar" : "exact",
     verified: true,
     reason: differences.length
-      ? "同类型同等级宝宝在售挂牌已核对；成长、完整技能、认证、内丹和穿戴装备一致，白名单属性存在明确差异，仅作相似样本"
+      ? "同类型在售宝宝已核对；受保护技能、变异和认证一致，普通技能与等级/成长/资质在相近范围，内丹及装备包价差异已列明，仅作相似样本"
       : "独立宝宝商品的挂牌价、完整技能及属性已核对；含匹配随身装备且只计一次",
     fetchedAt,
     sourceHash: hash(source),
@@ -543,9 +586,35 @@ export async function searchPetPricing(
     items: inventory.items,
     issues: inventory.issues,
   };
-  resumePricingItems(snapshot, previous);
+  resumePricingItems(snapshot, previous, true);
   signal.throwIfAborted();
-  if (!inventory.captureComplete) return finishPricingSearch(snapshot);
+  if (!inventory.captureComplete) {
+    const capture = record.detail?.petCapture;
+    const tabs = record.detail?.tabs.filter((tab) => tab.name === "召唤兽/孩子") || [];
+    const safelyPartial =
+      capture?.version === 1 &&
+      tabs.length === 1 &&
+      tabs[0].petCount === tabs[0].pets?.length &&
+      new Set(inventory.items.map((item) => item.key)).size === inventory.items.length &&
+      inventory.items.some((item) => item.status === "incomplete") &&
+      capture.issues.every((issue) => {
+        const index = issue.match(/^第 (\d+) 只召唤兽/)?.[1];
+        return (
+          !!index &&
+          inventory.items.some(
+            (item) => item.key === "召唤兽/孩子:" + index && item.status === "incomplete",
+          )
+        );
+      });
+    if (!safelyPartial) {
+      for (const item of snapshot.items) {
+        delete item.searchState;
+        if (item.status === "no_match")
+          item.issues.push("宝宝清单或采集范围未确认，先补采资料再查价");
+      }
+      return finishPricingSearch(snapshot);
+    }
+  }
   const searchable = snapshot.items.filter((item) => item.searchState === "pending");
   if (!searchable.length) return finishPricingSearch(snapshot);
   const lookupItems = searchable.map((item) => ({
