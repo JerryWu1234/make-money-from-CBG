@@ -25,7 +25,7 @@ export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[
   service().store.recover();
   const profile = loadProfile(service().store.db);
   return {
-    ...service().store.overview(options),
+    ...service().store.overview({ ...options, currentProfile: profile }),
     profile: {
       hash: profile.hash,
       version: profile.version,
@@ -98,7 +98,7 @@ export async function pauseAnalysis(id?: string) {
   return id ? service().store.run(id) : service().store.activeRun();
 }
 export function analysisDetail(id: string) {
-  const detail = service().store.detail(id);
+  const detail = service().store.detail(id, loadProfile(service().store.db));
   if (!detail) throw new Error("商品分析记录不存在");
   return detail;
 }

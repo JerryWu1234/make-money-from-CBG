@@ -185,7 +185,7 @@ export function ValuationResultView({
     <section className="analysis-valuation-result">
       {previousSettings && (
         <p role="status" className="analysis-pending-note">
-          这是旧设置下的结果。估值规则已更新，请按新规则开始分析。
+          这是旧设置下的结果。估值规则或分析设置已更新，再次分析会更新这件商品。
         </p>
       )}
       {comparison ? (
@@ -284,7 +284,7 @@ export function ValuationResultView({
             </button>
           )}
         {!!(result.pending_rules.length || result.missing_fields.length) && (
-          <details>
+          <details open={expanded}>
             <summary>
               {result.estimated_value_range ? "查看未取得精确报价的项目" : "查看未补齐的项目与原因"}
             </summary>

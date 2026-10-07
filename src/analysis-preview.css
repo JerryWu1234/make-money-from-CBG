@@ -966,6 +966,7 @@ body:has(.analysis-page) #root {
 }
 .analysis-result-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
   padding: 0;
   margin: 0;
@@ -973,6 +974,7 @@ body:has(.analysis-page) #root {
 }
 .analysis-result-card {
   min-width: 0;
+  overflow-wrap: anywhere;
   padding: 1.25rem;
   border-bottom: 1px solid rgba(148, 163, 184, 0.18);
 }
@@ -1436,6 +1438,7 @@ body:has(.analysis-page) #root {
   transition: width 0.3s;
 }
 .analysis-result-dialog {
+  overflow-wrap: anywhere;
   position: fixed;
   inset: 0 0 0 auto;
   width: min(100%, 600px);

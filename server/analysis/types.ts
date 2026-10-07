@@ -70,6 +70,8 @@ export type AnalysisResultItem = {
   model: string;
   completedAt: string;
   stale: boolean;
+  profileHash: string | null;
+  profileChanged: boolean;
   result: ProductAnalysis;
 };
 export type AnalysisOverview = {
@@ -111,6 +113,7 @@ export type AnalysisDetail = {
   error: string | null;
   reusedFrom: string | null;
   profile?: AnalysisProfile | null;
+  profileChanged?: boolean;
   equipmentPricing?: EquipmentPricingSnapshot | null;
   petPricing?: PetPricingSnapshot | null;
   attempts: {

@@ -151,7 +151,13 @@ describe("持久化的商品分析队列", () => {
       ...profile.settings,
       servers: [...profile.settings.servers, { serverId: "999999", age: "older", rank: 50 }],
     });
+    const savedTask = store.overview().results.items[0].taskId;
     expect(otherServer.hash).not.toBe(profile.hash);
+    expect(store.overview({ currentProfile: otherServer }).results.items[0]).toMatchObject({
+      profileHash: profile.hash,
+      profileChanged: false,
+    });
+    expect(store.detail(savedTask, otherServer)?.profileChanged).toBe(false);
     expect(await runner.start("codex", false, otherServer)).toBe(first);
     await runner.settled();
     expect(analyze).toHaveBeenCalledTimes(1);
@@ -163,6 +169,20 @@ describe("持久化的商品分析队列", () => {
           : server,
       ),
     });
+    expect(changed.calculationVersion).toBe(profile.calculationVersion);
+    expect(store.overview({ currentProfile: changed }).results.items[0].profileChanged).toBe(true);
+    expect(store.detail(savedTask, changed)?.profileChanged).toBe(true);
+    for (const changedSettings of [
+      createProfile(profile.template + "\n请补充价格说明。", profile.settings),
+      createProfile(profile.template, profile.settings, false, true),
+      createProfile(profile.template, profile.settings, true, false),
+    ]) {
+      expect(changedSettings.calculationVersion).toBe(profile.calculationVersion);
+      expect(
+        store.overview({ currentProfile: changedSettings }).results.items[0].profileChanged,
+      ).toBe(true);
+      expect(store.detail(savedTask, changedSettings)?.profileChanged).toBe(true);
+    }
     const next = await runner.start("codex", false, changed);
     await runner.settled();
     expect(next).not.toBe(first);
@@ -171,6 +191,8 @@ describe("持久化的商品分析队列", () => {
     expect(store.detail(store.overview().records.items[0].taskId!)!.profile!.hash).toBe(
       changed.hash,
     );
+    expect(store.overview({ currentProfile: changed }).results.items[0].profileChanged).toBe(false);
+    expect(store.detail(savedTask, changed)?.profileChanged).toBe(true);
   });
   it("增量任务只处理新增商品；新任务排队时保留之前的完整结果", async () => {
     const { store, runner, analyze } = setup();

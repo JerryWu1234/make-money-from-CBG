@@ -653,10 +653,11 @@ export function AnalysisPreview() {
                           expanded
                           onConfigure={() => setSettingsOpen(true)}
                           previousSettings={
-                            !!entry.result.valuation &&
-                            !!data?.profile?.calculationVersion &&
-                            entry.result.valuation.calculation_version !==
-                              data.profile.calculationVersion
+                            entry.profileChanged ||
+                            (!!entry.result.valuation &&
+                              !!data?.profile?.calculationVersion &&
+                              entry.result.valuation.calculation_version !==
+                                data.profile.calculationVersion)
                           }
                         />
                         <button
@@ -807,7 +808,7 @@ export function AnalysisPreview() {
         <AnalysisResultDrawer
           taskId={taskId}
           onClose={() => setTaskId(null)}
-          previousSettings={!sameCalculation}
+          currentCalculationVersion={data?.profile?.calculationVersion}
           onConfigure={() => {
             setTaskId(null);
             setSettingsOpen(true);
