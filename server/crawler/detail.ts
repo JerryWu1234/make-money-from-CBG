@@ -542,5 +542,5 @@ export async function isOnShelf(page: Page, item: Listing, signal: AbortSignal):
   await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 45000 });
   await assertAvailable(page);
   checkAborted(signal);
-  return onShelfFromText(await page.locator("body").innerText());
+  return onShelfFromText(await page.evaluate(() => document.body.innerText));
 }
