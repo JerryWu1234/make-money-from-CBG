@@ -566,7 +566,7 @@ async function readMainPet(page: Page, signal: AbortSignal) {
               attrs[attr.name.replace(/^data-/, "data_")] ||= attr.value;
         return { attrs, src: icon.getAttribute("src") || "" };
       });
-    const skills = icons
+    const skillNames = icons
       .filter(
         ({ attrs, src }) =>
           attrs.data_skill_type === "cifu" ||
@@ -575,6 +575,10 @@ async function readMainPet(page: Page, signal: AbortSignal) {
             !!(attrs.data_equip_name || attrs.data_store_name)),
       )
       .map(({ attrs }) => attrs.data_equip_name || attrs.data_store_name || "");
+    // Explicit evolution previews are not current skills; their configuration remains unpriced.
+    const futureSkill = (name: string) => /[（(]进化后获得[）)]/.test(name.replace(/\s/g, ""));
+    const futureSkills = skillNames.filter(futureSkill);
+    const skills = skillNames.filter((name) => !futureSkill(name));
     const expectedSkills = pet.all_skills.map(
       (id: unknown) => g.CBG_GAME_CONFIG?.pet_skill_desc?.[String(id)]?.name || "",
     );
@@ -626,7 +630,7 @@ async function readMainPet(page: Page, signal: AbortSignal) {
       })
       .join("\n");
     return {
-      unsupportedDescription,
+      unsupportedDescription: unsupportedDescription || futureSkills.length > 0,
       productId: raw.eid,
       serverId: raw.serverid ?? raw.server_id,
       productName: raw.equip_name,
