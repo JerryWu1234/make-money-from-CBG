@@ -18,13 +18,14 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
   const store = new AnalysisStore(crawl.db);
   let automatic = false;
   let calls = 0;
+  let starts = 0;
   let verified = false;
   let settingsChangedByCollection = false;
   const runner = new AnalysisRunner(store, async (_provider, model) => ({
     model: model || "test-model",
     analyze: async (prompt, _schema, signal) => {
       calls++;
-      const key = prompt.includes("商品 ID：a。") ? "a" : "b";
+      const key = prompt.match(/商品 ID：([^。]+)。/)![1];
       if (key === "b" && !automatic)
         await new Promise<never>((_resolve, reject) => {
           signal.addEventListener("abort", () => reject(signal.reason), { once: true });
@@ -84,6 +85,7 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
                 provider: url.searchParams.get("provider") as "codex" | "deepseek",
                 runId: url.searchParams.get("runId") || undefined,
                 page: Number(url.searchParams.get("page") || 1),
+                resultsPage: Number(url.searchParams.get("resultsPage") || 1),
                 search: url.searchParams.get("search") || undefined,
                 filter: url.searchParams.get("filter") || undefined,
               }),
@@ -101,6 +103,7 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
             };
             break;
           case "/api/analysis/start":
+            starts++;
             expect(input.model).toBe("deepseek-v4-pro");
             body = store.run(
               await runner.start(input.provider, input.force, undefined, false, input.model),
@@ -154,7 +157,15 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     await connect.getByRole("button", { name: "保存并验证" }).click();
     await expect(connect).not.toBeVisible();
     await expect(page.getByRole("button", { name: "暂停分析" })).toBeVisible();
-    await expect(page.getByRole("tabpanel", { name: "推荐榜" })).toContainText("角色a");
+    await expect(page.getByRole("tabpanel", { name: "分析记录" })).toContainText("角色a");
+    await expect(
+      page
+        .getByRole("tabpanel", { name: "分析记录" })
+        .getByRole("heading", { name: "评分字段依据" }),
+    ).toBeVisible();
+    await expect(page.getByLabel("分析批次")).toHaveCount(0);
+    await expect(page.getByLabel("试分析数量")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /先分析|全部重新分析/ })).toHaveCount(0);
     expect(calls).toBe(2);
     expect(store.overview().run?.model).toBe("deepseek-v4-pro");
     await expect(page.getByLabel("分析 Agent")).toBeDisabled();
@@ -163,6 +174,7 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     await expect(page.getByRole("button", { name: "暂停分析" })).toBeVisible();
     await expect(page.getByLabel("分析模型")).toHaveValue("deepseek-v4-pro");
     expect(calls).toBe(2);
+    expect(starts).toBe(1);
     await page.getByRole("button", { name: "暂停分析" }).click();
     await expect(page.getByRole("button", { name: "继续分析" })).toBeEnabled();
     expect(store.activeRun()).toBeNull();
@@ -211,14 +223,75 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     await page.getByRole("searchbox", { name: "搜索商品" }).fill("角色b");
     await expect(page.getByRole("table").locator("tbody tr")).toHaveCount(1);
     await page.getByRole("tab", { name: "分析记录" }).click();
-    await expect(page.getByRole("tabpanel", { name: "分析记录" })).toContainText("已中断");
+    await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
+      2,
+    );
+    await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "分析新增或已更新商品", exact: true }),
+    ).toBeEnabled();
+    expect(calls).toBe(3);
+    expect(store.overview().runs).toHaveLength(1);
+    const startsBeforeRefresh = starts;
+    await page.reload();
+    await expect(page.getByLabel("分析模型")).toHaveValue("deepseek-v4-pro");
+    await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
+      2,
+    );
+    expect(starts).toBe(startsBeforeRefresh);
+    expect(calls).toBe(3);
+    // Collection saves six new complete goods; the next analysis handles only these six.
+    for (const key of ["c", "d", "e", "f", "g", "h"]) {
+      const record = analysisRecord(key);
+      crawl.observe(record.listing);
+      crawl.save(record.listing, record.detail!);
+    }
+    await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
+    const records = page.getByRole("tabpanel", { name: "分析记录" });
+    await expect(records.getByRole("article")).toHaveCount(8);
+    await expect(records.locator(".analysis-result-number")).toHaveText([
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+    ]);
+    await expect(records.getByRole("heading", { name: "评分字段依据" })).toHaveCount(8);
+    expect(calls).toBe(9);
+    expect(store.overview().run).toMatchObject({ total: 6, completed: 6 });
+    await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "分析新增或已更新商品", exact: true }),
+    ).toBeEnabled();
+    expect(calls).toBe(9);
+    expect(store.overview().runs).toHaveLength(2);
+    const changed = crawl.detail("a") as SavedRoleRecord;
+    changed.listing.price = "333";
+    crawl.observe(changed.listing);
+    await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
+    await expect(
+      page.getByRole("button", { name: "分析新增或已更新商品", exact: true }),
+    ).toBeEnabled();
+    expect(calls).toBe(10);
+    expect(store.overview().run).toMatchObject({ total: 1, completed: 1 });
+    await expect(records.getByRole("article")).toHaveCount(8);
+    await records
+      .getByRole("article", { name: /角色b/ })
+      .getByRole("button", { name: "查看原文与调用记录 →" })
+      .click();
+    const savedCall = page.getByRole("dialog", { name: "角色b" });
+    await expect(savedCall).toContainText("中断");
+    await page.keyboard.press("Escape");
     expect(await page.evaluate(() => JSON.stringify(localStorage))).not.toContain(
       "fixture-only-key",
     );
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("tab", { name: "推荐榜" }).click();
+    await page.getByRole("tab", { name: /分析记录/ }).click();
     await page.screenshot({
-      path: testInfo.outputPath("analysis-mobile-fixture.png"),
+      path: testInfo.outputPath("analysis-eight-results-mobile-fixture.png"),
       fullPage: true,
     });
     expect(
@@ -345,7 +418,7 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
       if (obsolete) {
         await expect(runner.resume(oldRunId)).rejects.toThrow("估值规则已更新");
         await expect(
-          page.getByText("估值规则已更新，开始分析会使用新规则；旧批次和已完成结果保留。", {
+          page.getByText("估值规则已更新，下次分析使用新规则，已有结果保留。", {
             exact: true,
           }),
         ).toBeVisible();

@@ -133,6 +133,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             provider: provider ? (await import("./ai-connection")).aiProvider(provider) : undefined,
             runId: params.get("runId") || undefined,
             page: Number(params.get("page") || 1),
+            resultsPage: Number(params.get("resultsPage") || 1),
             search: params.get("search") || undefined,
             filter: params.get("filter") || undefined,
           });

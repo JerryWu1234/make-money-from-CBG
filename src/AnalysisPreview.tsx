@@ -3,6 +3,7 @@ import type { AiProvider } from "../server/ai/types";
 import type { AnalysisItem, AnalysisOverview, AnalysisRun } from "../server/analysis/types";
 import { AiConnectionControl } from "./AiConnectionControl";
 import { AnalysisResultDrawer } from "./AnalysisResultDrawer";
+import { ProductAnalysisView } from "./ProductAnalysisView";
 import { AnalysisSettings } from "./AnalysisSettings";
 import {
   valuationDecisionLabel,
@@ -57,7 +58,6 @@ export function AnalysisPreview() {
     deepseek: "",
   });
   const [modelChanged, setModelChanged] = useState(false);
-  const [sampleSize, setSampleSize] = useState(1);
   const [defaultModels, setDefaultModels] = useState<Record<AiProvider, string | null>>({
     codex: null,
     deepseek: null,
@@ -65,10 +65,10 @@ export function AnalysisPreview() {
   const updateDefaultModel = useCallback((source: AiProvider, model: string | null) => {
     setDefaultModels((previous) => ({ ...previous, [source]: model }));
   }, []);
-  const [runId, setRunId] = useState<string | null>(null);
-  const [tab, setTab] = useState<"ranking" | "all" | "history">("ranking");
+  const [tab, setTab] = useState<"ranking" | "all" | "history">("history");
   const [data, setData] = useState<AnalysisOverview | null>(null);
   const [page, setPage] = useState(1);
+  const [resultsPage, setResultsPage] = useState(1);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [revision, setRevision] = useState(0);
@@ -87,7 +87,6 @@ export function AnalysisPreview() {
   const searchingEquipment = active?.phase === "equipment_search" || active?.phase === "pet_search";
   const searchAsset = active?.phase === "pet_search" ? "宝宝" : "装备";
   const finished = (run?.completed || 0) + (run?.failed || 0);
-  const sameProfile = !data?.profile || run?.profileHash === data.profile.hash;
   const sameCalculation =
     !run?.calculationVersion || run.calculationVersion === data?.profile?.calculationVersion;
   const selectedModel = selectedModels[provider];
@@ -109,26 +108,31 @@ export function AnalysisPreview() {
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
       try {
-        const params = new URLSearchParams({ provider, page: String(page), search, filter });
-        if (runId) params.set("runId", runId);
+        const params = new URLSearchParams({
+          provider,
+          page: String(page),
+          resultsPage: String(resultsPage),
+          search,
+          filter,
+        });
         const next = await request<AnalysisOverview>(
           `/api/analysis/status?${params}`,
           undefined,
           AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
         );
         if (controller.signal.aborted) return;
-        if (firstLoad.current && next.activeRun && !runId) {
-          setProvider(next.activeRun.provider);
-          setRunId(next.activeRun.id);
-          const executing = next.activeRun;
-          setSelectedModels((previous) => ({ ...previous, [executing.provider]: executing.model }));
+        if (firstLoad.current) {
+          const saved = next.activeRun || next.run;
+          if (saved) {
+            setProvider(saved.provider);
+            setSelectedModels((previous) => ({ ...previous, [saved.provider]: saved.model }));
+          }
         }
-        if (firstLoad.current && next.profile && !next.ranking.length) setTab("all");
         firstLoad.current = false;
-        if (runId && !next.run) setRunId(null);
         setData(next);
         setLoadError(null);
         if (next.records.page !== page) setPage(next.records.page);
+        if (next.results && next.results.page !== resultsPage) setResultsPage(next.results.page);
         timer = setTimeout(refresh, next.activeRun ? 1500 : 5000);
       } catch (failure) {
         if (controller.signal.aborted) return;
@@ -141,7 +145,7 @@ export function AnalysisPreview() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [provider, runId, page, search, filter, revision]);
+  }, [provider, page, resultsPage, search, filter, revision]);
 
   const mutate = useCallback(async (path: string, body: unknown) => {
     if (operation.current) return;
@@ -151,8 +155,8 @@ export function AnalysisPreview() {
     try {
       const next = await request<AnalysisRun | null>(path, body);
       if (next) {
-        setRunId(next.id);
         setProvider(next.provider);
+        setSelectedModels((previous) => ({ ...previous, [next.provider]: next.model }));
         setModelChanged(false);
       }
       setRevision((value) => value + 1);
@@ -165,7 +169,8 @@ export function AnalysisPreview() {
   }, []);
   const start = useCallback(
     async (selected: AiProvider) => {
-      if (data?.profile) setTab("all");
+      setTab("history");
+      setResultsPage(1);
       if (sameCalculation && sameModel && run?.provider === selected && run.status === "paused")
         await mutate("/api/analysis/resume", { runId: run.id });
       else
@@ -174,14 +179,14 @@ export function AnalysisPreview() {
           model: selectedModels[selected] || undefined,
         });
     },
-    [run, mutate, sameCalculation, sameModel, selectedModels, data?.profile],
+    [run, mutate, sameCalculation, sameModel, selectedModels],
   );
   const changeProvider = (selected: AiProvider) => {
     setProvider(selected);
     setModelChanged(!!selectedModels[selected]);
-    setRunId(null);
     setData(null);
     setPage(1);
+    setResultsPage(1);
     setError(null);
   };
   const viewItem = (item: AnalysisItem) => {
@@ -223,7 +228,7 @@ export function AnalysisPreview() {
             <h1>
               每完成一件，
               <br />
-              <em>就更新一次榜单</em>
+              <em>就展示完整结果</em>
             </h1>
             <p>
               先核对装备和宝宝，再联网查价，直接比较参考估值与挂牌价；缺资料或可靠报价时显示补齐办法。
@@ -251,35 +256,6 @@ export function AnalysisPreview() {
               >
                 分析设置
               </button>
-              <label className="analysis-sample-size">
-                试分析数量
-                <select
-                  value={sampleSize}
-                  disabled={busy || running || !data?.counts.complete}
-                  onChange={(event) => setSampleSize(Number(event.target.value))}
-                >
-                  {[1, 2, 3].map((size) => (
-                    <option key={size} value={size}>
-                      {size} 件
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                className="analysis-button analysis-button-outline"
-                disabled={busy || running || !data?.counts.complete}
-                onClick={() => {
-                  setTab("all");
-                  void mutate("/api/analysis/start", {
-                    provider,
-                    sample: true,
-                    sampleSize,
-                    model: selectedModel || undefined,
-                  });
-                }}
-              >
-                先分析 {sampleSize} 件
-              </button>
               {active && (
                 <button
                   className="analysis-button analysis-button-stop"
@@ -298,25 +274,10 @@ export function AnalysisPreview() {
                   重试失败的 {run.failed} 件
                 </button>
               )}
-              {!running && run && (
-                <button
-                  className="analysis-button analysis-button-quiet"
-                  disabled={busy || !data?.counts.complete}
-                  onClick={() =>
-                    void mutate("/api/analysis/start", {
-                      provider,
-                      force: true,
-                      model: selectedModel || undefined,
-                    })
-                  }
-                >
-                  全部重新分析
-                </button>
-              )}
             </div>
             {settingsNotice && (
               <p className="analysis-start-hint" role="status">
-                设置已保存。新批次使用新设置，旧批次仍保留原来的 Prompt 和参数。
+                设置已保存。下次分析将更新受影响的商品，已有结果保留。
               </p>
             )}
             {data?.profile && !data.profile.calculationCompatible && (
@@ -334,30 +295,19 @@ export function AnalysisPreview() {
                       ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
                       : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
                     : run && !sameModel
-                      ? "模型选择已更改，开始时创建新批次；旧批次保留原来的模型和结果。"
+                      ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
                       : run && !sameCalculation
-                        ? "估值规则已更新，开始分析会使用新规则；旧批次和已完成结果保留。"
+                        ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
                         : run?.status === "paused"
-                          ? "分析已暂停，已完成结果保留；继续分析会沿用本批次设置。"
+                          ? "分析已暂停，已完成结果保留；继续分析会沿用任务开始时的设置。"
                           : run?.status === "completed"
-                            ? `本批次完成：${run.completed} 件成功，${run.failed} 件失败，${run.reused} 件复用已有结果。`
+                            ? `分析完成：${run.completed} 件成功，${run.failed} 件失败。再次开始只分析新增或已更新商品。`
                             : `${data.counts.complete} 件资料完整，可以开始分析；${data.counts.waitingDetail} 件等待补采。`}
             </p>
             {(error || loadError || run?.error) && (
               <p className="analysis-auth-notice" role="alert">
                 {error || loadError || run?.error}
               </p>
-            )}
-            {active && run?.id !== active.id && (
-              <button
-                className="analysis-button analysis-button-quiet"
-                onClick={() => {
-                  setProvider(active.provider);
-                  setRunId(active.id);
-                }}
-              >
-                查看正在执行的批次 →
-              </button>
             )}
           </div>
           <div className="analysis-hero-visual" aria-hidden="true">
@@ -412,8 +362,8 @@ export function AnalysisPreview() {
           </div>
           <div>
             <span className="analysis-overview-icon">02</span>
-            <small>当前批次</small>
-            <strong>{run ? `${run.completed} / ${run.total} 件已分析` : "等待首次分析"}</strong>
+            <small>已完成分析</small>
+            <strong>{data?.results?.total || 0} 件已有结果</strong>
             <p>
               {run ? `${run.failed} 件失败 · ${run.queued} 件排队中` : "选择 AI 后点击开始分析"}
             </p>
@@ -427,31 +377,6 @@ export function AnalysisPreview() {
         </div>
         <div className="analysis-workspace">
           <section className="analysis-results" aria-label="商品分析结果">
-            {!!data?.runs.length && (
-              <label className="analysis-run-selector">
-                分析批次
-                <select
-                  aria-label="分析批次"
-                  value={run?.id || ""}
-                  onChange={(event) => {
-                    setRunId(event.target.value);
-                    setPage(1);
-                  }}
-                >
-                  <option value="">最新批次</option>
-                  {data.runs.map((entry) => (
-                    <option key={entry.id} value={entry.id}>
-                      {displayTime(entry.createdAt)} · {entry.completed}/{entry.total} 件 ·{" "}
-                      {entry.status === "running"
-                        ? "分析中"
-                        : entry.status === "paused"
-                          ? "已暂停"
-                          : "已完成"}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
             <div className="analysis-tabbar" role="tablist" aria-label="分析结果视图">
               <button
                 role="tab"
@@ -468,13 +393,13 @@ export function AnalysisPreview() {
                 aria-selected={tab === "history"}
                 onClick={() => setTab("history")}
               >
-                分析记录
+                分析记录 <span>{data?.results?.total || 0}</span>
               </button>
             </div>
             {tab === "ranking" ? (
               <div className="analysis-rank-list" role="tabpanel" aria-label="推荐榜">
                 <div className="analysis-list-intro">
-                  <span>当前批次前 10 名</span>
+                  <span>已完成商品前 10 名</span>
                   <span>完整保存后更新榜单</span>
                 </div>
                 {!data?.ranking.length && (
@@ -612,7 +537,7 @@ export function AnalysisPreview() {
                                     item.valuation?.decision === "NEED_INFO"
                                   ? "分析完成 · 待补齐"
                                   : item.state === "ready" && run
-                                    ? "本批次未分析"
+                                    ? "待分析"
                                     : labels[item.state]}
                             </span>
                             {item.error && <small>{item.error}</small>}
@@ -691,41 +616,78 @@ export function AnalysisPreview() {
             ) : (
               <div className="analysis-history" role="tabpanel" aria-label="分析记录">
                 <p className="analysis-list-intro">
-                  当前批次最近 30 次调用；失败与中断记录也会保留。
+                  每件商品展示最新完成的完整结果；新增分析完成后自动更新。
                 </p>
-                {!data?.history.length && (
+                {!data?.results?.total && (
                   <p className="analysis-empty">
-                    暂无调用记录。复用的结果可打开商品分析查看原始记录。
+                    暂无已完成结果。每完成一件，结果就会自动显示在这里。
                   </p>
                 )}
-                <ol>
-                  {data?.history.map((entry) => (
-                    <li key={entry.id}>
-                      <span
-                        className={`analysis-history-dot ${entry.state === "completed" ? "is-done" : "is-current"}`}
-                      />
-                      <div>
-                        <strong>
-                          {entry.name} ·{" "}
-                          {entry.state === "completed"
-                            ? "已完成"
-                            : entry.state === "failed"
-                              ? "调用失败"
-                              : entry.state === "interrupted"
-                                ? "已中断"
-                                : "分析中"}
-                        </strong>
-                        <p>{entry.error || displayTime(entry.finishedAt || entry.createdAt)}</p>
+                <ol className="analysis-result-list" start={(resultsPage - 1) * 20 + 1}>
+                  {data?.results?.items.map((entry, index) => (
+                    <li key={entry.taskId}>
+                      <article
+                        className="analysis-result-card"
+                        aria-label={`${(resultsPage - 1) * 20 + index + 1} ${entry.name}`}
+                      >
+                        <header className="analysis-result-card-header">
+                          <span className="analysis-result-number">
+                            {(resultsPage - 1) * 20 + index + 1}
+                          </span>
+                          <div>
+                            <h3>{entry.name}</h3>
+                            <p>
+                              {entry.server} · {providerNames[entry.provider]} · {entry.model} ·{" "}
+                              {displayTime(entry.completedAt)}
+                            </p>
+                          </div>
+                          <span className="analysis-result-state">已分析</span>
+                        </header>
+                        {entry.stale && (
+                          <p className="analysis-pending-note">
+                            资料或报价已更新，以下为上次完成的结果。
+                          </p>
+                        )}
+                        <ProductAnalysisView
+                          result={entry.result}
+                          expanded
+                          onConfigure={() => setSettingsOpen(true)}
+                          previousSettings={
+                            !!entry.result.valuation &&
+                            !!data?.profile?.calculationVersion &&
+                            entry.result.valuation.calculation_version !==
+                              data.profile.calculationVersion
+                          }
+                        />
                         <button
                           className="analysis-button analysis-button-quiet"
                           onClick={() => setTaskId(entry.taskId)}
                         >
                           查看原文与调用记录 →
                         </button>
-                      </div>
+                      </article>
                     </li>
                   ))}
                 </ol>
+                {(data?.results?.total || 0) > 20 && (
+                  <div className="analysis-pagination">
+                    <span>
+                      共 {data?.results.total} 件 · 第 {resultsPage} / {data?.results.totalPages} 页
+                    </span>
+                    <button
+                      disabled={resultsPage <= 1}
+                      onClick={() => setResultsPage((value) => value - 1)}
+                    >
+                      上一页
+                    </button>
+                    <button
+                      disabled={resultsPage >= (data?.results.totalPages || 1)}
+                      onClick={() => setResultsPage((value) => value + 1)}
+                    >
+                      下一页
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -758,7 +720,9 @@ export function AnalysisPreview() {
                         : "暂无正在执行的商品"}
                 </p>
               </div>
-              <p>关闭页面后，本机服务会继续处理。服务关闭后，重新打开页面可继续未完成的批次。</p>
+              <p>
+                关闭页面后，本机服务会继续处理。刷新页面会保留进度；服务关闭后可继续未完成的任务。
+              </p>
             </section>
             <section className="analysis-flow-card">
               <span className="analysis-kicker">RULES / 分析依据</span>
@@ -816,7 +780,7 @@ export function AnalysisPreview() {
               )}
               <p>
                 {valuationMode
-                  ? "从“分析设置”调整 Prompt 和参数。修改后创建新批次，保留历史结果及其依据。"
+                  ? "从“分析设置”调整 Prompt 和参数。修改后只更新受影响的商品，保留历史结果及其依据。"
                   : "任一维度缺少必要资料时，总分显示“资料不足”，仍保存分析说明。分数用于配置比较。"}
               </p>
             </section>
@@ -824,7 +788,7 @@ export function AnalysisPreview() {
         </div>
         <div className="analysis-bottom-note">
           <span>
-            资料变化或行情过期后，旧结论标为“需要重新分析”；新批次重新查询装备和宝宝行情，历史结果保留。
+            资料变化或行情过期后，旧结论标为“需要重新分析”；再次分析时更新相关商品，历史结果保留。
           </span>
           <a href="/">返回采集工作台 →</a>
         </div>
@@ -843,7 +807,7 @@ export function AnalysisPreview() {
         <AnalysisResultDrawer
           taskId={taskId}
           onClose={() => setTaskId(null)}
-          previousSettings={!sameProfile}
+          previousSettings={!sameCalculation}
           onConfigure={() => {
             setTaskId(null);
             setSettingsOpen(true);

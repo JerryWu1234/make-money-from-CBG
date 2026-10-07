@@ -128,6 +128,148 @@ function untilAborted(signal: AbortSignal): Promise<never> {
 }
 
 describe("持久化的商品分析队列", () => {
+  it("联网查价结果有效时再次开始不创建任务，也不重复查价或 AI", async () => {
+    const { store, runner, analyze, profile, searchEquipment, searchPets } = await valuationSetup();
+    const first = await runner.start("codex", false, profile);
+    await runner.settled();
+    const taskId = store.overview().records.items[0].taskId!;
+    const original = store.detail(taskId)!;
+    const again = await runner.start("codex", false, profile);
+    await runner.settled();
+    expect(again).toBe(first);
+    expect(store.db.prepare("SELECT count(*) AS n FROM analysis_runs").get()!.n).toBe(1);
+    expect(searchEquipment).toHaveBeenCalledTimes(1);
+    expect(searchPets).toHaveBeenCalledTimes(1);
+    expect(analyze).toHaveBeenCalledTimes(1);
+    expect(store.detail(taskId)).toEqual(original);
+  });
+  it("新增无关区服不重复分析；本角色计价参数变化仍重新分析", async () => {
+    const { store, runner, analyze, profile, searchEquipment } = await valuationSetup();
+    const first = await runner.start("codex", false, profile);
+    await runner.settled();
+    const otherServer = createProfile(profile.template, {
+      ...profile.settings,
+      servers: [...profile.settings.servers, { serverId: "999999", age: "older", rank: 50 }],
+    });
+    expect(otherServer.hash).not.toBe(profile.hash);
+    expect(await runner.start("codex", false, otherServer)).toBe(first);
+    await runner.settled();
+    expect(analyze).toHaveBeenCalledTimes(1);
+    const changed = createProfile(profile.template, {
+      ...otherServer.settings,
+      servers: otherServer.settings.servers.map((server) =>
+        server.serverId === profile.settings.servers[0].serverId
+          ? { ...server, rank: 100 }
+          : server,
+      ),
+    });
+    const next = await runner.start("codex", false, changed);
+    await runner.settled();
+    expect(next).not.toBe(first);
+    expect(searchEquipment).toHaveBeenCalledTimes(2);
+    expect(analyze).toHaveBeenCalledTimes(2);
+    expect(store.detail(store.overview().records.items[0].taskId!)!.profile!.hash).toBe(
+      changed.hash,
+    );
+  });
+  it("增量任务只处理新增商品；新任务排队时保留之前的完整结果", async () => {
+    const { store, runner, analyze } = setup();
+    const first = await runner.start("codex", true, undefined, true, undefined, 1);
+    await runner.settled();
+    const firstTask = store
+      .overview({ runId: first })
+      .records.items.find((item) => item.key === "a")!.taskId;
+    analyze.mockImplementation(async (prompt, _schema, signal) => {
+      if (prompt.includes("商品 ID：b。")) await untilAborted(signal);
+      throw new Error("already analysed product must not run");
+    });
+    const next = await runner.start("codex");
+    expect(store.run(next)!.total).toBe(1);
+    expect(store.overview().records.items.find((item) => item.key === "a")).toMatchObject({
+      taskId: firstTask,
+      state: "completed",
+      summary: expect.any(String),
+    });
+    expect(store.overview().results.items).toHaveLength(1);
+    expect(store.overview().results.items[0]).toMatchObject({
+      taskId: firstTask,
+      name: "角色a",
+      result: { productKey: "a", summary: expect.any(String) },
+    });
+    expect(analyze).toHaveBeenCalledTimes(2);
+    await runner.pause(next);
+  });
+  it("报价快照过期仍重新查价，不能复用过期估值", async () => {
+    const { store, runner, profile, searchEquipment, searchPets, analyze } = await valuationSetup();
+    const first = await runner.start("codex", false, profile);
+    await runner.settled();
+    const taskId = store.overview().records.items[0].taskId!;
+    const result = store.detail(taskId)!.result!;
+    result.valuation!.equipment_pricing!.searchedAt = new Date(
+      Date.now() - 25 * 3600_000,
+    ).toISOString();
+    store.db
+      .prepare("UPDATE analysis_tasks SET result_json=? WHERE id=?")
+      .run(JSON.stringify(result), taskId);
+    const next = await runner.start("codex", false, profile);
+    await runner.settled();
+    expect(next).not.toBe(first);
+    expect(searchEquipment).toHaveBeenCalledTimes(2);
+    expect(searchPets).toHaveBeenCalledTimes(2);
+    expect(analyze).toHaveBeenCalledTimes(2);
+  });
+
+  it("全部已完成但结果分散在多个任务时，不新建任务且两个商品都仍展示", async () => {
+    const { store, runner, analyze } = setup();
+    const first = await runner.start("codex", true, undefined, true, undefined, 1);
+    await runner.settled();
+    const second = await runner.start("codex");
+    await runner.settled();
+    expect(first).not.toBe(second);
+    expect(store.run(second)).toMatchObject({ total: 1, completed: 1 });
+    const noop = await runner.start("codex");
+    await runner.settled();
+    expect(noop).toBe(second);
+    expect(store.overview().runs).toHaveLength(2);
+    expect(store.overview().records.items.map((item) => [item.key, item.state])).toEqual([
+      ["a", "completed"],
+      ["b", "completed"],
+    ]);
+    expect(store.overview().results.total).toBe(2);
+    expect(analyze).toHaveBeenCalledTimes(2);
+  });
+
+  it("结果按商品去重并分页，重分析后仍保留完整依据和旧调用", async () => {
+    const keys = Array.from({ length: 23 }, (_, index) => `product-${index}`);
+    const { store, runner, analyze } = setup(keys);
+    const first = await runner.start("codex");
+    await runner.settled();
+    const oldTask = store.overview({ runId: first }).results.items[0].taskId;
+    expect(store.overview().results).toMatchObject({ page: 1, total: 23, totalPages: 2 });
+    expect(store.overview().results.items).toHaveLength(20);
+    expect(store.overview({ resultsPage: 2 }).results.items).toHaveLength(3);
+    const updatedKey = store.detail(oldTask)!.result!.productKey;
+    await runner.start("codex", true, undefined, true, undefined, 1, [updatedKey]);
+    await runner.settled();
+    const results = store.overview().results;
+    expect(results.total).toBe(23);
+    expect(results.items.filter((item) => item.result.productKey === updatedKey)).toHaveLength(1);
+    expect(results.items[0]).toMatchObject({
+      name: `角色${updatedKey}`,
+      result: {
+        productKey: updatedKey,
+        summary: expect.any(String),
+        dimensions: {
+          foundation: { evidence: expect.any(Array) },
+          equipment: { evidence: expect.any(Array) },
+          pets: { evidence: expect.any(Array) },
+        },
+      },
+    });
+    expect(store.detail(oldTask)!.attempts).toHaveLength(1);
+    expect(analyze).toHaveBeenCalledTimes(24);
+  });
+
   it("指定商品试分析只分析所选商品，保留选择顺序", async () => {
     const { crawl, store, runner, analyze } = setup(["a", "b", "c"]);
     const id = await runner.start("codex", true, undefined, true, undefined, 2, ["c", "b"]);
@@ -571,9 +713,11 @@ describe("持久化的商品分析队列", () => {
     const original = store.detail(store.overview({ runId: first }).ranking[0].taskId!)!;
     const reused = await runner.start("codex");
     await runner.settled();
-    expect(store.run(reused)).toMatchObject({ completed: 1, reused: 1 });
+    expect(reused).toBe(first);
+    expect(store.run(reused)).toMatchObject({ completed: 1, reused: 0 });
+    expect(store.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n).toBe(1);
     const reusedDetail = store.detail(store.overview({ runId: reused }).ranking[0].taskId!)!;
-    expect(reusedDetail.reusedFrom).toBe(original.taskId);
+    expect(reusedDetail.taskId).toBe(original.taskId);
     expect(reusedDetail.attempts).toEqual(original.attempts);
     expect(analyze).toHaveBeenCalledTimes(1);
     const changed = crawl.detail("a") as SavedRoleRecord;
@@ -631,7 +775,7 @@ describe("持久化的商品分析队列", () => {
       .run("大".repeat(50_000));
     const large = await runner.start("codex");
     await runner.settled();
-    expect(store.run(large)).toMatchObject({ failed: 1, completed: 1 });
+    expect(store.run(large)).toMatchObject({ failed: 1, completed: 0, total: 1 });
     expect(analyze).toHaveBeenCalledTimes(3);
     const item = store
       .overview({ runId: large })

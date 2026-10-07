@@ -363,7 +363,7 @@ export function AiConnectionControl({
             </option>
           ))}
         </select>
-        <small>默认沿用当前配置；手动选择的模型用于新批次。</small>
+        <small>默认沿用当前配置；手动选择的模型用于下次分析。</small>
         {modelsError && (
           <small className="analysis-auth-notice" role="status">
             {modelsError}。可以使用默认模型，或在连接设置中重新连接。
