@@ -74,7 +74,19 @@ export async function createBackgroundPage(browser: Browser): Promise<Page> {
   return selectedPage;
 }
 
-export async function createHiddenPage(browser: Browser): Promise<Page> {
+let hiddenPageCreation: Promise<void> = Promise.resolve();
+
+export function createHiddenPage(browser: Browser): Promise<Page> {
+  // Only target creation shares the temporary Playwright compatibility switch.
+  const creation = hiddenPageCreation.then(() => openHiddenPage(browser));
+  hiddenPageCreation = creation.then(
+    () => {},
+    () => {},
+  );
+  return creation;
+}
+
+async function openHiddenPage(browser: Browser): Promise<Page> {
   const before = new Set(browser.contexts().flatMap((context) => context.pages()));
   const session = await browser.newBrowserCDPSession();
   let retained = false;
