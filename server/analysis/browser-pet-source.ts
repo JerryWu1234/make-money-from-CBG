@@ -282,7 +282,7 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
     const diagnostics = await page
       .evaluate(() => {
         const excluded =
-          '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]';
+          '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"], .equip_tips';
         const describe = (selector: string) =>
           Array.from(document.querySelectorAll<HTMLElement>(selector))
             .filter((node) => !node.closest(excluded))
@@ -437,7 +437,7 @@ async function inspectMainPetEquipment(page: Page, signal: AbortSignal, excluded
       document
         .querySelectorAll("[data-cbg-pet-gear-index]")
         .forEach((node) => node.removeAttribute("data-cbg-pet-gear-index"));
-      const missing = nodes.filter((icon) => {
+      const equipment = nodes.filter((icon) => {
         if (
           !icon.checkVisibility() ||
           icon.closest(excluded) ||
@@ -454,10 +454,12 @@ async function inspectMainPetEquipment(page: Page, signal: AbortSignal, excluded
           for (const attr of node.attributes)
             if (attr.name.startsWith("data"))
               attrs[attr.name.replace(/^data-/, "data_")] ||= attr.value;
-        return !attrs.data_skill_type && (!attrs.data_equip_name || !attrs.data_equip_desc);
+        return !attrs.data_skill_type;
       });
-      missing.forEach((node, index) => node.setAttribute("data-cbg-pet-gear-index", String(index)));
-      return missing.length;
+      equipment.forEach((node, index) =>
+        node.setAttribute("data-cbg-pet-gear-index", String(index)),
+      );
+      return equipment.length;
     }, excluded);
   for (let index = 0; index < count; index++) {
     signal.throwIfAborted();
@@ -481,8 +483,6 @@ async function inspectMainPetEquipment(page: Page, signal: AbortSignal, excluded
               attrs[attr.name.replace(/^data-/, "data_")] ||= attr.value;
         const name = attrs.data_equip_name || "";
         const id = attrs.data_tip_box;
-        if (!id && name && attrs.data_equip_desc)
-          return { name, description: attrs.data_equip_desc };
         const tips = id
           ? [document.getElementById(id)]
           : Array.from(
@@ -497,13 +497,16 @@ async function inspectMainPetEquipment(page: Page, signal: AbortSignal, excluded
                 (tip) =>
                   tip?.checkVisibility() &&
                   !tip.closest(
-                    "#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .goodsRemmds",
+                    "#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds",
                   ),
               )
               .map((tip) => tip!.innerText.trim())
               .filter(Boolean),
           ),
         ];
+        // Inline descriptions can contain only the level; prefer the actual visible tip.
+        if (texts.length === 0 && !id && name && attrs.data_equip_desc)
+          return { name, description: attrs.data_equip_desc };
         if (texts.length !== 1) return false;
         const lines = texts[0]
           .split(/\r?\n/)
@@ -535,7 +538,7 @@ async function readMainPet(page: Page, signal: AbortSignal) {
   signal.throwIfAborted();
   await assertAvailable(page);
   const excluded =
-    '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]';
+    '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"], .equip_tips';
   await page.waitForFunction(petRegionReady, excluded, { timeout: 5000 });
   await inspectMainPetEquipment(page, signal, excluded);
   signal.throwIfAborted();
