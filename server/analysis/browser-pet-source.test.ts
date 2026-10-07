@@ -10,6 +10,7 @@ import {
   type PetSearchConfig,
 } from "./browser-pet-source";
 import { verifyPetCandidate, type PetPricingItem } from "./pet-pricing";
+import { CrawlStore } from "../crawler/store";
 import { pageText } from "./equipment-pricing";
 const runtime = vi.hoisted(() => ({
   createHiddenPage: vi.fn(),
@@ -394,26 +395,24 @@ describe("主宝宝商品来源核对", () => {
   });
 });
 
-describe("宝宝查询拥有页面与共享采集锁", () => {
+describe("宝宝查询使用独立后台页", () => {
+  let crawl: CrawlStore;
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     vi.useFakeTimers();
+    crawl = new CrawlStore(":memory:");
+    expect(crawl.acquire("collecting")).toBe(true);
+    runtime.crawlDatabase.mockReturnValue(crawl.db);
   });
   afterEach(() => {
+    expect(crawl.db.prepare("SELECT owner FROM crawl_lock").get()?.owner).toBe("collecting");
+    crawl.close();
     vi.useRealTimers();
   });
   const pages = () => ({
     search: { close: vi.fn(async () => {}) },
     detail: { close: vi.fn(async () => {}), goto: vi.fn() },
   });
-  const database = (changes = 1) => {
-    const acquire = vi.fn().mockReturnValue({ changes }),
-      release = vi.fn();
-    runtime.crawlDatabase.mockReturnValue({
-      prepare: vi.fn((sql: string) => ({ run: sql.startsWith("INSERT") ? acquire : release })),
-    });
-    return { acquire, release };
-  };
   const open = async (control = new AbortController()) => {
     const { search, detail } = pages();
     runtime.getBrowser.mockResolvedValue({});
@@ -572,53 +571,54 @@ describe("宝宝查询拥有页面与共享采集锁", () => {
       await source.close();
     }
   });
-  it("采集持锁或预先取消时不开Chrome/新页", async () => {
-    database(0);
-    await expect(createPetSource(new AbortController().signal)).rejects.toThrow(/采集/);
+  it("采集持锁时仍可查宝宝，只关闭自有页", async () => {
+    const { source, search, detail } = await open();
+    await source.close();
+    await source.close();
+    expect(runtime.getBrowser).toHaveBeenCalledWith();
+    expect(runtime.createHiddenPage).toHaveBeenCalledTimes(2);
+    expect(search.close).toHaveBeenCalledOnce();
+    expect(detail.close).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("预先取消时不连接或创建页面", async () => {
     const control = new AbortController();
     control.abort(new Error("停止"));
     await expect(createPetSource(control.signal)).rejects.toThrow("停止");
     expect(runtime.getBrowser).not.toHaveBeenCalled();
     expect(runtime.createHiddenPage).not.toHaveBeenCalled();
-    expect(vi.getTimerCount()).toBe(0);
   });
-  it("只复用缓存浏览器；第二页创建失败关闭第一页并释放自己的锁", async () => {
-    const { acquire, release } = database(),
-      { search } = pages();
+  it("第二页创建失败时关闭已创建的第一页", async () => {
+    const { search } = pages();
     runtime.getBrowser.mockResolvedValue({});
     runtime.createHiddenPage
       .mockResolvedValueOnce(search)
       .mockRejectedValueOnce(new Error("详情页失败"));
     await expect(createPetSource(new AbortController().signal)).rejects.toThrow("详情页失败");
-    expect(runtime.getBrowser).toHaveBeenCalledWith();
     expect(search.close).toHaveBeenCalledOnce();
-    expect(release).toHaveBeenCalledWith(acquire.mock.calls[0][0]);
     expect(vi.getTimerCount()).toBe(0);
   });
-  it("取消自动清理两页和锁，随后finally close幂等且禁止后续读取", async () => {
-    const { release } = database();
+  it("创建途中取消时清理两页", async () => {
+    const { search, detail } = pages();
+    const control = new AbortController();
+    runtime.getBrowser.mockResolvedValue({});
+    runtime.createHiddenPage.mockResolvedValueOnce(search).mockImplementationOnce(async () => {
+      control.abort(new Error("停止"));
+      return detail;
+    });
+    await expect(createPetSource(control.signal)).rejects.toThrow("停止");
+    expect(search.close).toHaveBeenCalledOnce();
+    expect(detail.close).toHaveBeenCalledOnce();
+  });
+  it("取消自动清理两页，finally close幂等且禁止后续读取", async () => {
     const { source, control, search, detail } = await open();
     control.abort(new Error("暂停"));
     await source.close();
     await source.close();
     expect(search.close).toHaveBeenCalledOnce();
     expect(detail.close).toHaveBeenCalledOnce();
-    expect(release).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
     await expect(source.readSource(url, new AbortController().signal)).rejects.toThrow("暂停");
-  });
-  it("续租失败中止自有页并释放timer和锁，不继续查询", async () => {
-    const { acquire, release } = database(),
-      { source, detail } = await open();
-    acquire.mockReturnValue({ changes: 0 });
-    await vi.advanceTimersByTimeAsync(30000);
-    await expect(source.findCandidates([item()], new AbortController().signal)).rejects.toThrow(
-      /锁已失效/,
-    );
-    await source.close();
-    expect(detail.goto).not.toHaveBeenCalled();
-    expect(release).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
   });
   it("关闭等待两页实际结束，一个close失败仍关闭另一页", async () => {
     const { search, detail } = pages(),
