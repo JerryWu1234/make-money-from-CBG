@@ -82,6 +82,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
         : null;
     const shown = {
       ...valuation,
+      ai_explanation: `【模拟测试长查询条件】${JSON.stringify({ query: "listed_condition_".repeat(80) })}`,
       ...compareListingPrice(value, valuation.asking_price),
       model_value: value,
       equipment_value: pricing.total,
@@ -167,6 +168,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
             const overview = store.overview({
               provider: "codex",
               runId: url.searchParams.get("runId") || undefined,
+              currentProfile: profile,
             });
             body = {
               ...overview,
@@ -229,7 +231,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
             );
             break;
           case "/api/analysis/detail": {
-            const detail = store.detail(url.searchParams.get("taskId")!);
+            const detail = store.detail(url.searchParams.get("taskId")!, profile);
             body = detail?.result
               ? {
                   ...detail,
@@ -288,6 +290,42 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await page.getByRole("button", { name: "开始分析已有商品", exact: true }).click();
     const completedRecords = page.getByRole("tabpanel", { name: "分析记录" });
     await expect(completedRecords.getByRole("article")).toHaveCount(4);
+    for (const width of [1100, 390]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect(completedRecords.getByRole("heading", { name: "AI 核对说明" })).toHaveCount(2);
+      expect(
+        await completedRecords.evaluate((element) => element.scrollWidth - element.clientWidth),
+      ).toBeLessThanOrEqual(1);
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth),
+      ).toBeLessThanOrEqual(1);
+    }
+    await page.setViewportSize({ width: 1100, height: 1000 });
+    const analysedProfile = profile;
+    profile = createProfile(
+      profile.template + "\n【模拟测试】修改分析说明。",
+      profile.settings,
+      false,
+    );
+    expect(profile.calculationVersion).toBe(analysedProfile.calculationVersion);
+    const oldSettingsMessage =
+      "这是旧设置下的结果。估值规则或分析设置已更新，再次分析会更新这件商品。";
+    await page.reload();
+    const savedResult = completedRecords.getByRole("article", { name: /角色b/ });
+    await expect(savedResult.getByText(oldSettingsMessage, { exact: true })).toBeVisible();
+    await savedResult.getByRole("button", { name: "查看原文与调用记录 →", exact: true }).click();
+    const oldDetail = page.getByRole("dialog", { name: "角色b" });
+    await expect(oldDetail.getByText(oldSettingsMessage, { exact: true })).toBeVisible();
+    await oldDetail.getByText("查看估值依据与查价记录", { exact: true }).click();
+    await expect(
+      oldDetail.getByRole("button", { name: "去补充分析设置", exact: true }),
+    ).toBeVisible();
+    await oldDetail.getByRole("button", { name: "关闭分析详情", exact: true }).click();
+    profile = analysedProfile;
+    await page.reload();
+    await expect(completedRecords.getByRole("article")).toHaveCount(4);
+    await expect(completedRecords.getByText(oldSettingsMessage, { exact: true })).toHaveCount(0);
+    expect(calls).toBe(4);
     await expect(
       completedRecords
         .getByRole("article", { name: /角色a/ })

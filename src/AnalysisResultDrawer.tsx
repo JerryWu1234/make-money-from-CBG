@@ -9,13 +9,13 @@ export function AnalysisResultDrawer({
   onClose,
   onShowRole,
   onConfigure,
-  previousSettings,
+  currentCalculationVersion,
 }: {
   taskId: string;
   onClose: () => void;
   onShowRole: (key: string) => void;
   onConfigure?: () => void;
-  previousSettings?: boolean;
+  currentCalculationVersion?: string;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [detail, setDetail] = useState<AnalysisDetail | null>(null);
@@ -121,7 +121,11 @@ export function AnalysisResultDrawer({
             <ProductAnalysisView
               result={detail.result}
               onConfigure={onConfigure}
-              previousSettings={previousSettings}
+              previousSettings={
+                detail.profileChanged ||
+                (!!currentCalculationVersion &&
+                  detail.result.valuation?.calculation_version !== currentCalculationVersion)
+              }
             />
           ) : (
             <p className="analysis-pending-note" role="status">
