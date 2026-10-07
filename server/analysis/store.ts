@@ -151,7 +151,11 @@ export class AnalysisStore {
       coalesce(sum(t.status='completed'),0) completed,coalesce(sum(t.status='failed'),0) failed,
       coalesce(sum(t.status='queued'),0) queued,coalesce(sum(t.reused),0) reused,
       (SELECT json_extract(source_listing_json,'$.name') FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current,
-      (SELECT CASE WHEN equipment_pricing_json IS NULL AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search' WHEN pet_pricing_json IS NULL AND json_extract(r.profile_json,'$.petSearch')=1 THEN 'pet_search' ELSE 'analysis' END FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) phase
+      (SELECT CASE
+        WHEN (equipment_pricing_json IS NULL OR json_type(equipment_pricing_json,'$.searchComplete')='false') AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search'
+        WHEN (pet_pricing_json IS NULL OR json_type(pet_pricing_json,'$.searchComplete')='false') AND json_extract(r.profile_json,'$.petSearch')=1 THEN 'pet_search'
+        ELSE 'analysis'
+      END FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) phase
       FROM analysis_runs r LEFT JOIN analysis_tasks t ON t.run_id=r.id WHERE r.id=? GROUP BY r.id`)
       .get(id);
     return row
