@@ -12,8 +12,12 @@ export type PricingSearchAttempt = {
 };
 
 /** Only explicitly finished, fresh, identity-checked assets may skip a resumed search. */
-export function resumePricingItems<T extends EquipmentPricingSnapshot>(snapshot: T, previous?: T) {
-  if (!snapshot.captureComplete) return snapshot;
+export function resumePricingItems<T extends EquipmentPricingSnapshot>(
+  snapshot: T,
+  previous?: T,
+  allowPartialCapture = false,
+) {
+  if (!snapshot.captureComplete && !allowPartialCapture) return snapshot;
   const reusable =
     previous?.inputHash === snapshot.inputHash && validateExactPricing(previous, snapshot.items);
   if (reusable) {
@@ -24,8 +28,17 @@ export function resumePricingItems<T extends EquipmentPricingSnapshot>(snapshot:
   snapshot.items = snapshot.items.map((item) => {
     if (item.status !== "no_match" || item.baselineEstimate) return item;
     const saved = reusable ? previous!.items.find((value) => value.key === item.key) : undefined;
-    if (saved && ["completed", "unsupported"].includes(saved.searchState || ""))
-      return structuredClone(saved);
+    if (
+      saved &&
+      ["completed", "unsupported", "pending", "read_failed"].includes(saved.searchState || "")
+    ) {
+      const resumed = structuredClone(saved);
+      if (["pending", "read_failed"].includes(resumed.searchState || "")) {
+        resumed.searchState = "pending";
+        resumed.issues = [...item.issues];
+      }
+      return resumed;
+    }
     return { ...item, searchState: "pending" };
   }) as T["items"];
   return snapshot;
@@ -65,4 +78,25 @@ export function saveSearchAttempt(
   snapshot.queries = [
     ...new Set([...snapshot.queries, ...response.queries.filter((q) => q.trim())]),
   ];
+}
+
+/** Continue a bounded search only when a saved official query cursor actually advances. */
+export function equipmentSearchAdvanced(
+  previous: EquipmentPricingSnapshot | undefined,
+  current: EquipmentPricingSnapshot,
+) {
+  if (current.items.some((item) => item.searchState === "read_failed")) return false;
+  return current.items.some((item) => {
+    const saved = previous?.items.find((value) => value.key === item.key);
+    if (
+      ["completed", "unsupported"].includes(item.searchState || "") &&
+      item.searchState !== saved?.searchState
+    )
+      return true;
+    return (
+      item.searchState === "pending" &&
+      !!item.searchCursor &&
+      JSON.stringify(saved?.searchCursor) !== JSON.stringify(item.searchCursor)
+    );
+  });
 }

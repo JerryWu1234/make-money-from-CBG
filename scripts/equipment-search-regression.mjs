@@ -90,6 +90,7 @@ const { equipmentSourceFromPages } = await import(
     "../crawler/compact": compact,
     "./equip-attributes": attributes,
     "./equipment-match": matcher,
+    "./pricing-estimate": estimate,
     "./jade-query": jade,
     "./equipment-pricing": pricing,
   })
@@ -100,6 +101,7 @@ let persistent, browser;
 let passed = 0,
   failed = 0;
 const check = async (name, run) => {
+  if (process.env.CBG_OFFLINE_FILTER && !name.includes(process.env.CBG_OFFLINE_FILTER)) return;
   try {
     await run();
     passed++;
@@ -153,7 +155,8 @@ try {
   let searchOptions = {},
     detailOptions = {},
     detailVisits = [],
-    navigationDelay = 0;
+    navigationDelay = 0,
+    onDetailVisit = null;
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.origin !== "https://xyq.cbg.163.com") {
@@ -165,6 +168,7 @@ try {
     else if (url.pathname === "/equip") {
       const eid = url.searchParams.get("eid");
       detailVisits.push(eid);
+      onDetailVisit?.(eid);
       if (navigationDelay) await new Promise((resolve) => setTimeout(resolve, navigationDelay));
       const settings = typeof detailOptions === "function" ? detailOptions(eid) : detailOptions;
       if (settings.redirect) {
@@ -196,6 +200,7 @@ try {
     detailOptions = detail;
     detailVisits = [];
     navigationDelay = 0;
+    onDetailVisit = null;
     const searchPage = await createHiddenPage(browser),
       detailPage = await createHiddenPage(browser);
     const control = new AbortController();
@@ -358,7 +363,7 @@ try {
     );
   });
 
-  await check("不同宝石等级保留为相近候选，同配优先且不把总属性套成初值", () =>
+  await check("先采用同宝石同段匹配，不为已有同配扩大段数或换算总属性", () =>
     withSource(
       {
         pages: [
@@ -381,9 +386,9 @@ try {
       }),
       async ({ source, searchPage, control }) => {
         const result = await source.findCandidates([item({ modelId: "2912" })], control.signal);
-        assert.deepEqual(detailVisits, ["matching", "other-gem"]);
+        assert.deepEqual(detailVisits, ["matching"]);
         assert.equal(result.items[0].candidates[0].verified, true);
-        assert.equal(result.items[0].candidates[1].matchType, "similar");
+        assert.equal(result.items[0].candidates.length, 1);
         const [query] = await searchPage.evaluate(() => window.calls);
         assert.equal(query.gem_level, 8);
         assert.equal(query.init_defense, undefined);
@@ -448,6 +453,47 @@ try {
         assert.equal(query.added_attr_num, "3");
         assert.deepEqual(detailVisits, ["matching"]);
         assert.equal(result.items[0].candidates[0].verified, true);
+      },
+    );
+  });
+
+  await check("目标芙蓉戒独立商品不含角色整套生效速度仍取得三条相近参考", () => {
+    const name = "芙蓉戒";
+    const description =
+      "等级 80\n防御 +21\n耐久度 84\n精炼等级 5\n附加属性：\n法术伤害结果 +8 [+15]\n法术伤害 +8 [+20]\n法术暴击等级 +10 [+20]\n特效：健步如飞（2级）\n速度 +2\n速度+7（已生效）\n装备条件：等级80";
+    const standalone = description.replace("速度+7（已生效）\n", "");
+    return withSource(
+      {
+        jewelry: true,
+        pages: [
+          Array.from({ length: 3 }, (_, index) => ({
+            eid: "jewelry-context-" + index,
+            name,
+            level: "80",
+            kindId: "61",
+            description: standalone,
+          })),
+        ],
+      },
+      { name, description: standalone, kindId: "61", renderedPanel: true, selling: 1 },
+      async ({ source, searchPage, control }) => {
+        const result = await source.findCandidates(
+          [item({ name, level: 80, category: "人物装备 · 戒指", kindId: "61", description })],
+          control.signal,
+        );
+        assert.equal(result.items[0].searchState, "completed");
+        assert.equal(result.items[0].candidates.length, 3);
+        for (const candidate of result.items[0].candidates) {
+          assert.equal(candidate.verified, true);
+          assert.equal(candidate.matchType, "similar");
+          assert.ok(candidate.differences.includes("已生效套装加成：速度:+7 → 未标明"));
+          assert.equal(candidate.price, 1000);
+        }
+        const [query] = await searchPage.evaluate(() => window.calls);
+        assert.equal(query.server_type, "3");
+        assert.equal(query.kindid, "61");
+        assert.equal(query.jinglian_level, 5);
+        assert.equal(detailVisits.length, 3);
       },
     );
   });
@@ -722,10 +768,22 @@ try {
       { pages: [[{ eid: "first", name: "其他装备" }], [{ eid: "last", name: equipmentName }]] },
       {},
       async ({ source, searchPage, control }) => {
-        const result = await source.findCandidates([item()], control.signal);
+        const input = item();
+        const first = await source.findCandidates([input], control.signal);
+        assert.equal(first.items[0].searchState, "pending");
+        assert.equal(first.items[0].searchCursor.modeIndex, 3);
+        assert.equal(first.items[0].searchCursor.pageNumber, 1);
         assert.deepEqual(
           (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
-          [1, 1, 2],
+          [1, 1, 1],
+        );
+        const result = await source.findCandidates(
+          [{ ...input, ...first.items[0] }],
+          control.signal,
+        );
+        assert.deepEqual(
+          (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
+          [1, 2],
         );
         assert.equal(result.items[0].candidates[0].verified, true);
         assert.match(result.items[0].note, /已读完/);
@@ -750,15 +808,31 @@ try {
             ? equipmentDescription.replace("防御：50", "防御：99")
             : equipmentDescription,
       }),
-      async ({ source, control }) => {
-        const result = await source.findCandidates([item()], control.signal);
+      async ({ source, searchPage, control }) => {
+        const input = item();
+        const first = await source.findCandidates([input], control.signal);
+        assert.equal(first.items[0].searchState, "pending");
+        const result = await source.findCandidates(
+          [{ ...input, ...first.items[0] }],
+          control.signal,
+        );
+        assert.deepEqual(
+          (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
+          [1, 2],
+        );
         assert.deepEqual(detailVisits, ["wrong", "primary"]);
         assert.equal(
           result.items[0].candidates.filter((candidate) => candidate.verified).length,
           1,
         );
         assert.equal(
-          result.items[0].candidates.find((candidate) => candidate.url.includes("wrong")).verified,
+          first.items[0].candidates.find((candidate) => candidate.url.includes("wrong")).verified,
+          false,
+        );
+        assert.equal(
+          result.items[0].candidates.some(
+            (candidate) => candidate.url.includes("wrong") && candidate.verified,
+          ),
           false,
         );
       },
@@ -800,6 +874,93 @@ try {
     ),
   );
 
+  await check("单一筛选模式跨轮从第四页续查，不重复前三页", () =>
+    withSource(
+      {
+        pages: Array.from({ length: 5 }, (_, page) => [
+          { eid: "single-" + page, name: "其他装备" },
+        ]),
+      },
+      {},
+      async ({ source, searchPage, control }) => {
+        const input = item({ description: "等级100" });
+        const first = await source.findCandidates([input], control.signal);
+        assert.equal(first.items[0].searchState, "pending");
+        assert.equal(first.items[0].searchCursor.pageNumber, 4);
+        assert.deepEqual(
+          (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
+          [1, 2, 3],
+        );
+        const second = await source.findCandidates(
+          [{ ...input, ...first.items[0] }],
+          control.signal,
+        );
+        assert.deepEqual(
+          (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
+          [4, 5],
+        );
+        assert.equal(second.items[0].searchState, "completed");
+        assert.match(second.items[0].note, /已读完/);
+        assert.deepEqual(detailVisits, []);
+      },
+    ),
+  );
+
+  await check("保存的两条参考刷新途中超时，保留全部旧候选和后件断点", async () => {
+    const fixture = {
+      pages: Array.from({ length: 4 }, () => [
+        { eid: "saved-1", name: equipmentName },
+        { eid: "saved-2", name: equipmentName },
+      ]),
+    };
+    const details = (eid) => ({
+      kindId: "20",
+      description: equipmentDescription.replace(
+        "防御：50",
+        eid === "saved-1" ? "防御：49" : "防御：51",
+      ),
+    });
+    let saved;
+    await withSource(fixture, details, async ({ source, control }) => {
+      saved = (await source.findCandidates([item({ kindId: "20" })], control.signal)).items[0];
+      assert.equal(saved.searchState, "pending");
+      assert.equal(
+        saved.candidates.filter((candidate) => candidate.verified).length,
+        2,
+        JSON.stringify(saved),
+      );
+    });
+    await withSource(fixture, details, async ({ source, control }) => {
+      const originalNow = Date.now;
+      const baseline = originalNow();
+      onDetailVisit = () => {
+        Date.now = () => baseline + 180_001;
+      };
+      try {
+        const untouched = item({ key: "later-item", ...saved });
+        const result = await source.findCandidates(
+          [
+            { ...item({ kindId: "20" }), ...saved },
+            { ...untouched, key: "later-item" },
+          ],
+          control.signal,
+        );
+        assert.deepEqual(detailVisits, ["saved-1"]);
+        assert.equal(result.items[0].skipped, true);
+        assert.deepEqual(result.items[0].candidates, saved.candidates);
+        assert.deepEqual(result.items[0].searchCursor, saved.searchCursor);
+        assert.equal(result.searchItems[0].reason, "candidate_refresh_budget");
+        assert.equal(result.searchItems[0].refreshed, 1);
+        assert.equal(result.items[1].skipped, true);
+        assert.deepEqual(result.items[1].candidates, saved.candidates);
+        assert.deepEqual(result.items[1].searchCursor, saved.searchCursor);
+      } finally {
+        Date.now = originalNow;
+        onDetailVisit = null;
+      }
+    });
+  });
+
   await check("最多六十个列表候选，不无限请求详情", () =>
     withSource(
       {
@@ -812,8 +973,11 @@ try {
       },
       {},
       async ({ source, searchPage, control }) => {
-        const result = await source.findCandidates([item()], control.signal);
-        assert.equal((await searchPage.evaluate(() => window.calls)).length, 3);
+        const result = await source.findCandidates(
+          [item({ description: "等级100" })],
+          control.signal,
+        );
+        assert.equal((await searchPage.evaluate(() => window.calls)).length, 2);
         assert.match(result.items[0].note, /60个列表候选/);
         assert.deepEqual(detailVisits, []);
       },
@@ -823,7 +987,7 @@ try {
   await check("最多读取二十个详情，达到三个真实同配匹配立即停", async () => {
     await withSource(
       {
-        pages: Array.from({ length: 3 }, (_, page) =>
+        pages: Array.from({ length: 1 }, (_, page) =>
           Array.from({ length: 25 }, (_, row) => ({
             eid: `${page}-${row}`,
             name: equipmentName,
@@ -831,10 +995,25 @@ try {
         ),
       },
       { description: equipmentDescription.replace("防御：50", "防御：99") },
-      async ({ source, control }) => {
-        const result = await source.findCandidates([item()], control.signal);
+      async ({ source, searchPage, control }) => {
+        const input = item({ description: "等级100" });
+        const result = await source.findCandidates([input], control.signal);
         assert.equal(detailVisits.length, 20);
         assert.match(result.items[0].note, /20个详情/);
+        assert.equal(result.items[0].searchState, "pending");
+        assert.equal(result.items[0].searchCursor.rowIndex, 20);
+        const resumed = await source.findCandidates(
+          [{ ...input, ...result.items[0] }],
+          control.signal,
+        );
+        assert.equal(resumed.searchItems[0].details, 5);
+        assert.equal(resumed.items[0].searchState, "completed");
+        assert.equal(detailVisits.length, 25);
+        assert.equal(new Set(detailVisits).size, 25);
+        assert.deepEqual(
+          (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
+          [1],
+        );
       },
     );
     await withSource(

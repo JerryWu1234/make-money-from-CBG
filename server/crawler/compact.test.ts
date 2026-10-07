@@ -67,6 +67,13 @@ describe("有官网证据的角色装备分类", () => {
     ).toBe("可爱的外观装饰，装扮你的召唤兽。\n不增加战斗属性。");
   });
   it.each([
+    [1, "头盔"],
+    [2, "衣服"],
+    [6, "武器"],
+    [187, "戒指"],
+    [188, "耳饰"],
+    [189, "手镯"],
+    [190, "佩饰"],
     [3, "鞋子"],
     [4, "饰品"],
     [5, "腰带"],
@@ -84,7 +91,18 @@ describe("有官网证据的角色装备分类", () => {
     expect(observedEquipmentCategory("19", "role_using_equip_" + slot)).toBe(item.category);
   });
 
-  it.each([1, 2, 6, 187, 188, 189, 190])("未知slot %s不猜头部、男女衣、武器或灵饰类型", (slot) => {
+  it.each([
+    [187, "戒指"],
+    [188, "耳饰"],
+    [189, "手镯"],
+    [190, "佩饰"],
+  ])("保存记录的泛灵饰类别按官网槽位%s补充为%s", (slot, label) => {
+    expect(observedEquipmentCategory("灵饰", "role_using_equip_" + slot)).toBe(
+      "人物装备 · " + label,
+    );
+  });
+
+  it.each([7, 8, 191])("未知slot %s不猜装备类别", (slot) => {
     expect(observedEquipmentCategory("人物装备", "role_using_equip_" + slot)).toBe("人物装备");
   });
 

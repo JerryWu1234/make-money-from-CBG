@@ -6,12 +6,13 @@ export type SimilarEstimate = {
   policyVersion: string;
   status: "range" | "insufficient" | "dispersed";
   range: PriceRange | null;
+  observedRange?: PriceRange;
   sampleCount: number;
   median?: number;
   issues: string[];
 };
 export const SIMILAR_POLICY_VERSION = "same-level-comparables-v1";
-export const EQUIPMENT_SIMILAR_POLICY_VERSION = "same-core-equipment-v3";
+export const EQUIPMENT_SIMILAR_POLICY_VERSION = "same-core-gem-bands-v4";
 
 export function buildEquipmentEstimate(candidates: EquipmentCandidate[]): SimilarEstimate {
   return buildSimilarEstimate(candidates, true);
@@ -57,7 +58,11 @@ export function buildSimilarEstimate(
     distinct.set(identity, candidate.price);
   }
   const prices = [...distinct.values()].sort((a, b) => a - b);
-  const base = { policyVersion, sampleCount: prices.length };
+  const base = {
+    policyVersion,
+    sampleCount: prices.length,
+    ...(prices.length ? { observedRange: { min: prices[0], max: prices[prices.length - 1] } } : {}),
+  };
   if (prices.length < 3)
     return {
       ...base,

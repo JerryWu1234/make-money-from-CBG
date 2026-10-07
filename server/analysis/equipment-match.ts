@@ -152,12 +152,51 @@ export function matchEquipmentAttributes(
   };
 }
 
+/** Search near the observed enhancement without converting it into a guessed base stat. */
+export function equipmentEnhancementMismatch(
+  target: EquipmentAttributes,
+  source: EquipmentAttributes,
+  mode: "same-gems" | "near-gems",
+  partial = false,
+): string | null {
+  const gemTokens = (values: string[] = []) =>
+    values
+      .flatMap((value) => value.split(/[、，,；;\s]+/))
+      .filter(Boolean)
+      .sort();
+  const targetGems = gemTokens(target.fields.宝石);
+  const sourceGems = gemTokens(source.fields.宝石);
+  if ((!partial || sourceGems.length) && JSON.stringify(targetGems) !== JSON.stringify(sourceGems))
+    return "宝石种类不符合当前相近筛选阶段";
+  for (const field of ["锻炼等级", "精炼等级"]) {
+    const left = target.fields[field],
+      right = source.fields[field];
+    if (partial && !right?.length) continue;
+    if (!left?.length && !right?.length) continue;
+    const targetLevel = left?.length === 1 ? numbers(left)?.[0] : undefined;
+    const sourceLevel = right?.length === 1 ? numbers(right)?.[0] : undefined;
+    if (targetLevel === undefined || sourceLevel === undefined)
+      return field + "没有完整证据，不能当作同段或邻近段数";
+    if (
+      !Number.isInteger(targetLevel) ||
+      !Number.isInteger(sourceLevel) ||
+      targetLevel < 0 ||
+      sourceLevel < 0
+    )
+      return field + "不符合有效段数";
+    if (Math.abs(targetLevel - sourceLevel) > (mode === "same-gems" ? 0 : 1))
+      return field + "不符合当前同段或相邻一段筛选";
+  }
+  return null;
+}
+
 const comparableDifferences = new Set([
   "五行",
   "套装",
   "宝石",
   "锻炼等级",
   "精炼等级",
+  "已生效套装加成",
   "熔炼",
   "修理失败",
   "开运孔数",
@@ -229,7 +268,13 @@ export function matchComparableEquipmentAttributes(
       differences.push(
         name + "：" + (left.join("、") || "未标明") + " → " + (right.join("、") || "未标明"),
       );
-      score += 10;
+      const grades = ["锻炼等级", "精炼等级"].includes(name) ? [numbers(left), numbers(right)] : [];
+      score +=
+        grades.length && grades[0]?.length === 1 && grades[1]?.length === 1
+          ? Math.abs(grades[0][0] - grades[1][0]) * 10
+          : name === "宝石"
+            ? 30
+            : 10;
       continue;
     }
     if (!left.length || !right.length)

@@ -33,6 +33,9 @@ export function applyValuationRange(
   let total: PriceRange = { min: bare.model_value ?? 0, max: bare.model_value ?? 0 };
   let referenceSubtotal: PriceRange = { min: 0, max: 0 };
   let referenceValue = 0;
+  let knownAssetValue = 0;
+  const assetRanges: Pick<ValuationResult, "estimated_equipment_range" | "estimated_pet_range"> =
+    {};
   let equipmentReferences = 0;
   let allReferencesHaveValue = true;
   let missing = bare.model_value === null ? 1 : 0;
@@ -61,8 +64,8 @@ export function applyValuationRange(
   ) => {
     const age = snapshot ? Date.now() - Date.parse(snapshot.searchedAt) : Infinity;
     if (
-      !captured ||
-      !snapshot?.captureComplete ||
+      !snapshot ||
+      snapshot.captureComplete !== captured ||
       snapshot.inputHash !== inputHash ||
       !validateExactPricing(snapshot, inventoryItems) ||
       age < -60_000 ||
@@ -78,6 +81,11 @@ export function applyValuationRange(
       return;
     }
     const previousMissing = missing;
+    let assetRange: PriceRange | undefined;
+    const addAsset = (price: PriceRange) => {
+      assetRange = add(assetRange || { min: 0, max: 0 }, price);
+      total = add(total, price);
+    };
     missingFields.push(...snapshot.issues);
     for (const item of snapshot.items) {
       if (
@@ -86,7 +94,8 @@ export function applyValuationRange(
         Number.isFinite(item.referencePrice) &&
         item.referencePrice > 0
       ) {
-        total = add(total, { min: item.referencePrice, max: item.referencePrice });
+        addAsset({ min: item.referencePrice, max: item.referencePrice });
+        knownAssetValue = round(knownAssetValue + item.referencePrice);
         continue;
       }
       if (allowBaseline && item.baselineEstimate) {
@@ -99,7 +108,7 @@ export function applyValuationRange(
           estimate.amount >= 0
         ) {
           const price = { min: estimate.amount, max: estimate.amount };
-          total = add(total, price);
+          addAsset(price);
           referenceSubtotal = add(referenceSubtotal, price);
           referenceValue = round(referenceValue + estimate.amount);
           baseline++;
@@ -121,7 +130,7 @@ export function applyValuationRange(
         item.similarEstimate.range.max === estimate.range.max &&
         item.similarEstimate.median === estimate.median
       ) {
-        total = add(total, estimate.range);
+        addAsset(estimate.range);
         referenceSubtotal = add(referenceSubtotal, estimate.range);
         if (equipmentReference && estimate.median !== undefined) {
           referenceValue = round(referenceValue + estimate.median);
@@ -130,7 +139,16 @@ export function applyValuationRange(
         similar++;
       } else missingAsset(item);
     }
-    if (missing === previousMissing)
+    if (assetRange)
+      assetRanges[allowBaseline ? "estimated_equipment_range" : "estimated_pet_range"] = assetRange;
+    if (!captured) {
+      missing = Math.max(missing, previousMissing + 1);
+      missingFields.push(
+        ...inventoryIssues,
+        (allowBaseline ? "装备" : "宝宝") + "清单尚未完整，以上仅为已核验项目的小计",
+      );
+    }
+    if (captured && missing === previousMissing)
       recoverySuggestions.delete(
         allowBaseline
           ? "查看装备查价模块的候选与匹配原因；可靠同类报价不足时继续保留未定价。"
@@ -160,6 +178,7 @@ export function applyValuationRange(
     );
   }
   const finalMissing = [...new Set(missingFields)];
+  const knownSubtotal = round(bare.known_subtotal + knownAssetValue);
   const pendingSuggestions = missing
     ? ["逐项查看剩余未定价资产的资料、实际筛选条件与候选拒绝原因，再补采或补查。"]
     : [];
@@ -167,6 +186,8 @@ export function applyValuationRange(
   if (!similar && !baseline)
     return {
       ...result,
+      ...assetRanges,
+      known_subtotal: knownSubtotal,
       missing_fields: finalMissing,
       estimate_missing_count: missing,
       suggestions: finalSuggestions,
@@ -200,17 +221,16 @@ export function applyValuationRange(
         ]
       : []),
   ];
-  const subtotal = add(
-    { min: result.known_subtotal, max: result.known_subtotal },
-    referenceSubtotal,
-  );
+  const subtotal = add({ min: knownSubtotal, max: knownSubtotal }, referenceSubtotal);
   const referenceAmount =
     equipmentReferences && allReferencesHaveValue
-      ? round(result.known_subtotal + referenceValue)
+      ? round(knownSubtotal + referenceValue)
       : undefined;
   if (missing)
     return {
       ...result,
+      ...assetRanges,
+      known_subtotal: knownSubtotal,
       missing_fields: finalMissing,
       estimated_subtotal_range: subtotal,
       ...(referenceAmount !== undefined ? { estimated_subtotal_value: referenceAmount } : {}),
@@ -247,6 +267,8 @@ export function applyValuationRange(
         : "挂牌落在参考区间内";
   return {
     ...result,
+    ...assetRanges,
+    known_subtotal: knownSubtotal,
     missing_fields: finalMissing,
     estimated_value_range: total,
     estimated_subtotal_range: subtotal,

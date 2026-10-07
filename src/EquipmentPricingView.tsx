@@ -69,7 +69,9 @@ export function EquipmentPricingView({
           这是超过24小时的历史快照。请开始新批次重新核对；继续旧批次保留当时资料。
         </p>
       )}
-      {hasBaseline && snapshot.total === null && snapshot.knownTotal === 0 ? (
+      {snapshot.captureComplete && snapshot.items.length === 0 ? (
+        <p>已确认没有{asset}。</p>
+      ) : hasBaseline && snapshot.total === null && snapshot.knownTotal === 0 ? (
         <p>本次没有已核实同配置挂牌参考价；默认参考价另列。</p>
       ) : snapshot.total === null && snapshot.knownTotal === 0 ? (
         <p>尚无同配置挂牌价；相近商品的参考价和未定价项目见下方。</p>
@@ -232,6 +234,12 @@ export function EquipmentPricingView({
               )}
             {item.similarEstimate && (
               <>
+                {!item.similarEstimate.range && item.similarEstimate.observedRange && (
+                  <p>
+                    已核实样本挂牌范围：{valuationRangeMoney(item.similarEstimate.observedRange)}
+                    ；样本不足或报价分散，未纳入估值。
+                  </p>
+                )}
                 {item.similarEstimate.median !== undefined && item.similarEstimate.range && (
                   <p>样本挂牌范围：{valuationRangeMoney(item.similarEstimate.range)}。</p>
                 )}

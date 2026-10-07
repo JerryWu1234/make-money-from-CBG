@@ -9,6 +9,7 @@ import { VALUATION_SCHEMA, validateValuation } from "./valuation-contract";
 import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { CALCULATION_VERSION } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
+import { equipmentSearchAdvanced } from "./pricing-progress";
 
 export type AnalysisClient = {
   model: string;
@@ -159,6 +160,7 @@ export class AnalysisRunner {
       });
   }
   private async process(id: string, owner: string, client: AnalysisClient, stop: AbortSignal) {
+    const equipmentContinuations = new Map<string, { startedAt: number; rounds: number }>();
     while (!stop.aborted) {
       if (!this.store.owns(owner)) return;
       let task = this.store.next(id);
@@ -174,6 +176,12 @@ export class AnalysisRunner {
         try {
           this.store.beginEquipmentSearch(task, owner);
           if (!client.searchEquipment) throw new Error("装备联网查价尚未连接");
+          const previousPricing = task.equipmentPricing;
+          const budget = equipmentContinuations.get(task.id) || {
+            startedAt: Date.now(),
+            rounds: 0,
+          };
+          equipmentContinuations.set(task.id, budget);
           const snapshot = await client.searchEquipment(
             task.record,
             signal,
@@ -184,6 +192,14 @@ export class AnalysisRunner {
           if (!this.store.owns(owner)) return;
           task = this.store.saveEquipmentPricing(task, snapshot, owner);
           if (snapshot.searchComplete === false) {
+            if (
+              equipmentSearchAdvanced(previousPricing, snapshot) &&
+              budget.rounds < 4 &&
+              Date.now() - budget.startedAt < 15 * 60_000
+            ) {
+              budget.rounds++;
+              continue;
+            }
             this.store.setRun(
               id,
               "paused",

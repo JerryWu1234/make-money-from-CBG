@@ -88,17 +88,29 @@ function ValuationPriceOverview({ result }: { result: ValuationResult }) {
     asset: "装备" | "宝宝",
     value: number | null | undefined,
     snapshot: ValuationResult["equipment_pricing"],
+    range: ValuationResult["estimated_equipment_range"],
   ) => {
     if (snapshot?.captureComplete && snapshot.items.length === 0) return "无" + asset;
+    const ignored = (item: NonNullable<typeof snapshot>["items"][number]) =>
+      item.baselineEstimate?.kind === "ignored" && !item.baselineInvalidReason;
+    if (snapshot?.items.length && snapshot.items.every(ignored))
+      return snapshot.captureComplete ? "低值未计入" : "资料未采齐";
+    if (range?.min === 0 && range.max === 0 && snapshot?.items.some(ignored))
+      return snapshot.captureComplete ? "未定价" : "资料未采齐";
     if (value != null) return valuationMoney(value);
+    if (range) {
+      const partial =
+        !snapshot?.captureComplete ||
+        snapshot.items.some(
+          (item) =>
+            item.status !== "priced" &&
+            !item.similarEstimate?.range &&
+            (item.baselineInvalidReason || item.baselineEstimate?.amount == null),
+        );
+      return (partial ? "已算小计区间 " : "参考区间 ") + valuationRangeMoney(range);
+    }
     if (!snapshot) return "未计价";
     if (!snapshot.captureComplete) return "资料未采齐";
-    if (
-      snapshot.items.every(
-        (item) => item.baselineEstimate?.kind === "ignored" && !item.baselineInvalidReason,
-      )
-    )
-      return "低值未计入";
     if (
       snapshot.knownTotal > 0 ||
       snapshot.items.some(
@@ -137,11 +149,20 @@ function ValuationPriceOverview({ result }: { result: ValuationResult }) {
         </div>
         <div>
           <dt>装备</dt>
-          <dd>{assetPrice("装备", result.equipment_value, result.equipment_pricing)}</dd>
+          <dd>
+            {assetPrice(
+              "装备",
+              result.equipment_value,
+              result.equipment_pricing,
+              result.estimated_equipment_range,
+            )}
+          </dd>
         </div>
         <div>
           <dt>宝宝</dt>
-          <dd>{assetPrice("宝宝", result.pet_value, result.pet_pricing)}</dd>
+          <dd>
+            {assetPrice("宝宝", result.pet_value, result.pet_pricing, result.estimated_pet_range)}
+          </dd>
         </div>
         <div>
           <dt>其他（锦衣、道具）</dt>

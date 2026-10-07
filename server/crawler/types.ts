@@ -46,6 +46,7 @@ export interface TabSnapshot {
   items?: DetailItem[];
   pets?: PetSnapshot[];
   petCount?: number;
+  equipmentEmptyProof?: "official-containers";
 }
 export interface PetSnapshot {
   index: number;
@@ -89,6 +90,7 @@ export interface RoleDetail {
     collectedAt: string;
     complete: boolean;
     issues: string[];
+    emptyProof?: "official-containers" | "explicit-text";
   };
   petCapture?: {
     version: 1;

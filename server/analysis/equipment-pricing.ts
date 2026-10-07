@@ -4,7 +4,7 @@ import type { ValuationResult } from "./valuation-types";
 import { compareListingPrice } from "./valuation-calculator";
 import { inventoryMatchesSnapshot, validateExactPricing } from "./pricing-integrity";
 import { parseEquipmentAttributes } from "./equip-attributes";
-import { observedEquipmentCategory } from "../crawler/compact";
+import { hasUnconfirmedEmptyEquipment, observedEquipmentCategory } from "../crawler/compact";
 import { matchComparableEquipmentAttributes, matchEquipmentAttributes } from "./equipment-match";
 import { buildEquipmentEstimate, type SimilarEstimate } from "./pricing-estimate";
 import {
@@ -35,6 +35,16 @@ export type EquipmentCandidate = {
   matchType?: "exact" | "similar";
   similarityScore?: number;
 };
+export type EquipmentSearchCursor = {
+  version: 1;
+  planHash: string;
+  modeIndex: number;
+  pageNumber: number;
+  rowIndex: number;
+  pageRowsHash: string;
+  seen: string[];
+  failed: Array<{ url: string; modeIndex: number }>;
+};
 export type EquipmentPricingItem = {
   key: string;
   name: string;
@@ -52,6 +62,7 @@ export type EquipmentPricingItem = {
   baselineEstimate?: BaselineEstimate;
   baselineInvalidReason?: string;
   searchState?: PricingSearchState;
+  searchCursor?: EquipmentSearchCursor;
 };
 export type EquipmentPricingSnapshot = {
   version: 1;
@@ -85,6 +96,8 @@ export type EquipmentSource = {
       note?: string;
       query?: string;
       searchState?: PricingSearchState;
+      searchCursor?: EquipmentSearchCursor;
+      skipped?: boolean;
     }>;
     searchItems?: unknown[];
   }>;
@@ -117,7 +130,13 @@ export function equipmentInventory(record: SavedRoleRecord) {
       const observed = parseEquipmentAttributes(details);
       const restrictions = Object.entries(item.attributes || {})
         .filter(([key]) => /^(?:装备角色|装备对象|装备条件|使用条件|门派条件|部位条件)$/.test(key))
-        .filter(([key]) => !Object.hasOwn(observed.fields, key))
+        .filter(
+          ([key, value]) =>
+            !Object.hasOwn(observed.fields, key) &&
+            !(observed.fields.符石组合 || []).some(
+              (line) => normalize(line) === normalize(key + "：" + value),
+            ),
+        )
         .map(([key, value]) => key + "：" + value);
       const description = [details, ...restrictions].filter(Boolean).join("\n");
       const category = observedEquipmentCategory(item.category, item.location, item.modelId) || "";
@@ -154,6 +173,9 @@ export function equipmentInventory(record: SavedRoleRecord) {
       const issues: string[] = [];
       if (category !== "上古玉魄" && level === null) issues.push("装备等级缺失");
       if (!description.trim()) issues.push("装备属性未采齐");
+      for (const issue of record.detail?.equipmentCapture?.issues || [])
+        if (issue.startsWith(tab.name + "：" + item.name + " ") && /属性|等级|JSON/.test(issue))
+          issues.push(issue);
       const unsupported = level === 0;
       if (unsupported)
         issues.push("官网全服装备检索范围为60至160级，0级装备尚缺可用查询入口和可靠报价");
@@ -192,6 +214,8 @@ export function equipmentInventory(record: SavedRoleRecord) {
   if (!capture || capture.version !== 1)
     issues.push("需要重新补采当前装备，旧详情不证明装备已采齐");
   if (!tabs.some((tab) => tab.name === "道具/法宝")) issues.push("缺少道具/法宝页");
+  if (!items.length && hasUnconfirmedEmptyEquipment(record.detail))
+    issues.push("人物装备库存是否为空尚未核对，需要自动补采装备区域");
   const captureComplete =
     !!capture?.complete && tabs.some((tab) => tab.name === "道具/法宝") && !issues.length;
   const inputHash = hash(
@@ -495,14 +519,26 @@ export async function searchEquipmentPrices(
   settings?: ValuationSettings,
   previous?: EquipmentPricingSnapshot,
 ): Promise<EquipmentPricingSnapshot> {
-  const snapshot = resumePricingItems(equipmentPricingPlan(record, settings), previous);
+  const snapshot = resumePricingItems(equipmentPricingPlan(record, settings), previous, true);
   signal.throwIfAborted();
-  if (!snapshot.captureComplete) return finishPricingSearch(snapshot);
+  const capture = record.detail?.equipmentCapture;
+  if (
+    !capture ||
+    capture.version !== 1 ||
+    (!snapshot.captureComplete && !snapshot.issues.length) ||
+    snapshot.issues.some((issue) => /重复显示|实际件数|核对是否同一件/.test(issue))
+  ) {
+    for (const item of snapshot.items) {
+      item.searchState = undefined;
+      item.searchCursor = undefined;
+    }
+    return finishPricingSearch(snapshot);
+  }
   const searchable = snapshot.items.filter((item) => item.searchState === "pending");
   if (!searchable.length) return finishPricingSearch(snapshot);
   const lookupItems = searchable.map((item) => ({
     ...item,
-    candidates: [],
+    candidates: item.candidates.filter((candidate) => candidate.verified),
     issues: [...item.issues],
   }));
   snapshot.requestText = snapshot.requestText
@@ -514,6 +550,12 @@ export async function searchEquipmentPrices(
   snapshot.rawResponse = JSON.stringify(response);
   saveSearchAttempt(snapshot, response);
   if (!response.queries.some((query) => query.trim())) {
+    if (
+      Array.isArray(response.items) &&
+      response.items.length &&
+      response.items.every((item) => item.skipped === true)
+    )
+      return finishPricingSearch(snapshot);
     for (const item of searchable)
       if (
         Array.isArray(response.items) &&
@@ -553,7 +595,11 @@ export async function searchEquipmentPrices(
       item.issues.push("未返回该装备的有效候选");
       continue;
     }
+    // Untouched items keep their earlier cursor/quotations; they were not re-read this round.
+    if (result.skipped === true) continue;
     item.query = typeof result.query === "string" ? result.query : "";
+    item.searchCursor = result.searchCursor as EquipmentSearchCursor | undefined;
+    item.candidates = [];
     item.searchState = ["pending", "read_failed", "unsupported"].includes(
       String(result.searchState),
     )

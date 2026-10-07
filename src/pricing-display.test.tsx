@@ -464,3 +464,69 @@ describe("默认价设置和整体估值显示", () => {
     expect(exact).not.toContain("已核算小计不含另列默认参考价");
   });
 });
+
+it("价格组成直接展示装备和宝宝参考区间，不只显示裸号金额", () => {
+  const html = renderToStaticMarkup(
+    <ValuationResultView
+      result={valuation({
+        estimated_equipment_range: { min: 400, max: 420 },
+        estimated_pet_range: { min: 900, max: 1200 },
+      })}
+    />,
+  );
+  expect(html).toContain("已算小计区间 ¥400.00—¥420.00");
+  expect(html).toContain("已算小计区间 ¥900.00—¥1,200.00");
+});
+it.each([
+  { captureComplete: true, missingPrice: false, label: "低值未计入" },
+  { captureComplete: false, missingPrice: false, label: "资料未采齐" },
+  { captureComplete: true, missingPrice: true, label: "未定价" },
+])("排除低值装备的零小计不冒充挂牌参考价：$label", ({ captureComplete, missingPrice, label }) => {
+  const ignored = item(
+    baseline({
+      kind: "ignored",
+      amount: 0,
+      gameCurrency: 0,
+      source: { basis: "excluded", label: "低值排除" },
+    }),
+  );
+  const items = missingPrice
+    ? [
+        ignored,
+        {
+          ...item(),
+          key: "unpriced",
+          baselineEstimate: undefined,
+          searchState: "pending" as const,
+        },
+      ]
+    : [ignored];
+  const html = renderToStaticMarkup(
+    <ValuationResultView
+      result={valuation({
+        equipment_pricing: { ...snapshot(items), captureComplete },
+        equipment_value: null,
+        estimated_equipment_range: { min: 0, max: 0 },
+      })}
+    />,
+  );
+  const overview = html.split('<details class="analysis-valuation-details">')[0];
+  expect(overview).toContain("<dt>装备</dt><dd>" + label + "</dd>");
+  expect(overview).not.toContain("¥0.00");
+});
+it("少样本显示已核实挂牌范围，并明确未计入估值", () => {
+  const gear = item();
+  delete gear.baselineEstimate;
+  gear.similarEstimate = {
+    policyVersion: "simulated",
+    status: "insufficient",
+    range: null,
+    observedRange: { min: 388.88, max: 400.8 },
+    sampleCount: 2,
+    issues: ["不足3条"],
+  };
+  const html = renderToStaticMarkup(<EquipmentPricingView snapshot={snapshot([gear])} />);
+  expect(html).toContain("已核实样本挂牌范围：¥388.88—¥400.80");
+  expect(html).toContain("未纳入估值");
+  expect(html).not.toContain("¥0.00");
+});

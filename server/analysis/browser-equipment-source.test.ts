@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import type { Page } from "playwright-core";
 import {
   equipmentQuery,
+  equipmentQueryPlan,
+  equipmentCursorMatches,
   equipmentListingMismatch,
   equipmentSourceFromPages,
   createEquipmentSource,
@@ -782,4 +784,181 @@ describe("装备查价使用独立后台页", () => {
     expect(detail.close).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
+});
+
+describe("实际装备的分阶段相近检索", () => {
+  const actualConfig: EquipmentSearchConfig = {
+    ...config,
+    kinds: [
+      ...config.kinds,
+      [15, "男头"],
+      [16, "女头"],
+      [17, "女衣"],
+      [61, "戒指"],
+      [62, "耳饰"],
+      [63, "手镯"],
+      [64, "佩饰"],
+    ],
+    gems: [
+      [2, "太阳石"],
+      [3, "舍利子"],
+      [4, "光芒石"],
+      [5, "月亮石"],
+      [6, "黑宝石"],
+    ],
+  };
+  it("目标46377146黑魔冠保持80级、月亮石8段后相邻段，再扩大到其他配置", () => {
+    const target = item({
+      name: "黑魔冠",
+      category: "人物装备 · 头盔",
+      level: 80,
+      modelId: "2509",
+      description: "等级80\n魔法95 防御142\n锻炼等级8 镶嵌宝石 月亮石\n装备角色：男",
+    });
+    const plan = equipmentQueryPlan(target, actualConfig);
+    expect(plan.map(({ mode }) => mode)).toEqual(["exact", "near-gems", "similar"]);
+    expect(plan[0].args).toMatchObject({ kindid: "15", gem_level: 8, gem_value: "5" });
+    expect(plan[1].args).toMatchObject({ gem_level: 7, gem_value: "5" });
+    expect(plan[2].args).not.toHaveProperty("gem_level");
+    for (const { args } of plan)
+      expect(args).toMatchObject({ level_min: 80, level_max: 80, server_type: "3" });
+  });
+  it("保存的乾坤帽先松套装与属性，保留太阳石4段，再3至5段，最后宽搜", () => {
+    const target = item({
+      name: "乾坤帽",
+      category: "人物装备 · 头盔",
+      level: 70,
+      description:
+        "等级70\n防御41 魔法73\n锻炼等级4 镶嵌宝石 太阳石\n伤害32\n修理失败1次\n装备角色：男",
+    });
+    const plan = equipmentQueryPlan(target, actualConfig);
+    expect(plan.map(({ mode }) => mode)).toEqual(["exact", "same-gems", "near-gems", "similar"]);
+    expect(plan[0].args).toMatchObject({
+      damage: 32,
+      gem_level: 4,
+      gem_value: "2",
+      repair_fail: 1,
+    });
+    expect(plan[1].args).toMatchObject({ damage: 26, gem_level: 4, gem_value: "2" });
+    expect(plan[1].args).not.toHaveProperty("repair_fail");
+    expect(plan[2].args).toMatchObject({ gem_level: 3, gem_value: "2" });
+  });
+  it("真实灵饰型号对应已采集细分类后发送kind与主属性，精炼邻段仍同级", () => {
+    const target = item({
+      name: "芙蓉戒",
+      category: "灵饰 · 戒指",
+      level: 80,
+      modelId: "27002",
+      description:
+        "等级80\n防御21\n精炼等级5\n附加属性：\n法术伤害8[+20]\n法术暴击等级10[+20]\n速度8[+15]",
+    });
+    const plan = equipmentQueryPlan(target, actualConfig);
+    expect(plan.map(({ mode }) => mode)).toEqual(["exact", "same-gems", "near-gems", "similar"]);
+    expect(plan[0].args).toMatchObject({ kindid: "61", defense: 21, jinglian_level: 5 });
+    expect(plan[1].args).toMatchObject({ kindid: "61", defense: 17, jinglian_level: 5 });
+    expect(plan[2].args.jinglian_level).toBe(4);
+    for (const { args } of plan)
+      expect(args).toMatchObject({ equip_level_min: 80, equip_level_max: 80, server_type: "3" });
+  });
+  it("各阶段保留核心特技与特效，不能把无级别/愤怒溢价套给普通装备", () => {
+    const target = item({
+      description:
+        "等级100\n防御50\n伤害120\n锻炼等级8 镶嵌宝石 黑宝石\n特技：破血狂攻\n特效：愤怒",
+    });
+    const plan = equipmentQueryPlan(target, actualConfig);
+    expect(plan.length).toBeGreaterThan(2);
+    for (const { args } of plan)
+      expect(args).toMatchObject({
+        special_skill: "1036",
+        special_effect: "3",
+        special_mode: "and",
+        server_type: "3",
+      });
+  });
+  it("头衣按实际穿戴性别匹配官网种类，未知性别不猜编号", () => {
+    for (const [category, sex, expected] of [
+      ["头盔", "男", "15"],
+      ["头盔", "女", "16"],
+      ["衣服", "男", "18"],
+      ["衣服", "女", "17"],
+    ])
+      expect(
+        equipmentQuery(
+          item({ category: "人物装备 · " + category, description: "等级100\n装备角色：" + sex }),
+          actualConfig,
+        ).args.kindid,
+      ).toBe(expected);
+    expect(
+      equipmentQuery(item({ category: "人物装备 · 头盔", description: "等级100" }), actualConfig)
+        .args,
+    ).not.toHaveProperty("kindid");
+  });
+  it("游标必须与完整参数计划一致且位置有效，失配或旧版从头重新核验", () => {
+    const cursor = {
+      version: 1 as const,
+      planHash: "expected",
+      modeIndex: 1,
+      pageNumber: 4,
+      rowIndex: 20,
+      pageRowsHash: "rows",
+      seen: ["1:item"],
+      failed: [{ url: "https://xyq.cbg.163.com/equip?s=1&eid=retry", modeIndex: 0 }],
+    };
+    expect(equipmentCursorMatches(cursor, "expected", 4)).toBe(true);
+    expect(equipmentCursorMatches(cursor, "changed-settings", 4)).toBe(false);
+    expect(equipmentCursorMatches({ ...cursor, pageNumber: 0 }, "expected", 4)).toBe(false);
+    expect(equipmentCursorMatches({ ...cursor, rowIndex: -1 }, "expected", 4)).toBe(false);
+  });
+});
+
+it("前件用完时间预算时后件候选和游标原样返回且标记未处理，不重新导航", async () => {
+  vi.useFakeTimers();
+  const search = { close: vi.fn(async () => {}), goto: vi.fn() };
+  const detail = { close: vi.fn(async () => {}), goto: vi.fn() };
+  const control = new AbortController();
+  const source = equipmentSourceFromPages(
+    search as unknown as Page,
+    detail as unknown as Page,
+    control.signal,
+  );
+  const cursor = {
+    version: 1 as const,
+    planHash: "saved",
+    modeIndex: 1,
+    pageNumber: 4,
+    rowIndex: 5,
+    pageRowsHash: "rows",
+    seen: ["1:previous"],
+    failed: [],
+  };
+  const candidates = [100, 120].map((price, index) => ({
+    url: "https://xyq.cbg.163.com/equip?s=1&eid=saved-" + index,
+    title: "测试腰带",
+    price,
+    priceType: "listing" as const,
+    quote: "挂牌价：¥" + price,
+    verified: true,
+    reason: "保存报价",
+    matchType: "similar" as const,
+    fetchedAt: new Date().toISOString(),
+    sourceHash: "hash",
+  }));
+  try {
+    vi.advanceTimersByTime(180001);
+    const result = await source.findCandidates(
+      [item({ searchCursor: cursor, candidates })],
+      control.signal,
+    );
+    expect(result.items[0]).toMatchObject({
+      skipped: true,
+      searchState: "pending",
+      searchCursor: cursor,
+      candidates,
+    });
+    expect(search.goto).not.toHaveBeenCalled();
+    expect(detail.goto).not.toHaveBeenCalled();
+  } finally {
+    await source.close();
+    vi.useRealTimers();
+  }
 });

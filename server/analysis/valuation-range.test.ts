@@ -723,3 +723,34 @@ describe("相近配置报价与完整区间", () => {
     ).toThrow("结论不一致");
   });
 });
+
+it("一件未采齐不抹掉另一件核实相近装备价格，仍不形成完整整号估值", () => {
+  const value = fixture();
+  const tab = value.record.detail!.tabs.find((row) => row.name === "道具/法宝")!;
+  tab.items!.push({
+    index: 1,
+    kind: "equipment",
+    name: "鬼牙攫魂",
+    category: "武器",
+    description: "等级70",
+  });
+  value.record.detail!.equipmentCapture!.complete = false;
+  value.record.detail!.equipmentCapture!.issues = ["鬼牙攫魂资料未完整读取"];
+  const inventory = equipmentInventory(value.record);
+  value.equipment.inputHash = inventory.inputHash;
+  value.equipment.captureComplete = false;
+  value.equipment.items.push(inventory.items[1]);
+  value.equipment.items[0].similarEstimate = buildEquipmentEstimate(
+    value.equipment.items[0].candidates,
+  );
+  const result = value.combine();
+  expect(result.estimated_equipment_range).toEqual({ min: 100, max: 140 });
+  expect(result.estimated_subtotal_range).toEqual({
+    min: value.bare.known_subtotal + 100,
+    max: value.bare.known_subtotal + 140,
+  });
+  expect(result.estimated_value_range).toBeUndefined();
+  expect(result.model_value).toBeNull();
+  expect(result.estimate_missing_count).toBeGreaterThan(0);
+  expect(result.missing_fields.join(" ")).toContain("鬼牙攫魂");
+});

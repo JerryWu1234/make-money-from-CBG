@@ -65,6 +65,8 @@ export type ValuationResult = {
   estimated_subtotal_value?: number;
   estimated_value_range?: import("./pricing-estimate").PriceRange;
   estimated_subtotal_range?: import("./pricing-estimate").PriceRange;
+  estimated_equipment_range?: import("./pricing-estimate").PriceRange;
+  estimated_pet_range?: import("./pricing-estimate").PriceRange;
   estimated_price_difference?: import("./pricing-estimate").PriceRange;
   estimated_comparison?: "below" | "within" | "above";
   estimate_missing_count?: number;

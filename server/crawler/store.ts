@@ -3,7 +3,12 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { CAPTURE_VERSION, compactDetail, compactListing } from "./compact";
+import {
+  CAPTURE_VERSION,
+  compactDetail,
+  compactListing,
+  hasUnconfirmedEmptyEquipment,
+} from "./compact";
 import type { Checkpoint, Listing, RoleDetail, SavedListingPage } from "./types";
 
 export class CrawlStore {
@@ -63,7 +68,7 @@ export class CrawlStore {
     const now = new Date().toISOString();
     const old = this.db
       .prepare(
-        "SELECT status, selling_time, json_extract(detail_json,'$.captureVersion') AS version,json_array_length(json_extract(detail_json,'$.valuation.issues')) AS valuation_issues,json_extract(detail_json,'$.equipmentCapture.complete') AS equipment_complete,json_array_length(json_extract(detail_json,'$.equipmentCapture.issues')) AS equipment_issues,json_extract(detail_json,'$.petCapture.complete') AS pet_complete,json_array_length(json_extract(detail_json,'$.petCapture.issues')) AS pet_issues FROM listings WHERE key=?",
+        "SELECT status, selling_time, detail_json, json_extract(detail_json,'$.captureVersion') AS version,json_array_length(json_extract(detail_json,'$.valuation.issues')) AS valuation_issues,json_extract(detail_json,'$.equipmentCapture.complete') AS equipment_complete,json_array_length(json_extract(detail_json,'$.equipmentCapture.issues')) AS equipment_issues,json_extract(detail_json,'$.petCapture.complete') AS pet_complete,json_array_length(json_extract(detail_json,'$.petCapture.issues')) AS pet_issues FROM listings WHERE key=?",
       )
       .get(item.key);
     // 同一商品重新上架时更新原记录、重采详情，不插入重复商品。
@@ -75,7 +80,8 @@ export class CrawlStore {
       old.equipment_complete === 1 &&
       !old.equipment_issues &&
       old.pet_complete === 1 &&
-      !old.pet_issues;
+      !old.pet_issues &&
+      !hasUnconfirmedEmptyEquipment(old.detail_json ? JSON.parse(String(old.detail_json)) : null);
     this.db
       .prepare(`INSERT INTO listings(key,server_id,eid,ordersn,url,selling_time,created_time,name,price,listing_json,first_seen_at,last_seen_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET ordersn=excluded.ordersn,url=excluded.url,selling_time=excluded.selling_time,
@@ -105,10 +111,17 @@ export class CrawlStore {
   retryItems(keys?: string[]): Listing[] {
     return this.db
       .prepare(
-        `SELECT listing_json FROM listings WHERE (status IN ('pending','failed') OR (status='complete' AND (coalesce(json_extract(detail_json,'$.captureVersion'),0) < ${CAPTURE_VERSION} OR json_array_length(json_extract(detail_json,'$.valuation.issues')) > 0 OR coalesce(json_extract(detail_json,'$.equipmentCapture.complete'),0)!=1 OR json_array_length(json_extract(detail_json,'$.equipmentCapture.issues'))>0 OR coalesce(json_extract(detail_json,'$.petCapture.complete'),0)!=1 OR json_array_length(json_extract(detail_json,'$.petCapture.issues'))>0)))
+        `SELECT listing_json,detail_json,(status IN ('pending','failed') OR (status='complete' AND (coalesce(json_extract(detail_json,'$.captureVersion'),0) < ${CAPTURE_VERSION} OR json_array_length(json_extract(detail_json,'$.valuation.issues')) > 0 OR coalesce(json_extract(detail_json,'$.equipmentCapture.complete'),0)!=1 OR json_array_length(json_extract(detail_json,'$.equipmentCapture.issues'))>0 OR coalesce(json_extract(detail_json,'$.petCapture.complete'),0)!=1 OR json_array_length(json_extract(detail_json,'$.petCapture.issues'))>0))) AS needs_retry FROM listings WHERE status IN ('pending','failed','complete')
         ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,first_seen_at ASC,key ASC`,
       )
       .all()
+      .filter(
+        (row) =>
+          row.needs_retry ||
+          hasUnconfirmedEmptyEquipment(
+            row.detail_json ? JSON.parse(String(row.detail_json)) : null,
+          ),
+      )
       .map((row) => JSON.parse(String(row.listing_json)) as Listing)
       .filter((item) => !keys || keys.includes(item.key));
   }
@@ -214,7 +227,7 @@ export class CrawlStore {
       ? Math.max(1, Math.min(totalPages, Math.trunc(requestedPage)))
       : 1;
     const rows = this.db
-      .prepare(`SELECT key,name,price,url,server_id,selling_time,collected_at,last_seen_at,status,error,
+      .prepare(`SELECT key,name,price,url,server_id,selling_time,collected_at,last_seen_at,status,error,detail_json,
       json_extract(listing_json,'$.serverName') AS server_name,
       json_extract(listing_json,'$.highlights') AS highlights,
       json_extract(listing_json,'$.summary.summary') AS summary,last_attempt_at,attempt_count,
@@ -249,7 +262,10 @@ export class CrawlStore {
             row.equipment_complete === 1 &&
             !row.equipment_issues &&
             row.pet_complete === 1 &&
-            !row.pet_issues,
+            !row.pet_issues &&
+            !hasUnconfirmedEmptyEquipment(
+              row.detail_json ? JSON.parse(String(row.detail_json)) : null,
+            ),
           status: String(row.status),
           error: row.error ? String(row.error) : null,
         };

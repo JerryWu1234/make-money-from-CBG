@@ -63,10 +63,11 @@ async function valuationSetup() {
       collectedAt: record.detail!.collectedAt,
       complete: true,
       issues: [],
+      emptyProof: "explicit-text",
     };
     record.detail!.tabs.push({
       name: "道具/法宝",
-      text: "",
+      text: "没有装备",
       fields: [],
       tables: [],
       elements: [],

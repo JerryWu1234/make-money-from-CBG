@@ -97,6 +97,64 @@ const source = (pages: Listing[][]): CrawlSource => {
   };
 };
 describe("仅补齐估值资料", () => {
+  it("只补采缺空库存证据的旧角色，非空角色不重采，空确认后不重复补采", async () => {
+    const db = memory(),
+      row = item(1),
+      equipped = item(2);
+    const makeDetail = (
+      listing: Listing,
+      items: RoleDetail["tabs"][number]["items"],
+    ): RoleDetail => ({
+      ...detail(listing),
+      tabs: [
+        {
+          name: "道具/法宝",
+          text: "现金：100",
+          fields: [],
+          tables: [],
+          elements: [],
+          tooltips: [],
+          items,
+        },
+      ],
+    });
+    db.observe(row);
+    db.observe(equipped);
+    const empty = makeDetail(row, [
+      { index: 0, name: "法宝", kind: "equipment", category: "法宝" },
+    ]);
+    db.save(row, empty);
+    db.save(
+      equipped,
+      makeDetail(equipped, [
+        {
+          index: 0,
+          name: "腰带",
+          kind: "equipment",
+          category: "人物装备",
+          description: "等级100\n防御50",
+        },
+      ]),
+    );
+    expect(db.retryItems().map((item) => item.key)).toEqual([row.key]);
+    expect(db.records().items.find((item) => item.key === row.key)?.valuationReady).toBe(false);
+    expect(db.observe(equipped)).toBe(true);
+    expect(db.observe(row)).toBe(false);
+    const before = db.checkpoint();
+    const collector = source([]);
+    collector.prepare = vi.fn();
+    collector.detail = vi.fn(async () => ({
+      ...empty,
+      equipmentCapture: { ...empty.equipmentCapture!, emptyProof: "official-containers" as const },
+    }));
+    await crawl(collector, db, signal(), () => {}, { backfillOnly: true, keys: [row.key] });
+    expect(collector.detail).toHaveBeenCalledOnce();
+    expect(collector.prepare).not.toHaveBeenCalled();
+    expect(db.checkpoint()).toEqual(before);
+    expect(db.retryItems()).toEqual([]);
+    expect(db.observe(row)).toBe(true);
+    expect(db.records().items.find((item) => item.key === row.key)?.valuationReady).toBe(true);
+  });
   it("宝宝凭据缺失、未读完整或带异常时都进入补采，补齐后才跳过", () => {
     const db = memory(),
       row = item(1);
@@ -345,7 +403,8 @@ describe("商品身份和时间", () => {
       ),
     ];
     expect(empty.items[0].category).toBe("法宝");
-    expect(equipmentCaptureSummary([empty], "now").complete).toBe(true);
+    expect(equipmentCaptureSummary([empty], "now").complete).toBe(false);
+    expect(equipmentCaptureSummary([{ ...empty, text: "没有装备" }], "now").complete).toBe(true);
     expect(equipmentCaptureSummary([], "now").complete).toBe(false);
     expect(equipmentCaptureSummary([{ ...empty, text: "", items: [] }], "now").complete).toBe(
       false,
@@ -381,7 +440,11 @@ describe("商品身份和时间", () => {
       tooltips: [],
       items,
     };
-    expect(equipmentCaptureSummary([snapshot], "now").complete).toBe(true);
+    expect(equipmentCaptureSummary([snapshot], "now").complete).toBe(false);
+    expect(
+      equipmentCaptureSummary([{ ...snapshot, equipmentEmptyProof: "official-containers" }], "now")
+        .complete,
+    ).toBe(true);
     const unknown = itemFromAttributes({ data_equip_name: "未知物品", data_equip_type: "6033" }, 5);
     expect(unknown.category).toBeUndefined();
     expect(equipmentCaptureSummary([{ ...snapshot, items: [unknown] }], "now").complete).toBe(

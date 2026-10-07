@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 import { parseEquipmentAttributes } from "./equip-attributes";
-import { matchComparableEquipmentAttributes, matchEquipmentAttributes } from "./equipment-match";
+import {
+  equipmentEnhancementMismatch,
+  matchComparableEquipmentAttributes,
+  matchEquipmentAttributes,
+} from "./equipment-match";
 const gear =
   "等级 100\n五行 水\n防御 +100\n气血 +400\n耐久度 300\n修理失败 0\n宝石 黑宝石\n锻炼等级 8\n特效 愤怒\n套装 变身术之葫芦宝贝";
 const match = (source: string, target = gear) =>
@@ -132,12 +136,95 @@ describe("同核心装备粗略参考价匹配", () => {
     ).toBeNull();
     for (const changed of [
       description.replace("健步如飞（2级）", "宿敌·无底洞（2级）"),
-      description.replace("速度+7（已生效）", "速度+6（已生效）"),
       description.replace("速度+7（已生效）", "速度+7"),
       description + "\n抵抗未知属性+1",
     ])
       expect(
         matchComparableEquipmentAttributes(target, parseEquipmentAttributes(changed)).matchType,
       ).toBeNull();
+  });
+});
+
+describe("角色上下文不会阻塞独立灵饰参考", () => {
+  const description =
+    "等级 80\n防御 +21\n耐久度 84\n精炼等级 5\n附加属性：\n法术伤害结果 +8 [+15]\n法术伤害 +8 [+20]\n法术暴击等级 +10 [+20]\n特效：健步如飞（2级）\n速度 +2\n速度+7（已生效）\n装备条件：等级80";
+  it("目标46377146芙蓉戒独立挂牌没有整套已生效速度时保留为相近差异", () => {
+    const target = parseEquipmentAttributes(description);
+    const source = parseEquipmentAttributes(description.replace("速度+7（已生效）\n", ""));
+    expect(matchEquipmentAttributes(target, source).matchType).toBeNull();
+    const result = matchComparableEquipmentAttributes(target, source);
+    expect(result.matchType).toBe("similar");
+    expect(result.differences).toContain("已生效套装加成：速度:+7 → 未标明");
+    expect(target.fields.速度).toBeUndefined();
+    expect(target.fields.特效加成).toEqual(["速度:+2"]);
+    expect(
+      matchComparableEquipmentAttributes(
+        target,
+        parseEquipmentAttributes(description.replace("速度+7（已生效）", "速度+6（已生效）")),
+      ).matchType,
+    ).toBe("similar");
+  });
+  it.each([
+    description.replace("健步如飞（2级）", "健步如飞（1级）"),
+    description.replace("速度 +2", "速度 +1"),
+    description.replace("速度 +2\n", ""),
+    description.replace("健步如飞（2级）", "血气方刚（2级）"),
+  ])("单件特效等级或加成不符仍拒绝", (source) => {
+    expect(
+      matchComparableEquipmentAttributes(
+        parseEquipmentAttributes(description),
+        parseEquipmentAttributes(source),
+      ).matchType,
+    ).toBeNull();
+  });
+});
+
+describe("宝石及精炼逐级相近筛选", () => {
+  const target = parseEquipmentAttributes(
+    "等级70\n防御41 魔法73\n锻炼等级4 镶嵌宝石 太阳石\n伤害32",
+  );
+  const mismatch = (source: string, mode: "same-gems" | "near-gems", partial = false) =>
+    equipmentEnhancementMismatch(target, parseEquipmentAttributes(source), mode, partial);
+  it("保存的乾坤帽4段与6段差异不会冒充相邻段数，更不换算基础价格", () => {
+    const source = "等级70\n防御40 魔法75\n锻炼等级6 镶嵌宝石 太阳石\n伤害48";
+    expect(mismatch(source, "same-gems")).toContain("同段或相邻一段");
+    expect(mismatch(source, "near-gems")).toContain("同段或相邻一段");
+    expect(target.fields.伤害).toEqual(["32"]);
+    expect(parseEquipmentAttributes(source).fields.伤害).toEqual(["48"]);
+  });
+  it("同宝石相邻一段可搜索，不同种类和缺失段数不当同段证据", () => {
+    const same = "等级70\n锻炼等级4 镶嵌宝石 太阳石";
+    expect(mismatch(same, "same-gems")).toBeNull();
+    expect(mismatch(same.replace("等级4", "等级3"), "near-gems")).toBeNull();
+    expect(mismatch(same.replace("等级4", "等级5"), "near-gems")).toBeNull();
+    expect(mismatch(same.replace("太阳石", "月亮石"), "near-gems")).toContain("宝石种类");
+    expect(mismatch("等级70\n镶嵌宝石 太阳石", "near-gems")).toContain("完整证据");
+    expect(mismatch("等级70\n防御41", "near-gems", true)).toBeNull();
+  });
+  it("目标89级角色的灵饰5精炼仅允许4至6段，特效仍交给核心匹配核验", () => {
+    const jewelry = parseEquipmentAttributes(
+      "等级80\n精炼等级5\n防御21\n特效：健步如飞（2级）\n速度2",
+    );
+    const source = parseEquipmentAttributes(
+      "等级80\n精炼等级4\n防御21\n特效：健步如飞（2级）\n速度2",
+    );
+    expect(equipmentEnhancementMismatch(jewelry, source, "near-gems")).toBeNull();
+    expect(equipmentEnhancementMismatch(jewelry, source, "same-gems")).toContain("同段或相邻一段");
+    expect(matchComparableEquipmentAttributes(jewelry, source).matchType).toBe("similar");
+    source.fields.特效 = ["宿敌·神木林（2级）"];
+    expect(matchComparableEquipmentAttributes(jewelry, source).matchType).toBeNull();
+  });
+  it("相近样本优先邻近段数，保留所有实际宝石差异", () => {
+    const target = parseEquipmentAttributes(gear);
+    const nearby = matchComparableEquipmentAttributes(
+      target,
+      parseEquipmentAttributes(gear.replace("锻炼等级 8", "锻炼等级 7")),
+    );
+    const distant = matchComparableEquipmentAttributes(
+      target,
+      parseEquipmentAttributes(gear.replace("锻炼等级 8", "锻炼等级 12")),
+    );
+    expect(nearby.similarityScore).toBeLessThan(distant.similarityScore);
+    expect(distant.differences).toContain("锻炼等级：8 → 12");
   });
 });
