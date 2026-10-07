@@ -468,15 +468,12 @@ async function readMainPet(page: Page, signal: AbortSignal) {
           : typeof value === "string"
             ? value.trim() !== "" && value.trim() !== "0"
             : !!value;
-    if (
-      [pet?.evol_skill_list, pet?.evol_skills, pet?.other?.EvolSkill, pet?.other?.evol_skills].some(
-        hasValues,
-      )
-    )
-      return {
-        kind: "unsupported" as const,
-        reason: "主宝宝含赐福配置，独立模板可见信息尚未核对，报价未采用",
-      };
+    const unsupportedDescription = [
+      pet?.evol_skill_list,
+      pet?.evol_skills,
+      pet?.other?.EvolSkill,
+      pet?.other?.evol_skills,
+    ].some(hasValues);
     if (
       !pet ||
       !Array.isArray(pet.all_skills) ||
@@ -617,7 +614,7 @@ async function readMainPet(page: Page, signal: AbortSignal) {
       })
       .join("\n");
     return {
-      kind: "observed" as const,
+      unsupportedDescription,
       productId: raw.eid,
       serverId: raw.serverid ?? raw.server_id,
       productName: raw.equip_name,
@@ -647,8 +644,13 @@ async function readMainPet(page: Page, signal: AbortSignal) {
     };
   }, excluded);
   signal.throwIfAborted();
-  if (observed.kind === "unsupported") throw new UnsupportedPetDescriptionError(observed.reason);
-  return petObservationSource(observed, page.url());
+  const source = petObservationSource(observed, page.url());
+  // A supported base payload must be complete and bound before a configuration is terminal.
+  if (observed.unsupportedDescription)
+    throw new UnsupportedPetDescriptionError(
+      "主宝宝含赐福配置，独立模板可见信息尚未核对，报价未采用",
+    );
+  return source;
 }
 
 /** Separate work pages share the existing login; they never navigate the role list. */

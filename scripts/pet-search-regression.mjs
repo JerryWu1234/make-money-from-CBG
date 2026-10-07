@@ -404,6 +404,31 @@ try {
       assert.deepEqual(detailVisits, []);
     });
   });
+  await check("同一赐福详情必须先通过商品绑定、完整字段和可见价格核验", async () => {
+    for (const broken of [
+      { missingPayloadField: "all_skills" },
+      { missingPayloadField: "neidan" },
+      { missingPayloadField: "equip_list" },
+      { rawEid: "another-product" },
+      { rawName: "另一商品" },
+      { rawPrice: "999" },
+      { panelLevel: "120" },
+      { missingSkill: true },
+      { duplicateFields: [{ name: "攻击资质", value: "1551 +22" }] },
+    ])
+      await withSource(
+        {},
+        { evolSkills: [{ skill_type: "1" }], ...broken },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          assert.equal(result.total, null);
+          assert.equal(result.searchComplete, false);
+          assert.equal(result.items[0].searchState, "read_failed");
+          assert.ok(result.searchItems.some((item) => item.detailFailures.length > 0));
+          assert.ok(result.searchItems.every((item) => item.unsupportedDetails.length === 0));
+        },
+      );
+  });
   await check("查询同时含赐福样本与真正的描述读取故障时，故障仍待重试", () =>
     withSource(
       {
