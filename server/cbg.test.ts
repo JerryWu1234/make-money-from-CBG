@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { disconnectedState } from "./page-state";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { buildPageState, disconnectedState, type PageSnapshot } from "./page-state";
 
 const mocks = vi.hoisted(() => ({
   getBrowser: vi.fn(),
@@ -21,8 +21,18 @@ vi.mock("./workflow", async (importOriginal) => ({
 }));
 
 beforeEach(() => {
+  Reflect.deleteProperty(globalThis, Symbol.for("cbg.workflow-state.v1"));
   vi.resetModules();
   vi.clearAllMocks();
+  const page = { isClosed: () => false };
+  mocks.getBrowser.mockResolvedValue({});
+  mocks.getCbgPage.mockReturnValue(page);
+  mocks.createBackgroundPage.mockResolvedValue(page);
+  mocks.readStableSnapshot.mockResolvedValue(snapshot);
+  mocks.runFixedWorkflow.mockImplementation(async () => completed());
+});
+afterEach(() => {
+  Reflect.deleteProperty(globalThis, Symbol.for("cbg.workflow-state.v1"));
 });
 
 describe("后台流程与状态查询", () => {
@@ -87,5 +97,110 @@ describe("后台流程与状态查询", () => {
     await vi.waitFor(async () => expect((await checkCbgStatus()).message).toBe("重新开始成功"));
     expect((await checkCbgStatus()).error).toBeUndefined();
     log.mockRestore();
+  });
+});
+
+// All browser operations are mocked; this fixture never contacts the target site.
+const snapshot: PageSnapshot = {
+  url: "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=show_overall_search_role",
+  title: "模拟角色列表",
+  ready: true,
+  serverAuthenticated: true,
+  hasLogout: true,
+  hasLogin: false,
+  hasQr: false,
+  hasRoles: false,
+  hasDialog: false,
+  serverName: "模拟区服",
+};
+const completed = () => ({
+  ...buildPageState(snapshot),
+  running: false,
+  workflowStep: "completed" as const,
+  message: "模拟列表已就绪",
+});
+
+const finishWorkflow = async () => {
+  const first = await import("./cbg");
+  first.openCbg();
+  await vi.waitFor(async () => {
+    expect(await first.checkCbgStatus()).toMatchObject({
+      workflowStep: "completed",
+      isLoggedIn: true,
+    });
+  });
+  return first;
+};
+
+describe("开发服务重载后的流程复用", () => {
+  it("已登录的角色列表保留状态，轮询不重新执行登录流程", async () => {
+    await finishWorkflow();
+    vi.resetModules();
+    const reloaded = await import("./cbg");
+    expect(await reloaded.checkCbgStatus()).toMatchObject({
+      workflowStep: "completed",
+      isLoggedIn: true,
+      message: "模拟列表已就绪",
+    });
+    expect(mocks.getBrowser).toHaveBeenCalledOnce();
+    expect(mocks.createBackgroundPage).toHaveBeenCalledOnce();
+    expect(mocks.runFixedWorkflow).toHaveBeenCalledOnce();
+    expect(mocks.readStableSnapshot).toHaveBeenCalled();
+  });
+  it("扫码或确认正在进行时重载继续原流程，不创建第二个工作页", async () => {
+    let finish!: (value: ReturnType<typeof completed>) => void;
+    mocks.runFixedWorkflow.mockImplementation((_page, publish) => {
+      publish({ ...completed(), workflowStep: "logging_in", running: true, isLoggedIn: false });
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    const first = await import("./cbg");
+    first.openCbg();
+    await vi.waitFor(() => expect(mocks.runFixedWorkflow).toHaveBeenCalledOnce());
+    vi.resetModules();
+    const reloaded = await import("./cbg");
+    try {
+      expect(reloaded.openCbg()).toMatchObject({ workflowStep: "logging_in", running: true });
+      expect(await reloaded.checkCbgStatus()).toMatchObject({ workflowStep: "logging_in" });
+      expect(mocks.createBackgroundPage).toHaveBeenCalledOnce();
+      expect(mocks.runFixedWorkflow).toHaveBeenCalledOnce();
+    } finally {
+      finish(completed());
+    }
+    await vi.waitFor(async () => {
+      expect(await reloaded.checkCbgStatus()).toMatchObject({
+        workflowStep: "completed",
+        isLoggedIn: true,
+      });
+    });
+  });
+  it("复用后仍重新检查真实登录，失效时保留登录失效提示", async () => {
+    await finishWorkflow();
+    vi.resetModules();
+    const reloaded = await import("./cbg");
+    mocks.readStableSnapshot.mockResolvedValue({
+      ...snapshot,
+      serverAuthenticated: false,
+      hasLogin: true,
+    });
+    expect(await reloaded.checkCbgStatus()).toMatchObject({
+      workflowStep: "idle",
+      isLoggedIn: false,
+      message: "登录已失效，请重新开始。",
+    });
+    expect(mocks.getBrowser).toHaveBeenCalledOnce();
+  });
+  it("自有工作页确实关闭后显示未连接，不继续展示已登录", async () => {
+    await finishWorkflow();
+    vi.resetModules();
+    const reloaded = await import("./cbg");
+    mocks.getCbgPage.mockReturnValue(null);
+    expect(await reloaded.checkCbgStatus()).toMatchObject({
+      workflowStep: "idle",
+      isLoggedIn: false,
+      message: "后台工作页已关闭，请重新开始。",
+    });
+    expect(mocks.runFixedWorkflow).toHaveBeenCalledOnce();
   });
 });
