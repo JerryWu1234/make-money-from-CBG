@@ -5,9 +5,21 @@ import { ensureWorkViewport } from "./viewport";
 import { openWorkTransport, type WorkTransport } from "./work-transport";
 import { diagnostics } from "./diagnostics";
 
-let cachedBrowser: Browser | null = null;
-let connectionPromise: Promise<Browser> | null = null;
-let selectedPage: Page | null = null;
+type BrowserSession = {
+  cachedBrowser: Browser | null;
+  connectionPromise: Promise<Browser> | null;
+  selectedPage: Page | null;
+  hiddenPageCreation: Promise<void>;
+};
+// Vite reloads the API modules in the same process; keep only our own work session.
+const sessionKey = Symbol.for("cbg.browser-session.v1");
+const runtime = globalThis as typeof globalThis & { [sessionKey]?: BrowserSession };
+const cache = (runtime[sessionKey] ??= {
+  cachedBrowser: null,
+  connectionPromise: null,
+  selectedPage: null,
+  hiddenPageCreation: Promise.resolve(),
+});
 
 export function isCbgUrl(value: string): boolean {
   try {
@@ -18,10 +30,10 @@ export function isCbgUrl(value: string): boolean {
 }
 
 export async function getBrowser(allowConnect = false): Promise<Browser> {
-  if (cachedBrowser?.isConnected()) return cachedBrowser;
+  if (cache.cachedBrowser?.isConnected()) return cache.cachedBrowser;
   if (!allowConnect) throw new Error(`浏览器未连接。${CONNECTION_HELP}`);
-  if (connectionPromise) return connectionPromise;
-  connectionPromise = (async () => {
+  if (cache.connectionPromise) return cache.connectionPromise;
+  cache.connectionPromise = (async () => {
     const endpoint = await resolveCdpEndpoint();
     let transport: WorkTransport | undefined;
     let stage = "handshake";
@@ -34,11 +46,11 @@ export async function getBrowser(allowConnect = false): Promise<Browser> {
         timeout: 15000,
         noDefaults: true,
       });
-      cachedBrowser = browser;
+      cache.cachedBrowser = browser;
       browser.on("disconnected", () => {
-        if (cachedBrowser === browser) {
-          cachedBrowser = null;
-          selectedPage = null;
+        if (cache.cachedBrowser === browser) {
+          cache.cachedBrowser = null;
+          cache.selectedPage = null;
         }
       });
       return browser;
@@ -54,14 +66,14 @@ export async function getBrowser(allowConnect = false): Promise<Browser> {
     }
   })();
   try {
-    return await connectionPromise;
+    return await cache.connectionPromise;
   } finally {
-    connectionPromise = null;
+    cache.connectionPromise = null;
   }
 }
 
 export function getCbgPage(): Page | null {
-  return selectedPage && !selectedPage.isClosed() ? selectedPage : null;
+  return cache.selectedPage && !cache.selectedPage.isClosed() ? cache.selectedPage : null;
 }
 
 export async function createBackgroundPage(browser: Browser): Promise<Page> {
@@ -70,16 +82,14 @@ export async function createBackgroundPage(browser: Browser): Promise<Page> {
     await ensureWorkViewport(existing);
     return existing;
   }
-  selectedPage = await createHiddenPage(browser);
-  return selectedPage;
+  cache.selectedPage = await createHiddenPage(browser);
+  return cache.selectedPage;
 }
-
-let hiddenPageCreation: Promise<void> = Promise.resolve();
 
 export function createHiddenPage(browser: Browser): Promise<Page> {
   // Only target creation shares the temporary Playwright compatibility switch.
-  const creation = hiddenPageCreation.then(() => openHiddenPage(browser));
-  hiddenPageCreation = creation.then(
+  const creation = cache.hiddenPageCreation.then(() => openHiddenPage(browser));
+  cache.hiddenPageCreation = creation.then(
     () => {},
     () => {},
   );
@@ -115,7 +125,7 @@ async function openHiddenPage(browser: Browser): Promise<Page> {
             // 隐藏目标的生命周期绑定创建它的会话，不能在返回时 detach。
             retained = true;
             page.once("close", () => {
-              if (selectedPage === page) selectedPage = null;
+              if (cache.selectedPage === page) cache.selectedPage = null;
               void session.detach().catch(() => {});
             });
             return page;
