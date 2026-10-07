@@ -24,6 +24,7 @@ export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[
       version: profile.version,
       promptHash: profile.promptHash,
       calculationCompatible: profile.calculationCompatible,
+      calculationVersion: profile.calculationVersion,
     },
   };
 }

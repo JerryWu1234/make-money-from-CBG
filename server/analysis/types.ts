@@ -62,7 +62,10 @@ export type AnalysisItem = {
   valuation?: ValuationResult;
 };
 export type AnalysisOverview = {
-  profile?: Pick<AnalysisProfile, "hash" | "version" | "promptHash" | "calculationCompatible">;
+  profile?: Pick<
+    AnalysisProfile,
+    "hash" | "version" | "promptHash" | "calculationCompatible" | "calculationVersion"
+  >;
   counts: { total: number; complete: number; waitingDetail: number };
   run: AnalysisRun | null;
   activeRun: AnalysisRun | null;
