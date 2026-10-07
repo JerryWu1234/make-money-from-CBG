@@ -164,7 +164,7 @@ export function AnalysisPreview() {
   const start = useCallback(
     async (selected: AiProvider) => {
       if (data?.profile) setTab("all");
-      if (sameProfile && sameModel && run?.provider === selected && run.status === "paused")
+      if (sameModel && run?.provider === selected && run.status === "paused")
         await mutate("/api/analysis/resume", { runId: run.id });
       else
         await mutate("/api/analysis/start", {
@@ -172,7 +172,7 @@ export function AnalysisPreview() {
           model: selectedModels[selected] || undefined,
         });
     },
-    [run, mutate, sameProfile, sameModel, selectedModels, data?.profile],
+    [run, mutate, sameModel, selectedModels, data?.profile],
   );
   const changeProvider = (selected: AiProvider) => {
     setProvider(selected);
@@ -192,15 +192,13 @@ export function AnalysisPreview() {
       ? searchingEquipment
         ? "正在查价…"
         : "正在分析…"
-      : run && !sameProfile
-        ? "按当前设置重新分析"
-        : run && !sameModel
-          ? "按新模型开始分析"
-          : run?.status === "paused"
-            ? "继续分析"
-            : run?.status === "completed"
-              ? "分析新增或已更新商品"
-              : "开始分析已有商品";
+      : run && !sameModel
+        ? "按新模型开始分析"
+        : run?.status === "paused"
+          ? "继续分析"
+          : run?.status === "completed"
+            ? "分析新增或已更新商品"
+            : "开始分析已有商品";
 
   return (
     <div className="analysis-page">
@@ -331,15 +329,13 @@ export function AnalysisPreview() {
                     ? searchingEquipment
                       ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
                       : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
-                    : run && !sameProfile
-                      ? "本批次的 Prompt 或参数与当前设置不同，重新分析将使用当前设置。"
-                      : run && !sameModel
-                        ? "模型选择已更改，开始时创建新批次；旧批次保留原来的模型和结果。"
-                        : run?.status === "paused"
-                          ? `已暂停，已完成结果保留；继续时沿用 ${run.model}。选择模型可开始新批次。`
-                          : run?.status === "completed"
-                            ? `本批次完成：${run.completed} 件成功，${run.failed} 件失败，${run.reused} 件复用已有结果。`
-                            : `${data.counts.complete} 件资料完整，可以开始分析；${data.counts.waitingDetail} 件等待补采。`}
+                    : run && !sameModel
+                      ? "模型选择已更改，开始时创建新批次；旧批次保留原来的模型和结果。"
+                      : run?.status === "paused"
+                        ? "分析已暂停，已完成结果保留；继续分析会沿用本批次设置。"
+                        : run?.status === "completed"
+                          ? `本批次完成：${run.completed} 件成功，${run.failed} 件失败，${run.reused} 件复用已有结果。`
+                          : `${data.counts.complete} 件资料完整，可以开始分析；${data.counts.waitingDetail} 件等待补采。`}
             </p>
             {(error || loadError || run?.error) && (
               <p className="analysis-auth-notice" role="alert">
