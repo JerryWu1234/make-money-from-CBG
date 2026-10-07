@@ -90,6 +90,7 @@ const { searchPetPricing } = await import(petPricing);
 const { petSourceFromPages } = await import(
   await moduleUrl("server/analysis/browser-pet-source.ts", {
     "../session": session,
+    "../viewport": viewport,
     "../crawler/controller": inline(
       "export function crawlDatabase(){throw new Error('Fixture must not open the application database');}",
     ),
@@ -505,6 +506,38 @@ try {
         const result = await searchPetPricing(record(), control.signal, source);
         assert.equal(result.total, null);
         assert.match(result.items[0].candidates[0].reason, /可见属性不一致/);
+      },
+    ),
+  );
+  await check("独立宝宝装备通过悬停显示后核对名称、属性和饰品身份", async () => {
+    for (const gear of [
+      petGear,
+      [
+        ...petGear,
+        { name: "画魂饰品", description: "玄天灵力 529", shipin: true, location: "RolePetShipin" },
+      ],
+    ])
+      for (const detail of [{}, { legacyDescription: true, noPanelId: true, panelLevel: null }])
+        await withSource(
+          {},
+          { ...detail, equipment: gear, lazyGear: true },
+          async ({ source, control }) => {
+            const result = await searchPetPricing(record(gear), control.signal, source);
+            assert.equal(result.total, 368.6, JSON.stringify(result.searchItems));
+            assert.equal(result.searchComplete, true);
+            assert.equal(result.items[0].candidates[0].verified, true);
+          },
+        );
+  });
+  await check("装备提示不完整时仍保留读取失败，不用隐藏描述代替可见资料", () =>
+    withSource(
+      {},
+      { equipment: petGear, lazyGear: true, brokenGearTooltip: true },
+      async ({ source, control }) => {
+        const result = await searchPetPricing(record(petGear), control.signal, source);
+        assert.equal(result.total, null);
+        assert.equal(result.searchComplete, false);
+        assert.equal(result.items[0].searchState, "read_failed");
       },
     ),
   );

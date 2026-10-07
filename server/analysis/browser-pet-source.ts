@@ -1,4 +1,5 @@
 import type { Page } from "playwright-core";
+import { hoverForInspection } from "../viewport";
 import { createHiddenPage, getBrowser } from "../session";
 import { assertAvailable, pace } from "../crawler/page";
 import { buildPageState } from "../page-state";
@@ -281,7 +282,7 @@ export async function petPageSource(page: Page, signal: AbortSignal) {
     const diagnostics = await page
       .evaluate(() => {
         const excluded =
-          '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [id$="TipsBox"], [role="tooltip"]';
+          '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]';
         const describe = (selector: string) =>
           Array.from(document.querySelectorAll<HTMLElement>(selector))
             .filter((node) => !node.closest(excluded))
@@ -428,12 +429,115 @@ export function petRegionReady(excluded: string) {
   return priceReady;
 }
 
+async function inspectMainPetEquipment(page: Page, signal: AbortSignal, excluded: string) {
+  signal.throwIfAborted();
+  const count = await page
+    .locator("[data-cbg-pet-main-panel] img")
+    .evaluateAll((nodes, excluded) => {
+      document
+        .querySelectorAll("[data-cbg-pet-gear-index]")
+        .forEach((node) => node.removeAttribute("data-cbg-pet-gear-index"));
+      const missing = nodes.filter((icon) => {
+        if (
+          !icon.checkVisibility() ||
+          icon.closest(excluded) ||
+          !/\/(?:equip|pet_shipin)\//.test(icon.getAttribute("src") || "")
+        )
+          return false;
+        const attrs: Record<string, string> = {};
+        let node: Element | null = icon;
+        for (
+          let depth = 0;
+          depth < 3 && node && !node.hasAttribute("data-cbg-pet-main-panel");
+          depth++, node = node.parentElement
+        )
+          for (const attr of node.attributes)
+            if (attr.name.startsWith("data"))
+              attrs[attr.name.replace(/^data-/, "data_")] ||= attr.value;
+        return !attrs.data_skill_type && (!attrs.data_equip_name || !attrs.data_equip_desc);
+      });
+      missing.forEach((node, index) => node.setAttribute("data-cbg-pet-gear-index", String(index)));
+      return missing.length;
+    }, excluded);
+  for (let index = 0; index < count; index++) {
+    signal.throwIfAborted();
+    await assertAvailable(page);
+    const icon = page.locator(`[data-cbg-pet-gear-index="${index}"]`);
+    await hoverForInspection(page, icon);
+    await pace(signal, 300, 200);
+    const handle = await page.waitForFunction(
+      ({ index, excluded }) => {
+        const icon = document.querySelector(`[data-cbg-pet-gear-index="${index}"]`);
+        if (!icon || !icon.checkVisibility() || icon.closest(excluded)) return false;
+        const attrs: Record<string, string> = {};
+        let node: Element | null = icon;
+        for (
+          let depth = 0;
+          depth < 3 && node && !node.hasAttribute("data-cbg-pet-main-panel");
+          depth++, node = node.parentElement
+        )
+          for (const attr of node.attributes)
+            if (attr.name.startsWith("data"))
+              attrs[attr.name.replace(/^data-/, "data_")] ||= attr.value;
+        const name = attrs.data_equip_name || "";
+        const id = attrs.data_tip_box;
+        if (!id && name && attrs.data_equip_desc)
+          return { name, description: attrs.data_equip_desc };
+        const tips = id
+          ? [document.getElementById(id)]
+          : Array.from(
+              document.querySelectorAll<HTMLElement>(
+                '[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"], .equip_tips',
+              ),
+            );
+        const texts = [
+          ...new Set(
+            tips
+              .filter(
+                (tip) =>
+                  tip?.checkVisibility() &&
+                  !tip.closest(
+                    "#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .goodsRemmds",
+                  ),
+              )
+              .map((tip) => tip!.innerText.trim())
+              .filter(Boolean),
+          ),
+        ];
+        if (texts.length !== 1) return false;
+        const lines = texts[0]
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        const visibleName = name || lines[0];
+        if (!visibleName || !texts[0].includes(visibleName)) return false;
+        const description = (lines[0] === visibleName ? lines.slice(1) : lines).join("\n");
+        return description ? { name: visibleName, description } : false;
+      },
+      { index, excluded },
+      { timeout: 4000 },
+    );
+    try {
+      const value = await handle.jsonValue();
+      if (!value) throw new Error("宝宝装备提示框未完整显示");
+      signal.throwIfAborted();
+      await icon.evaluate((node, value) => {
+        node.setAttribute("data_cbg_pet_gear_name", value.name);
+        node.setAttribute("data_cbg_pet_gear_description", value.description);
+      }, value);
+    } finally {
+      await handle.dispose();
+    }
+  }
+}
+
 async function readMainPet(page: Page, signal: AbortSignal) {
   signal.throwIfAborted();
   await assertAvailable(page);
   const excluded =
-    '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [id$="TipsBox"], [role="tooltip"]';
+    '#search_result, #bottomRecommands, #recommd_list, #recommend, .recommend, .recommd, .recommandWrp, .goodsRemmds, [data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]';
   await page.waitForFunction(petRegionReady, excluded, { timeout: 5000 });
+  await inspectMainPetEquipment(page, signal, excluded);
   signal.throwIfAborted();
   await assertAvailable(page);
   const observed = await page.evaluate((excluded) => {
@@ -537,7 +641,13 @@ async function readMainPet(page: Page, signal: AbortSignal) {
       }
     }
     // Parsed tables already include bonus spans; the text fallback would split them into conflicting values.
-    let fallbackText = panel.innerText;
+    const principalText = (region: HTMLElement) => {
+      let text = region.innerText;
+      for (const tip of region.querySelectorAll<HTMLElement>(excluded))
+        text = text.replace(tip.innerText, "");
+      return text;
+    };
+    let fallbackText = principalText(panel);
     for (const region of structuredRegions)
       fallbackText = fallbackText.replace(region.innerText, "");
     const fieldText = fallbackText.split(
@@ -549,7 +659,9 @@ async function readMainPet(page: Page, signal: AbortSignal) {
       add(match[1], match[2]);
     // The bound product information region may hold the only visible level.
     for (const region of [panel, info])
-      for (const match of region.innerText.matchAll(/(?:^|\s)等级\s*[：:]\s*(\d{1,3})(?=\s|$)/g))
+      for (const match of principalText(region).matchAll(
+        /(?:^|\s)等级\s*[：:]\s*(\d{1,3})(?=\s|$)/g,
+      ))
         add("等级", match[1]);
     const type = g.CBG_GAME_CONFIG?.pet_info?.[String(pet.type_id)];
     if (typeof type !== "string" || !type) throw new Error("官网主宝宝类型目录未识别");
@@ -615,8 +727,8 @@ async function readMainPet(page: Page, signal: AbortSignal) {
     const equipment = icons
       .filter(({ attrs, src }) => !attrs.data_skill_type && /\/(?:equip|pet_shipin)\//.test(src))
       .map(({ attrs, src }) => ({
-        name: attrs.data_equip_name || "",
-        description: attrs.data_equip_desc || "",
+        name: attrs.data_equip_name || attrs.data_cbg_pet_gear_name || "",
+        description: attrs.data_cbg_pet_gear_description || attrs.data_equip_desc || "",
         accessory: /\/images\/pet_shipin\//.test(src),
       }));
     const expectedEquipment = pet.equip_list
