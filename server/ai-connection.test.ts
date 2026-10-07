@@ -143,11 +143,16 @@ describe("AI 连接验证", () => {
     expect(snapshot.provider).toBe("browser");
     expect(mocks.petInventory).toHaveBeenCalledWith(record);
     expect(mocks.createPetSource).toHaveBeenCalledWith(signal);
-    expect(mocks.searchPetPricing).toHaveBeenCalledWith(record, signal, {
-      findCandidates: mocks.findPetCandidates,
-      readSource: mocks.readPetSource,
-      close: mocks.closePetSource,
-    });
+    expect(mocks.searchPetPricing).toHaveBeenCalledWith(
+      record,
+      signal,
+      {
+        findCandidates: mocks.findPetCandidates,
+        readSource: mocks.readPetSource,
+        close: mocks.closePetSource,
+      },
+      undefined,
+    );
     expect(mocks.closePetSource).toHaveBeenCalledOnce();
     expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
     expect(mocks.codexAccount).not.toHaveBeenCalled();
@@ -280,6 +285,7 @@ describe("AI 连接验证", () => {
         readSource: mocks.readSource,
         close: mocks.closeSource,
       },
+      undefined,
       undefined,
     );
     expect(mocks.closeSource).toHaveBeenCalledOnce();
