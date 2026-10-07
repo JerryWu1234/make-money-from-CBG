@@ -94,7 +94,8 @@ export class AnalysisRunner {
         sampleSize,
         productKeys,
       );
-      this.launch(id, owner, client);
+      if (this.store.run(id)?.status === "running") this.launch(id, owner, client);
+      else this.store.release(owner);
       return id;
     } catch (error) {
       this.store.release(owner);

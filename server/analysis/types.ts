@@ -61,6 +61,17 @@ export type AnalysisItem = {
   error: string | null;
   valuation?: ValuationResult;
 };
+export type AnalysisResultItem = {
+  taskId: string;
+  name: string;
+  server: string;
+  price: string;
+  provider: AiProvider;
+  model: string;
+  completedAt: string;
+  stale: boolean;
+  result: ProductAnalysis;
+};
 export type AnalysisOverview = {
   profile?: Pick<
     AnalysisProfile,
@@ -72,6 +83,7 @@ export type AnalysisOverview = {
   runs: AnalysisRun[];
   ranking: AnalysisItem[];
   records: { page: number; totalPages: number; total: number; items: AnalysisItem[] };
+  results: { page: number; totalPages: number; total: number; items: AnalysisResultItem[] };
   history: {
     id: string;
     taskId: string;

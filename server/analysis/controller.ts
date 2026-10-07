@@ -6,11 +6,18 @@ import { AnalysisStore } from "./store";
 import { refreshMarket, marketServers } from "./market";
 import { loadProfile, saveProfile, PROMPT_FILE } from "./profile";
 
-let analysis: { store: AnalysisStore; runner: AnalysisRunner } | undefined;
+type AnalysisService = { store: AnalysisStore; runner: AnalysisRunner };
+const serviceKey = Symbol.for("cbg.analysis-service.v1");
+const runtime = globalThis as typeof globalThis & { [serviceKey]?: AnalysisService };
 function service() {
-  if (!analysis) {
+  let analysis = runtime[serviceKey];
+  // A page or Vite module reload must keep the in-flight queue and its abort controller.
+  if (!analysis || (!(analysis.store instanceof AnalysisStore) && !analysis.runner.isRunning())) {
     const store = new AnalysisStore(crawlDatabase());
-    analysis = { store, runner: new AnalysisRunner(store, prepareAnalysisClient) };
+    analysis = runtime[serviceKey] = {
+      store,
+      runner: new AnalysisRunner(store, prepareAnalysisClient),
+    };
   }
   return analysis;
 }
@@ -99,5 +106,5 @@ export function isAnalyzing() {
   return service().runner.isRunning();
 }
 export async function shutdownAnalysis() {
-  if (analysis) await analysis.runner.shutdown();
+  if (runtime[serviceKey]) await runtime[serviceKey].runner.shutdown();
 }
