@@ -1,5 +1,5 @@
 import { chromium, type Browser, type Page } from "playwright-core";
-import { CONNECTION_HELP, resolveCdpEndpoint } from "./chrome";
+import { CONNECTION_HELP, resolveCdpEndpoint, verifyCdpEndpoint } from "./chrome";
 import { CBG_HOME_URL } from "./config";
 import { ensureWorkViewport } from "./viewport";
 import { openWorkTransport, type WorkTransport } from "./work-transport";
@@ -36,9 +36,11 @@ export async function getBrowser(allowConnect = false): Promise<Browser> {
   cache.connectionPromise = (async () => {
     const endpoint = await resolveCdpEndpoint();
     let transport: WorkTransport | undefined;
-    let stage = "handshake";
+    let stage = "checking_port";
     try {
       diagnostics.record("browser.endpoint_resolved", { port: Number(new URL(endpoint).port) });
+      await verifyCdpEndpoint(endpoint);
+      stage = "handshake";
       transport = await openWorkTransport(endpoint);
       stage = "initializing";
       diagnostics.record("browser.websocket_connected");
@@ -57,10 +59,11 @@ export async function getBrowser(allowConnect = false): Promise<Browser> {
     } catch (error) {
       transport?.close();
       diagnostics.record("browser.connection_error", { stage, error });
+      if (stage === "checking_port") throw error;
       throw new Error(
         stage === "initializing"
           ? "已连接 Chrome 调试服务，但初始化工作连接失败。请重试，并查看运行日志中的 browser.connection_error。"
-          : `Chrome 调试连接尚未建立。${CONNECTION_HELP}`,
+          : `Chrome 调试端口已启动，但连接未获授权或握手失败。请检查 Chrome 的连接提示并确认允许；如已允许，请关闭再重新开启远程调试后重试。`,
         { cause: error },
       );
     }

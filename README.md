@@ -20,6 +20,8 @@ vp dev
 
 当前自动连接支持 macOS 上的日常 Chrome。默认读取 `~/Library/Application Support/Google/Chrome/DevToolsActivePort`；自定义用户数据目录可设置 `CBG_CHROME_USER_DATA_DIR`。这里只读取调试地址，不复制浏览器配置。旧 `.chrome-cbg-profile` 不再使用。
 
+日常 Chrome 请正常启动，不要添加 `--remote-debugging-port` 或 `--remote-debugging-pipe`。新版 Chrome 使用默认用户目录时，这些旧参数会阻止调试服务及界面开关生效；需要完全退出后去掉参数重新打开。程序会检查调试地址对应的端口，区分旧地址失效、连接权限错误和授权握手失败；修复后再次点击开始会重新读取地址。
+
 连接采用 [Playwright connectOverCDP](https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp)。使用 Chrome 默认用户上下文创建隐藏工作页，并在 [Target.createTarget](https://chromedevtools.github.io/devtools-protocol/tot/Target/#method-createTarget) 时设置 `hidden: true`、`background: true` 和 `forTab: false`，保留创建会话以维持工作页生命周期。隐藏工作页不出现在标签栏，也没有可见浏览器窗口。Chrome 授权提示本身仍需要用户允许，说明见 [Chrome 官方文档](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session)。
 
 ## 状态与错误
