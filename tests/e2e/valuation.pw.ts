@@ -321,8 +321,15 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
       oldDetail.getByRole("button", { name: "去补充分析设置", exact: true }),
     ).toBeVisible();
     await oldDetail.getByRole("button", { name: "关闭分析详情", exact: true }).click();
+    await page.getByRole("tab", { name: /全部商品/ }).click();
+    const previousRow = page.getByRole("row").filter({ hasText: "角色b" });
+    await expect(previousRow).toContainText("上次分析");
+    await expect(previousRow).toContainText("上次结果");
+    await expect(previousRow).not.toContainText("分析完成");
+    expect(calls).toBe(4);
     profile = analysedProfile;
     await page.reload();
+    await page.getByRole("tab", { name: /分析记录/ }).click();
     await expect(completedRecords.getByRole("article")).toHaveCount(4);
     await expect(completedRecords.getByText(oldSettingsMessage, { exact: true })).toHaveCount(0);
     expect(calls).toBe(4);

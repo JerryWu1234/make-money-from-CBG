@@ -14,6 +14,9 @@ export async function checkEquipment(input: Record<string, unknown>, requestSign
   };
   const productKey = identifier("productKey"),
     equipmentKey = identifier("equipmentKey");
+  const mode = input.mode === undefined ? "search" : input.mode;
+  if (typeof mode !== "string" || !["search", "discover"].includes(mode))
+    throw new Error("装备检查 mode 必须为 search 或 discover");
   const record = savedDetail(productKey) as SavedRoleRecord | null;
   if (!record) throw new Error("已保存商品不存在");
   if (record.listing.key !== productKey) throw new Error("商品 ID 与保存记录不一致");
@@ -24,12 +27,28 @@ export async function checkEquipment(input: Record<string, unknown>, requestSign
     throw new Error("装备资料尚未采集完整：" + inventory.issues.join("；"));
   const item = inventory.items.find((value) => value.key === equipmentKey);
   if (!item) throw new Error("指定装备不在该商品的已保存装备中");
-  if (item.status !== "no_match") throw new Error("该装备暂不能查价：" + item.issues.join("；"));
+  if (mode !== "discover" && item.status !== "no_match")
+    throw new Error("该装备暂不能查价：" + item.issues.join("；"));
   const signal = AbortSignal.any([requestSignal, AbortSignal.timeout(300_000)]);
   signal.throwIfAborted();
   const source = await createEquipmentSource(signal);
   try {
     signal.throwIfAborted();
+    if (mode === "discover") {
+      const form = await source.discover(item, signal);
+      signal.throwIfAborted();
+      return {
+        target: {
+          productKey,
+          equipmentKey,
+          name: item.name,
+          level: item.level,
+          category: item.category,
+        },
+        mode: "discover",
+        form,
+      };
+    }
     const result = await source.findCandidates([item], signal);
     signal.throwIfAborted();
     return {

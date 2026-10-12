@@ -73,6 +73,14 @@ describe("官方上古玉魄查询", () => {
     });
   });
 
+  it.each(["5 [+1]", "5[+2]", "5 [＋1]"])("灵尘%s仅以基础5查询，不把额外等级加总", (level) => {
+    const result = jadeQuery(
+      item({ description: item().description + "\n灵尘等级 " + level }),
+      config,
+    );
+    expect(result.args.minghun_level_min).toBe("5");
+    expect(result.args).not.toHaveProperty("include_ext_mh_lv");
+  });
   it("不会加入普通装备等级、宝石、区服、价格或根据空槽捏造条件", () => {
     const result = jadeQuery(
       item({

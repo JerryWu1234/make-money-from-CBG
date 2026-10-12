@@ -7,7 +7,7 @@ import { parseListing, timestamp } from "./listing";
 import { CrawlStore } from "./store";
 import { crawl } from "./runner";
 import { locateCheckpoint } from "./resume";
-import type { CrawlSource } from "./types";
+import type { CrawlSource, SavedRoleRecord } from "./types";
 import {
   ListingChangedError,
   type Checkpoint,
@@ -22,7 +22,7 @@ import {
   itemFromAttributes,
   coreEquipmentDescription,
 } from "./compact";
-import { equipmentCaptureSummary, onShelfFromText } from "./detail";
+import { equipmentCaptureSummary, onShelfFromText, MAIN_TABS } from "./detail";
 const signal = () => new AbortController().signal;
 const item = (id: number, time = 10000 - id): Listing => ({
   ...parseListing(
@@ -96,7 +96,221 @@ const source = (pages: Listing[][]): CrawlSource => {
     detail: vi.fn(async (row) => detail(row)),
   };
 };
+const refreshDetail = (listing: Listing, price = "500.00"): RoleDetail => ({
+  ...detail(listing),
+  equipmentCapture: { ...detail(listing).equipmentCapture!, emptyProof: "official-containers" },
+  tabs: MAIN_TABS.map((name) => ({
+    name,
+    text: "",
+    fields: [],
+    tables: [],
+    elements: [],
+    tooltips: [],
+    items: [],
+    ...(name === "道具/法宝" ? { equipmentEmptyProof: "official-containers" as const } : {}),
+    ...(name === "召唤兽/孩子" ? { petCount: 0, pets: [] } : {}),
+  })),
+  valuation: {
+    version: 1,
+    fields: [],
+    issues: [],
+    source: { eid: listing.eid, serverId: listing.serverId, askingPrice: price },
+  },
+});
+const readSaved = (db: CrawlStore, key: string) => db.detail(key) as SavedRoleRecord | null;
+describe("按商品刷新完整资料", () => {
+  it("仅刷新指定完整商品，不访问其他待采记录、不移动断点", async () => {
+    const db = memory(),
+      target = item(1),
+      other = item(2),
+      pending = item(3);
+    for (const row of [target, other, pending]) db.observe(row);
+    db.save(target, refreshDetail(target));
+    db.save(other, refreshDetail(other), checkpoint(other));
+    const beforeOther = db.detail(other.key),
+      beforePending = db.detail(pending.key);
+    const beforeCheckpoint = db.checkpoint();
+    const fresh = refreshDetail(target, "666.00");
+    fresh.collectedAt = "2026-10-07T07:00:00.000Z";
+    const collector = source([]);
+    collector.prepare = vi.fn();
+    collector.detail = vi.fn(async () => fresh);
+    await crawl(collector, db, signal(), () => {}, {
+      backfillOnly: true,
+      keys: [target.key],
+      refresh: true,
+    });
+    expect(collector.detail).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ key: target.key }),
+    );
+    expect(collector.onShelf).toHaveBeenCalledTimes(2);
+    expect(collector.prepare).not.toHaveBeenCalled();
+    expect(collector.page).not.toHaveBeenCalled();
+    expect(collector.hover).not.toHaveBeenCalled();
+    expect(readSaved(db, target.key)?.listing.price).toBe("666.00");
+    expect(readSaved(db, target.key)?.detail?.collectedAt).toBe(fresh.collectedAt);
+    expect(readSaved(db, target.key)?.detail?.tabs.map((tab) => tab.name)).toEqual(MAIN_TABS);
+    expect(db.detail(other.key)).toEqual(beforeOther);
+    expect(db.detail(pending.key)).toEqual(beforePending);
+    expect(db.checkpoint()).toEqual(beforeCheckpoint);
+  });
+  it.each([
+    [
+      "装备未齐",
+      (value: RoleDetail) => {
+        value.equipmentCapture!.complete = false;
+      },
+    ],
+    [
+      "宝宝未齐",
+      (value: RoleDetail) => {
+        value.petCapture!.complete = false;
+      },
+    ],
+    [
+      "缺标签",
+      (value: RoleDetail) => {
+        value.tabs = value.tabs.filter((tab) => tab.name !== "技能");
+      },
+    ],
+    [
+      "身份不符",
+      (value: RoleDetail) => {
+        value.valuation!.source.eid = "other";
+      },
+    ],
+    [
+      "价格无效",
+      (value: RoleDetail) => {
+        value.valuation!.source.askingPrice = "0";
+      },
+    ],
+  ])("%s时保留旧详情并留下重试项", async (_name, corrupt) => {
+    const db = memory(),
+      target = item(1);
+    db.observe(target);
+    db.save(target, refreshDetail(target), checkpoint(target));
+    const before = readSaved(db, target.key)?.detail,
+      point = db.checkpoint();
+    const fresh = refreshDetail(target, "666.00");
+    corrupt(fresh);
+    const collector = source([]);
+    collector.detail = vi.fn(async () => fresh);
+    await crawl(collector, db, signal(), () => {}, {
+      backfillOnly: true,
+      keys: [target.key],
+      refresh: true,
+    });
+    expect(readSaved(db, target.key)?.status).toBe("failed");
+    expect(readSaved(db, target.key)?.detail).toEqual(before);
+    expect(readSaved(db, target.key)?.listing.price).not.toBe("666.00");
+    expect(db.retryItems().map((row) => row.key)).toEqual([target.key]);
+    expect(db.checkpoint()).toEqual(point);
+  });
+  it.each([[false], [true, false]])("在售核对失败%s时不覆盖旧资料", async (...states) => {
+    const db = memory(),
+      target = item(1);
+    db.observe(target);
+    db.save(target, refreshDetail(target), checkpoint(target));
+    const before = readSaved(db, target.key)?.detail,
+      point = db.checkpoint();
+    const collector = source([]);
+    collector.detail = vi.fn(async () => refreshDetail(target, "666.00"));
+    collector.onShelf = vi.fn(async () => states.shift() ?? false);
+    await expect(
+      crawl(collector, db, signal(), () => {}, {
+        backfillOnly: true,
+        keys: [target.key],
+        refresh: true,
+      }),
+    ).rejects.toThrow("未确认商品仍在售");
+    expect(readSaved(db, target.key)?.detail).toEqual(before);
+    expect(db.checkpoint()).toEqual(point);
+  });
+  it("普通补采仍跳过完整商品", async () => {
+    const db = memory(),
+      target = item(1);
+    db.observe(target);
+    db.save(target, refreshDetail(target));
+    const collector = source([]);
+    await crawl(collector, db, signal(), () => {}, { backfillOnly: true, keys: [target.key] });
+    expect(collector.detail).not.toHaveBeenCalled();
+    expect(collector.onShelf).not.toHaveBeenCalled();
+  });
+  it("拒绝未知商品刷新且不触发采集", async () => {
+    const db = memory(),
+      collector = source([]);
+    await expect(
+      crawl(collector, db, signal(), () => {}, {
+        backfillOnly: true,
+        keys: ["missing"],
+        refresh: true,
+      }),
+    ).rejects.toThrow("指定刷新商品不存在");
+    expect(collector.detail).not.toHaveBeenCalled();
+    expect(collector.onShelf).not.toHaveBeenCalled();
+    expect(db.count()).toBe(0);
+  });
+});
 describe("仅补齐估值资料", () => {
+  it("只补采缺空库存证据的旧角色，非空角色不重采，空确认后不重复补采", async () => {
+    const db = memory(),
+      row = item(1),
+      equipped = item(2);
+    const makeDetail = (
+      listing: Listing,
+      items: RoleDetail["tabs"][number]["items"],
+    ): RoleDetail => ({
+      ...detail(listing),
+      tabs: [
+        {
+          name: "道具/法宝",
+          text: "现金：100",
+          fields: [],
+          tables: [],
+          elements: [],
+          tooltips: [],
+          items,
+        },
+      ],
+    });
+    db.observe(row);
+    db.observe(equipped);
+    const empty = makeDetail(row, [
+      { index: 0, name: "法宝", kind: "equipment", category: "法宝" },
+    ]);
+    db.save(row, empty);
+    db.save(
+      equipped,
+      makeDetail(equipped, [
+        {
+          index: 0,
+          name: "腰带",
+          kind: "equipment",
+          category: "人物装备",
+          description: "等级100\n防御50",
+        },
+      ]),
+    );
+    expect(db.retryItems().map((item) => item.key)).toEqual([row.key]);
+    expect(db.records().items.find((item) => item.key === row.key)?.valuationReady).toBe(false);
+    expect(db.observe(equipped)).toBe(true);
+    expect(db.observe(row)).toBe(false);
+    const before = db.checkpoint();
+    const collector = source([]);
+    collector.prepare = vi.fn();
+    collector.detail = vi.fn(async () => ({
+      ...empty,
+      equipmentCapture: { ...empty.equipmentCapture!, emptyProof: "official-containers" as const },
+    }));
+    await crawl(collector, db, signal(), () => {}, { backfillOnly: true, keys: [row.key] });
+    expect(collector.detail).toHaveBeenCalledOnce();
+    expect(collector.prepare).not.toHaveBeenCalled();
+    expect(db.checkpoint()).toEqual(before);
+    expect(db.retryItems()).toEqual([]);
+    expect(db.observe(row)).toBe(true);
+    expect(db.records().items.find((item) => item.key === row.key)?.valuationReady).toBe(true);
+  });
   it("宝宝凭据缺失、未读完整或带异常时都进入补采，补齐后才跳过", () => {
     const db = memory(),
       row = item(1);
@@ -236,6 +450,10 @@ describe("商品身份和时间", () => {
     expect(onShelfFromText("是否上架：已下架")).toBe(false);
     expect(onShelfFromText("是否上架：已售出")).toBe(false);
     expect(onShelfFromText("商品详情")).toBe(false);
+    expect(onShelfFromText("服务器：模拟服\n编号：123\n状态：上架中\n价格：￥5888.00")).toBe(true);
+    expect(onShelfFromText("状态：已下架\n相关推荐：上架中")).toBe(false);
+    expect(onShelfFromText("绑定状态：上架中\n相关推荐：上架中")).toBe(false);
+    expect(onShelfFromText("状态：交易中")).toBe(false);
   });
   it("保留估价装备数值和专用限制，剔除背景与功效说明", () => {
     const weapon = itemFromAttributes(
@@ -345,7 +563,8 @@ describe("商品身份和时间", () => {
       ),
     ];
     expect(empty.items[0].category).toBe("法宝");
-    expect(equipmentCaptureSummary([empty], "now").complete).toBe(true);
+    expect(equipmentCaptureSummary([empty], "now").complete).toBe(false);
+    expect(equipmentCaptureSummary([{ ...empty, text: "没有装备" }], "now").complete).toBe(true);
     expect(equipmentCaptureSummary([], "now").complete).toBe(false);
     expect(equipmentCaptureSummary([{ ...empty, text: "", items: [] }], "now").complete).toBe(
       false,
@@ -381,7 +600,11 @@ describe("商品身份和时间", () => {
       tooltips: [],
       items,
     };
-    expect(equipmentCaptureSummary([snapshot], "now").complete).toBe(true);
+    expect(equipmentCaptureSummary([snapshot], "now").complete).toBe(false);
+    expect(
+      equipmentCaptureSummary([{ ...snapshot, equipmentEmptyProof: "official-containers" }], "now")
+        .complete,
+    ).toBe(true);
     const unknown = itemFromAttributes({ data_equip_name: "未知物品", data_equip_type: "6033" }, 5);
     expect(unknown.category).toBeUndefined();
     expect(equipmentCaptureSummary([{ ...snapshot, items: [unknown] }], "now").complete).toBe(

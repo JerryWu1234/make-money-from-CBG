@@ -61,6 +61,7 @@ const fixture = (
   iconKindId?: string,
   nonEquipmentHtml = "",
   equipmentDescription = "",
+  equipmentHtml?: string,
 ) => {
   const gear = `<p>道具和法宝</p><div id="RoleEquip"><a data_kindid="999" data_equip_name="新武器" data_equip_desc="${equipmentDescription}" data_equip_category="武器" data_tip_box="RoleEquipTipsBox"><img ${iconKindId ? `data_kindid="${iconKindId}"` : ""} width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseout="document.getElementById('RoleEquipTipsBox').style.display='none'" onmouseover="${missingTooltip ? "" : "document.getElementById('RoleEquipTipsBox').style.display='block';document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'"}"></a></div>`;
   return `<meta charset="utf-8"><section><nav>${MAIN_TABS.map(
@@ -68,7 +69,7 @@ const fixture = (
       `<button onclick="show(${JSON.stringify(name).replaceAll('"', "&quot;")})">${name}</button>`,
   ).join(
     "",
-  )}</nav><div id="panel">${"基本资料。".repeat(60)}</div><div id="RoleEquipTipsBox" style="display:none"></div></section><script>function show(name){document.getElementById('panel').innerHTML=name==='道具/法宝'?${JSON.stringify(gear + nonEquipmentHtml)}:name==='召唤兽/孩子'?${JSON.stringify(petHtml)}:'<p>'+name+'：新资料</p>'}</script>`;
+  )}</nav><div id="panel">${"基本资料。".repeat(60)}</div><div id="RoleEquipTipsBox" style="display:none"></div></section><script>function show(name){document.getElementById('panel').innerHTML=name==='道具/法宝'?${JSON.stringify((equipmentHtml ?? gear) + nonEquipmentHtml)}:name==='召唤兽/孩子'?${JSON.stringify(petHtml)}:'<p>'+name+'：新资料</p>'}</script>`;
 };
 const completePet = () =>
   `<p>召唤兽(1/10)</p><img width="30" height="30" data_idx="0" src="/images/pets/small/0.gif"><section><p>详细信息</p><p>类型：幽灵</p><p>等级：0</p><p>成长：1.23</p>${["攻击资质", "防御资质", "体力资质", "法力资质", "速度资质", "躲闪资质"].map((name) => `<p>${name}：1400</p>`).join("")}<p>技能（2）</p><img width="30" height="30" data_skill_type="cifu" data_equip_name="鬼魂术"><img width="30" height="30" data_skill_type="cifu" data_equip_name="死亡召唤"><p>装备（1）</p><img width="30" height="30" data_equip_name="宝宝项圈" data_equip_desc="等级 80#r速度 +20"><p>内丹（1）</p><img width="30" height="30" data_skill_type="neidan" data_equip_name="玄武躯" data_equip_level="5"></section><p>孩子</p><img width="30" height="30" data_skill_type="cifu" data_equip_name="孩子技能">`;
@@ -104,6 +105,24 @@ describe("装备局部补采", () => {
       }
     },
   );
+
+  it.each([
+    ["上架中", true],
+    ["已下架", false],
+  ])("当前官网的主商品状态%s可识别，辅助页面状态不影响判断", async (state, expected) => {
+    const page = await browser.newPage();
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<meta charset="utf-8"><p>编号：123</p><p>状态：${state}</p><p>价格：￥5888.00（元）</p><browser-mcp-container></browser-mcp-container><script>const auxiliaryBody = document.createElement('body'); auxiliaryBody.innerText = '状态：已下架'; document.querySelector('browser-mcp-container').attachShadow({mode:'open'}).append(auxiliaryBody);</script>`,
+        }),
+      );
+      expect(await isOnShelf(page, listing, new AbortController().signal)).toBe(expected);
+    } finally {
+      await page.close();
+    }
+  });
 
   it("官网时间锁徽章不计装备图标，其他同尺寸未知图片仍报告缺失", async () => {
     const page = await browser.newPage();
@@ -151,6 +170,55 @@ describe("装备局部补采", () => {
       await page.close();
     }
   }, 15000);
+
+  it.each(["cash", "artifacts", "hidden", "empty", "explicit"])(
+    "空装备只有实际容器或明确文字可确认：%s",
+    async (kind) => {
+      const page = await browser.newPage();
+      try {
+        const artifacts =
+          '<div id="RoleUsingFabao"><img data_equip_name="法宝" data_equip_type="6033" src="/images/fabao.png"></div>';
+        const empty =
+          '<table id="RoleUsingEquips"><tbody><tr><td></td></tr></tbody></table><table id="RoleStoreEquips"><tbody><tr><td></td></tr></tbody></table>';
+        const body =
+          kind === "cash"
+            ? "<p>现金：100</p><p>存银：0</p>"
+            : kind === "artifacts"
+              ? artifacts
+              : kind === "hidden"
+                ? empty.replace('id="RoleStoreEquips"', 'id="RoleStoreEquips" style="display:none"')
+                : kind === "explicit"
+                  ? "<p>没有装备</p>"
+                  : empty + artifacts;
+        await page.route("**/images/**", (route) => route.abort());
+        await page.route(url, (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: fixture(false, undefined, undefined, "", "", body),
+          }),
+        );
+        const captured = await collectValuationDetail(
+          page,
+          listing,
+          previous(),
+          new AbortController().signal,
+        );
+        const expected = ["empty", "explicit"].includes(kind);
+        expect(captured.equipmentCapture?.complete).toBe(expected);
+        expect(captured.equipmentCapture?.emptyProof).toBe(
+          kind === "empty"
+            ? "official-containers"
+            : kind === "explicit"
+              ? "explicit-text"
+              : undefined,
+        );
+        if (!expected)
+          expect(captured.equipmentCapture?.issues.join(" ")).toContain("库存是否为空尚未核对");
+      } finally {
+        await page.close();
+      }
+    },
+  );
 
   it("新采保存官网模型号，玉魄和技能书不误报普通装备等级缺失", async () => {
     const page = await browser.newPage();

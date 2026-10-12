@@ -2,15 +2,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 import type { Browser, Page } from "playwright-core";
 import { parseDevToolsEndpoint } from "./chrome";
 
-const { connectOverCDP, readFile, openWorkTransport, transport } = vi.hoisted(() => ({
-  connectOverCDP: vi.fn(),
-  readFile: vi.fn(),
-  openWorkTransport: vi.fn(),
-  transport: { close: vi.fn() },
-}));
+const { connectOverCDP, readFile, openWorkTransport, verifyCdpEndpoint, transport } = vi.hoisted(
+  () => ({
+    connectOverCDP: vi.fn(),
+    readFile: vi.fn(),
+    openWorkTransport: vi.fn(),
+    verifyCdpEndpoint: vi.fn(),
+    transport: { close: vi.fn() },
+  }),
+);
 vi.mock("playwright-core", () => ({ chromium: { connectOverCDP } }));
 vi.mock("node:fs/promises", () => ({ readFile }));
 vi.mock("./work-transport", () => ({ openWorkTransport }));
+vi.mock("./chrome", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./chrome")>()),
+  verifyCdpEndpoint,
+}));
 
 beforeEach(() => {
   Reflect.deleteProperty(globalThis, Symbol.for("cbg.browser-session.v1"));
@@ -18,6 +25,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   readFile.mockResolvedValue("9345\n/devtools/browser/test\n");
   openWorkTransport.mockResolvedValue(transport);
+  verifyCdpEndpoint.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -102,11 +110,26 @@ describe("日常浏览器连接", () => {
   it("握手失败时不初始化 Playwright，重试会重新建立连接", async () => {
     const { getBrowser } = await import("./session");
     openWorkTransport.mockRejectedValueOnce(new Error("握手超时"));
-    await expect(getBrowser(true)).rejects.toThrow("Chrome 调试连接尚未建立");
+    await expect(getBrowser(true)).rejects.toThrow(
+      "Chrome 调试端口已启动，但连接未获授权或握手失败",
+    );
     expect(connectOverCDP).not.toHaveBeenCalled();
     connectOverCDP.mockResolvedValue({ on: vi.fn(), isConnected: () => true });
     await getBrowser(true);
     expect(openWorkTransport).toHaveBeenCalledTimes(2);
+  });
+  it("调试地址残留时保留端口诊断，修复后重读地址再连接", async () => {
+    const { getBrowser } = await import("./session");
+    verifyCdpEndpoint.mockRejectedValueOnce(new Error("Chrome 调试端口 9345 未启动"));
+    await expect(getBrowser(true)).rejects.toThrow("Chrome 调试端口 9345 未启动");
+    expect(openWorkTransport).not.toHaveBeenCalled();
+    expect(connectOverCDP).not.toHaveBeenCalled();
+    readFile.mockResolvedValue("9456\n/devtools/browser/new-session\n");
+    connectOverCDP.mockResolvedValue({ on: vi.fn(), isConnected: () => true });
+    await getBrowser(true);
+    expect(openWorkTransport).toHaveBeenCalledExactlyOnceWith(
+      "ws://127.0.0.1:9456/devtools/browser/new-session",
+    );
   });
   it("创建隐藏后台页面，沿用默认用户上下文，只复用自己的工作页", async () => {
     const { createBackgroundPage, getCbgPage } = await import("./session");

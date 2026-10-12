@@ -76,13 +76,13 @@ const mainFields: Record<Slot, string[]> = {
 const commonFields = new Set(["等级", "五行", "耐久", "修理失败", "装备角色", "装备条件"]);
 
 /** Deliberately narrow program limits, not an official complete crafting-stat table. */
-function ordinarySlot(item: BaselineItem): Slot | null {
+export function ordinarySlot(item: BaselineItem): Slot | null {
   const level = item.level;
   if (level === null || !Number.isInteger(level) || level < 0 || level > 100 || level % 10 !== 0)
     return null;
   if (
     !["no_match", "unsupported"].includes(item.status) ||
-    (item.status === "unsupported" && level !== 0) ||
+    (item.status === "unsupported" && level >= 60) ||
     item.referencePrice !== null ||
     item.candidates.length
   )

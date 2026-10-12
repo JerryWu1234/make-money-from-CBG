@@ -28,6 +28,8 @@ const mocks = vi.hoisted(() => ({
   findPetCandidates: vi.fn(),
   readPetSource: vi.fn(),
   closePetSource: vi.fn(),
+  searchPetGearPricing: vi.fn(),
+  searchRolePricing: vi.fn(),
 }));
 vi.mock("./ai/codex", () => mocks);
 vi.mock("./ai/deepseek", () => ({
@@ -54,6 +56,8 @@ vi.mock("./analysis/pet-pricing", () => ({
   petInventory: mocks.petInventory,
   searchPetPricing: mocks.searchPetPricing,
 }));
+vi.mock("./analysis/pet-gear-search", () => ({ searchPetGearPricing: mocks.searchPetGearPricing }));
+vi.mock("./analysis/role-search", () => ({ searchRolePricing: mocks.searchRolePricing }));
 const account = { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" };
 const fakeKey = "test-only-deepseek-key";
 
@@ -95,7 +99,37 @@ beforeEach(() => {
   });
   mocks.closePetSource.mockResolvedValue(undefined);
   mocks.searchPetPricing.mockResolvedValue({ ...petPricingFixture(), provider: "browser" });
+  mocks.searchPetGearPricing.mockResolvedValue({ items: [], total: null, knownTotal: 0 });
 });
+
+it.each(["codex", "deepseek"] as const)("%s 客户端接入整号参考而不调用AI查价", async (provider) => {
+  if (provider === "deepseek") vi.stubEnv("DEEPSEEK_API_KEY", fakeKey);
+  const { prepareAnalysisClient } = await import("./ai-connection");
+  const client = await prepareAnalysisClient(provider);
+  const record = valuationRecord(),
+    signal = new AbortController().signal;
+  const snapshot = { marketReference: { status: "insufficient", range: null, median: null } };
+  mocks.searchRolePricing.mockResolvedValue(snapshot);
+  await expect(client.searchRole(record, signal)).resolves.toEqual(snapshot);
+  expect(mocks.searchRolePricing).toHaveBeenCalledExactlyOnceWith(record, signal, undefined);
+  expect(mocks.requestCodex).not.toHaveBeenCalled();
+  expect(mocks.requestDeepSeek).not.toHaveBeenCalled();
+});
+
+it.each(["codex", "deepseek"] as const)(
+  "%s 客户端自动接入宝宝装备查价并复用上次进度",
+  async (provider) => {
+    if (provider === "deepseek") vi.stubEnv("DEEPSEEK_API_KEY", fakeKey);
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient(provider);
+    const record = valuationRecord();
+    const signal = new AbortController().signal;
+    const snapshot = { items: [], total: null, knownTotal: 0 };
+    await expect(client.searchPetGear(record, signal)).resolves.toEqual(snapshot);
+    expect(mocks.searchPetGearPricing).toHaveBeenCalledExactlyOnceWith(record, signal, undefined);
+  },
+  15_000,
+);
 
 function equipmentRecord(empty = false) {
   const record = valuationRecord();
@@ -309,7 +343,7 @@ describe("AI 连接验证", () => {
     expect(mocks.closeSource).toHaveBeenCalledOnce();
   });
 
-  it("普通环装与待补默认价只走程序规则，不创建浏览器或触发扫码", async () => {
+  it("普通环装与缺默认价的装备都使用浏览器市场搜索", async () => {
     const { DEFAULT_SETTINGS } = await import("./analysis/profile");
     const { prepareAnalysisClient } = await import("./ai-connection");
     const client = await prepareAnalysisClient("codex");
@@ -337,8 +371,8 @@ describe("AI 连接验证", () => {
       .replace("255", "220")
       .replace("伤害：220", "伤害：190");
     await client.searchEquipment(record, signal, settings);
-    expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
-    expect(mocks.closeSource).not.toHaveBeenCalled();
+    expect(mocks.createEquipmentSource).toHaveBeenCalledTimes(2);
+    expect(mocks.closeSource).toHaveBeenCalledTimes(2);
     expect(mocks.searchEquipmentPrices).toHaveBeenCalledTimes(2);
     expect(mocks.searchEquipmentPrices.mock.calls[0][3]).toBe(settings);
     expect(mocks.requestCodexSearch).not.toHaveBeenCalled();
@@ -362,6 +396,35 @@ describe("AI 连接验证", () => {
     expect(mocks.readSource).not.toHaveBeenCalled();
     expect(mocks.codexAccount).not.toHaveBeenCalled();
     expect(mocks.codexModel).not.toHaveBeenCalled();
+  });
+
+  it("库存有部分缺资料时，已完整采集的装备仍进入浏览器搜索", async () => {
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const client = await prepareAnalysisClient("codex");
+    const record = equipmentRecord();
+    record.detail!.equipmentCapture!.complete = false;
+    record.detail!.equipmentCapture!.issues = ["道具/法宝：另一件装备 属性未采齐"];
+    await client.searchEquipment(record, new AbortController().signal);
+    expect(mocks.createEquipmentSource).toHaveBeenCalledOnce();
+    expect(mocks.searchEquipmentPrices).toHaveBeenCalledOnce();
+    expect(mocks.closeSource).toHaveBeenCalledOnce();
+  });
+
+  it("本任务已完成且有效的查价不再创建浏览器工作页，过期时才重查", async () => {
+    const { prepareAnalysisClient } = await import("./ai-connection");
+    const { equipmentPricingPlan } = await import("./analysis/equipment-pricing");
+    const client = await prepareAnalysisClient("codex");
+    const record = equipmentRecord();
+    const previous = equipmentPricingPlan(record);
+    previous.queries = ["模拟已读完的零结果查询"];
+    for (const item of previous.items) item.searchState = "completed";
+    previous.searchComplete = true;
+    await client.searchEquipment(record, new AbortController().signal, undefined, previous);
+    expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
+    previous.searchedAt = new Date(Date.now() - 25 * 3600_000).toISOString();
+    await client.searchEquipment(record, new AbortController().signal, undefined, previous);
+    expect(mocks.createEquipmentSource).toHaveBeenCalledOnce();
+    expect(mocks.closeSource).toHaveBeenCalledOnce();
   });
 
   it("查询失败或source创建后取消也关闭浏览器工作页，失败信息隐藏密钥", async () => {

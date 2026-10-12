@@ -5,7 +5,13 @@ import type {
   EquipmentPricingSnapshot,
 } from "./equipment-pricing";
 import type { PetPricingItem } from "./pet-pricing";
-import { inventoryMatchesSnapshot, validateExactPricing } from "./pricing-integrity";
+import {
+  inventoryMatchesSnapshot,
+  validateExactPricing,
+  EQUIPMENT_QUOTE_POLICY,
+  priceAverage,
+  unfinishedPricingSearch,
+} from "./pricing-integrity";
 
 const now = Date.parse("2026-10-05T12:00:00.000Z");
 const item = (key = "gear:0"): EquipmentPricingItem => ({
@@ -56,6 +62,84 @@ const priced = (key = "gear:0") => ({
 const complete = () => ({ ...snapshot([priced()]), knownTotal: 120, total: 120 });
 
 describe("精确查价快照完整性", () => {
+  it("完成标记不能覆盖尚未穷尽的查询证据", () => {
+    const source = complete();
+    source.items[0].searchState = "completed";
+    source.searchItems = [{ key: "gear:0", exhausted: false }];
+    expect(validateExactPricing(source, [item()], now)).toBe(false);
+    source.searchItems.push({ key: "gear:0", exhausted: true });
+    expect(validateExactPricing(source, [item()], now)).toBe(true);
+  });
+
+  it("只检查采用组的最新记录，诊断页和其他资产不改变已穷尽结果", () => {
+    const row = priced();
+    const records = [
+      { key: row.key, matchType: "exact", exhausted: false },
+      { key: row.key, matchType: "exact", exhausted: true },
+      { key: row.key, matchType: "similar", exhausted: false },
+      { key: row.key, matchType: "diagnostic", exhausted: false },
+      { key: "other", exhausted: false },
+    ];
+    expect(unfinishedPricingSearch(row, records)).toBe(false);
+    row.candidates = row.candidates.map((value) => ({ ...value, matchType: "similar" }));
+    expect(unfinishedPricingSearch(row, records)).toBe(true);
+  });
+
+  it("零报价和URL别名不足十件不能冒充完成，十件不同商品允许结束", () => {
+    const row = item();
+    const records = [{ key: row.key, modes: [{ mode: "exact", exhausted: false }] }];
+    expect(unfinishedPricingSearch(row, records)).toBe(true);
+    row.candidates = Array.from({ length: 10 }, () => candidate(100, "same"));
+    expect(unfinishedPricingSearch(row, records)).toBe(true);
+    row.candidates = Array.from({ length: 10 }, (_, index) => candidate(100, `sample-${index}`));
+    expect(unfinishedPricingSearch(row, records)).toBe(false);
+  });
+
+  it("结果顺序变化后丢弃前次已穷尽证据", () => {
+    const row = item();
+    const records = [
+      {
+        key: row.key,
+        modes: [
+          { mode: "exact", exhausted: false },
+          { mode: "similar", exhausted: true },
+        ],
+      },
+      { key: row.key, reason: "result_order_changed" },
+      {
+        key: row.key,
+        modes: [
+          { mode: "exact", exhausted: true },
+          { mode: "similar", exhausted: false },
+        ],
+      },
+    ];
+    expect(unfinishedPricingSearch(row, records)).toBe(true);
+  });
+
+  it("新的十件均价快照重算平均值，不能以中位数或旧计价策略冒充", () => {
+    const inventory: EquipmentPricingItem[] = [{ ...item(), priceMethod: EQUIPMENT_QUOTE_POLICY }];
+    const row: EquipmentPricingItem = {
+      ...inventory[0],
+      status: "priced" as const,
+      referencePrice: 226,
+      candidates: [100, 110, 120, 130, 140, 150, 160, 170, 180, 1000, 1].map((price, index) =>
+        candidate(price, `mean-${index}`),
+      ),
+    };
+    row.candidates.splice(1, 0, {
+      ...candidate(100, "mean-0"),
+      url: "https://xyq.cbg.163.com/equip/1/mean-0",
+    });
+    const source = { ...snapshot([row]), total: 226, knownTotal: 226 };
+    expect(validateExactPricing(source, inventory, now)).toBe(true);
+    row.referencePrice = source.total = source.knownTotal = 120;
+    expect(validateExactPricing(source, inventory, now)).toBe(false);
+    delete row.priceMethod;
+    expect(inventoryMatchesSnapshot(source, inventory)).toBe(false);
+    expect(priceAverage([100.01, 100.02])).toBe(100.02);
+    expect(priceAverage([])).toBeNull();
+  });
   it("路径与查询身份冲突、非商品路径或带端口/凭据的链接不能支撑精确中位数", () => {
     for (const url of [
       (index: number) => "https://xyq.cbg.163.com/equip/1/same?s=1&eid=alias-" + index,
@@ -114,6 +198,20 @@ describe("精确查价快照完整性", () => {
     even.items[0].candidates = [candidate(100, "one"), candidate(141.11, "two")];
     even.items[0].referencePrice = even.total = even.knownTotal = 120.56;
     expect(validateExactPricing(even, [item()], now)).toBe(true);
+  });
+
+  it("两条相差一分的报价取半分进位，并排除过期和重复身份报价", () => {
+    const source = complete();
+    source.items[0].candidates = [
+      candidate(1050.01, "one"),
+      candidate(1050.02, "two"),
+      { ...candidate(1050.01, "one"), url: "https://xyq.cbg.163.com/equip/1/one" },
+      { ...candidate(1, "old"), fetchedAt: new Date(now - 24 * 3600_000).toISOString() },
+    ];
+    source.items[0].referencePrice = source.total = source.knownTotal = 1050.02;
+    expect(validateExactPricing(source, [item()], now)).toBe(true);
+    source.items[0].referencePrice = source.total = source.knownTotal = 1050.01;
+    expect(validateExactPricing(source, [item()], now)).toBe(false);
   });
 
   it("允许合法部分小计，但缺价或相近报价不能伪装成精确总价", () => {

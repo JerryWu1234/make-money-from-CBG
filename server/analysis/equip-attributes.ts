@@ -1,10 +1,11 @@
-import { cleanDescription } from "../crawler/compact";
+import { cleanDescription, jewelryDescriptionSections } from "../crawler/compact";
 
 export type EquipmentAttributes = {
   level: number | null;
   fields: Record<string, string[]>;
   restrictions: string[];
   unknownLines: string[];
+  jewelrySections?: { main: Record<string, string[]>; added: Record<string, string[]> };
 };
 
 const aliases: Record<string, string> = {
@@ -241,7 +242,82 @@ export function parseEquipmentAttributes(description: string): EquipmentAttribut
   ].map((match) => normalize(match[0]));
   const levels = fields.等级?.map((value) => canonical(value));
   const level = levels?.length === 1 && /^\d+$/.test(levels[0]) ? Number(levels[0]) : null;
-  return { level, fields, restrictions, unknownLines };
+  let sections = jewelry ? jewelryDescriptionSections(description) : null;
+  if (jewelry && !sections) {
+    // Independent listings often omit the color-derived header in innerText. The observed
+    // bracketed refinement bonuses identify their contiguous two/three added stat rows.
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const indexes = lines.flatMap((line, index) =>
+      /^[\u4e00-\u9fff]+\s*[+＋−-]?\d+(?:\.\d+)?\s*\[[+＋−-]?\d+(?:\.\d+)?\]$/.test(line)
+        ? [index]
+        : [],
+    );
+    if (
+      [2, 3].includes(indexes.length) &&
+      indexes.every((index, offset) => index === indexes[0] + offset)
+    )
+      sections = {
+        main: lines.slice(0, indexes[0]).join("\n"),
+        added: indexes.map((index) => lines[index]),
+      };
+  }
+  return {
+    level,
+    fields,
+    restrictions,
+    unknownLines,
+    ...(sections
+      ? {
+          jewelrySections: {
+            main: parseEquipmentAttributes(sections.main).fields,
+            added: parseEquipmentAttributes(sections.added.join("\n")).fields,
+          },
+        }
+      : {}),
+  };
+}
+
+/** Same-named primary and added jewelry stats must never trade places in a comparison. */
+export function separateJewelryAttributes(
+  target: EquipmentAttributes,
+  source: EquipmentAttributes,
+  partial = false,
+) {
+  const overlap = [
+    ...new Set(
+      [target, source].flatMap((value) =>
+        value.jewelrySections
+          ? Object.keys(value.jewelrySections.main).filter(
+              (name) =>
+                Object.hasOwn(value.jewelrySections!.added, name) &&
+                (Object.hasOwn(target.fields, name) || Object.hasOwn(source.fields, name)),
+            )
+          : [],
+      ),
+    ),
+  ];
+  if (!overlap.length || (partial && !source.jewelrySections))
+    return { target, source, reason: null };
+  if (!target.jewelrySections || !source.jewelrySections)
+    return { target, source, reason: "灵饰主属性与附加属性缺少分段证据，不能混合比较" };
+  const separate = (value: EquipmentAttributes) => {
+    const fields = { ...value.fields };
+    for (const name of overlap) {
+      delete fields[name];
+      for (const [section, prefix] of [
+        ["main", "主属性"],
+        ["added", "附加属性"],
+      ] as const) {
+        const values = value.jewelrySections![section][name];
+        if (values?.length) fields[prefix + "·" + name] = values;
+      }
+    }
+    return { ...value, fields };
+  };
+  return { target: separate(target), source: separate(source), reason: null };
 }
 
 /** Strict matching does not infer premiums, discounts or substitute superior items. */
@@ -249,6 +325,10 @@ export function compareEquipmentAttributes(
   target: EquipmentAttributes,
   source: EquipmentAttributes,
 ) {
+  const separated = separateJewelryAttributes(target, source);
+  if (separated.reason) return separated.reason;
+  target = separated.target;
+  source = separated.source;
   const sorted = (values: string[]) => values.flatMap(canonicalValues).sort();
   const same = (left: string[], right: string[]) =>
     JSON.stringify(sorted(left)) === JSON.stringify(sorted(right));

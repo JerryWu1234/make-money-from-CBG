@@ -1,5 +1,6 @@
 import { cleanDescription } from "../crawler/compact";
 import type { EquipmentPricingItem } from "./equipment-pricing";
+import { equipmentAttributeLowerBound } from "./equipment-match";
 
 export const JADE_SEARCH_URL =
   "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=show_overall_search_yupo";
@@ -46,7 +47,7 @@ const attribute = (line: string) => {
 };
 
 /** Official yupo search inputs are lower bounds; only independently verified listings set prices. */
-export function jadeQuery(item: EquipmentPricingItem, config: JadeSearchConfig) {
+export function jadeQuery(item: EquipmentPricingItem, config: JadeSearchConfig, similar = false) {
   if (item.category !== "上古玉魄") throw new Error("玉魄查询不能用于普通装备");
   const modelId = item.modelId || Object.keys(types).find((id) => types[id] === item.name);
   if (!modelId || types[modelId] !== item.name)
@@ -63,7 +64,12 @@ export function jadeQuery(item: EquipmentPricingItem, config: JadeSearchConfig) 
   const addAttribute = (key: string, line: string) => {
     const parsed = attribute(line);
     const id = parsed && idFor(parsed.name, choices);
-    if (id) args[key] = JSON.stringify({ [id]: parsed!.value });
+    if (id) {
+      const lower = similar && equipmentAttributeLowerBound(parsed!.name, Number(parsed!.value));
+      args[key] = JSON.stringify({
+        [id]: lower === false || lower === null ? parsed!.value : String(Math.ceil(lower)),
+      });
+    }
   };
   // parse_yupo_json renders the initial attribute first, then the two ordered base attributes.
   // Do not promote a later recognized line to the initial slot when the first line is unknown.
@@ -75,7 +81,8 @@ export function jadeQuery(item: EquipmentPricingItem, config: JadeSearchConfig) 
   for (const [index, line] of baseLines.slice(0, 2).entries())
     addAttribute("base_attrs" + (index + 1), line);
   for (const line of lines) {
-    const level = line.match(/^灵尘等级\s*[：:]?\s*(\d+)$/)?.[1];
+    // The public form excludes extra levels unless its checkbox is selected; use the base value.
+    const level = line.match(/^灵尘等级\s*[：:]?\s*(\d+)(?:\s*\[[+＋]?\d+\])?$/)?.[1];
     if (level && Number.isSafeInteger(Number(level)) && Number(level) > 0)
       args.minghun_level_min = level;
     const effect = line.match(/^(.+?)\s*[：:]?\s*[+＋]\s*(\d+(?:\.\d+)?)%$/);

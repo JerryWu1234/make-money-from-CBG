@@ -1,36 +1,55 @@
-import { compareEquipmentAttributes, type EquipmentAttributes } from "./equip-attributes";
+import {
+  compareEquipmentAttributes,
+  separateJewelryAttributes,
+  type EquipmentAttributes,
+} from "./equip-attributes";
 
-const smallNumericDifferences = new Set([
-  "命中",
-  "伤害",
-  "防御",
-  "灵力",
-  "力量",
-  "体质",
-  "魔力",
-  "耐力",
-  "敏捷",
-  "气血",
-  "魔法",
-  "速度",
-  "法术伤害",
-  "法术防御",
-  "法术防御等级",
-  "法术暴击等级",
-  "物理暴击等级",
-  "封印命中等级",
-  "抗封印等级",
-  "抵抗封印等级",
-  "治疗能力",
-  "格挡值",
-  "固定伤害",
-  "狂暴等级",
-  "穿刺等级",
-  "抗物理暴击等级",
-  "抗法术暴击等级",
-  "气血回复效果",
-  "法术伤害结果",
-]);
+// Absolute floors keep a two-point jewelry roll difference from failing only because its base is low.
+// The 20% bound still applies to larger values; these are matching limits, never price adjustments.
+export const EQUIPMENT_ATTRIBUTE_ABSOLUTE_TOLERANCES: Readonly<Record<string, number>> = {
+  命中: 5,
+  伤害: 3,
+  防御: 3,
+  灵力: 3,
+  力量: 2,
+  体质: 2,
+  魔力: 2,
+  耐力: 2,
+  敏捷: 2,
+  气血: 10,
+  魔法: 5,
+  速度: 2,
+  法术伤害: 2,
+  法术防御: 2,
+  法术防御等级: 2,
+  法术暴击等级: 2,
+  物理暴击等级: 2,
+  封印命中等级: 2,
+  抗封印等级: 2,
+  抵抗封印等级: 2,
+  治疗能力: 2,
+  格挡值: 2,
+  固定伤害: 2,
+  狂暴等级: 2,
+  穿刺等级: 2,
+  抗物理暴击等级: 2,
+  抗法术暴击等级: 2,
+  气血回复效果: 10,
+  法术伤害结果: 2,
+};
+const smallNumericDifferences = new Set(Object.keys(EQUIPMENT_ATTRIBUTE_ABSOLUTE_TOLERANCES));
+export function equipmentAttributeTolerance(field: string, targetValue: number): number | null {
+  const name = field.replace(/^(?:主属性|附加属性)·/, "");
+  if (!smallNumericDifferences.has(name) || !Number.isFinite(targetValue)) return null;
+  if (targetValue === 0) return 0;
+  return Math.max(Math.abs(targetValue) * 0.2, EQUIPMENT_ATTRIBUTE_ABSOLUTE_TOLERANCES[name]);
+}
+
+/** Public numeric search bounds and detail matching share the same lower limit. */
+export function equipmentAttributeLowerBound(field: string, targetValue: number): number | null {
+  const tolerance = equipmentAttributeTolerance(field, targetValue);
+  return tolerance === null ? null : Math.max(0, targetValue - tolerance);
+}
 type Match = {
   matchType: "exact" | "similar" | null;
   similarityScore: number;
@@ -62,6 +81,10 @@ export function matchEquipmentAttributes(
     differences: [],
     reason,
   });
+  const separated = separateJewelryAttributes(target, source, partial);
+  if (separated.reason) return reject(separated.reason);
+  target = separated.target;
+  source = separated.source;
   if (!partial) {
     const exact = compareEquipmentAttributes(target, source);
     if (!exact) return { matchType: "exact", similarityScore: 0, differences: [], reason: null };
@@ -99,7 +122,7 @@ export function matchEquipmentAttributes(
         selected: string[] = [];
       for (const value of right) {
         let index = remaining.findIndex((expected) => sameField(name, [expected], [value]));
-        if (index < 0 && smallNumericDifferences.has(name)) {
+        if (index < 0 && smallNumericDifferences.has(name.replace(/^(?:主属性|附加属性)·/, ""))) {
           const quoted = numbers([value])?.[0];
           const choices = remaining
             .flatMap((expected, index) => {
@@ -119,7 +142,8 @@ export function matchEquipmentAttributes(
       left = selected;
       if (sameField(name, left, right)) continue;
     }
-    if (!smallNumericDifferences.has(name)) return reject("关键属性“" + name + "”不匹配");
+    if (!smallNumericDifferences.has(name.replace(/^(?:主属性|附加属性)·/, "")))
+      return reject("关键属性“" + name + "”不匹配");
     const a = numbers(left),
       b = numbers(right);
     if (!a || !b || a.length !== b.length) return reject("关键属性“" + name + "”不能可靠比较");
@@ -152,12 +176,51 @@ export function matchEquipmentAttributes(
   };
 }
 
+/** Search near the observed enhancement without converting it into a guessed base stat. */
+export function equipmentEnhancementMismatch(
+  target: EquipmentAttributes,
+  source: EquipmentAttributes,
+  mode: "same-gems" | "near-gems",
+  partial = false,
+): string | null {
+  const gemTokens = (values: string[] = []) =>
+    values
+      .flatMap((value) => value.split(/[、，,；;\s]+/))
+      .filter(Boolean)
+      .sort();
+  const targetGems = gemTokens(target.fields.宝石);
+  const sourceGems = gemTokens(source.fields.宝石);
+  if ((!partial || sourceGems.length) && JSON.stringify(targetGems) !== JSON.stringify(sourceGems))
+    return "宝石种类不符合当前相近筛选阶段";
+  for (const field of ["锻炼等级", "精炼等级"]) {
+    const left = target.fields[field],
+      right = source.fields[field];
+    if (partial && !right?.length) continue;
+    if (!left?.length && !right?.length) continue;
+    const targetLevel = left?.length === 1 ? numbers(left)?.[0] : undefined;
+    const sourceLevel = right?.length === 1 ? numbers(right)?.[0] : undefined;
+    if (targetLevel === undefined || sourceLevel === undefined)
+      return field + "没有完整证据，不能当作同段或邻近段数";
+    if (
+      !Number.isInteger(targetLevel) ||
+      !Number.isInteger(sourceLevel) ||
+      targetLevel < 0 ||
+      sourceLevel < 0
+    )
+      return field + "不符合有效段数";
+    if (Math.abs(targetLevel - sourceLevel) > (mode === "same-gems" ? 0 : 1))
+      return field + "不符合当前同段或相邻一段筛选";
+  }
+  return null;
+}
+
 const comparableDifferences = new Set([
   "五行",
   "套装",
   "宝石",
   "锻炼等级",
   "精炼等级",
+  "已生效套装加成",
   "熔炼",
   "修理失败",
   "开运孔数",
@@ -190,14 +253,18 @@ export function matchComparableEquipmentAttributes(
   source: EquipmentAttributes,
   partial = false,
 ): Match {
+  const separated = separateJewelryAttributes(target, source, partial);
+  target = separated.target;
+  source = separated.source;
   const strict = matchEquipmentAttributes(target, source, partial);
-  if (!strict.reason) return strict;
+  if (!strict.reason && !separated.reason) return strict;
   const reject = (reason: string): Match => ({
     matchType: null,
     similarityScore: Infinity,
     differences: [],
     reason,
   });
+  if (separated.reason) return reject(separated.reason);
   const restrictions = compareEquipmentAttributes(
     { ...target, fields: {}, ...(partial ? { unknownLines: [] } : {}) },
     { ...source, fields: {}, ...(partial ? { unknownLines: [] } : {}) },
@@ -229,12 +296,19 @@ export function matchComparableEquipmentAttributes(
       differences.push(
         name + "：" + (left.join("、") || "未标明") + " → " + (right.join("、") || "未标明"),
       );
-      score += 10;
+      const grades = ["锻炼等级", "精炼等级"].includes(name) ? [numbers(left), numbers(right)] : [];
+      score +=
+        grades.length && grades[0]?.length === 1 && grades[1]?.length === 1
+          ? Math.abs(grades[0][0] - grades[1][0]) * 10
+          : name === "宝石"
+            ? 30
+            : 10;
       continue;
     }
     if (!left.length || !right.length)
       return reject("关键属性“" + name + "”缺失或多出，不能作为相近参考");
-    if (!smallNumericDifferences.has(name)) return reject("关键属性“" + name + "”不匹配");
+    if (!smallNumericDifferences.has(name.replace(/^(?:主属性|附加属性)·/, "")))
+      return reject("关键属性“" + name + "”不匹配");
     let a = baseNumbers(left);
     const b = baseNumbers(right);
     if (!a || !b || (!partial && a.length !== b.length) || b.length > a.length)
@@ -263,8 +337,14 @@ export function matchComparableEquipmentAttributes(
           ? Infinity
           : Math.abs(b[index] - value) / Math.abs(value),
     );
-    if (deltas.some((delta) => delta > 0.2 + 1e-10))
-      return reject("关键属性“" + name + "”差异超过20%，不作为相近参考");
+    if (
+      a.some(
+        (value, index) =>
+          Math.sign(value) !== Math.sign(b[index]) ||
+          Math.abs(b[index] - value) > equipmentAttributeTolerance(name, value)! + 1e-10,
+      )
+    )
+      return reject("关键属性“" + name + "”差异超过20%与有限绝对差容差，不作为相近参考");
     differences.push(name + "：" + left.join("、") + " → " + right.join("、"));
     score += 1 + deltas.reduce((sum, delta) => sum + delta * 100, 0);
   }

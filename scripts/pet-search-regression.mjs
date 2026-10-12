@@ -47,7 +47,16 @@ const session = await moduleUrl("server/session.ts", {
 const attributes = await moduleUrl("server/analysis/equip-attributes.ts", {
   "../crawler/compact": compact,
 });
-const integrity = await moduleUrl("server/analysis/pricing-integrity.ts");
+const baseline = await moduleUrl("server/analysis/equipment-baseline.ts", {
+  "../crawler/compact": compact,
+  "./equip-attributes": attributes,
+});
+const exclusion = await moduleUrl("server/analysis/equipment-exclusion.ts", {
+  "./equipment-baseline": baseline,
+});
+const integrity = await moduleUrl("server/analysis/pricing-integrity.ts", {
+  "./equipment-exclusion": exclusion,
+});
 const progress = await moduleUrl("server/analysis/pricing-progress.ts", {
   "./pricing-integrity": integrity,
 });
@@ -57,7 +66,13 @@ const estimate = await moduleUrl("server/analysis/pricing-estimate.ts", {
 const matcher = await moduleUrl("server/analysis/equipment-match.ts", {
   "./equip-attributes": attributes,
 });
+const marketScope = await moduleUrl("server/analysis/market-scope.ts");
+const specialMatcher = await moduleUrl("server/analysis/special-asset-match.ts", {
+  "../crawler/compact": compact,
+  "./equipment-match": matcher,
+});
 const pricing = await moduleUrl("server/analysis/equipment-pricing.ts", {
+  "./market-scope": marketScope,
   "./pricing-progress": progress,
   "./equipment-baseline": await moduleUrl("server/analysis/equipment-baseline.ts", {
     "../crawler/compact": compact,
@@ -66,6 +81,8 @@ const pricing = await moduleUrl("server/analysis/equipment-pricing.ts", {
   "./pricing-estimate": estimate,
   "./pricing-integrity": integrity,
   "./equipment-match": matcher,
+  "./special-asset-match": specialMatcher,
+  "./equipment-exclusion": exclusion,
   "../crawler/compact": compact,
   "./equip-attributes": attributes,
   "./valuation-calculator": await moduleUrl("server/analysis/valuation-calculator.ts", {
@@ -76,7 +93,10 @@ const pricing = await moduleUrl("server/analysis/equipment-pricing.ts", {
 const pacedPage = inline(
   `export {assertAvailable} from ${JSON.stringify(crawlerPage)};export async function pace(signal){signal.throwIfAborted();}`,
 );
+const petMatcher = await moduleUrl("server/analysis/pet-match.ts");
 const petPricing = await moduleUrl("server/analysis/pet-pricing.ts", {
+  "./market-scope": marketScope,
+  "./pet-match": petMatcher,
   "./pricing-progress": progress,
   "./pricing-estimate": estimate,
   "./pricing-integrity": integrity,
@@ -87,21 +107,27 @@ const petPricing = await moduleUrl("server/analysis/pet-pricing.ts", {
   }),
 });
 const { searchPetPricing } = await import(petPricing);
-const { petSourceFromPages } = await import(
-  await moduleUrl("server/analysis/browser-pet-source.ts", {
-    "../session": session,
-    "../viewport": viewport,
-    "../crawler/controller": inline(
-      "export function crawlDatabase(){throw new Error('Fixture must not open the application database');}",
-    ),
-    "../crawler/page": pacedPage,
-    "../page-state": pageState,
-    "../workflow": workflow,
-    "../crawler/compact": compact,
-    "./equipment-pricing": pricing,
-    "./pet-pricing": petPricing,
-  })
-);
+const { petSourceFromPages, fillPetSearchForm, petQuery, petQueries, assertPetUIArguments } =
+  await import(
+    await moduleUrl("server/analysis/browser-pet-source.ts", {
+      "./pricing-integrity": integrity,
+      "./pet-match": petMatcher,
+      "./market-scope": marketScope,
+      "../session": session,
+      "../viewport": viewport,
+      "../crawler/controller": inline(
+        "export function crawlDatabase(){throw new Error('Fixture must not open the application database');}",
+      ),
+      "../crawler/page": pacedPage,
+      "../page-state": pageState,
+      "../workflow": workflow,
+      "../crawler/compact": compact,
+      "./equipment-pricing": pricing,
+      "./pricing-estimate": estimate,
+      "./pricing-progress": progress,
+      "./pet-pricing": petPricing,
+    })
+  );
 const { createHiddenPage } = await import(session);
 // Every request is intercepted. This is a simulated DOM regression, not a market query.
 const profile = await mkdtemp(path.join(os.tmpdir(), "cbg-pet-regression-"));
@@ -110,6 +136,8 @@ let persistent,
   passed = 0,
   failed = 0;
 const check = async (name, run) => {
+  // Optional focused rerun; every selected check retains its production assertions.
+  if (process.env.CBG_PET_DOM_FILTER && !name.includes(process.env.CBG_PET_DOM_FILTER)) return;
   try {
     await run();
     passed++;
@@ -148,11 +176,21 @@ const bounded = (page) =>
   new Proxy(page, {
     get(target, key) {
       if (key === "waitForFunction")
-        return (fn, arg, options = {}) =>
-          target.waitForFunction(fn, arg, {
-            ...options,
-            timeout: Math.min(options.timeout || 1000, 1000),
-          });
+        return async (fn, arg, options = {}) => {
+          // Search callbacks await an intercepted fetch; keep broken-detail checks at 1s.
+          const searchWait = options.timeout >= 15000;
+          const fixtureLimit = searchWait ? 3000 : 1000;
+          try {
+            return await target.waitForFunction(fn, arg, {
+              ...options,
+              timeout: Math.min(options.timeout || fixtureLimit, fixtureLimit),
+            });
+          } catch (error) {
+            if (searchWait)
+              error.message += ` (offline ${options.timeout === 20000 ? "search response" : "search component"} wait)`;
+            throw error;
+          }
+        };
       const value = Reflect.get(target, key, target);
       return typeof value === "function" ? value.bind(target) : value;
     },
@@ -162,7 +200,13 @@ try {
     executablePath:
       process.env.CBG_TEST_CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     headless: true,
-    args: ["--remote-debugging-port=0"],
+    serviceWorkers: "block",
+    args: [
+      "--remote-debugging-port=0",
+      "--disable-background-networking",
+      "--disable-component-update",
+      "--disable-sync",
+    ],
   });
   const [port, endpoint] = (await readFile(path.join(profile, "DevToolsActivePort"), "utf8"))
     .trim()
@@ -223,6 +267,473 @@ try {
     assert.equal(searchPage.isClosed(), true);
     assert.equal(detailPage.isClosed(), true);
   };
+  await check("相近分组保留须弥法宠核心，每组都有有限附近等级且同级优先", async () => {
+    const skills = ["须弥真言", "高级法术连击", "高级魔之心", "法术暴击", "地狱烈火", "慧根"];
+    const choices = skills.map((name, index) => [index + 1, name]);
+    const target = {
+      ...record().detail.tabs[0].pets[0],
+      name: "画魂",
+      level: 99,
+      skills,
+      innerSkills: [],
+      equipment: [],
+    };
+    const plans = petQueries(target, {
+      names: { 2001: "画魂" },
+      skills: choices,
+      highNeidans: [],
+      lowNeidans: [],
+    });
+    const similar = plans.filter(({ matchType }) => matchType === "similar");
+    for (const { args } of similar) {
+      assert.ok(["1", "2", "3"].every((id) => String(args.skill).split(",").includes(id)));
+      assert.equal(args.skill_num, undefined);
+      assert.equal(args.high_neidan, undefined);
+    }
+    assert.deepEqual(
+      similar.filter(({ args }) => args.level_min === 99).map(({ args }) => args.skill),
+      similar.filter(({ args }) => args.level_min === 94).map(({ args }) => args.skill),
+    );
+    await withSource({ petSkillChoices: choices }, {}, async ({ searchPage, control }) => {
+      await searchPage.goto(
+        "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=show_overall_search_pet",
+      );
+      const plan = similar.find(
+        ({ args }) => args.level_min === 94 && String(args.skill).split(",").length === 4,
+      );
+      await fillPetSearchForm(searchPage, target, plan.args, control.signal);
+      await searchPage.locator("#btn_pet_search").click();
+      assertPetUIArguments(plan.args, await searchPage.evaluate(() => window.CurSearchValue.arg));
+    });
+  });
+  await check("详情预算耗尽自动保存官方表单游标，恢复后读取后面的有效宝宝报价", async () => {
+    const rows = Array.from({ length: 9 }, (_, index) => ({
+      eid: `sample-${index}`,
+      name: "画魂",
+      type: "2001",
+    }));
+    const detail = (id) => {
+      const index = Number(id.split("-").at(-1));
+      return {
+        price: 300 + index * 10,
+        rawPrice: 300 + index * 10,
+        ...(index < 6 ? { skills: [], parsedSkillIds: [] } : {}),
+      };
+    };
+    const target = {
+      ...record().detail.tabs[0].pets[0],
+      key: "pet",
+      name: "画魂",
+      level: 119,
+      fields: petFields,
+      skills: petSkills,
+      innerSkills: [{ name: "催心浪", level: "5" }],
+      equipment: [],
+      description: "模拟宝宝",
+      candidates: [],
+      status: "no_match",
+      referencePrice: null,
+      issues: [],
+      query: "",
+    };
+    let cursor;
+    await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
+      const result = await source.findCandidates([target], control.signal);
+      assert.equal(result.items[0].searchState, "pending");
+      cursor = result.items[0].searchCursor;
+      assert.equal(cursor.rowIndex, 6);
+      assert.equal(detailVisits.length, 6);
+    });
+    await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
+      const result = await source.findCandidates(
+        [{ ...target, searchCursor: cursor }],
+        control.signal,
+      );
+      assert.equal(result.items[0].searchState, "completed");
+      assert.deepEqual(detailVisits, ["sample-6", "sample-7", "sample-8"]);
+      assert.deepEqual(
+        result.items[0].candidates.map(({ price }) => price),
+        [360, 370, 380],
+      );
+      assert.ok(result.items[0].candidates.every(({ verified }) => verified));
+    });
+  });
+  await check("续查宝宝页面重排或清空时清除旧候选，重新按官网顺序收集", async () => {
+    const rows = Array.from({ length: 9 }, (_, index) => ({
+      eid: `order-${index}`,
+      name: "画魂",
+      type: "2001",
+    }));
+    const detail = (id) => {
+      const index = Number(id.split("-").at(-1));
+      return {
+        price: 300 + index,
+        rawPrice: 300 + index,
+        ...(index > 0 && index < 6 ? { skills: [], parsedSkillIds: [] } : {}),
+      };
+    };
+    const target = {
+      ...record().detail.tabs[0].pets[0],
+      key: "pet",
+      name: "画魂",
+      level: 119,
+      fields: petFields,
+      skills: petSkills,
+      innerSkills: [{ name: "催心浪", level: "5" }],
+      equipment: [],
+      description: "模拟宝宝",
+      candidates: [],
+      status: "no_match",
+      referencePrice: null,
+      issues: [],
+      query: "",
+    };
+    let saved;
+    await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
+      saved = (await source.findCandidates([target], control.signal)).items[0];
+      assert.equal(saved.searchState, "pending");
+      assert.equal(saved.candidates.filter((x) => x.verified).length, 1);
+    });
+    for (const changed of [[rows[8], ...rows.slice(0, 8)], []]) {
+      await withSource({ pages: [changed] }, detail, async ({ source, control }) => {
+        const result = await source.findCandidates([{ ...target, ...saved }], control.signal);
+        const reset = result.items[0];
+        assert.equal(reset.searchState, "pending", reset.note);
+        assert.deepEqual(reset.candidates, []);
+        assert.equal(reset.searchCursor.rowIndex, 0);
+        assert.equal(reset.searchCursor.pageNumber, 1);
+        assert.equal(reset.searchCursor.restartCount, 1);
+        assert.deepEqual(reset.searchCursor.seen, []);
+        assert.ok(result.searchItems.some((x) => x.reason === "result_order_changed"));
+        if (changed.length) {
+          let rebuilt = reset;
+          for (let round = 0; round < 3 && rebuilt.searchState === "pending"; round++)
+            rebuilt = (await source.findCandidates([{ ...target, ...rebuilt }], control.signal))
+              .items[0];
+          assert.equal(rebuilt.searchState, "completed", rebuilt.note);
+          assert.deepEqual(
+            rebuilt.candidates
+              .filter((x) => x.verified)
+              .map((x) => new URL(x.url).searchParams.get("eid")),
+            ["order-8", "order-0", "order-6", "order-7"],
+          );
+        }
+      });
+    }
+  });
+
+  await check("续查宝宝当前页未变也核验已读完前页", async () => {
+    const rows = Array.from({ length: 9 }, (_, index) => ({
+      eid: `prefix-${index}`,
+      name: "画魂",
+      type: "2001",
+    }));
+    const detail = (id) => ({
+      price: 300,
+      rawPrice: 300,
+      ...(id !== "prefix-new" && Number(id.split("-").at(-1)) < 6
+        ? { skills: [], parsedSkillIds: [] }
+        : {}),
+    });
+    const target = {
+      ...record().detail.tabs[0].pets[0],
+      key: "pet",
+      name: "画魂",
+      level: 119,
+      fields: petFields,
+      skills: petSkills,
+      innerSkills: [{ name: "催心浪", level: "5" }],
+      equipment: [],
+      description: "模拟宝宝",
+      candidates: [],
+      status: "no_match",
+      referencePrice: null,
+      issues: [],
+      query: "",
+    };
+    let saved;
+    await withSource(
+      { pages: [rows.slice(0, 6), rows.slice(6)] },
+      detail,
+      async ({ source, control }) => {
+        saved = (await source.findCandidates([target], control.signal)).items[0];
+        assert.equal(saved.searchCursor.pageNumber, 2);
+      },
+    );
+    await withSource(
+      {
+        pages: [
+          [{ eid: "prefix-new", name: "画魂", type: "2001" }, ...rows.slice(1, 6)],
+          rows.slice(6),
+        ],
+      },
+      detail,
+      async ({ source, control }) => {
+        const reset = (await source.findCandidates([{ ...target, ...saved }], control.signal))
+          .items[0];
+        assert.equal(reset.searchState, "pending");
+        assert.deepEqual(reset.candidates, []);
+        assert.equal(reset.searchCursor.restartCount, 1);
+        assert.equal(reset.searchCursor.pageNumber, 1);
+      },
+    );
+  });
+
+  await check("动态类型/等级/技能都经官网输入、菜单选择和搜索按钮，旧服与购入服清除", async () => {
+    const names = { 2001: "画魂", 3001: "幽灵", 4001: "泪妖", 5001: "毗舍童子" };
+    const skillChoices = [
+      [1, "须弥真言"],
+      [2, "高级法术暴击"],
+      [3, "高级魔之心"],
+      [4, "高级法术连击"],
+      [5, "高级必杀"],
+      [6, "高级偷袭"],
+    ];
+    for (const [name, level, skills] of [
+      ["幽灵", 45, ["须弥真言", "高级魔之心"]],
+      ["泪妖", 99, ["须弥真言", "高级法术连击", "高级魔之心"]],
+      ["毗舍童子", 160, ["高级必杀", "高级偷袭"]],
+    ])
+      await withSource(
+        { petNames: names, petSkillChoices: skillChoices },
+        {},
+        async ({ searchPage, control }) => {
+          await searchPage.goto(
+            "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=show_overall_search_pet",
+          );
+          const target = {
+            ...record().detail.tabs[0].pets[0],
+            name,
+            level,
+            fields: petFields.map((field) =>
+              field.name === "类型"
+                ? { ...field, value: name }
+                : field.name === "等级"
+                  ? { ...field, value: String(level) }
+                  : field,
+            ),
+            skills,
+            innerSkills: [],
+            equipment: [],
+          };
+          const args = petQuery(target, {
+            names,
+            skills: skillChoices,
+            highNeidans: [],
+            lowNeidans: [],
+          });
+          const evidence = await fillPetSearchForm(searchPage, target, args, control.signal);
+          await searchPage.locator("#btn_pet_search").click();
+          const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
+          assertPetUIArguments(args, actual);
+          assert.equal(await searchPage.locator("#pet_select_box").inputValue(), name);
+          assert.equal(await searchPage.locator("#txt_level_min").inputValue(), String(level));
+          assert.equal(actual.level_min, level);
+          assert.equal(actual.level_max, level);
+          assert.equal(actual.server_type, "3");
+          assert.equal(actual.serverid, undefined);
+          assert.equal(actual.cross_buy_serverid, undefined);
+          assert.equal(evidence.inputs.pet_select_box, name);
+          assert.equal(
+            (await searchPage.evaluate(() => window.uiActions)).filter(
+              (value) => value.action === "search-click",
+            ).length,
+            1,
+          );
+        },
+      );
+  });
+  await check("神兽星级与唯一特性经真实复选框和菜单提交，0星不与缺失混用", async () => {
+    const names = { 6001: "超级神羊", 6002: "超级神狗" };
+    const traits = [
+      [718, "灵刃"],
+      [712, "顺势"],
+    ];
+    await withSource(
+      { petNames: names, petTraitChoices: traits },
+      {},
+      async ({ searchPage, control }) => {
+        await searchPage.goto(
+          "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=show_overall_search_pet",
+        );
+        for (const [name, level, star, expectedStar, trait, expectedTrait] of [
+          ["超级神羊", 99, "0", "0", "灵刃", "718"],
+          ["超级神狗", 119, "一星", "1", "顺势", "712"],
+          ["超级神羊", 159, "二星", "2", "灵刃", "718"],
+          ["超级神狗", 175, "3星", "3", "顺势", "712"],
+        ]) {
+          const target = {
+            ...record().detail.tabs[0].pets[0],
+            name,
+            level,
+            skills: [],
+            innerSkills: [],
+            fields: [
+              { name: "神兽星级", value: star },
+              { name: "特性类型", value: trait },
+              { name: "特性概率", value: "12%" },
+            ],
+          };
+          for (const mode of ["exact", "similar", "diagnostic"]) {
+            const args = petQuery(
+              target,
+              { names, skills: [], highNeidans: [], lowNeidans: [], traits },
+              mode,
+            );
+            const evidence = await fillPetSearchForm(searchPage, target, args, control.signal);
+            await searchPage.locator("#btn_pet_search").click();
+            const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
+            assertPetUIArguments(args, actual);
+            assert.equal(actual.super_sum_star, expectedStar);
+            assert.equal(actual.texing, expectedTrait);
+            assert.equal(actual.level_min, level);
+            assert.equal(actual.server_type, "3");
+            assert.equal(actual.positive_effect, undefined);
+            assert.equal(actual.negative_effect, undefined);
+            assert.deepEqual(evidence.selections.super_sum_star, [expectedStar]);
+            assert.deepEqual(evidence.selections.texing_panel, [expectedTrait]);
+            assert.equal(
+              await searchPage.locator(`.js_super_sum_star[value="${expectedStar}"]`).isChecked(),
+              true,
+            );
+            assert.equal(await searchPage.locator(".js_super_sum_star:checked").count(), 1);
+            await searchPage.waitForFunction(
+              () => !document.querySelector("#loading_img")?.checkVisibility(),
+            );
+          }
+        }
+        const target = {
+          ...record().detail.tabs[0].pets[0],
+          name: "超级神羊",
+          level: 99,
+          fields: [],
+          skills: [],
+          innerSkills: [],
+        };
+        const args = petQuery(target, {
+          names,
+          skills: [],
+          highNeidans: [],
+          lowNeidans: [],
+          traits,
+        });
+        await fillPetSearchForm(searchPage, target, args, control.signal);
+        await searchPage.locator("#btn_pet_search").click();
+        const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
+        assertPetUIArguments(args, actual);
+        assert.equal(actual.super_sum_star, undefined);
+        assert.equal(actual.texing, undefined);
+        assert.equal(await searchPage.locator(".js_super_sum_star:checked").count(), 0);
+        const actions = await searchPage.evaluate(() => window.uiActions);
+        assert.ok(
+          actions.some(
+            (action) => action.action === "star-check" && action.value === "0" && action.checked,
+          ),
+        );
+        assert.ok(
+          actions.some(
+            (action) =>
+              action.action === "choice" &&
+              action.panel === "texing_panel" &&
+              action.value === "718",
+          ),
+        );
+        assert.equal(actions.filter((action) => action.action === "search-click").length, 13);
+      },
+    );
+  });
+  await check("神兽星级控件缺失和特性目录未确认时不宽泛查询或读报价", async () => {
+    const target = {
+      ...record().detail.tabs[0].pets[0],
+      key: "pet",
+      name: "画魂",
+      level: 119,
+      skills: petSkills,
+    };
+    await withSource({ petStarChoices: [0, 2, 3] }, {}, async ({ source, control }) => {
+      await assert.rejects(
+        () =>
+          source.findCandidates(
+            [{ ...target, fields: [...petFields, { name: "神兽星级", value: "1" }] }],
+            control.signal,
+          ),
+        /神兽星级控件缺失/,
+      );
+      assert.equal(detailVisits.length, 0);
+    });
+    await withSource({ petTraitChoices: [] }, {}, async ({ source, searchPage, control }) => {
+      const result = await source.findCandidates(
+        [{ ...target, fields: [...petFields, { name: "特性类型", value: "灵刃" }] }],
+        control.signal,
+      );
+      assert.equal(result.items[0].searchState, "unsupported");
+      assert.match(result.items[0].note, /特性名称没有唯一官网筛选定义/);
+      assert.equal(result.items[0].candidates.length, 0);
+      assert.equal(detailVisits.length, 0);
+      assert.equal(
+        (await searchPage.evaluate(() => window.uiActions)).filter(
+          (action) => action.action === "search-click",
+        ).length,
+        0,
+      );
+    });
+  });
+  await check(
+    "公开发现读取官方储值菜单，不输出隐藏凭据；公开IsLogin0不能作为价格证据",
+    async () => {
+      await withSource({ publicLogin: 0 }, {}, async ({ source, control }) => {
+        const form = await source.discover();
+        assert.ok(form.controls.some((value) => value.id === "txt_level_min" && value.visible));
+        assert.deepEqual(
+          form.menus
+            .find((value) => value.id === "server_type_panel")
+            .choices.map((value) => value.value),
+          ["1", "2", "3"],
+        );
+        assert.ok(
+          form.menus
+            .find((value) => value.id === "pet_skill_special_panel")
+            .choices.some((value) => value.label === "须弥真言"),
+        );
+        assert.equal(JSON.stringify(form).includes("do-not-export"), false);
+        await assert.rejects(
+          () => source.findCandidates([{ name: "画魂", fields: [] }], control.signal),
+          /登录/,
+        );
+      });
+      for (const discoveryExtra of [
+        '<div id="qrcode">扫码</div>',
+        '<div id="captcha_container">验证码</div>',
+      ])
+        await withSource({ discoveryExtra }, {}, async ({ source }) => {
+          await assert.rejects(() => source.discover(), /登录面板|安全验证/);
+        });
+    },
+  );
+  await check("界面保留额外价格过滤或未清购入服时，停止且不读取报价详情", async () => {
+    for (const search of [{ uiOverrides: { price_max: 100 } }, { stickyBuyServer: true }])
+      await withSource(search, {}, async ({ source, control }) => {
+        await assert.rejects(
+          () =>
+            source.findCandidates(
+              [
+                {
+                  ...record().detail.tabs[0].pets[0],
+                  key: "pet",
+                  name: "画魂",
+                  level: 119,
+                  skills: petSkills,
+                  innerSkills: [],
+                  equipment: [],
+                },
+              ],
+              control.signal,
+            ),
+          /未计划|全服|限定|单服|地区限制/,
+        );
+        assert.equal(detailVisits.length, 0);
+      });
+  });
   await check("source→adapter等待主区域/主价/JSON，绑定新容器并排除先出现的同名推荐", async () => {
     for (const detail of [
       {},
@@ -252,14 +763,41 @@ try {
         assert.equal(query.attack_aptitude, 1550);
         assert.equal(query.skill, "1,2");
         assert.equal(query.serverid, undefined);
-        assert.equal(query.server_type, undefined);
-        assert.equal(await searchPage.evaluate(() => window.historyWrites), 0);
+        assert.equal(query.server_type, "3");
+        assert.equal(await searchPage.evaluate(() => window.historyWrites), 1);
         assert.equal(
           await role.evaluate(() => localStorage.getItem("saved_overall_search_pet_query")),
           "kept",
         );
         assert.equal(result.items[0].candidates[0].sourceHash.length, 64);
         assert.equal(result.queries.length, 1);
+        assert.equal(result.searchItems[0].uiEvidence[0].method, "official-ui");
+        assert.equal(result.searchItems[0].uiEvidence[0].searchButton, "btn_pet_search");
+        assert.equal(
+          (await searchPage.evaluate(() => window.uiActions)).filter(
+            (value) => value.action === "search-click",
+          ).length,
+          result.queries.length,
+        );
+        const [scope] = result.searchItems[0].scopeEvidence;
+        assert.equal(scope.request.serverType, "3");
+        assert.equal(scope.request.searchType, "overall_search_pet");
+        assert.deepEqual(scope.request.restrictions, {});
+        assert.deepEqual(scope.candidateServers, { 1: 1 });
+      });
+  });
+  await check("最终市场请求仍为三年以上全服，helper污染、漏请求或错误页码拒绝计价", async () => {
+    for (const search of [
+      { dropServerType: true },
+      { marketOverrides: { server_type: "2" } },
+      { marketOverrides: { serverid: "33" } },
+      { marketOverrides: { area_id: "1" } },
+      { omitMarketRequest: true },
+      { marketPageOverride: 2 },
+    ])
+      await withSource(search, {}, async ({ source, control }) => {
+        await assert.rejects(() => searchPetPricing(record(), control.signal, source));
+        assert.deepEqual(detailVisits, []);
       });
   });
   await check("官网编码描述经页面解码器再解析，仍绑定可见主属性与价格", async () => {
@@ -387,12 +925,12 @@ try {
       await withSource({}, detail, async ({ source, control }) => {
         const result = await searchPetPricing(record(), control.signal, source);
         assert.equal(result.total, null);
-        assert.match(result.items[0].candidates[0].reason, /赐福配置/);
+        assert.match(result.items[0].candidates[0].reason, /未来\/赐福技能描述结构/);
         assert.equal(result.items[0].searchState, "unsupported");
         assert.equal(result.items[0].status, "unsupported");
         assert.equal(result.searchComplete, true);
         assert.equal(result.items[0].referencePrice, null);
-        assert.equal(result.items[0].similarEstimate.range, null);
+        assert.ok(!result.items[0].similarEstimate?.range);
         assert.ok(result.searchItems.some((item) => item.unsupportedDetails.length > 0));
         assert.ok(result.searchItems.every((item) => item.detailFailures.length === 0));
       });
@@ -401,7 +939,7 @@ try {
       input.detail.tabs[0].pets[0].fields = [...petFields, { name: "赐福", value: "须弥真言" }];
       const result = await searchPetPricing(input, control.signal, source);
       assert.equal(result.total, null);
-      assert.match(result.items[0].issues.join("；"), /赐福字段/);
+      assert.match(result.items[0].issues.join("；"), /存在赐福配置.*完整赐福技能/);
       assert.deepEqual(detailVisits, []);
     });
   });
@@ -431,6 +969,86 @@ try {
         },
       );
   });
+  await check("明确无赐福与有效赐福数0经实际表单搜索和独立详情正常定价", async () => {
+    for (const [target, sourceField] of [
+      [
+        { name: "赐福", value: "无" },
+        { name: "有效赐福技能数", value: "0" },
+      ],
+      [
+        { name: "有效赐福技能数", value: "0" },
+        { name: "赐福", value: "无" },
+      ],
+    ])
+      await withSource({}, { fields: [...petFields, sourceField] }, async ({ source, control }) => {
+        const input = record();
+        input.detail.tabs[0].pets[0].fields = [...petFields, target];
+        const result = await searchPetPricing(input, control.signal, source);
+        assert.equal(result.total, 368.6);
+        assert.ok(result.items[0].candidates.some((candidate) => candidate.verified));
+        assert.ok(detailVisits.length > 0);
+      });
+  });
+  await check(
+    "官网legacy的EvolSkill管道字符串与parser对象核对未来预览后采用同配置价格",
+    async () => {
+      const name = "超级法术暴击（进化后获得）";
+      const configuration = {
+        parsedSkillIds: [661, 577],
+        evolRaw: "577",
+        evolSkillMap: ["577"],
+        evolSkills: [{ skill_type: "577", level: 1, evol_type: "577", name, hlightLight: true }],
+        previewSkills: [name],
+        skillDirectory: {
+          661: { name: "须弥真言" },
+          577: { name: "高级法术暴击" },
+          575: { name: "法术暴击" },
+          55577: { name: "超级法术暴击" },
+          56230: { name: "未明之赐" },
+        },
+        evolMappings: {
+          577: { high_skill: 577, low_skill: 575, super_skill: 55577, name: "超级法术暴击" },
+        },
+      };
+      for (const legacyDescription of [false, true])
+        await withSource(
+          {},
+          { ...configuration, legacyDescription },
+          async ({ source, control }) => {
+            const input = record();
+            input.detail.tabs[0].pets[0].skills.push({ name, index: 2, kind: "skill" });
+            const result = await searchPetPricing(input, control.signal, source);
+            assert.equal(result.total, 368.6);
+            assert.ok(result.items[0].candidates.some((candidate) => candidate.verified));
+            assert.match(
+              result.items[0].candidates[0].quote,
+              /未来技能：超级法术暴击（进化后获得）/,
+            );
+            assert.ok(!result.searchItems.some((item) => item.unsupportedDetails.length > 0));
+          },
+        );
+      for (const broken of [
+        { evolSkillMap: ["577", "661"] },
+        { evolSkills: [{ ...configuration.evolSkills[0], hlightLight: false }] },
+        { evolSkills: [{ ...configuration.evolSkills[0], name: "伪造（进化后获得）" }] },
+      ])
+        await withSource({}, { ...configuration, ...broken }, async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          assert.equal(result.total, null);
+          assert.equal(result.items[0].searchState, "unsupported");
+        });
+      await withSource(
+        {},
+        { ...configuration, evolRaw: "577|56230", evolSkillMap: ["577", "56230"] },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          assert.equal(result.total, null);
+          assert.equal(result.items[0].searchState, "unsupported");
+          assert.match(result.items[0].candidates[0].reason, /未明之赐占位尚未揭示技能/);
+        },
+      );
+    },
+  );
   await check("未来预览不能补足缺失的当前技能，额外当前技能仍拒绝", async () => {
     for (const detail of [
       { previewSkills: ["须弥真言（进化后获得）"], missingSkill: true },
@@ -473,27 +1091,33 @@ try {
         },
       );
   });
-  await check("查询同时含赐福样本与真正的描述读取故障时，故障仍待重试", () =>
-    withSource(
-      {
-        pages: [
-          [
-            { eid: "cifu", name: "宝宝昵称", type: "2001" },
-            { eid: "broken", name: "宝宝昵称", type: "2001" },
-          ],
-        ],
-      },
-      (id) => (id === "cifu" ? { evolSkills: [{ skill_type: "1" }] } : { incompleteJson: true }),
-      async ({ source, control }) => {
-        const result = await searchPetPricing(record(), control.signal, source);
-        assert.equal(result.total, null);
-        assert.equal(result.searchComplete, false);
-        assert.equal(result.items[0].searchState, "read_failed");
-        assert.ok(result.searchItems.some((item) => item.detailFailures.length > 0));
-        assert.ok(result.searchItems.some((item) => item.unsupportedDetails.length > 0));
-      },
-    ),
-  );
+  await check("前排配置不支持或详情损坏时停止读取后排商品，分别保留具体原因", async () => {
+    const cifu = { eid: "cifu", name: "宝宝昵称", type: "2001" };
+    const broken = { eid: "broken", name: "宝宝昵称", type: "2001" };
+    for (const rows of [
+      [cifu, broken],
+      [broken, cifu],
+    ]) {
+      await withSource(
+        { pages: [rows] },
+        (id) => (id === "cifu" ? { evolSkills: [{ skill_type: "1" }] } : { incompleteJson: true }),
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          const unsupported = rows[0].eid === "cifu";
+          assert.equal(result.total, null);
+          assert.equal(result.items[0].referencePrice, null);
+          assert.equal(result.items[0].searchState, unsupported ? "unsupported" : "read_failed");
+          assert.equal(result.searchComplete, unsupported);
+          assert.deepEqual(detailVisits, [rows[0].eid]);
+          assert.ok(
+            result.searchItems.some(
+              (x) => (unsupported ? x.unsupportedDetails : x.detailFailures)?.length > 0,
+            ),
+          );
+        },
+      );
+    }
+  });
   await check("明确base+bonus与合计不同，资质冲突不套价", () =>
     withSource(
       {},
@@ -660,7 +1284,7 @@ try {
       assert.equal(result.queries.length, 1);
     }),
   );
-  await check("分页结果去重后用独立样本中位数，所有候选都经过主详情核对", () =>
+  await check("分页结果不足十件时去重后用实际样本均价，所有候选都经过主详情核对", () =>
     withSource(
       {
         pages: [
@@ -680,6 +1304,36 @@ try {
       },
     ),
   );
+  await check("前十件宝宝跨页去重和断点续查后计算均价，不采用第十一件低价", async () => {
+    const prices = [100, 110, 120, 130, 140, 150, 160, 170, 180, 900, 1];
+    const rows = prices.map((_, index) => ({ eid: `ten-${index}`, name: "宝宝昵称" }));
+    const pages = [rows.slice(0, 5), [rows[0], ...rows.slice(5)]];
+    const detail = (eid) => {
+      const price = prices[Number(eid.split("-").at(-1))];
+      return { price, rawPrice: price };
+    };
+    let previous;
+    const visits = [];
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await withSource({ pages }, detail, async ({ source, control }) => {
+        previous = await searchPetPricing(record(), control.signal, source, previous);
+        visits.push(...detailVisits);
+      });
+      if (previous.searchComplete) break;
+      assert.equal(previous.total, null);
+      assert.equal(previous.items[0].searchState, "pending");
+    }
+    assert.equal(previous.searchComplete, true);
+    assert.equal(previous.items[0].searchState, "completed");
+    assert.equal(previous.total, 216);
+    assert.equal(previous.items[0].priceMethod, "first-ten-average-v2");
+    assert.deepEqual(
+      previous.items[0].candidates.map(({ price }) => price),
+      prices.slice(0, 10),
+    );
+    assert.ok(previous.items[0].candidates.every(({ verified }) => verified));
+    assert.ok(!visits.includes("ten-10"));
+  });
   await check("官网空结果保留未定价，验证码/查询失败中止而非伪造无匹配", async () => {
     await withSource({ pages: [[]] }, {}, async ({ source, control }) => {
       const result = await searchPetPricing(record(), control.signal, source);
@@ -713,6 +1367,6 @@ try {
   await rm(profile, { recursive: true, force: true });
 }
 console.log(
-  `SIMULATED DOM SUMMARY: ${passed} passed, ${failed} failed; no real browser/session/market used.`,
+  `SIMULATED DOM SUMMARY: ${passed} passed, ${failed} failed; isolated Chrome with intercepted fixtures, no real market or user session used.`,
 );
 if (failed) process.exitCode = 1;

@@ -84,8 +84,19 @@ export function AnalysisPreview() {
   const run = data?.run;
   const active = data?.activeRun;
   const running = !!active;
-  const searchingEquipment = active?.phase === "equipment_search" || active?.phase === "pet_search";
-  const searchAsset = active?.phase === "pet_search" ? "宝宝" : "装备";
+  const searchingEquipment =
+    active?.phase === "equipment_search" ||
+    active?.phase === "pet_search" ||
+    active?.phase === "pet_gear_search" ||
+    active?.phase === "role_search";
+  const searchAsset =
+    active?.phase === "role_search"
+      ? "整号"
+      : active?.phase === "pet_gear_search"
+        ? "宝宝装备"
+        : active?.phase === "pet_search"
+          ? "宝宝"
+          : "装备";
   const finished = (run?.completed || 0) + (run?.failed || 0);
   const sameCalculation =
     !run?.calculationVersion || run.calculationVersion === data?.profile?.calculationVersion;
@@ -531,20 +542,24 @@ export function AnalysisPreview() {
                           </td>
                           <td>
                             <span className={`analysis-state analysis-state-${item.state}`}>
-                              {item.state === "completed" && item.valuation?.estimated_value_range
-                                ? "分析完成 · 参考区间"
+                              {item.state === "completed" && item.profileChanged
+                                ? "上次分析"
                                 : item.state === "completed" &&
-                                    item.valuation?.decision === "NEED_INFO"
-                                  ? "分析完成 · 待补齐"
-                                  : item.state === "ready" && run
-                                    ? "待分析"
-                                    : labels[item.state]}
+                                    item.valuation?.estimated_value_range
+                                  ? "分析完成 · 参考区间"
+                                  : item.state === "completed" &&
+                                      item.valuation?.decision === "NEED_INFO"
+                                    ? "分析完成 · 待补齐"
+                                    : item.state === "ready" && run
+                                      ? "待分析"
+                                      : labels[item.state]}
                             </span>
                             {item.error && <small>{item.error}</small>}
                           </td>
                           <td>
                             {item.valuation ? (
                               <>
+                                {item.profileChanged && <small>上次结果</small>}
                                 <strong>{valuationDecisionLabel(item.valuation)}</strong>
                                 <small>
                                   {valuationPriceSummary(item.valuation).label}{" "}

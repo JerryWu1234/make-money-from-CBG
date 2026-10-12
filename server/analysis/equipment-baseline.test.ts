@@ -163,6 +163,19 @@ describe("普通装备的保守分流", () => {
       validateEquipmentBaseline({ ...value, baselineEstimate: baseline }, "941", { servers: [] }),
     ).toBe(true);
   });
+  it.each([10, 20, 30, 40, 50])("%i级普通装备查价入口unsupported仍保留低值排除策略", (level) => {
+    const value = atLevel(level, "weapon");
+    value.status = "unsupported";
+    value.description = "等级" + level + "\n命中20 伤害15\n耐久100\n装备条件：等级" + level;
+    expect(classifyOrdinaryEquipment(value)).toBe("ignored");
+    expect(makeEquipmentBaseline(value, "941", { servers: [] })).toMatchObject({
+      kind: "ignored",
+      amount: 0,
+      source: { basis: "excluded" },
+    });
+    value.description += "\n特效：无级别限制";
+    expect(classifyOrdinaryEquipment(value)).toBeNull();
+  });
   it("灵饰category误标时仍按kind或model排除，不用精炼存在与否判断", () => {
     for (const modelId of ["27003", "27102", "27202", "27302"]) {
       const value = item();

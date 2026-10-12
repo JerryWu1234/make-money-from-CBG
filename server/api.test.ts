@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => ({
   prepareAnalysisClient: vi.fn(),
   checkEquipment: vi.fn(),
   checkPet: vi.fn(),
+  checkPetGear: vi.fn(),
+  checkRole: vi.fn(),
   equipmentCheckImported: vi.fn(),
   startAnalysis: vi.fn(),
   aiProvider: vi.fn(),
@@ -29,6 +31,8 @@ vi.mock("./analysis/controller", () => mocks);
 vi.mock("./ai-connection", () => mocks);
 vi.mock("./analysis/equipment-check", () => mocks);
 vi.mock("./analysis/pet-check", () => mocks);
+vi.mock("./analysis/pet-gear-check", () => mocks);
+vi.mock("./analysis/role-check", () => mocks);
 vi.mock("./diagnostics", () => ({ diagnostics: { record: mocks.record } }));
 
 function request(pathname: string, body: Record<string, unknown> = {}) {
@@ -73,6 +77,33 @@ beforeEach(() => {
 });
 
 describe("指定商品试分析", () => {
+  it("宝宝装备表单诊断沿用请求取消，不启动AI或分析队列", async () => {
+    const input = { productKey: "941:role", mode: "discover" };
+    const result = { mode: "discover", inventory: { items: [] }, form: { controls: [] } };
+    mocks.checkPetGear.mockResolvedValue(result);
+    const { apiMiddleware } = await import("./api");
+    const res = response();
+    await apiMiddleware(request("/api/analysis/pet-gear/check", input), res, vi.fn());
+    expect(mocks.checkPetGear).toHaveBeenCalledExactlyOnceWith(input, expect.any(AbortSignal));
+    expect(res.end).toHaveBeenCalledWith(JSON.stringify(result));
+    expect(res.listenerCount("close")).toBe(0);
+    expect(mocks.analysisControllerImported).not.toHaveBeenCalled();
+    expect(mocks.startAnalysis).not.toHaveBeenCalled();
+  });
+  it("整号查价沿用请求取消，不启动AI或分析队列", async () => {
+    const input = { productKey: "941:role", mode: "discover" };
+    const result = { target: { productKey: input.productKey }, form: { controls: [] } };
+    mocks.checkRole.mockResolvedValue(result);
+    const { apiMiddleware } = await import("./api");
+    const res = response();
+    await apiMiddleware(request("/api/analysis/role/check", input), res, vi.fn());
+    expect(mocks.checkRole).toHaveBeenCalledExactlyOnceWith(input, expect.any(AbortSignal));
+    expect(res.end).toHaveBeenCalledWith(JSON.stringify(result));
+    expect(res.listenerCount("close")).toBe(0);
+    expect(mocks.analysisControllerImported).not.toHaveBeenCalled();
+    expect(mocks.startAnalysis).not.toHaveBeenCalled();
+    expect(mocks.prepareAnalysisClient).not.toHaveBeenCalled();
+  });
   it("宝宝单项诊断沿用请求校验，不准备AI或创建分析批次", async () => {
     const input = { productKey: "941:role", petKey: "召唤兽/孩子:1" };
     mocks.checkPet.mockResolvedValue({ queries: ["全服"] });
@@ -297,6 +328,37 @@ describe("采集接口与定时计划", () => {
     mocks.startCrawl.mockResolvedValueOnce({ status: { running: true }, started: true });
     await apiMiddleware(request("/api/crawl/start"), response(), vi.fn());
     expect(mocks.disableScanSchedule).toHaveBeenCalledTimes(1);
+  });
+  it("仅明确单商品补采可请求完整刷新", async () => {
+    const { apiMiddleware } = await import("./api");
+    const key = "33:target";
+    mocks.startCrawl.mockResolvedValueOnce({ status: { running: true }, started: true });
+    await apiMiddleware(
+      request("/api/crawl/backfill", { keys: [key], refresh: true }),
+      response(),
+      vi.fn(),
+    );
+    expect(mocks.startCrawl).toHaveBeenCalledExactlyOnceWith("manual", undefined, {
+      backfillOnly: true,
+      keys: [key],
+      refresh: true,
+    });
+  });
+  it.each([
+    ["/api/crawl/start", { keys: ["33:target"], refresh: true }],
+    ["/api/crawl/backfill", { refresh: true }],
+    ["/api/crawl/backfill", { keys: [], refresh: true }],
+    ["/api/crawl/backfill", { keys: ["33:target", "34:other"], refresh: true }],
+    ["/api/crawl/backfill", { keys: [" "], refresh: true }],
+    ["/api/crawl/backfill", { keys: ["33:target "], refresh: true }],
+    ["/api/crawl/backfill", { keys: ["33:target"], refresh: "true" }],
+  ])("拒绝无单商品边界的刷新：%s %j", async (pathname, body) => {
+    const { apiMiddleware } = await import("./api");
+    const res = response();
+    await apiMiddleware(request(pathname, body), res, vi.fn());
+    expect(res.statusCode).toBe(500);
+    expect(mocks.startCrawl).not.toHaveBeenCalled();
+    expect(mocks.disableScanSchedule).not.toHaveBeenCalled();
   });
   it("分析仍在执行时拒绝清空，不删除数据也不关闭计划", async () => {
     mocks.isAnalyzing.mockReturnValue(true);

@@ -22,12 +22,14 @@ const safeLink = (value: string) => {
 export function EquipmentPricingView({
   snapshot,
   asset = "装备",
+  accounting,
 }: {
   snapshot: EquipmentPricingSnapshot;
-  asset?: "装备" | "宝宝";
+  asset?: "装备" | "宝宝" | "宝宝装备";
+  accounting?: string;
 }) {
   const label = (status: keyof typeof statusLabels) =>
-    asset === "宝宝" ? statusLabels[status].replaceAll("装备", "宝宝") : statusLabels[status];
+    asset !== "装备" ? statusLabels[status].replaceAll("装备", asset) : statusLabels[status];
   const browserQuery = snapshot.provider === "browser";
   const queried = snapshot.queries.length > 0;
   const baselines = snapshot.items.flatMap((item) =>
@@ -58,8 +60,14 @@ export function EquipmentPricingView({
         {queried ? "联网查价" : "查价"}
       </h3>
       {browserQuery && queried && <p>查价方式：程序通过已登录藏宝阁查询，AI只接收核实后的结果。</p>}
+      {queried && snapshot.items.some((item) => item.priceMethod === "first-ten-average-v2") && (
+        <p>
+          每件资产优先收集前10件有效在售商品，按实际样本数计算算术平均价；同配与相近样本分别计价。
+        </p>
+      )}
       {hasBaseline && <p>普通装备默认参考价来自历史资料或人工预设，未实时核实藏宝阁报价。</p>}
       {queried && <p>相近商品的网页挂牌参考价，不代表实际成交价。</p>}
+      {accounting && <p>{accounting}</p>}
       <p>
         {queried ? (browserQuery ? "查询时间" : "搜索时间") : "参考价记录时间"}：
         {readTime(snapshot.searchedAt)}
@@ -69,7 +77,11 @@ export function EquipmentPricingView({
           这是超过24小时的历史快照。请开始新批次重新核对；继续旧批次保留当时资料。
         </p>
       )}
-      {hasBaseline && snapshot.total === null && snapshot.knownTotal === 0 ? (
+      {snapshot.captureComplete && snapshot.items.length === 0 ? (
+        <p>已确认没有{asset}。</p>
+      ) : accounting ? (
+        <p>逐件参考报价与匹配依据见下方。</p>
+      ) : hasBaseline && snapshot.total === null && snapshot.knownTotal === 0 ? (
         <p>本次没有已核实同配置挂牌参考价；默认参考价另列。</p>
       ) : snapshot.total === null && snapshot.knownTotal === 0 ? (
         <p>尚无同配置挂牌价；相近商品的参考价和未定价项目见下方。</p>
@@ -111,6 +123,9 @@ export function EquipmentPricingView({
         </ul>
       )}
       {snapshot.items.map((item) => {
+        const searchRecords = (snapshot.searchItems || []).filter(
+          (value) => value && typeof value === "object" && "key" in value && value.key === item.key,
+        );
         const baseline = item.baselineEstimate;
         const baselineInvalid = item.baselineInvalidReason !== undefined;
         const itemIssues = item.issues.filter((issue) => issue.trim() !== baseline?.note.trim());
@@ -124,7 +139,11 @@ export function EquipmentPricingView({
             ? "详情读取失败，需重试"
             : item.searchState === "pending"
               ? "查价未完成，继续时重试"
-              : label(item.status);
+              : item.exclusion
+                ? "无匹配，未计入参考合计"
+                : label(item.status);
+        const pendingAverage =
+          !!item.priceMethod && ["pending", "read_failed"].includes(item.searchState || "");
         return (
           <section key={item.key} className="analysis-evidence-card">
             <header>
@@ -143,11 +162,15 @@ export function EquipmentPricingView({
                         : baseline.amount !== null
                           ? valuationMoney(baseline.amount)
                           : "默认参考价待补"
-                      : item.similarEstimate?.median !== undefined
-                        ? valuationMoney(item.similarEstimate.median)
-                        : item.similarEstimate?.range
-                          ? valuationRangeMoney(item.similarEstimate.range)
-                          : searchLabel}
+                      : pendingAverage
+                        ? searchLabel
+                        : item.similarEstimate?.average !== undefined
+                          ? valuationMoney(item.similarEstimate.average)
+                          : item.similarEstimate?.median !== undefined
+                            ? valuationMoney(item.similarEstimate.median)
+                            : item.similarEstimate?.range
+                              ? valuationRangeMoney(item.similarEstimate.range)
+                              : searchLabel}
               </span>
             </header>
             <p>
@@ -155,12 +178,22 @@ export function EquipmentPricingView({
                 ? "默认参考价已失效"
                 : baseline
                   ? baselineLabel
-                  : item.similarEstimate?.median !== undefined
-                    ? "相近装备参考价（挂牌中位数）"
-                    : item.similarEstimate?.range
-                      ? "相近配置参考区间"
-                      : searchLabel}
+                  : pendingAverage
+                    ? searchLabel
+                    : item.status === "priced" && item.priceMethod
+                      ? "同配置挂牌平均价"
+                      : item.similarEstimate?.average !== undefined
+                        ? "相近" + asset + "参考价（挂牌平均价）"
+                        : item.similarEstimate?.median !== undefined
+                          ? "相近" + asset + "参考价（挂牌中位数）"
+                          : item.similarEstimate?.range
+                            ? "相近配置参考区间"
+                            : searchLabel}
             </p>
+            {"reason" in item &&
+              typeof item.reason === "string" &&
+              item.reason.trim() &&
+              !itemIssues.includes(item.reason) && <p>{item.reason}</p>}
             {baseline && (
               <>
                 {baselineInvalid && (
@@ -224,6 +257,12 @@ export function EquipmentPricingView({
                   " 相近配置样本：" + item.similarEstimate.sampleCount + "条。"}
               </p>
             )}
+            {!!searchRecords.length && (
+              <details>
+                <summary>查看这件{asset}的搜索页面与条件记录</summary>
+                <pre>{JSON.stringify(searchRecords, null, 2)}</pre>
+              </details>
+            )}
             {item.status === "priced" &&
               item.candidates.filter(
                 (candidate) => candidate.verified && candidate.matchType !== "similar",
@@ -232,9 +271,17 @@ export function EquipmentPricingView({
               )}
             {item.similarEstimate && (
               <>
-                {item.similarEstimate.median !== undefined && item.similarEstimate.range && (
-                  <p>样本挂牌范围：{valuationRangeMoney(item.similarEstimate.range)}。</p>
+                {!item.similarEstimate.range && item.similarEstimate.observedRange && (
+                  <p>
+                    已核实样本挂牌范围：{valuationRangeMoney(item.similarEstimate.observedRange)}
+                    ；样本不足或报价分散，未纳入估值。
+                  </p>
                 )}
+                {(item.similarEstimate.average !== undefined ||
+                  item.similarEstimate.median !== undefined) &&
+                  item.similarEstimate.range && (
+                    <p>样本挂牌范围：{valuationRangeMoney(item.similarEstimate.range)}。</p>
+                  )}
                 <ul>
                   {item.similarEstimate.issues.map((issue) => (
                     <li key={issue}>{issue}</li>

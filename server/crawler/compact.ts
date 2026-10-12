@@ -1,4 +1,4 @@
-import type { DetailItem, Listing, RoleDetail } from "./types";
+import type { DetailItem, Listing, RoleDetail, TabSnapshot } from "./types";
 
 export const CAPTURE_VERSION = 8;
 export function cleanDescription(value: string) {
@@ -13,18 +13,81 @@ export function cleanDescription(value: string) {
 export function observedEquipmentCategory(category = "", location = "", modelId = "") {
   // Official GAME_CONFIG.equip_info and parse_role use these exact model numbers.
   if ([61717, 61718].includes(Number(modelId)) || location === "RoleYuHun") return "上古玉魄";
+  // Each observed yuanshen_equip_types entry also has an equip_info name ending in ·元身.
+  if (
+    [
+      4221, 4222, 4223, 4224, 4225, 4226, 4227, 4228, 4229, 4230, 4231, 4232, 4233, 4234, 4235,
+      4236, 4237, 4238, 4239, 4240, 4241, 4242, 4246, 4247, 4248, 63232,
+    ].includes(Number(modelId))
+  )
+    return "元身";
   if ([611, 18521, 56870].includes(Number(modelId))) return "道具 · 召唤兽技能书";
-  if (category.trim() && !/^(?:\d+|人物装备|装备|武器)$/.test(category.trim())) return category;
+  if (category.trim() && !/^(?:\d+|人物装备|装备|武器|灵饰)$/.test(category.trim()))
+    return category;
   const label: Record<string, string> = {
+    role_using_equip_1: "头盔",
+    role_using_equip_2: "衣服",
     role_using_equip_3: "鞋子",
     role_using_equip_4: "饰品",
     role_using_equip_5: "腰带",
+    role_using_equip_6: "武器",
+    role_using_equip_187: "戒指",
+    role_using_equip_188: "耳饰",
+    role_using_equip_189: "手镯",
+    role_using_equip_190: "佩饰",
   };
   return label[location]
     ? "人物装备 · " + label[location]
     : /^\d+$/.test(category.trim())
       ? ""
       : category;
+}
+
+/** Cash and artifacts alone do not establish that the role equipment inventory is empty. */
+export function equipmentEmptyProof(tabs: TabSnapshot[]) {
+  if (!tabs.length) return undefined;
+  const explicit = (tab: TabSnapshot) =>
+    /(?:^|\n)\s*(?:暂无道具|没有装备|无装备)\s*(?:$|\n)/.test(tab.text);
+  if (!tabs.every((tab) => tab.equipmentEmptyProof === "official-containers" || explicit(tab)))
+    return undefined;
+  return tabs.some((tab) => tab.equipmentEmptyProof === "official-containers")
+    ? ("official-containers" as const)
+    : ("explicit-text" as const);
+}
+
+export function hasUnconfirmedEmptyEquipment(detail: RoleDetail | null) {
+  if (!detail) return false;
+  const tabs = detail.tabs.filter((tab) => /^道具\/法宝(?:\s*\/|$)/.test(tab.name));
+  if (
+    !tabs.length ||
+    equipmentEmptyProof(tabs) ||
+    ["official-containers", "explicit-text"].includes(detail.equipmentCapture?.emptyProof || "")
+  )
+    return false;
+  const roleEquipment = tabs.some((tab) =>
+    (tab.items || []).some((item) => {
+      if (item.kind === "skill" || item.kind === "innerSkill") return false;
+      const category = observedEquipmentCategory(item.category, item.location, item.modelId) || "";
+      const description = [
+        item.description,
+        item.tooltip,
+        ...Object.entries(item.attributes || {}).map(([key, value]) => key + "：" + value),
+      ]
+        .filter(Boolean)
+        .join("\n");
+      const observed =
+        item.kind === "equipment" ||
+        /人物装备|灵饰|武器|头盔|衣服|项链|腰带|鞋|戒指|耳饰|手镯|佩饰|上古玉魄/.test(category) ||
+        (/等级\s*[：:]?\s*\d/.test(description) &&
+          /伤害|防御|灵力|敏捷|速度|气血|封印|治疗/.test(description));
+      return (
+        observed &&
+        !/法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(category) &&
+        !/装备对象[：:]?\s*召唤兽|【?携带/.test(description)
+      );
+    }),
+  );
+  return !roleEquipment;
 }
 
 const jewelryAttributePattern =

@@ -44,15 +44,15 @@ canonical rules + pure Analyzer
 
 ## 3. 组件职责
 
-| 组件 | 唯一职责 | 明确不做 |
-|---|---|---|
-| `collector` | Stagehand 经 CDP 导航 scope 内页面并保存 rendered HTML | 解析业务字段、评分、交易、风控规避 |
-| `crawl-store` | 写 HTML、元数据、哈希，校验后原子冻结 crawl run | 修改已冻结快照 |
-| `html-parser` | 离线把版本化 HTML 转为 `RoleListingV1` | 访问浏览器、执行 HTML 中的脚本、猜测缺失字段 |
-| `batch-writer` | 校验角色记录并冻结 role batch | 读取在线页面、边抓边分析 |
-| `excel-adapter` | 将工作簿映射为标准规则 JSON | 猜列、执行 VBA 或任意公式代码 |
-| `analyzer` | 对 frozen role batch 做确定性过滤、评分和解释 | 访问浏览器或网络 |
-| `web` | 展示采集/解析状态、Top N 和分项解释 | 运行 Stagehand、保存密钥、渲染原始 HTML |
+| 组件            | 唯一职责                                               | 明确不做                                     |
+| --------------- | ------------------------------------------------------ | -------------------------------------------- |
+| `collector`     | Stagehand 经 CDP 导航 scope 内页面并保存 rendered HTML | 解析业务字段、评分、交易、风控规避           |
+| `crawl-store`   | 写 HTML、元数据、哈希，校验后原子冻结 crawl run        | 修改已冻结快照                               |
+| `html-parser`   | 离线把版本化 HTML 转为 `RoleListingV1`                 | 访问浏览器、执行 HTML 中的脚本、猜测缺失字段 |
+| `batch-writer`  | 校验角色记录并冻结 role batch                          | 读取在线页面、边抓边分析                     |
+| `excel-adapter` | 将工作簿映射为标准规则 JSON                            | 猜列、执行 VBA 或任意公式代码                |
+| `analyzer`      | 对 frozen role batch 做确定性过滤、评分和解释          | 访问浏览器或网络                             |
+| `web`           | 展示采集/解析状态、Top N 和分项解释                    | 运行 Stagehand、保存密钥、渲染原始 HTML      |
 
 Stagehand 的确定性 API（`goto`、`waitForSelector`、locator、`evaluate`）优先。`observe`/`act` 只用于确实需要自然语言定位的页面动作；不通过随机延迟、假输入或指纹修改模拟真人，也不将 `extract()` 输出直接写成 canonical 角色数据。
 

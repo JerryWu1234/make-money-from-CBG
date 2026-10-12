@@ -3,6 +3,7 @@ import type { Listing } from "../crawler/types";
 import type { AnalysisProfile, ValuationResult } from "./valuation-types";
 import type { EquipmentPricingSnapshot } from "./equipment-pricing";
 import type { PetPricingSnapshot } from "./pet-pricing";
+import type { RolePricingSnapshot } from "./role-pricing";
 
 export type DimensionId = "foundation" | "equipment" | "pets";
 export type Evidence = { path: string; value: string; reason: string };
@@ -33,7 +34,7 @@ export type AnalysisRun = {
   queued: number;
   reused: number;
   current: string | null;
-  phase?: "equipment_search" | "pet_search" | "analysis" | null;
+  phase?: "equipment_search" | "pet_search" | "pet_gear_search" | "role_search" | "analysis" | null;
   profileHash?: string;
   calculationVersion?: string;
 };
@@ -59,6 +60,7 @@ export type AnalysisItem = {
   summary: string | null;
   highlights: string[];
   error: string | null;
+  profileChanged?: boolean;
   valuation?: ValuationResult;
 };
 export type AnalysisResultItem = {
@@ -116,6 +118,7 @@ export type AnalysisDetail = {
   profileChanged?: boolean;
   equipmentPricing?: EquipmentPricingSnapshot | null;
   petPricing?: PetPricingSnapshot | null;
+  rolePricing?: RolePricingSnapshot | null;
   attempts: {
     id: string;
     state: string;

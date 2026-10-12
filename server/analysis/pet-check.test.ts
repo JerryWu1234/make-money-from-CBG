@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   petInventory: vi.fn(),
   createPetSource: vi.fn(),
   findCandidates: vi.fn(),
+  discover: vi.fn(),
   close: vi.fn(),
 }));
 vi.mock("../crawler/controller", () => ({ savedDetail: mocks.savedDetail }));
@@ -29,10 +30,46 @@ beforeEach(() => {
   mocks.close.mockResolvedValue(undefined);
   mocks.createPetSource.mockResolvedValue({
     findCandidates: mocks.findCandidates,
+    discover: mocks.discover,
     close: mocks.close,
   });
 });
 describe("同会话单只宝宝查价", () => {
+  it("公开字段发现不要求petKey或可计价库存，也不执行候选查询", async () => {
+    const form = {
+      controls: [{ id: "observed-grade", visible: true }],
+      menus: [],
+      buttons: [],
+      scripts: [],
+    };
+    mocks.discover.mockResolvedValue(form);
+    mocks.petInventory.mockReturnValue({ captureComplete: false, issues: ["缺资料"], items: [] });
+    await expect(
+      checkPet({ productKey: input.productKey, mode: "discover" }, new AbortController().signal),
+    ).resolves.toMatchObject({ mode: "discover", target: { productKey: input.productKey }, form });
+    expect(mocks.discover).toHaveBeenCalledOnce();
+    expect(mocks.petInventory).not.toHaveBeenCalled();
+    expect(mocks.findCandidates).not.toHaveBeenCalled();
+    expect(mocks.close).toHaveBeenCalledOnce();
+  });
+  it("公开字段读取失败或取消仍关闭工作页，未知mode不发起查询", async () => {
+    mocks.discover.mockRejectedValue(new Error("显示登录面板"));
+    await expect(
+      checkPet({ productKey: input.productKey, mode: "discover" }, new AbortController().signal),
+    ).rejects.toThrow("登录面板");
+    expect(mocks.close).toHaveBeenCalledOnce();
+    mocks.createPetSource.mockClear();
+    await expect(
+      checkPet({ ...input, mode: "unknown" }, new AbortController().signal),
+    ).rejects.toThrow("mode");
+    await expect(
+      checkPet(
+        { productKey: input.productKey, mode: "discover" },
+        AbortSignal.abort(new Error("取消")),
+      ),
+    ).rejects.toThrow("取消");
+    expect(mocks.createPetSource).not.toHaveBeenCalled();
+  });
   it("只查询指定宝宝，保留原始结果并关闭工作页", async () => {
     await expect(checkPet(input, new AbortController().signal)).resolves.toMatchObject({
       target: { ...input, name: "画魂", level: 119 },

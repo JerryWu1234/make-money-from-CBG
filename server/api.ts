@@ -36,6 +36,8 @@ const postRoutes = new Set([
   "/api/analysis/retry",
   "/api/analysis/equipment/check",
   "/api/analysis/pet/check",
+  "/api/analysis/pet-gear/check",
+  "/api/analysis/role/check",
   "/api/analysis/settings/save",
 ]);
 
@@ -97,16 +99,22 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
     if (pathname.startsWith("/api/analysis/")) {
       switch (pathname) {
         case "/api/analysis/equipment/check":
-        case "/api/analysis/pet/check": {
+        case "/api/analysis/pet/check":
+        case "/api/analysis/pet-gear/check":
+        case "/api/analysis/role/check": {
           if (res.destroyed) return;
           const controller = new AbortController();
           const cancel = () => controller.abort(new Error("查价请求已断开"));
           res.once("close", cancel);
           try {
             const check =
-              pathname === "/api/analysis/pet/check"
-                ? (await import("./analysis/pet-check")).checkPet
-                : (await import("./analysis/equipment-check")).checkEquipment;
+              pathname === "/api/analysis/role/check"
+                ? (await import("./analysis/role-check")).checkRole
+                : pathname === "/api/analysis/pet-gear/check"
+                  ? (await import("./analysis/pet-gear-check")).checkPetGear
+                  : pathname === "/api/analysis/pet/check"
+                    ? (await import("./analysis/pet-check")).checkPet
+                    : (await import("./analysis/equipment-check")).checkEquipment;
             const result = await check(body as Record<string, unknown>, controller.signal);
             if (!res.destroyed) res.end(JSON.stringify(result));
           } finally {
@@ -273,6 +281,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
         case "/api/crawl/backfill":
           {
             const keys = (body as Record<string, unknown>).keys;
+            const refresh = (body as Record<string, unknown>).refresh;
             if (
               keys !== undefined &&
               (!Array.isArray(keys) ||
@@ -280,9 +289,22 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
                 keys.some((key) => typeof key !== "string" || key.length > 100))
             )
               throw new Error("补采商品列表无效");
+            if (refresh !== undefined && typeof refresh !== "boolean")
+              throw new Error("刷新采集参数无效");
+            if (
+              refresh === true &&
+              (pathname !== "/api/crawl/backfill" ||
+                !Array.isArray(keys) ||
+                keys.length !== 1 ||
+                typeof keys[0] !== "string" ||
+                !keys[0].trim() ||
+                keys[0] !== keys[0].trim())
+            )
+              throw new Error("刷新采集仅支持明确指定一个已保存商品");
             const attempt = await crawler.startCrawl("manual", undefined, {
               backfillOnly: pathname === "/api/crawl/backfill",
               keys: keys as string[] | undefined,
+              ...(refresh === true ? { refresh: true } : {}),
             });
             if (attempt.started) (await import("./crawler/schedule")).disableScanSchedule();
             result = attempt.status;

@@ -19,13 +19,19 @@ import type { AiConnectionStatus, AiModelOptions, AiProvider, AiStatus } from ".
 import type { SavedRoleRecord } from "./crawler/types";
 import {
   equipmentPricingPlan,
+  equipmentCaptureSearchable,
   searchEquipmentPrices,
   type EquipmentPricingSnapshot,
 } from "./analysis/equipment-pricing";
 import type { ValuationSettings } from "./analysis/valuation-types";
 import { createEquipmentSource } from "./analysis/browser-equipment-source";
+import { resumePricingItems } from "./analysis/pricing-progress";
 import { petInventory, searchPetPricing, type PetPricingSnapshot } from "./analysis/pet-pricing";
 import { createPetSource } from "./analysis/browser-pet-source";
+import { searchPetGearPricing } from "./analysis/pet-gear-search";
+import type { PetGearPricingSnapshot } from "./analysis/pet-gear-inventory";
+import { searchRolePricing } from "./analysis/role-search";
+import type { RolePricingSnapshot } from "./analysis/role-pricing";
 
 export { startCodexLogin, codexLoginStatus, cancelCodexLogin } from "./ai/codex";
 
@@ -219,10 +225,10 @@ async function searchEquipment(
 ) {
   try {
     signal.throwIfAborted();
-    const plan = equipmentPricingPlan(record, settings);
+    const plan = resumePricingItems(equipmentPricingPlan(record, settings), previous, true);
     if (
-      !plan.captureComplete ||
-      !plan.items.some((item) => item.status === "no_match" && !item.baselineEstimate)
+      !equipmentCaptureSearchable(record, plan) ||
+      !plan.items.some((item) => item.searchState === "pending")
     )
       return await searchEquipmentPrices(record, signal, unusedEquipmentSource, settings, previous);
     const source = await createEquipmentSource(signal);
@@ -267,6 +273,30 @@ async function searchPets(
 }
 
 /** Credentials remain inside the Node process; an analysis run fixes its provider and model. */
+async function searchPetGear(
+  record: SavedRoleRecord,
+  signal: AbortSignal,
+  previous?: PetGearPricingSnapshot,
+) {
+  try {
+    return await searchPetGearPricing(record, signal, previous);
+  } catch (error) {
+    throw new Error(publicError(error));
+  }
+}
+
+async function searchRole(
+  record: SavedRoleRecord,
+  signal: AbortSignal,
+  previous?: RolePricingSnapshot,
+) {
+  try {
+    return await searchRolePricing(record, signal, previous);
+  } catch (error) {
+    throw new Error(publicError(error));
+  }
+}
+
 export async function prepareAnalysisClient(provider: AiProvider, selectedModel?: string) {
   if (provider === "codex") {
     const account = await codexAccount();
@@ -278,6 +308,8 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
       model,
       searchEquipment,
       searchPets,
+      searchPetGear,
+      searchRole,
       async analyze(prompt: string, schema: unknown, signal: AbortSignal) {
         const current = await codexAccount();
         if (!current || current.email !== account.email)
@@ -300,6 +332,8 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
     model,
     searchEquipment,
     searchPets,
+    searchPetGear,
+    searchRole,
     async analyze(prompt: string, _schema: unknown, signal: AbortSignal) {
       try {
         return await requestDeepSeek(key, model, prompt, signal, 8192);

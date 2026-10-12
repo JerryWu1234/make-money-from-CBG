@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   savedDetail: vi.fn(),
   createEquipmentSource: vi.fn(),
   findCandidates: vi.fn(),
+  discover: vi.fn(),
   close: vi.fn(),
   prepareAnalysisClient: vi.fn(),
 }));
@@ -67,15 +68,59 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.savedDetail.mockReturnValue(savedRecord());
   mocks.findCandidates.mockResolvedValue(result);
+  mocks.discover.mockResolvedValue({
+    publicPath: "/cgi-bin/equipquery.py",
+    IsLogin: false,
+    controls: [{ id: "public-level", value: "100" }],
+    menus: [],
+    buttons: [],
+    scripts: [],
+  });
   mocks.close.mockResolvedValue(undefined);
   mocks.createEquipmentSource.mockResolvedValue({
     findCandidates: mocks.findCandidates,
+    discover: mocks.discover,
     close: mocks.close,
   });
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe("同会话单件装备查价", () => {
+  it("discover只读取指定装备公开表单，不查询候选、不创建AI，结束关闭自有页", async () => {
+    const response = await checkEquipment(
+      { ...input, mode: "discover" },
+      new AbortController().signal,
+    );
+    expect(mocks.discover).toHaveBeenCalledOnce();
+    expect(mocks.discover.mock.calls[0][0]).toMatchObject({
+      key: input.equipmentKey,
+      name: "测试腰带",
+      level: 100,
+    });
+    expect(response).toMatchObject({
+      target: { ...input, name: "测试腰带", level: 100 },
+      mode: "discover",
+      form: { IsLogin: false, controls: [{ id: "public-level" }] },
+    });
+    expect(response).not.toHaveProperty("items");
+    expect(mocks.findCandidates).not.toHaveBeenCalled();
+    expect(mocks.prepareAnalysisClient).not.toHaveBeenCalled();
+    expect(mocks.close).toHaveBeenCalledOnce();
+  });
+  it("discover失败仍关闭工作页", async () => {
+    mocks.discover.mockRejectedValueOnce(new Error("安全验证"));
+    await expect(
+      checkEquipment({ ...input, mode: "discover" }, new AbortController().signal),
+    ).rejects.toThrow("安全验证");
+    expect(mocks.close).toHaveBeenCalledOnce();
+    expect(mocks.findCandidates).not.toHaveBeenCalled();
+  });
+  it("拒绝未知mode，不打开页面", async () => {
+    await expect(
+      checkEquipment({ ...input, mode: "unknown" }, new AbortController().signal),
+    ).rejects.toThrow("mode");
+    expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
+  });
   it("只选择指定保存装备，保留拒绝报价与原因，完成后关闭来源且不准备AI", async () => {
     const response = await checkEquipment(input, new AbortController().signal);
     expect(mocks.savedDetail).toHaveBeenCalledWith(input.productKey);

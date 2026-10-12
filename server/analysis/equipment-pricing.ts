@@ -2,19 +2,31 @@ import { createHash } from "node:crypto";
 import type { SavedRoleRecord } from "../crawler/types";
 import type { ValuationResult } from "./valuation-types";
 import { compareListingPrice } from "./valuation-calculator";
-import { inventoryMatchesSnapshot, validateExactPricing } from "./pricing-integrity";
-import { parseEquipmentAttributes } from "./equip-attributes";
-import { observedEquipmentCategory } from "../crawler/compact";
-import { matchComparableEquipmentAttributes, matchEquipmentAttributes } from "./equipment-match";
-import { buildEquipmentEstimate, type SimilarEstimate } from "./pricing-estimate";
 import {
-  makeEquipmentBaseline,
-  validateEquipmentBaseline,
-  type BaselineEstimate,
-} from "./equipment-baseline";
+  inventoryMatchesSnapshot,
+  priceAverage,
+  validateExactPricing,
+  EQUIPMENT_QUOTE_LIMIT,
+  EQUIPMENT_QUOTE_POLICY,
+  PRICING_RESUME_POLICY,
+} from "./pricing-integrity";
+import { parseEquipmentAttributes } from "./equip-attributes";
+import { hasUnconfirmedEmptyEquipment, observedEquipmentCategory } from "../crawler/compact";
+import { matchComparableEquipmentAttributes } from "./equipment-match";
+import { matchSpecialAsset, SPECIAL_ASSET_MATCH_POLICY } from "./special-asset-match";
+import {
+  equipmentExclusion,
+  validEquipmentExclusion,
+  EQUIPMENT_EXCLUSION_POLICY,
+  type EquipmentExclusion,
+} from "./equipment-exclusion";
+import { buildEquipmentEstimate, type SimilarEstimate } from "./pricing-estimate";
+import { GLOBAL_MARKET_SCOPE_VERSION, MARKET_SEARCH_UI_VERSION } from "./market-scope";
+import { validateEquipmentBaseline, type BaselineEstimate } from "./equipment-baseline";
 import type { ValuationSettings } from "./valuation-types";
 import {
   finishPricingSearch,
+  reconcilePricingCompletion,
   resumePricingItems,
   saveSearchAttempt,
   type PricingSearchAttempt,
@@ -35,7 +47,21 @@ export type EquipmentCandidate = {
   matchType?: "exact" | "similar";
   similarityScore?: number;
 };
+export type EquipmentSearchCursor = {
+  version: 1;
+  planHash: string;
+  modeIndex: number;
+  pageNumber: number;
+  rowIndex: number;
+  pageRowsHash: string;
+  restartCount?: number;
+  pageHistory?: Array<{ modeIndex: number; pageNumber: number; rowsHash: string }>;
+  historyIndex?: number;
+  seen: string[];
+  failed: Array<{ url: string; modeIndex: number }>;
+};
 export type EquipmentPricingItem = {
+  exclusion?: EquipmentExclusion;
   key: string;
   name: string;
   level: number | null;
@@ -46,12 +72,14 @@ export type EquipmentPricingItem = {
   query: string;
   status: "priced" | "no_match" | "incomplete" | "untradable" | "unsupported";
   referencePrice: number | null;
+  priceMethod?: typeof EQUIPMENT_QUOTE_POLICY;
   candidates: EquipmentCandidate[];
   issues: string[];
   similarEstimate?: SimilarEstimate;
   baselineEstimate?: BaselineEstimate;
   baselineInvalidReason?: string;
   searchState?: PricingSearchState;
+  searchCursor?: EquipmentSearchCursor;
 };
 export type EquipmentPricingSnapshot = {
   version: 1;
@@ -85,6 +113,8 @@ export type EquipmentSource = {
       note?: string;
       query?: string;
       searchState?: PricingSearchState;
+      searchCursor?: EquipmentSearchCursor;
+      skipped?: boolean;
     }>;
     searchItems?: unknown[];
   }>;
@@ -98,6 +128,46 @@ const levelOf = (description: string, attributes?: Record<string, string>) => {
     description.match(/(?:^|[\n\s【：:])等级\s*[：:]?\s*(\d{1,3})/)?.[1] || attributes?.等级;
   return level && /^\d+$/.test(level) ? Number(level) : null;
 };
+
+export const isJewelryEquipment = (
+  item: Pick<EquipmentPricingItem, "category" | "description" | "kindId">,
+) =>
+  /灵饰|戒指|耳饰|手镯|佩饰|配饰/.test(item.category) ||
+  /精炼等级/.test(item.description) ||
+  [61, 62, 63, 64].includes(Number(item.kindId));
+
+/** The two observed public sliders have independent steps; jade has no equipment level. */
+export function equipmentLevelUnsupportedReason(
+  item: Pick<EquipmentPricingItem, "category" | "description" | "kindId" | "level">,
+) {
+  if (item.category === "上古玉魄" || item.category === "元身" || item.level === null) return null;
+  const jewelry = isJewelryEquipment(item),
+    minimum = 60,
+    maximum = 160,
+    step = jewelry ? 20 : 10;
+  if (
+    Number.isInteger(item.level) &&
+    item.level >= minimum &&
+    item.level <= maximum &&
+    (item.level - minimum) % step === 0
+  )
+    return null;
+  return (
+    "官网全服" +
+    (jewelry ? "灵饰" : "装备") +
+    "检索范围为" +
+    minimum +
+    "至" +
+    maximum +
+    "级、步长" +
+    step +
+    "级，" +
+    item.level +
+    "级" +
+    (jewelry ? "灵饰" : "装备") +
+    "尚缺可用查询入口和可靠报价"
+  );
+}
 
 /** Only owned role equipment, not skills, artifacts, consumables or pet gear. */
 export function equipmentInventory(record: SavedRoleRecord) {
@@ -117,14 +187,24 @@ export function equipmentInventory(record: SavedRoleRecord) {
       const observed = parseEquipmentAttributes(details);
       const restrictions = Object.entries(item.attributes || {})
         .filter(([key]) => /^(?:装备角色|装备对象|装备条件|使用条件|门派条件|部位条件)$/.test(key))
-        .filter(([key]) => !Object.hasOwn(observed.fields, key))
+        .filter(
+          ([key, value]) =>
+            !Object.hasOwn(observed.fields, key) &&
+            !(observed.fields.符石组合 || []).some(
+              (line) => normalize(line) === normalize(key + "：" + value),
+            ),
+        )
         .map(([key, value]) => key + "：" + value);
       const description = [details, ...restrictions].filter(Boolean).join("\n");
-      const category = observedEquipmentCategory(item.category, item.location, item.modelId) || "";
+      const observedCategory =
+        observedEquipmentCategory(item.category, item.location, item.modelId) || "";
+      const yuanshen = /(?:^|[·/\s])元身(?:$|[·/\s])/.test(observedCategory);
+      const category = yuanshen ? "元身" : observedCategory;
       if (item.kind === "skill" || item.kind === "innerSkill") continue;
       if (/法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(category)) continue;
       const level = category === "上古玉魄" ? null : levelOf(description, item.attributes);
       const equipment =
+        yuanshen ||
         /人物装备|灵饰|武器|头盔|衣服|项链|腰带|鞋|上古玉魄/.test(category) ||
         (level !== null &&
           level >= 0 &&
@@ -140,7 +220,11 @@ export function equipmentInventory(record: SavedRoleRecord) {
         const location = item.location + ":" + signature;
         const firstTab = locations.get(location);
         if (firstTab && firstTab !== tab.name) {
-          if (/槽位|slot|position|装备位/i.test(item.location)) continue;
+          if (
+            /槽位|slot|position|装备位/i.test(item.location) ||
+            /^role_using_equip_(?:[1-6]|18[7-9]|190)$/.test(item.location)
+          )
+            continue;
           inventoryIssues.push(item.name + "在多页同一容器重复显示，需核对实际件数");
         }
         locations.set(location, tab.name);
@@ -152,12 +236,20 @@ export function equipmentInventory(record: SavedRoleRecord) {
       }
       const key = tab.name + ":" + item.index;
       const issues: string[] = [];
-      if (category !== "上古玉魄" && level === null) issues.push("装备等级缺失");
+      if (!yuanshen && category !== "上古玉魄" && level === null) issues.push("装备等级缺失");
       if (!description.trim()) issues.push("装备属性未采齐");
-      const unsupported = level === 0;
-      if (unsupported)
-        issues.push("官网全服装备检索范围为60至160级，0级装备尚缺可用查询入口和可靠报价");
+      for (const issue of record.detail?.equipmentCapture?.issues || [])
+        if (issue.startsWith(tab.name + "：" + item.name + " ") && /属性|等级|JSON/.test(issue))
+          issues.push(issue);
       const inferred = category || (/精炼等级/.test(description) ? "灵饰" : "人物装备");
+      const levelUnsupported = equipmentLevelUnsupportedReason({
+        category: inferred,
+        description,
+        level,
+        kindId: item.kindId,
+      });
+      const unsupported = !!levelUnsupported;
+      if (levelUnsupported) issues.push(levelUnsupported);
       const query =
         "梦幻西游 藏宝阁 " +
         item.name +
@@ -168,6 +260,7 @@ export function equipmentInventory(record: SavedRoleRecord) {
       const dedicated = /玩家\s*\d+\s*专用|专用|不可交易|不能交易|绑定/.test(description);
       items.push({
         key,
+        priceMethod: EQUIPMENT_QUOTE_POLICY,
         name: item.name,
         level,
         category: inferred,
@@ -192,10 +285,19 @@ export function equipmentInventory(record: SavedRoleRecord) {
   if (!capture || capture.version !== 1)
     issues.push("需要重新补采当前装备，旧详情不证明装备已采齐");
   if (!tabs.some((tab) => tab.name === "道具/法宝")) issues.push("缺少道具/法宝页");
+  if (!items.length && hasUnconfirmedEmptyEquipment(record.detail))
+    issues.push("人物装备库存是否为空尚未核对，需要自动补采装备区域");
   const captureComplete =
     !!capture?.complete && tabs.some((tab) => tab.name === "道具/法宝") && !issues.length;
   const inputHash = hash(
     JSON.stringify({
+      scopeVersion: GLOBAL_MARKET_SCOPE_VERSION,
+      searchUI: MARKET_SEARCH_UI_VERSION,
+      comparisonVersion: "per-attribute-absolute-and-relative-v2",
+      specialAssetPolicy: SPECIAL_ASSET_MATCH_POLICY,
+      exclusionPolicy: EQUIPMENT_EXCLUSION_POLICY,
+      queryPolicy: EQUIPMENT_QUOTE_POLICY,
+      resumePolicy: PRICING_RESUME_POLICY,
       serverId: record.listing.serverId,
       collectedAt: capture?.collectedAt,
       captureComplete,
@@ -231,7 +333,7 @@ export const EQUIPMENT_SEARCH_SCHEMA = {
           note: { type: "string" },
           candidates: {
             type: "array",
-            maxItems: 5,
+            maxItems: EQUIPMENT_QUOTE_LIMIT,
             items: {
               type: "object",
               additionalProperties: false,
@@ -352,6 +454,7 @@ export function verifyEquipmentCandidate(
   const sourceModel = html.match(/data-cbg-model-id=["'](\d+)["']/)?.[1];
   const sourceKind = html.match(/data-cbg-kind-id=["'](\d+)["']/)?.[1];
   const jade = item.category === "上古玉魄";
+  const yuanshen = item.category === "元身";
   const targetModel =
     item.modelId || (jade ? { 上古玉魄·阴: "61717", 上古玉魄·阳: "61718" }[item.name] : undefined);
   if (
@@ -361,7 +464,7 @@ export function verifyEquipmentCandidate(
     return reject("官方装备类型或型号不匹配");
   if (
     !normalized.includes(normalize(item.name)) ||
-    (!jade && (item.level === null || sourceAttributes.level !== item.level)) ||
+    (!jade && !yuanshen && (item.level === null || sourceAttributes.level !== item.level)) ||
     (jade && (!targetModel || sourceModel !== targetModel))
   )
     return reject("名称、等级或玉魄类型不匹配");
@@ -387,27 +490,14 @@ export function verifyEquipmentCandidate(
     if (parseInt(targetFailures[0], 10) !== parseInt(sourceFailures[0], 10))
       return reject("0耐久装备的修理失败次数不一致，不能作为相近参考");
   }
-  if (jade) {
-    const sourceDescription = html.match(
-      /<pre\b[^>]*data-cbg-equipment-description[^>]*>([\s\S]*?)<\/pre>/i,
-    )?.[1];
-    const comparable = (value: string) =>
-      pageText(value)
-        .split(/\n/)
-        .map((line) => line.trim())
-        .filter((line) => line && !/^耐久(?:度)?\s*[：:]?\s*\d/.test(line))
-        .map(normalize)
-        .filter((line) => line !== normalize(item.name));
-    if (
-      !sourceDescription ||
-      JSON.stringify(comparable(item.description)) !== JSON.stringify(comparable(sourceDescription))
-    )
-      return reject("玉魄初始/附加属性、灵尘、效形或奇袭/到期条件不完全一致");
-  }
-  const match = (jade ? matchEquipmentAttributes : matchComparableEquipmentAttributes)(
-    targetAttributes,
-    sourceAttributes,
-  );
+  const specialDescription = html.match(
+    /<pre\b[^>]*data-cbg-equipment-description[^>]*>([\s\S]*?)<\/pre>/i,
+  )?.[1];
+  if ((jade || yuanshen) && !specialDescription) return reject("玉魄/元身完整属性描述尚未读取");
+  const match =
+    jade || yuanshen
+      ? matchSpecialAsset(item, pageText(specialDescription!))
+      : matchComparableEquipmentAttributes(targetAttributes, sourceAttributes);
   if (match.reason) return reject(match.reason);
   if (
     match.matchType === "similar" &&
@@ -448,10 +538,10 @@ export type Search = (
   schema: unknown,
   signal: AbortSignal,
 ) => Promise<{ text: string; queries: string[]; searchItems?: unknown[]; usage?: unknown }>;
-/** Apply explicit default/exclusion policies before deciding whether a browser is needed. */
+/** Each tradable equipment item uses current market quotations; presets do not skip search. */
 export function equipmentPricingPlan(
   record: SavedRoleRecord,
-  settings?: ValuationSettings,
+  _settings?: ValuationSettings,
 ): EquipmentPricingSnapshot {
   const inventory = equipmentInventory(record);
   const snapshot: EquipmentPricingSnapshot = {
@@ -468,26 +558,21 @@ export function equipmentPricingPlan(
     items: inventory.items.map((item) => ({ ...item, query: "" })),
     issues: inventory.issues,
   };
-  if (inventory.captureComplete && settings) {
-    for (const item of snapshot.items) {
-      const baseline = makeEquipmentBaseline(item, String(record.listing.serverId), settings);
-      if (!baseline) continue;
-      item.baselineEstimate = baseline;
-      item.issues = [baseline.note];
-    }
-    if (snapshot.items.some((item) => item.baselineEstimate)) {
-      snapshot.requestText = JSON.stringify({
-        baselineItems: snapshot.items.filter((item) => item.baselineEstimate),
-        prices: settings.equipmentBaselinePrices,
-        server: settings.servers.find(
-          (server) => server.serverId === String(record.listing.serverId),
-        ),
-      });
-      snapshot.requestHash = hash(snapshot.requestText);
-    }
-  }
   return snapshot;
 }
+/** Partial captures may price complete items, but ambiguous inventory must be recaptured. */
+export function equipmentCaptureSearchable(
+  record: SavedRoleRecord,
+  snapshot: EquipmentPricingSnapshot,
+) {
+  const capture = record.detail?.equipmentCapture;
+  return (
+    capture?.version === 1 &&
+    (snapshot.captureComplete || snapshot.issues.length > 0) &&
+    !snapshot.issues.some((issue) => /重复显示|实际件数|核对是否同一件/.test(issue))
+  );
+}
+
 export async function searchEquipmentPrices(
   record: SavedRoleRecord,
   signal: AbortSignal,
@@ -495,14 +580,20 @@ export async function searchEquipmentPrices(
   settings?: ValuationSettings,
   previous?: EquipmentPricingSnapshot,
 ): Promise<EquipmentPricingSnapshot> {
-  const snapshot = resumePricingItems(equipmentPricingPlan(record, settings), previous);
+  const snapshot = resumePricingItems(equipmentPricingPlan(record, settings), previous, true);
   signal.throwIfAborted();
-  if (!snapshot.captureComplete) return finishPricingSearch(snapshot);
+  if (!equipmentCaptureSearchable(record, snapshot)) {
+    for (const item of snapshot.items) {
+      item.searchState = undefined;
+      item.searchCursor = undefined;
+    }
+    return finishPricingSearch(snapshot);
+  }
   const searchable = snapshot.items.filter((item) => item.searchState === "pending");
   if (!searchable.length) return finishPricingSearch(snapshot);
   const lookupItems = searchable.map((item) => ({
     ...item,
-    candidates: [],
+    candidates: item.candidates.filter((candidate) => candidate.verified),
     issues: [...item.issues],
   }));
   snapshot.requestText = snapshot.requestText
@@ -514,17 +605,27 @@ export async function searchEquipmentPrices(
   snapshot.rawResponse = JSON.stringify(response);
   saveSearchAttempt(snapshot, response);
   if (!response.queries.some((query) => query.trim())) {
-    for (const item of searchable)
-      if (
-        Array.isArray(response.items) &&
-        response.items.find((entry) => entry?.key === item.key)?.searchState === "unsupported"
-      ) {
+    if (
+      Array.isArray(response.items) &&
+      response.items.length &&
+      response.items.every((item) => item.skipped === true)
+    )
+      return finishPricingSearch(snapshot);
+    for (const item of searchable) {
+      const result = Array.isArray(response.items)
+        ? response.items.find((entry) => entry?.key === item.key)
+        : undefined;
+      if (!result || result.skipped === true) continue;
+      if (result.searchState === "unsupported") {
         item.searchState = "unsupported";
         item.status = "unsupported";
-        item.issues.push(
-          response.items.find((entry) => entry.key === item.key)?.note || "查询入口不支持此装备",
-        );
+        item.issues.push(result.note || "查询入口不支持此装备");
+      } else if (result.searchState === "read_failed") {
+        item.searchState = "read_failed";
+        if (typeof result.note === "string" && result.note.trim())
+          item.issues.push(result.note.slice(0, 500));
       }
+    }
     snapshot.issues.push("本次检索没有实际查询记录，返回价格未采纳");
     return finishPricingSearch(snapshot);
   }
@@ -549,11 +650,19 @@ export async function searchEquipmentPrices(
   const pages = new Map<string, Promise<string>>();
   for (const item of searchable) {
     const result = results.get(item.key);
-    if (!result || !Array.isArray(result.candidates) || result.candidates.length > 5) {
+    if (
+      !result ||
+      !Array.isArray(result.candidates) ||
+      result.candidates.length > EQUIPMENT_QUOTE_LIMIT
+    ) {
       item.issues.push("未返回该装备的有效候选");
       continue;
     }
+    // Untouched items keep their earlier cursor/quotations; they were not re-read this round.
+    if (result.skipped === true) continue;
     item.query = typeof result.query === "string" ? result.query : "";
+    item.searchCursor = result.searchCursor as EquipmentSearchCursor | undefined;
+    item.candidates = [];
     item.searchState = ["pending", "read_failed", "unsupported"].includes(
       String(result.searchState),
     )
@@ -562,7 +671,7 @@ export async function searchEquipmentPrices(
     if (item.searchState === "unsupported") item.status = "unsupported";
     if (typeof result.note === "string" && result.note.trim())
       item.issues.push(result.note.slice(0, 500));
-    const urls = new Set<string>();
+    const urls = new Map<string, number | null>();
     let readFailed = false;
     for (const raw of result.candidates) {
       if (
@@ -586,12 +695,20 @@ export async function searchEquipmentPrices(
         fetchedAt: null,
         sourceHash: null,
       };
+      let readingSource = false;
       try {
         const url = safeEquipmentUrl(candidate.url);
         const identity = equipmentIdentity(url);
-        if (urls.has(identity)) continue;
-        urls.add(identity);
+        if (urls.has(identity)) {
+          if (urls.get(identity) !== candidate.price) {
+            readFailed = true;
+            item.candidates.push({ ...candidate, reason: "同一商品的报价冲突，需要重新读取" });
+          }
+          continue;
+        }
+        urls.set(identity, candidate.price);
         candidate.url = url;
+        readingSource = true;
         if (!pages.has(identity)) pages.set(identity, source.readSource(url, signal));
         candidate = verifyEquipmentCandidate(
           item,
@@ -602,28 +719,45 @@ export async function searchEquipmentPrices(
       } catch (error) {
         signal.throwIfAborted();
         candidate.reason = error instanceof Error ? error.message : "无法核对来源";
-        readFailed = true;
+        readFailed ||= readingSource;
       }
       item.candidates.push(candidate);
     }
+    if (readFailed) item.searchState = "read_failed";
+    const closest = item.candidates
+      .filter((candidate) => candidate.verified && candidate.matchType === "similar")
+      .slice(0, EQUIPMENT_QUOTE_LIMIT);
+    // Final valuation recomputes from this cohort; the full response remains in rawResponse.
+    item.candidates = [
+      ...closest,
+      ...item.candidates.filter(
+        (candidate) => !candidate.verified || candidate.matchType !== "similar",
+      ),
+    ];
     const verified = item.candidates.filter(
       (candidate) => candidate.verified && candidate.matchType !== "similar",
     );
-    if (verified.length >= 1) {
-      const prices = verified.map((candidate) => candidate.price!).sort((a, b) => a - b);
-      const mid = Math.floor(prices.length / 2);
-      item.referencePrice = round(
-        prices.length % 2 ? prices[mid] : (prices[mid - 1] + prices[mid]) / 2,
+    reconcilePricingCompletion(item, snapshot.searchItems);
+    if (verified.length >= 1 && item.searchState === "completed") {
+      item.referencePrice = priceAverage(
+        verified.slice(0, EQUIPMENT_QUOTE_LIMIT).map((candidate) => candidate.price!),
       );
       item.status = "priced";
       item.searchState = "completed";
       if (verified.length === 1) item.issues.push("仅1条挂牌样本，参考范围有限");
+      if (verified.length < EQUIPMENT_QUOTE_LIMIT)
+        item.issues.push(
+          `已核实${verified.length}件同配置在售商品，目标为${EQUIPMENT_QUOTE_LIMIT}件，均价使用实际样本数`,
+        );
     } else {
-      if (readFailed) item.searchState = "read_failed";
       item.similarEstimate = buildEquipmentEstimate(item.candidates);
+      if (verified.length)
+        item.issues.push(
+          `已核实${verified.length}件同配置商品，继续收集至${EQUIPMENT_QUOTE_LIMIT}件或确认结果已读完`,
+        );
       item.issues.push(
         item.similarEstimate.status === "range"
-          ? "暂无完全同配置报价，采用相近装备挂牌中位数作为参考价，并保留报价范围和配置差异"
+          ? "暂无完全同配置报价，采用相近装备挂牌平均价作为参考价，并保留报价范围和配置差异"
           : "可靠的同配或相近样本不足，暂不自动定价",
       );
     }
@@ -631,6 +765,14 @@ export async function searchEquipmentPrices(
   snapshot.knownTotal = round(
     snapshot.items.reduce((sum, item) => sum + (item.referencePrice ?? 0), 0),
   );
+  if (snapshot.provider === "browser")
+    for (const item of snapshot.items) {
+      item.exclusion = equipmentExclusion(item, snapshot.searchItems || []);
+      if (item.exclusion)
+        item.issues.push(
+          item.exclusion.label + "；基础普通装备已完成同配与相近全服检索，市场售价仍未知。",
+        );
+    }
   snapshot.total = snapshot.items.every((item) => item.status === "priced")
     ? snapshot.knownTotal
     : null;
@@ -660,6 +802,11 @@ export function combineEquipmentPricing(
     validateEquipmentBaseline(item, String(record.listing.serverId), settings)
       ? item.baselineEstimate
       : undefined;
+  const excluded = (item: EquipmentPricingItem) =>
+    fresh &&
+    verified &&
+    snapshot?.provider === "browser" &&
+    validEquipmentExclusion(item, snapshot.searchItems);
   if (snapshot)
     snapshot = {
       ...snapshot,
@@ -692,7 +839,7 @@ export function combineEquipmentPricing(
     missing.push(
       ...snapshot.issues,
       ...snapshot.items.flatMap((item) =>
-        item.status === "priced" || baselineFor(item)?.amount != null
+        item.status === "priced" || baselineFor(item)?.amount != null || excluded(item)
           ? []
           : [item.name + "：" + (item.baselineInvalidReason || item.issues.join("；"))],
       ),
@@ -755,30 +902,37 @@ export function combineEquipmentPricing(
                   baseline.kind === "ignored" ? ("excluded" as const) : ("baseline" as const),
               }
             : {}),
+          ...(excluded(item) ? { referenceBasis: "excluded" as const } : {}),
           name: "装备：" + item.name + "（" + item.key + "）",
           input: item.description,
-          formula: baseline
-            ? baseline.kind === "ignored"
-              ? "普通低值装备按明确排除策略未计入，保留记录；不表示市场售价为0。"
-              : "普通装备默认参考价（非实时行情）：" +
-                (baseline.gameCurrency === null
-                  ? "默认价待补"
-                  : baseline.amount === null
-                    ? baseline.gameCurrency + "梦幻币，人民币换算待补"
-                    : baseline.gameCurrency +
-                      "梦幻币 ÷ " +
-                      baseline.goldUnit +
-                      " × ¥" +
-                      baseline.goldPrice) +
-                "；" +
-                baseline.source.label
-            : item.baselineInvalidReason
-              ? "默认参考价已失效：" + item.baselineInvalidReason
-              : "已核对同配置装备挂牌价的中位数（" +
-                item.candidates.filter(
-                  (candidate) => candidate.verified && candidate.matchType !== "similar",
-                ).length +
-                "条样本）",
+          formula: excluded(item)
+            ? "无匹配，未计入参考合计；同配与相近全服结果已读完。市场售价未知，不记作0元。"
+            : item.status === "untradable"
+              ? "专用或绑定装备无法独立挂牌查价，需结合整号参考评估；分项金额未知。"
+              : baseline
+                ? baseline.kind === "ignored"
+                  ? "普通低值装备按明确排除策略未计入，保留记录；不表示市场售价为0。"
+                  : "普通装备默认参考价（非实时行情）：" +
+                    (baseline.gameCurrency === null
+                      ? "默认价待补"
+                      : baseline.amount === null
+                        ? baseline.gameCurrency + "梦幻币，人民币换算待补"
+                        : baseline.gameCurrency +
+                          "梦幻币 ÷ " +
+                          baseline.goldUnit +
+                          " × ¥" +
+                          baseline.goldPrice) +
+                    "；" +
+                    baseline.source.label
+                : item.baselineInvalidReason
+                  ? "默认参考价已失效：" + item.baselineInvalidReason
+                  : (item.priceMethod === EQUIPMENT_QUOTE_POLICY
+                      ? "已核对同配置装备前十件有效挂牌价的算术平均值（"
+                      : "已核对同配置装备挂牌价的中位数（") +
+                    item.candidates.filter(
+                      (candidate) => candidate.verified && candidate.matchType !== "similar",
+                    ).length +
+                    "条样本）",
           amount: baseline ? baseline.amount : fresh && verified ? item.referencePrice : null,
           confirmed: fresh && verified && item.status === "priced",
           evidence: baseline

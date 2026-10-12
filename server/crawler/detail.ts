@@ -2,7 +2,13 @@ import type { Page } from "playwright-core";
 import { hoverForInspection } from "../viewport";
 import type { Listing, RoleDetail, TabSnapshot } from "./types";
 import { assertAvailable, checkAborted, pace } from "./page";
-import { CAPTURE_VERSION, itemFromAttributes, observedEquipmentCategory } from "./compact";
+import {
+  CAPTURE_VERSION,
+  equipmentEmptyProof,
+  hasUnconfirmedEmptyEquipment,
+  itemFromAttributes,
+  observedEquipmentCategory,
+} from "./compact";
 import { collectPets, petCaptureSummary } from "./pets";
 import { captureValuation } from "./valuation-capture";
 
@@ -36,7 +42,34 @@ async function capture(page: Page, name: string): Promise<TabSnapshot> {
           Array.from(row.cells).map((cell) => cell.innerText.trim()),
         ),
       );
-    return { name: tabName, text, fields, tables, elements: [], tooltips: [], items: [] };
+    const equipmentScopes = ["RoleUsingEquips", "RoleStoreEquips", "RoleSplitEquips", "RoleYuHun"];
+    const scopes = equipmentScopes.map((id) => root.querySelector<HTMLElement>("#" + id));
+    const present = scopes.filter((scope): scope is HTMLElement => Boolean(scope));
+    // The official show_equips renders these containers and removes empty worn-slot icons.
+    const emptyEquipment =
+      /^道具\/法宝(?:\s*\/|$)/.test(tabName) &&
+      Boolean(scopes[0] && scopes[1]) &&
+      present.every((scope) =>
+        scope.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }),
+      ) &&
+      present.every((scope) =>
+        Array.from(scope.querySelectorAll("img, [data_equip_name], [data-equip-name]")).every(
+          (element) =>
+            /\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#].*)?$/i.test(
+              element.getAttribute("src") || "",
+            ),
+        ),
+      );
+    return {
+      name: tabName,
+      text,
+      fields,
+      tables,
+      elements: [],
+      tooltips: [],
+      items: [],
+      ...(emptyEquipment ? { equipmentEmptyProof: "official-containers" as const } : {}),
+    };
   }, name);
 }
 async function inspectItems(
@@ -262,8 +295,17 @@ export function equipmentCaptureSummary(
         issues.push(`${tab.name}：${item.name} 的装备等级未完整读取`);
     }
   }
+  const emptyProof = equipmentEmptyProof(equipmentTabs);
+  if (hasUnconfirmedEmptyEquipment({ tabs, raw: {}, url: "", collectedAt }))
+    issues.push("人物装备库存是否为空尚未核对，需确认穿戴与随身装备区域后再计价");
   const unique = [...new Set(issues)];
-  return { version: 1, collectedAt, complete: unique.length === 0, issues: unique };
+  return {
+    version: 1,
+    collectedAt,
+    complete: unique.length === 0,
+    issues: unique,
+    ...(emptyProof ? { emptyProof } : {}),
+  };
 }
 async function settled(page: Page, signal: AbortSignal) {
   await page.waitForLoadState("networkidle", { timeout: 15000 });
@@ -535,7 +577,10 @@ export async function collectDetail(
   };
 }
 export function onShelfFromText(text: string): boolean {
-  return text.match(/是否上架\s*[：:]?\s*(\S+)/)?.[1] === "已上架";
+  // The current official item header says “状态：上架中”; older pages say “是否上架：已上架”.
+  // Only the main product's labelled state counts, never an unrelated “上架中” in a recommendation.
+  const state = text.match(/(?:是否上架|(?:^|\n)\s*状态)\s*[：:]?\s*(\S+)/)?.[1];
+  return state === "已上架" || state === "上架中";
 }
 export async function isOnShelf(page: Page, item: Listing, signal: AbortSignal): Promise<boolean> {
   checkAborted(signal);
