@@ -52,7 +52,8 @@ vi.mock("./analysis/browser-equipment-source", () => ({
 vi.mock("./analysis/browser-pet-source", () => ({
   createPetSource: mocks.createPetSource,
 }));
-vi.mock("./analysis/pet-pricing", () => ({
+vi.mock("./analysis/pet-pricing", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./analysis/pet-pricing")>()),
   petInventory: mocks.petInventory,
   searchPetPricing: mocks.searchPetPricing,
 }));
@@ -165,6 +166,55 @@ function equipmentRecord(empty = false) {
 }
 
 describe("AI 连接验证", () => {
+  it.each(["codex", "deepseek"] as const)(
+    "%s部分宝宝采集仍为完整宝宝创建真实查询源",
+    async (provider) => {
+      if (provider === "deepseek") vi.stubEnv("DEEPSEEK_API_KEY", fakeKey);
+      const { prepareAnalysisClient } = await import("./ai-connection");
+      const client = await prepareAnalysisClient(provider);
+      const record = valuationRecord();
+      record.detail!.petCapture = {
+        version: 1,
+        collectedAt: record.detail!.collectedAt,
+        complete: false,
+        issues: ["第 2 只召唤兽成长未完整读取"],
+      };
+      record.detail!.tabs.push({
+        name: "召唤兽/孩子",
+        text: "",
+        fields: [],
+        tables: [],
+        elements: [],
+        tooltips: [],
+        petCount: 2,
+        pets: [1, 2].map((index) => ({
+          index,
+          name: "画魂",
+          fields: [],
+          skills: [],
+          innerSkills: [],
+          equipment: [],
+        })),
+      });
+      mocks.petInventory.mockReturnValue({
+        captureComplete: false,
+        items: [
+          { key: "召唤兽/孩子:1", status: "no_match" },
+          { key: "召唤兽/孩子:2", status: "incomplete" },
+        ],
+      });
+      const signal = new AbortController().signal;
+      await client.searchPets(record, signal);
+      expect(mocks.createPetSource).toHaveBeenCalledExactlyOnceWith(signal);
+      expect(mocks.searchPetPricing).toHaveBeenCalledWith(
+        record,
+        signal,
+        expect.objectContaining({ findCandidates: mocks.findPetCandidates }),
+        undefined,
+      );
+      expect(mocks.closePetSource).toHaveBeenCalledOnce();
+    },
+  );
   it("DeepSeek宝宝查询使用浏览器source，不准备Codex搜索模型或账号，结束关闭source", async () => {
     mocks.readFile.mockResolvedValue(JSON.stringify({ deepseek: { apiKey: fakeKey } }));
     mocks.codexAccount.mockResolvedValue(null);

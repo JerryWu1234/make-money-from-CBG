@@ -2,7 +2,7 @@ import type { SavedRoleRecord } from "../crawler/types";
 import type { RoleSearchForm, RoleSearchSelections } from "./browser-role-source";
 import { roleCore } from "./role-market";
 
-export const ROLE_SEARCH_QUERY_POLICY = "observed-role-core-window-v1";
+export const ROLE_SEARCH_QUERY_POLICY = "observed-role-core-window-current-target-v2";
 export type RoleQueryPlan = RoleSearchSelections & {
   policy: typeof ROLE_SEARCH_QUERY_POLICY;
   omitted: { field: string; reason: string }[];

@@ -26,7 +26,12 @@ import {
 import type { ValuationSettings } from "./analysis/valuation-types";
 import { createEquipmentSource } from "./analysis/browser-equipment-source";
 import { resumePricingItems } from "./analysis/pricing-progress";
-import { petInventory, searchPetPricing, type PetPricingSnapshot } from "./analysis/pet-pricing";
+import {
+  petCaptureSearchable,
+  petInventory,
+  searchPetPricing,
+  type PetPricingSnapshot,
+} from "./analysis/pet-pricing";
 import { createPetSource } from "./analysis/browser-pet-source";
 import { searchPetGearPricing } from "./analysis/pet-gear-search";
 import type { PetGearPricingSnapshot } from "./analysis/pet-gear-inventory";
@@ -258,7 +263,10 @@ async function searchPets(
   try {
     signal.throwIfAborted();
     const inventory = petInventory(record);
-    if (!inventory.captureComplete || !inventory.items.some((item) => item.status === "no_match"))
+    if (
+      !petCaptureSearchable(record, inventory) ||
+      !inventory.items.some((item) => item.status === "no_match")
+    )
       return await searchPetPricing(record, signal, unusedPetSource, previous);
     const source = await createPetSource(signal);
     try {

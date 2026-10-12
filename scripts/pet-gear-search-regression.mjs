@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ts from "typescript";
@@ -113,12 +113,17 @@ try {
       const price = settings.prices?.[id] ?? { one: 200, two: 220, three: 240 }[id] ?? 100;
       return route.fulfill({
         contentType: "text/html; charset=utf-8",
-        body: petGearDetailDocument({
-          ...settings,
-          price,
-          ...detailSettings,
-          ...(settings.descriptions?.[id] ? { description: settings.descriptions[id] } : {}),
-        }),
+        // Simulate the final URL/identity of a redirect without allowing redirect-chain network traffic.
+        body:
+          (settings.redirectFrom === id
+            ? "<script>history.replaceState(null,'','/equip?s=1&eid=redirected-product')</script>"
+            : "") +
+          petGearDetailDocument({
+            ...settings,
+            price,
+            ...detailSettings,
+            ...(settings.descriptions?.[id] ? { description: settings.descriptions[id] } : {}),
+          }),
       });
     }
     return route.abort();
@@ -337,6 +342,30 @@ try {
     );
   }
   const target = item("项圈", 25, "等级 25\n速度 +20\n耐久度 120");
+  await check("详情跳转到另一商品不能作为原链接报价", async () => {
+    const result = await run(target, { pages: [["one"]], redirectFrom: "one" });
+    assert.equal(result.items[0].searchStatus, "read_failed");
+    assert.match(result.items[0].note, /另一商品/);
+    assert.equal(result.items[0].candidates.length, 0);
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, null);
+    assert.deepEqual(detailVisits, ["one"]);
+    const directory = "data/pr27-fix-validation";
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      path.join(directory, "pet-gear-redirect.json"),
+      JSON.stringify(
+        {
+          simulated: true,
+          scenario: "final product URL differs from requested listing",
+          detailVisits,
+          requests,
+          result,
+        },
+        null,
+        2,
+      ),
+    );
+  });
   await check("前十件宝宝装备跨页去重计算均价，不采用第十一件低价", async () => {
     const prices = [100, 110, 120, 130, 140, 150, 160, 170, 180, 900, 1];
     const ids = prices.map((_, index) => `ten-${index}`);

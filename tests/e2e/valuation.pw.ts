@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import { CrawlStore } from "../../server/crawler/store";
@@ -557,6 +557,27 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await expect(buyResult.getByText("建议最高买入价", { exact: true })).toBeVisible();
     await expect(buyResult.getByText("购买总成本", { exact: true })).toBeVisible();
     await expect(buyResult.getByText("估值与挂牌价差额", { exact: true })).not.toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("valuation-workflow-final.png"),
+      fullPage: true,
+    });
+    const evidencePath = testInfo.outputPath("valuation-workflow-final-state.json");
+    await writeFile(
+      evidencePath,
+      JSON.stringify(
+        {
+          simulated: true,
+          profileVersion: profile.calculationVersion,
+          overview: store.overview({ provider: "codex", currentProfile: profile }),
+        },
+        null,
+        2,
+      ),
+    );
+    await testInfo.attach("valuation-workflow-final-state", {
+      path: evidencePath,
+      contentType: "application/json",
+    });
   } finally {
     await runner.shutdown();
     crawl.db.close();

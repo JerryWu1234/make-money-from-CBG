@@ -10,7 +10,7 @@ import {
   jewelryDescriptionSections,
   observedEquipmentCategory,
 } from "../crawler/compact";
-import { parseEquipmentAttributes } from "./equip-attributes";
+import { equipmentInitialDefense, parseEquipmentAttributes } from "./equip-attributes";
 import {
   equipmentAttributeLowerBound,
   equipmentEnhancementMismatch,
@@ -346,7 +346,6 @@ export function equipmentQuery(
       // The official init_* inputs are lower bounds. Only ungemmed, separately observed
       // base values are usable here; do not convert total values or add melting effects.
       for (const [field, parameter] of [
-        ["防御", "init_defense"],
         ["气血", "init_hp"],
         ["敏捷", "init_dex"],
       ] as const) {
@@ -358,6 +357,11 @@ export function equipmentQuery(
         args[parameter] = value;
         args.attr_without_melt = 1;
       }
+    }
+    const initialDefense = equipmentInitialDefense(parseEquipmentAttributes(item.description));
+    if (initialDefense !== null) {
+      args.init_defense = initialDefense;
+      args.attr_without_melt = 1;
     }
     for (const [field, key, choices] of [
       ["特效", "special_effect", config.effects],

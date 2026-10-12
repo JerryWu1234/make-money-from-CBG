@@ -325,7 +325,7 @@ describe("宝宝来源核对与挂牌比价", () => {
       verifyPetCandidate(target, candidate(), sourcePage(1000, sample), "now", "similar").verified,
     ).toBe(false);
   });
-  it("相似模式不混淆资质base加bonus，受保护技能和认证不放宽，完整内丹及装备差异保留", () => {
+  it("相似模式保留资质和内丹差异，受保护技能、认证及装备包价仍须核验", () => {
     const targetPet = setField(allocatedPet(), "攻击资质", "1200 +22");
     const target = petInventory(recordWithPets([targetPet])).items[0];
     const sample = setField(similarPet(), "攻击资质", "1230 +22");
@@ -364,13 +364,17 @@ describe("宝宝来源核对与挂牌比价", () => {
       "now",
       "similar",
     );
-    expect(packageReference.verified).toBe(true);
-    expect(packageReference.differences).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining("内丹：目标"),
-        expect.stringContaining("随身装备包价差异"),
-      ]),
+    expect(packageReference.verified).toBe(false);
+    expect(packageReference.reason).toContain("随身宝宝装备数量不匹配");
+    const innerReference = verifyPetCandidate(
+      target,
+      candidate(),
+      sourcePage(1000, { ...packageSample, equipment: [] }),
+      "now",
+      "similar",
     );
+    expect(innerReference.verified).toBe(true);
+    expect(innerReference.differences).toContainEqual(expect.stringContaining("内丹：目标"));
     const missing = structuredClone(sample);
     missing.fields = missing.fields.filter((field) => field.name !== "力量");
     expect(
@@ -1303,6 +1307,45 @@ describe("真实99级泪妖的相近匹配回归（只使用已保存配置，�
         ).verified,
       ).toBe(false);
   });
+  it.each(["missing", "extra", "model", "level", "stats", "suit", "stone"])(
+    "相近宝宝包价不能采用不兼容随身装备：%s",
+    (kind) => {
+      const target = petInventory(recordWithPets([targetPet()])).items[0];
+      const sample = comparable();
+      if (kind === "missing") sample.equipment = [];
+      if (kind === "extra") sample.equipment.push({ ...sample.equipment[0], index: 3 });
+      if (kind === "model") sample.equipment[0].name = "其他护腕";
+      if (kind === "level")
+        sample.equipment[0].description = sample.equipment[0].description!.replace(
+          "等级 95",
+          "等级 115",
+        );
+      if (kind === "stats")
+        sample.equipment[0].description = sample.equipment[0].description!.replace(
+          "命中率 +13%",
+          "命中率 +30%",
+        );
+      if (kind === "suit")
+        sample.equipment[0].description = sample.equipment[0].description!.replace(
+          "高级神佑复生",
+          "高级反震",
+        );
+      if (kind === "stone")
+        sample.equipment[0].description = sample.equipment[0].description!.replace(
+          "镶嵌等级：6",
+          "镶嵌等级：3",
+        );
+      const result = verifyPetCandidate(
+        target,
+        candidate(),
+        sourcePage(1000, sample),
+        new Date().toISOString(),
+        "similar",
+      );
+      expect(result.verified).toBe(false);
+      expect(result.reason).toContain("随身宝宝装备");
+    },
+  );
   it("目标普通技能包含地狱烈火时，样本认证地狱烈火在相似模式下作为有效样本并记录差异", () => {
     const target = petInventory(recordWithPets([targetPet()])).items[0];
     const sameCert = comparable();

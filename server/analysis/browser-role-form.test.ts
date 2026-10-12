@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 import { chromium, type Browser } from "playwright-core";
 import { valuationRecord } from "../../tests/fixtures/analysis";
+import { rolePricingRecord } from "../../tests/fixtures/role-pricing";
 import { assertAvailable } from "../crawler/page";
 import {
   applyRoleSearchSelections,
@@ -17,19 +18,27 @@ const session = vi.hoisted(() => ({
   getBrowser: vi.fn(),
   createHiddenPage: vi.fn(),
   getCbgPage: vi.fn(),
+  waitList: vi.fn(),
+  readListings: vi.fn(),
+  isOnShelf: vi.fn(),
+  collectDetail: vi.fn(),
 }));
 vi.mock("../session", () => session);
+vi.mock("../crawler/detail", () => ({
+  isOnShelf: session.isOnShelf,
+  collectDetail: session.collectDetail,
+}));
 vi.mock("../crawler/page", async (original) => ({
   ...(await original<typeof import("../crawler/page")>()),
-  waitList: async () => {
-    throw new Error("fixture: reached list wait");
-  },
+  waitList: session.waitList,
+  readListings: session.readListings,
 }));
 
 /** Isolated synthetic pages only; no existing Chrome session or live website is accessed. */
 describe("公开角色表单与价格认证边界", () => {
   let browser: Browser;
   beforeAll(async () => {
+    session.waitList.mockRejectedValue(new Error("fixture: reached list wait"));
     browser = await chromium.launch({ channel: "chrome", headless: true });
   });
   afterAll(async () => {
@@ -217,6 +226,68 @@ describe("公开角色表单与价格认证边界", () => {
       await page.close();
     }
   });
+  it.each(["off_shelf", "read_failure", "identity_failure", "cancelled", "fresh"])(
+    "目标重读%s保留实际读取结果或失败原因",
+    async (failure) => {
+      const navigation = await show(
+        '<a id="sub_role" href="/cgi-bin/xyq_overall_search.py?act=show_search_role_form">角色搜索</a><script>window.IsLogin=1;window.LoginInfo={login:1}</script>',
+      );
+      const html = `<meta charset="utf-8"><form name="query_form" method="post" action="/cgi-bin/xyq_overall_search.py?submitted=1"><input type="hidden" name="act" value="show_role_search_result"><input type="hidden" name="server_type" value="3"><table class="searcTb"><tr><td><ul id="server_type"><li class="on" data_value="3">3年以上服</li></ul></td></tr></table><button id="btn_do_query">查询</button></form><script>window.IsLogin=1;window.LoginInfo={login:1};window.QueryArgs={act:'overall_search_role',server_type:3,page:1};</script>`;
+      const workPage = await show(html);
+      session.getBrowser.mockResolvedValue(browser);
+      session.getCbgPage.mockReturnValue(navigation);
+      session.createHiddenPage
+        .mockResolvedValueOnce(workPage)
+        .mockImplementation(() => browser.newPage());
+      session.waitList.mockImplementation((page) => page.waitForURL("**/*submitted=1"));
+      session.readListings.mockResolvedValue({ items: [], totalPages: 1 });
+      session.isOnShelf.mockResolvedValue(failure !== "off_shelf");
+      const controller = new AbortController();
+      const target = rolePricingRecord();
+      if (failure === "fresh")
+        session.collectDetail.mockResolvedValue({
+          ...target.detail,
+          valuation: {
+            ...target.detail!.valuation,
+            source: { ...target.detail!.valuation!.source, askingPrice: 5500 },
+          },
+        });
+      if (failure === "read_failure")
+        session.collectDetail.mockRejectedValue(new Error("fixture: detail read failure"));
+      if (failure === "identity_failure")
+        session.collectDetail.mockResolvedValue({
+          ...target.detail,
+          valuation: { source: { eid: "another", serverId: "33" } },
+        });
+      if (failure === "cancelled")
+        session.isOnShelf.mockImplementation(async () => {
+          controller.abort(new Error("fixture: cancelled"));
+          controller.signal.throwIfAborted();
+        });
+      const source = await createRoleSource(controller.signal);
+      try {
+        if (failure === "fresh") {
+          const result = await source.search(target, { controls: [], menus: [] });
+          expect(result.target.listing.price).toBe("5500");
+          expect(result.target).not.toBe(target);
+          return;
+        }
+        await expect(source.search(target, { controls: [], menus: [] })).rejects.toThrow(
+          failure === "off_shelf"
+            ? "目标角色已不在售"
+            : failure === "read_failure"
+              ? "fixture: detail read failure"
+              : failure === "identity_failure"
+                ? "整号详情身份"
+                : "fixture: cancelled",
+        );
+      } finally {
+        await source.close();
+        await navigation.close();
+        session.waitList.mockRejectedValue(new Error("fixture: reached list wait"));
+      }
+    },
+  );
   it.each([
     ['<div id="qrcode">二维码</div>', "登录面板"],
     ['<div id="loginContainer">扫码登录</div>', "登录面板"],

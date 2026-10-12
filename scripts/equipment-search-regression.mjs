@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ts from "typescript";
@@ -921,6 +921,119 @@ try {
       },
     );
   });
+  await check("初防衣服全流程：填写、提交、翻页、独立报价核验与均价", async () => {
+    const name = "模拟月亮石衣服";
+    const description =
+      "等级100\n防御296\n耐久300\n锻炼等级8\n镶嵌宝石 月亮石\n熔炼效果：\n+10防御";
+    await withSource(
+      {
+        pages: [
+          [
+            { eid: "initial-1", name },
+            { eid: "initial-bad", name },
+          ],
+          [{ eid: "initial-2", name }],
+        ],
+      },
+      (eid) => ({
+        name,
+        description:
+          eid === "initial-bad" ? description.replace("防御296", "防御428") : description,
+        modelId: 2912,
+        kindId: 18,
+        price: eid === "initial-2" ? 800 : 600,
+        renderedPanel: true,
+        selling: 1,
+      }),
+      async ({ source, searchPage, control }) => {
+        const collectedAt = new Date().toISOString();
+        const record = {
+          listing: { serverId: "1" },
+          detail: {
+            equipmentCapture: { version: 1, collectedAt, complete: true, issues: [] },
+            tabs: [
+              {
+                name: "道具/法宝",
+                text: "",
+                fields: [],
+                tables: [],
+                elements: [],
+                tooltips: [],
+                items: [
+                  {
+                    index: 0,
+                    kind: "equipment",
+                    name,
+                    description,
+                    category: "人物装备 · 衣服",
+                    kindId: "18",
+                    modelId: "2912",
+                  },
+                ],
+              },
+            ],
+          },
+        };
+        const snapshot = await searchEquipmentPrices(record, control.signal, source);
+        assert.equal(snapshot.searchComplete, true);
+        assert.equal(snapshot.total, 700);
+        assert.equal(snapshot.items[0].referencePrice, 700);
+        assert.deepEqual(
+          snapshot.items[0].candidates.map((value) => new URL(value.url).searchParams.get("eid")),
+          ["initial-1", "initial-2"],
+        );
+        const calls = await searchPage.evaluate(() => window.calls);
+        assert.deepEqual(
+          calls.map((call) => call.page),
+          [1, 2],
+        );
+        for (const call of calls) {
+          assert.equal(call.kindid, "18");
+          assert.equal(call.init_defense, 200);
+          assert.equal(call.attr_without_melt, 1);
+          assert.equal(call.attr_with_melt, undefined);
+        }
+        const events = await searchPage.evaluate(() => window.uiEvents);
+        assert.ok(
+          events.some(
+            (event) =>
+              event.type === "input" && event.id === "txt_init_defense" && event.value === "200",
+          ),
+        );
+        assert.deepEqual(
+          await role.evaluate(() => ({
+            url: location.href,
+            args: window.QueryArgs,
+            checkpoint: window.checkpoint,
+          })),
+          roleBefore,
+        );
+        const directory = "data/initial-defense-validation";
+        await mkdir(directory, { recursive: true });
+        await writeFile(
+          path.join(directory, "armor-search-e2e.json"),
+          JSON.stringify(
+            {
+              simulated: true,
+              target: { description, initialDefense: 200 },
+              calls,
+              marketRequests,
+              events,
+              detailVisits,
+              snapshot,
+              originalRole: roleBefore,
+            },
+            null,
+            2,
+          ),
+        );
+        await searchPage.screenshot({
+          path: path.join(directory, "armor-search-e2e.png"),
+          fullPage: true,
+        });
+      },
+    );
+  });
 
   await check("列表先排除十个明确不同配置，后续有效报价只读取一个详情", () => {
     const description = "等级 100\n气血 +176 防御 +50\n耐久度 435";
@@ -982,7 +1095,7 @@ try {
         assert.equal(result.items[0].candidates.length, 1);
         const [query] = await searchPage.evaluate(() => window.calls);
         assert.equal(query.gem_level, 8);
-        assert.equal(query.init_defense, undefined);
+        assert.equal(query.init_defense, 50);
       },
     ),
   );

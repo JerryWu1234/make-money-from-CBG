@@ -1,5 +1,6 @@
 import {
   compareEquipmentAttributes,
+  equipmentInitialDefense,
   separateJewelryAttributes,
   type EquipmentAttributes,
 } from "./equip-attributes";
@@ -10,6 +11,7 @@ export const EQUIPMENT_ATTRIBUTE_ABSOLUTE_TOLERANCES: Readonly<Record<string, nu
   命中: 5,
   伤害: 3,
   防御: 3,
+  初始防御: 3,
   灵力: 3,
   力量: 2,
   体质: 2,
@@ -253,24 +255,58 @@ export function matchComparableEquipmentAttributes(
   source: EquipmentAttributes,
   partial = false,
 ): Match {
-  const separated = separateJewelryAttributes(target, source, partial);
-  target = separated.target;
-  source = separated.source;
-  const strict = matchEquipmentAttributes(target, source, partial);
-  if (!strict.reason && !separated.reason) return strict;
   const reject = (reason: string): Match => ({
     matchType: null,
     similarityScore: Infinity,
     differences: [],
     reason,
   });
+  const separated = separateJewelryAttributes(target, source, partial);
+  target = separated.target;
+  source = separated.source;
   if (separated.reason) return reject(separated.reason);
+  const strict = matchEquipmentAttributes(target, source, partial);
+  const displayedDefense = [target.fields.防御?.join("、"), source.fields.防御?.join("、")];
+  if (
+    !target.fields.精炼等级 &&
+    !target.jewelrySections &&
+    (target.fields.防御 || target.fields.初始防御)
+  ) {
+    const initialTarget = equipmentInitialDefense(target);
+    const gemmedTarget =
+      target.fields.宝石?.some((value) => value.trim()) ||
+      target.fields.锻炼等级?.some((value) => Number(value) > 0);
+    const initialSource = equipmentInitialDefense(source, partial && !!gemmedTarget);
+    if (initialTarget === null) return reject("目标初始防御未确认，不能以总防御替代");
+    if (!partial && initialSource === null)
+      return reject("报价初始防御未确认，宝石种类/段数或初防证据缺失或冲突");
+    const normalized = (attributes: EquipmentAttributes, value: number | null) => ({
+      ...attributes,
+      fields: {
+        ...Object.fromEntries(
+          Object.entries(attributes.fields).filter(
+            ([name]) => !["防御", "初始防御"].includes(name),
+          ),
+        ),
+        ...(value !== null ? { 初始防御: [String(value)] } : {}),
+      },
+    });
+    target = normalized(target, initialTarget);
+    source = normalized(source, initialSource);
+  }
+  if (!strict.reason && !separated.reason) return strict;
   const restrictions = compareEquipmentAttributes(
     { ...target, fields: {}, ...(partial ? { unknownLines: [] } : {}) },
     { ...source, fields: {}, ...(partial ? { unknownLines: [] } : {}) },
   );
   if (restrictions) return reject(restrictions);
   const differences: string[] = [];
+  if (
+    target.fields.初始防御 &&
+    displayedDefense.every(Boolean) &&
+    displayedDefense[0] !== displayedDefense[1]
+  )
+    differences.push("防御（含宝石）：" + displayedDefense[0] + " → " + displayedDefense[1]);
   let score = 0;
   const names = partial
     ? Object.keys(source.fields)

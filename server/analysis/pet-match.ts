@@ -45,7 +45,8 @@ export const PET_APTITUDE_TOLERANCE = 0.15;
 export const PET_GROWTH_TOLERANCE = 0.03;
 export const PET_LEVEL_TOLERANCE = 5;
 export const PET_BLESSING_POLICY_VERSION = "explicit-blessing-and-legacy-preview-v2";
-export const PET_COMPARISON_POLICY_VERSION = "protected-magic-core-and-resumable-groups-v1";
+export const PET_COMPARISON_POLICY_VERSION =
+  "protected-magic-core-compatible-gear-and-resumable-groups-v2";
 
 /** The template calls ordinary skill icons `cifu`; only explicit fields establish blessing state. */
 export function petBlessingState(fields: { name: string; value: string }[]) {

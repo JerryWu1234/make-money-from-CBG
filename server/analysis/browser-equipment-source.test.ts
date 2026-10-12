@@ -551,6 +551,29 @@ describe("官方装备搜索条件", () => {
     for (const field of ["hp", "defense", "dex", "init_dex", "attr_with_melt"])
       expect(args).not.toHaveProperty(field);
   });
+  it("月亮石衣服填写初防，相近搜索仍保留初防下限并排除熔炼", () => {
+    const target = item({
+      name: "测试衣服",
+      category: "人物装备 · 衣服",
+      kindId: "18",
+      description: "等级100\n防御296\n锻炼等级8\n镶嵌宝石 月亮石\n熔炼效果：\n+10防御",
+    });
+    expect(equipmentQuery(target, config).args).toMatchObject({
+      init_defense: 200,
+      attr_without_melt: 1,
+      gem_level: 8,
+    });
+    expect(equipmentQuery(target, config, "similar").args).toMatchObject({
+      init_defense: 160,
+      attr_without_melt: 1,
+    });
+    expect(
+      equipmentQuery(
+        { ...target, description: target.description.replace("月亮石", "月亮石、光芒石") },
+        config,
+      ).args,
+    ).not.toHaveProperty("init_defense");
+  });
 
   it("锻炼明确为0也允许初值，熔炼单列不混加到主属性", () => {
     const { args } = equipmentQuery(
@@ -1106,10 +1129,16 @@ describe("实际装备的分阶段相近检索", () => {
       description: "等级80\n魔法95 防御142\n锻炼等级8 镶嵌宝石 月亮石\n装备角色：男",
     });
     const plan = equipmentQueryPlan(target, actualConfig);
-    expect(plan.map(({ mode }) => mode)).toEqual(["exact", "near-gems", "similar"]);
-    expect(plan[0].args).toMatchObject({ kindid: "15", gem_level: 8, gem_value: "5" });
-    expect(plan[1].args).toMatchObject({ gem_level: 7, gem_value: "5" });
-    expect(plan[2].args).not.toHaveProperty("gem_level");
+    expect(plan.map(({ mode }) => mode)).toEqual(["exact", "same-gems", "near-gems", "similar"]);
+    expect(plan[0].args).toMatchObject({
+      kindid: "15",
+      gem_level: 8,
+      gem_value: "5",
+      init_defense: 46,
+    });
+    expect(plan[1].args).toMatchObject({ gem_level: 8, gem_value: "5", init_defense: 37 });
+    expect(plan[2].args).toMatchObject({ gem_level: 7, gem_value: "5", init_defense: 37 });
+    expect(plan[3].args).not.toHaveProperty("gem_level");
     for (const { args } of plan)
       expect(args).toMatchObject({ level_min: 80, level_max: 80, server_type: "3" });
   });

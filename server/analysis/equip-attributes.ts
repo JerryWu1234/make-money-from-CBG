@@ -15,8 +15,13 @@ const aliases: Record<string, string> = {
   熔炼效果: "熔炼",
   套装效果: "套装",
   点化特效: "点化",
+  初防: "初始防御",
+  总防御: "防御",
 };
 const labels = [
+  "初始防御",
+  "初防",
+  "总防御",
   "等级",
   "五行",
   "命中",
@@ -94,6 +99,54 @@ const fieldPattern = new RegExp(
 const conditionPattern =
   /(?:^|[\s【[])(装备角色|装备对象|装备条件|使用条件|门派条件|部位条件)(?=[：:】\]]|\s)/g;
 const normalize = (value: string) => value.replace(/[\s：:，,；;【】[\]]/g, "").toLowerCase();
+/** Main description stats exclude separately rendered melting; only gem defense is removed. */
+export function equipmentInitialDefense(
+  attributes: EquipmentAttributes,
+  partial = false,
+): number | null {
+  const fields = attributes.fields;
+  if (fields.精炼等级 || attributes.jewelrySections) return null;
+  const integer = (values?: string[]) => {
+    if (values?.length !== 1 || !/^\+?\d+$/.test(values[0])) return null;
+    const value = Number(values[0]);
+    return Number.isSafeInteger(value) && value <= 10000 ? value : null;
+  };
+  const explicit = integer(fields.初始防御);
+  if (fields.初始防御 && explicit === null) return null;
+  const defense = integer(fields.防御);
+  const gems = [
+    ...new Set(
+      (fields.宝石 || []).flatMap((value) => value.split(/[、，,；;\s]+/)).filter(Boolean),
+    ),
+  ];
+  const grade = fields.锻炼等级 === undefined ? null : integer(fields.锻炼等级);
+  let derived: number | null = null;
+  if (defense !== null) {
+    if (!gems.length && (fields.锻炼等级 === undefined || grade === 0)) {
+      if (!partial || grade === 0) derived = defense;
+    } else if (grade !== null && grade > 0) {
+      // Official gem rules: https://xyq.163.com/introduce/dj008.html.
+      const withoutDefense = new Set([
+        "光芒石",
+        "太阳石",
+        "红宝石",
+        "黄宝石",
+        "蓝宝石",
+        "绿宝石",
+        "黑宝石",
+        "红玛瑙",
+        "舍利子",
+        "神秘石",
+        "翡翠石",
+      ]);
+      if (gems.length === 1 && gems[0] === "月亮石") derived = defense - grade * 12;
+      else if (gems.length && gems.every((gem) => withoutDefense.has(gem))) derived = defense;
+    }
+  }
+  if (derived !== null && derived < 0) return null;
+  if (explicit !== null && derived !== null && explicit !== derived) return null;
+  return explicit ?? derived;
+}
 function canonical(value: string) {
   const normalized = normalize(value).replace(/＋/g, "+").replace(/−/g, "-");
   const number = normalized.match(/^([+-]?\d+(?:\.\d+)?)(?:点|级|次|锻)?$/)?.[1];

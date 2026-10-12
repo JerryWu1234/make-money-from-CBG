@@ -293,7 +293,7 @@ export function equipmentInventory(record: SavedRoleRecord) {
     JSON.stringify({
       scopeVersion: GLOBAL_MARKET_SCOPE_VERSION,
       searchUI: MARKET_SEARCH_UI_VERSION,
-      comparisonVersion: "per-attribute-absolute-and-relative-v2",
+      comparisonVersion: "per-attribute-initial-defense-v3",
       specialAssetPolicy: SPECIAL_ASSET_MATCH_POLICY,
       exclusionPolicy: EQUIPMENT_EXCLUSION_POLICY,
       queryPolicy: EQUIPMENT_QUOTE_POLICY,

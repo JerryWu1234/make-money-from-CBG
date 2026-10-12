@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { comparePetGear } from "./pet-gear-match";
 import type { DetailItem, PetSnapshot, SavedRoleRecord } from "../crawler/types";
 import { cleanDescription, coreEquipmentDescription, itemFromAttributes } from "../crawler/compact";
 import { compareListingPrice } from "./valuation-calculator";
@@ -588,6 +589,21 @@ export function verifyPetCandidate(
     normalize((gear.accessory ? "饰品" : "装备") + "\n" + gear.name + "\n" + gear.description);
   if (!equalSet(item.equipment.map(gearKey), sourceGear.map(gearKey))) {
     if (matchType !== "similar") return reject("随身宝宝装备不匹配；包价不能另外重复加装备钱");
+    if (item.equipment.length !== sourceGear.length)
+      return reject("随身宝宝装备数量不匹配，不能作为含装备包价");
+    const remaining = [...sourceGear];
+    for (const gear of item.equipment) {
+      const index = remaining.findIndex(
+        (other) =>
+          other.name === gear.name &&
+          Boolean(other.accessory) === Boolean(gear.accessory) &&
+          (gear.accessory
+            ? gearKey(gear) === gearKey(other)
+            : !comparePetGear(gear, other.name, other.description).reason),
+      );
+      if (index < 0) return reject("随身宝宝装备类型、等级、属性、镶嵌或套装不兼容，不能采用包价");
+      remaining.splice(index, 1);
+    }
     const describe = (gear: PetEquipment[]) =>
       gear.map((value) => value.name + "：" + value.description).join("；") || "无";
     differences.push(
@@ -616,6 +632,29 @@ export function verifyPetCandidate(
   };
 }
 
+/** Query complete pets only when the captured inventory scope is unambiguous. */
+export function petCaptureSearchable(record: SavedRoleRecord, inventory = petInventory(record)) {
+  const capture = record.detail?.petCapture;
+  const tabs = record.detail?.tabs.filter((tab) => tab.name === "召唤兽/孩子") || [];
+  return (
+    inventory.captureComplete ||
+    (capture?.version === 1 &&
+      tabs.length === 1 &&
+      tabs[0].petCount === tabs[0].pets?.length &&
+      new Set(inventory.items.map((item) => item.key)).size === inventory.items.length &&
+      inventory.items.some((item) => item.status === "incomplete") &&
+      capture.issues.every((issue) => {
+        const index = issue.match(/^第 (\d+) 只召唤兽/)?.[1];
+        return (
+          !!index &&
+          inventory.items.some(
+            (item) => item.key === "召唤兽/孩子:" + index && item.status === "incomplete",
+          )
+        );
+      }))
+  );
+}
+
 export async function searchPetPricing(
   record: SavedRoleRecord,
   signal: AbortSignal,
@@ -639,32 +678,13 @@ export async function searchPetPricing(
   };
   resumePricingItems(snapshot, previous, true);
   signal.throwIfAborted();
-  if (!inventory.captureComplete) {
-    const capture = record.detail?.petCapture;
-    const tabs = record.detail?.tabs.filter((tab) => tab.name === "召唤兽/孩子") || [];
-    const safelyPartial =
-      capture?.version === 1 &&
-      tabs.length === 1 &&
-      tabs[0].petCount === tabs[0].pets?.length &&
-      new Set(inventory.items.map((item) => item.key)).size === inventory.items.length &&
-      inventory.items.some((item) => item.status === "incomplete") &&
-      capture.issues.every((issue) => {
-        const index = issue.match(/^第 (\d+) 只召唤兽/)?.[1];
-        return (
-          !!index &&
-          inventory.items.some(
-            (item) => item.key === "召唤兽/孩子:" + index && item.status === "incomplete",
-          )
-        );
-      });
-    if (!safelyPartial) {
-      for (const item of snapshot.items) {
-        delete item.searchState;
-        if (item.status === "no_match")
-          item.issues.push("宝宝清单或采集范围未确认，先补采资料再查价");
-      }
-      return finishPricingSearch(snapshot);
+  if (!petCaptureSearchable(record, inventory)) {
+    for (const item of snapshot.items) {
+      delete item.searchState;
+      if (item.status === "no_match")
+        item.issues.push("宝宝清单或采集范围未确认，先补采资料再查价");
     }
+    return finishPricingSearch(snapshot);
   }
   const searchable = snapshot.items.filter((item) => item.searchState === "pending");
   if (!searchable.length) return finishPricingSearch(snapshot);

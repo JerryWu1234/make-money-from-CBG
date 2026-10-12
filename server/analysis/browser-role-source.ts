@@ -766,9 +766,7 @@ export async function createRoleSource(signal: AbortSignal) {
           if (!(await isOnShelf(detailPage!, listing, signal))) return null;
           return { listing: { ...listing, price }, detail, status: "complete", error: null };
         };
-        const freshTarget =
-          (await freshRecord(target.listing).catch(() => null)) ||
-          (target.detail && target.status === "complete" ? target : null);
+        const freshTarget = await freshRecord(target.listing);
         if (!freshTarget) throw new Error("目标角色已不在售，暂不能校验当前整号参考");
         const candidates: RoleMarketCandidate[] = [],
           skipped: { key: string; url: string; reason: string }[] = [];
