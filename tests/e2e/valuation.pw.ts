@@ -290,9 +290,11 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await page.getByRole("button", { name: "开始分析已有商品", exact: true }).click();
     const completedRecords = page.getByRole("tabpanel", { name: "分析记录" });
     await expect(completedRecords.getByRole("article")).toHaveCount(4);
+    await completedRecords.screenshot({ path: testInfo.outputPath("valuation-results-list.png") });
     for (const width of [1100, 390]) {
       await page.setViewportSize({ width, height: 844 });
-      await expect(completedRecords.getByRole("heading", { name: "AI 核对说明" })).toHaveCount(2);
+      await expect(completedRecords.getByRole("heading", { name: "AI 核对说明" })).toHaveCount(0);
+      await expect(completedRecords.getByRole("button", { name: /查看分析详情/ })).toHaveCount(4);
       expect(
         await completedRecords.evaluate((element) => element.scrollWidth - element.clientWidth),
       ).toBeLessThanOrEqual(1);
@@ -312,8 +314,8 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
       "这是旧设置下的结果。估值规则或分析设置已更新，再次分析会更新这件商品。";
     await page.reload();
     const savedResult = completedRecords.getByRole("article", { name: /角色b/ });
-    await expect(savedResult.getByText(oldSettingsMessage, { exact: true })).toBeVisible();
-    await savedResult.getByRole("button", { name: "查看原文与调用记录 →", exact: true }).click();
+    await expect(savedResult.getByText("上次设置的结果", { exact: true })).toBeVisible();
+    await savedResult.getByRole("button", { name: /查看分析详情/ }).click();
     const oldDetail = page.getByRole("dialog", { name: "角色b" });
     await expect(oldDetail.getByText(oldSettingsMessage, { exact: true })).toBeVisible();
     await oldDetail.getByText("查看估值依据与查价记录", { exact: true }).click();
@@ -333,16 +335,16 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await expect(completedRecords.getByRole("article")).toHaveCount(4);
     await expect(completedRecords.getByText(oldSettingsMessage, { exact: true })).toHaveCount(0);
     expect(calls).toBe(4);
+    await expect(completedRecords.getByRole("heading", { name: /联网查价/ })).toHaveCount(0);
+    await completedRecords
+      .getByRole("article", { name: /角色b/ })
+      .getByRole("button", { name: /查看分析详情/ })
+      .click();
+    await oldDetail.getByText("查看估值依据与查价记录", { exact: true }).click();
     await expect(
-      completedRecords
-        .getByRole("article", { name: /角色a/ })
-        .getByRole("heading", { name: "装备联网查价", exact: true }),
+      oldDetail.getByRole("heading", { name: "宝宝联网查价", exact: true }),
     ).toBeVisible();
-    await expect(
-      completedRecords
-        .getByRole("article", { name: /角色b/ })
-        .getByRole("heading", { name: "宝宝联网查价", exact: true }),
-    ).toBeVisible();
+    await oldDetail.getByRole("button", { name: "关闭分析详情", exact: true }).click();
     await page.getByRole("tab", { name: /全部商品/ }).click();
     await expect(page.getByRole("tabpanel", { name: "全部商品" })).toBeVisible();
     const row = page.getByRole("row").filter({ hasText: "角色a" });
@@ -351,6 +353,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await row.getByRole("button", { name: "查看分析", exact: true }).click();
     const result = page.getByRole("dialog", { name: "角色a" });
     await expect(result.getByText("已算小计", { exact: true })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("valuation-result-dialog.png") });
     await expect(
       result.getByText("还有未定价项目，总估值暂无法计算。", { exact: true }),
     ).toBeVisible();

@@ -3,7 +3,6 @@ import type { AiProvider } from "../server/ai/types";
 import type { AnalysisItem, AnalysisOverview, AnalysisRun } from "../server/analysis/types";
 import { AiConnectionControl } from "./AiConnectionControl";
 import { AnalysisResultDrawer } from "./AnalysisResultDrawer";
-import { ProductAnalysisView } from "./ProductAnalysisView";
 import { AnalysisSettings } from "./AnalysisSettings";
 import {
   valuationDecisionLabel,
@@ -237,9 +236,9 @@ export function AnalysisPreview() {
           <div className="analysis-hero-copy">
             <span className="analysis-eyebrow">PRODUCT ANALYSIS / 商品分析</span>
             <h1>
-              每完成一件，
+              每件商品一条，
               <br />
-              <em>就展示完整结果</em>
+              <em>点开查看详情</em>
             </h1>
             <p>
               先核对装备和宝宝，再联网查价，直接比较参考估值与挂牌价；缺资料或可靠报价时显示补齐办法。
@@ -631,7 +630,7 @@ export function AnalysisPreview() {
             ) : (
               <div className="analysis-history" role="tabpanel" aria-label="分析记录">
                 <p className="analysis-list-intro">
-                  每件商品展示最新完成的完整结果；新增分析完成后自动更新。
+                  每件商品一条记录，点击查看完整分析、原文与调用记录。
                 </p>
                 {!data?.results?.total && (
                   <p className="analysis-empty">
@@ -639,51 +638,68 @@ export function AnalysisPreview() {
                   </p>
                 )}
                 <ol className="analysis-result-list" start={(resultsPage - 1) * 20 + 1}>
-                  {data?.results?.items.map((entry, index) => (
-                    <li key={entry.taskId}>
-                      <article
-                        className="analysis-result-card"
-                        aria-label={`${(resultsPage - 1) * 20 + index + 1} ${entry.name}`}
-                      >
-                        <header className="analysis-result-card-header">
-                          <span className="analysis-result-number">
-                            {(resultsPage - 1) * 20 + index + 1}
-                          </span>
-                          <div>
-                            <h3>{entry.name}</h3>
-                            <p>
-                              {entry.server} · {providerNames[entry.provider]} · {entry.model} ·{" "}
-                              {displayTime(entry.completedAt)}
-                            </p>
-                          </div>
-                          <span className="analysis-result-state">已分析</span>
-                        </header>
-                        {entry.stale && (
-                          <p className="analysis-pending-note">
-                            资料或报价已更新，以下为上次完成的结果。
-                          </p>
-                        )}
-                        <ProductAnalysisView
-                          result={entry.result}
-                          expanded
-                          onConfigure={() => setSettingsOpen(true)}
-                          previousSettings={
-                            entry.profileChanged ||
-                            (!!entry.result.valuation &&
-                              !!data?.profile?.calculationVersion &&
-                              entry.result.valuation.calculation_version !==
-                                data.profile.calculationVersion)
-                          }
-                        />
-                        <button
-                          className="analysis-button analysis-button-quiet"
-                          onClick={() => setTaskId(entry.taskId)}
+                  {data?.results?.items.map((entry, index) => {
+                    const valuation = entry.result.valuation;
+                    const previousSettings =
+                      entry.profileChanged ||
+                      (!!valuation &&
+                        !!data?.profile?.calculationVersion &&
+                        valuation.calculation_version !== data.profile.calculationVersion);
+                    return (
+                      <li key={entry.taskId}>
+                        <article
+                          className="analysis-result-card"
+                          aria-label={`${(resultsPage - 1) * 20 + index + 1} ${entry.name}`}
                         >
-                          查看原文与调用记录 →
-                        </button>
-                      </article>
-                    </li>
-                  ))}
+                          <button
+                            className="analysis-result-row"
+                            aria-label={`查看分析详情：${entry.name}`}
+                            aria-haspopup="dialog"
+                            onClick={() => setTaskId(entry.taskId)}
+                          >
+                            <span className="analysis-result-number">
+                              {(resultsPage - 1) * 20 + index + 1}
+                            </span>
+                            <span className="analysis-result-identity">
+                              <strong className="analysis-result-name">{entry.name}</strong>
+                              <span className="analysis-result-meta">
+                                {entry.server} · {providerNames[entry.provider]} · {entry.model} ·{" "}
+                                {displayTime(entry.completedAt)}
+                              </span>
+                              <span
+                                className="analysis-result-summary"
+                                title={entry.result.summary}
+                              >
+                                {entry.result.summary}
+                              </span>
+                            </span>
+                            <span className="analysis-result-price">
+                              <small>
+                                {valuation ? valuationPriceSummary(valuation).label : "配置参考分"}
+                              </small>
+                              <strong>
+                                {valuation
+                                  ? valuationSummaryText(valuation)
+                                  : (entry.result.score ?? "资料不足")}
+                              </strong>
+                              <small>挂牌 {price(entry.price)}</small>
+                            </span>
+                            <span className="analysis-result-action">
+                              <span className="analysis-result-decision">
+                                {valuation ? valuationDecisionLabel(valuation) : "已分析"}
+                              </span>
+                              {(entry.stale || previousSettings) && (
+                                <span className="analysis-result-outdated">
+                                  {entry.stale ? "资料或报价已更新" : "上次设置的结果"}
+                                </span>
+                              )}
+                              <span className="analysis-result-open">查看详情 →</span>
+                            </span>
+                          </button>
+                        </article>
+                      </li>
+                    );
+                  })}
                 </ol>
                 {(data?.results?.total || 0) > 20 && (
                   <div className="analysis-pagination">

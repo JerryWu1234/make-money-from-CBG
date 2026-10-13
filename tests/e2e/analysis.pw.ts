@@ -162,7 +162,7 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
       page
         .getByRole("tabpanel", { name: "分析记录" })
         .getByRole("heading", { name: "评分字段依据" }),
-    ).toBeVisible();
+    ).toHaveCount(0);
     await expect(page.getByLabel("分析批次")).toHaveCount(0);
     await expect(page.getByLabel("试分析数量")).toHaveCount(0);
     await expect(page.getByRole("button", { name: /先分析|全部重新分析/ })).toHaveCount(0);
@@ -259,7 +259,26 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
       "7",
       "8",
     ]);
-    await expect(records.getByRole("heading", { name: "评分字段依据" })).toHaveCount(8);
+    await expect(records.getByRole("heading", { name: "评分字段依据" })).toHaveCount(0);
+    await records.screenshot({ path: testInfo.outputPath("analysis-results-list-desktop.png") });
+    const firstResult = records.getByRole("button", { name: /查看分析详情/ }).first();
+    await firstResult.focus();
+    await page.keyboard.press("Enter");
+    const firstDetail = page.locator(".analysis-detail-dialog");
+    await expect(firstDetail).toBeVisible();
+    await expect(firstDetail.getByRole("heading", { name: "评分字段依据" })).toBeVisible();
+    const bounds = await firstDetail.boundingBox();
+    expect(bounds!.x).toBeGreaterThan(0);
+    expect(Math.abs(bounds!.x * 2 + bounds!.width - 1100)).toBeLessThanOrEqual(2);
+    await page.screenshot({ path: testInfo.outputPath("analysis-result-dialog.png") });
+    await page.keyboard.press("Escape");
+    await expect(firstDetail).not.toBeVisible();
+    await expect(firstResult).toBeFocused();
+    await firstResult.click();
+    await expect(firstDetail).toBeVisible();
+    await page.mouse.click(4, 4);
+    await expect(firstDetail).not.toBeVisible();
+    await expect(firstResult).toBeFocused();
     expect(calls).toBe(9);
     expect(store.overview().run).toMatchObject({ total: 6, completed: 6 });
     await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
@@ -280,7 +299,7 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     await expect(records.getByRole("article")).toHaveCount(8);
     await records
       .getByRole("article", { name: /角色b/ })
-      .getByRole("button", { name: "查看原文与调用记录 →" })
+      .getByRole("button", { name: /查看分析详情/ })
       .click();
     const savedCall = page.getByRole("dialog", { name: "角色b" });
     await expect(savedCall).toContainText("中断");
@@ -297,6 +316,21 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
+    await firstResult.click();
+    await expect(firstDetail).toBeVisible();
+    await expect(firstDetail.getByRole("heading", { name: "评分字段依据" })).toBeVisible();
+    expect(
+      await firstDetail.evaluate((element) => element.scrollWidth <= element.clientWidth),
+    ).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("analysis-result-dialog-mobile.png") });
+    const content = firstDetail.locator(".analysis-modal-content");
+    await content.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    expect(await content.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await expect(firstDetail.getByRole("button", { name: "关闭分析详情" })).toBeInViewport();
+    await firstDetail.getByRole("button", { name: "关闭分析详情" }).click();
+    await expect(firstDetail).not.toBeVisible();
   } finally {
     await runner.shutdown();
     crawl.close();
@@ -412,9 +446,9 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
         exact: true,
       });
       await expect(primary).toBeEnabled();
-      await expect(page.getByRole("button", { name: "重试失败的 1 件", exact: true })).toHaveCount(
-        obsolete ? 0 : 1,
-      );
+      await expect(
+        page.getByRole("button", { name: /^重试失败(?:及待补齐)?的 1 件$/ }),
+      ).toHaveCount(obsolete ? 0 : 1);
       if (obsolete) {
         await expect(runner.resume(oldRunId)).rejects.toThrow("估值规则已更新");
         await expect(
