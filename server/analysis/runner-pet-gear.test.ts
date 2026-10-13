@@ -201,7 +201,7 @@ it.each([
   ["pet", "read_failed"],
   ["pet-gear", "pending"],
   ["pet-gear", "read_failed"],
-] as const)("%s 没有新进展或详情读取失败时保存暂停：%s", async (phase, state) => {
+] as const)("%s 没有新进展或详情读取失败时保存待补齐：%s", async (phase, state) => {
   const c = setup();
   if (phase === "pet")
     c.searchPets.mockResolvedValue({
@@ -218,10 +218,17 @@ it.each([
   try {
     const id = await c.runner.start("codex", true, c.profile);
     await c.runner.settled();
-    expect(c.store.run(id)?.status).toBe("paused");
+    expect(c.store.run(id)).toMatchObject({
+      status: "completed",
+      waitingPricing: 1,
+      completed: 0,
+      queued: 0,
+    });
     expect(phase === "pet" ? c.searchPets : c.searchPetGear).toHaveBeenCalledOnce();
     expect(c.analyze).not.toHaveBeenCalled();
-    const saved = c.store.next(id)!.petPricing!;
+    const saved = c.store.detail(
+      c.store.overview({ runId: id }).records.items[0].taskId!,
+    )!.petPricing!;
     expect((phase === "pet" ? saved : saved.gearPricing!).items[0].searchState).toBe(state);
   } finally {
     await c.runner.shutdown();
@@ -239,13 +246,20 @@ it("宝宝装备自动查价，暂停和刷新后复用父宝宝进度，完成�
   try {
     const id = await c.runner.start("codex", false, c.profile);
     await c.runner.settled();
-    expect(c.store.run(id)?.status).toBe("paused");
+    expect(c.store.run(id)).toMatchObject({
+      status: "completed",
+      waitingPricing: 1,
+      completed: 0,
+      queued: 0,
+    });
     expect(c.analyze).not.toHaveBeenCalled();
-    expect(c.store.next(id)?.petPricing).toMatchObject({
+    expect(
+      c.store.detail(c.store.overview({ runId: id }).records.items[0].taskId!)?.petPricing,
+    ).toMatchObject({
       searchComplete: true,
       gearPricing: { searchComplete: false },
     });
-    await c.runner.resume(id);
+    await c.runner.resume(id, true);
     await c.runner.settled();
     expect(c.store.run(id)?.status).toBe("completed");
     expect(c.searchEquipment).toHaveBeenCalledTimes(1);
@@ -282,9 +296,14 @@ it("宠装暂停恢复后才整号、再AI，已完成父宝宝不重复查", as
   try {
     const id = await c.runner.start("codex", false, c.profile);
     await c.runner.settled();
-    expect(c.store.run(id)?.status).toBe("paused");
+    expect(c.store.run(id)).toMatchObject({
+      status: "completed",
+      waitingPricing: 1,
+      completed: 0,
+      queued: 0,
+    });
     expect(c.searchRole).not.toHaveBeenCalled();
-    await c.runner.resume(id);
+    await c.runner.resume(id, true);
     await c.runner.settled();
     expect(c.store.run(id)?.status).toBe("completed");
     expect(c.searchEquipment).toHaveBeenCalledOnce();
@@ -320,22 +339,16 @@ it.each(["identity", "total"])("拒绝不匹配或重复计价的宝宝装备快
   }
 });
 
-it("宝宝库存未采齐时输出缺项结果，不陷入无法恢复的市场查价暂停", async () => {
+it("宝宝库存未采齐时留在采集阶段，不调用市场查价或输出缺项分析", async () => {
   const c = setup(false);
   try {
-    const id = await c.runner.start("codex", false, c.profile);
-    await c.runner.settled();
-    expect(c.store.run(id)?.status).toBe("completed");
-    expect(c.analyze).toHaveBeenCalledTimes(1);
-    const result = c.store.overview().results.items[0].result.valuation!;
-    expect(result.decision).toBe("NEED_INFO");
-    expect(result.pet_pricing?.gearPricing).toMatchObject({
-      captureComplete: false,
-      total: null,
-      searchComplete: true,
-    });
-    expect(result.missing_fields.join("；")).toContain("补采");
-    expect(result.pet_value).toBeNull();
+    await expect(c.runner.start("codex", false, c.profile)).rejects.toThrow("暂无详情完整的商品");
+    expect(c.analyze).not.toHaveBeenCalled();
+    expect(c.searchEquipment).not.toHaveBeenCalled();
+    expect(c.searchPets).not.toHaveBeenCalled();
+    expect(c.searchPetGear).not.toHaveBeenCalled();
+    expect(c.store.counts()).toMatchObject({ complete: 0, waitingDetail: 1 });
+    expect(c.crawl.retryItems()).toHaveLength(1);
   } finally {
     await c.runner.shutdown();
     c.crawl.db.close();

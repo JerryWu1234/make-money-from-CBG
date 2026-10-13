@@ -95,6 +95,9 @@ const pacedPage = inline(
 );
 const petMatcher = await moduleUrl("server/analysis/pet-match.ts");
 const petPricing = await moduleUrl("server/analysis/pet-pricing.ts", {
+  "./pet-gear-match": await moduleUrl("server/analysis/pet-gear-match.ts", {
+    "../crawler/compact": compact,
+  }),
   "./market-scope": marketScope,
   "./pet-match": petMatcher,
   "./pricing-progress": progress,
@@ -267,6 +270,82 @@ try {
     assert.equal(searchPage.isClosed(), true);
     assert.equal(detailPage.isClosed(), true);
   };
+  await check("宝宝结果等待超时能区分回调缺失与加载图标不消失", async () => {
+    for (const settings of [{ mode: "stalled" }, { keepLoading: true }]) {
+      await withSource(settings, {}, async ({ source, control }) => {
+        await assert.rejects(
+          () => searchPetPricing(record(), control.signal, source),
+          (error) => {
+            assert.equal(error.name, "TimeoutError");
+            assert.equal(error.code, "PET_SEARCH_RESULT_TIMEOUT");
+            assert.match(error.message, /宝宝搜索结果等待超时/);
+            assert.match(
+              error.message,
+              settings.keepLoading ? /回调已收到.*加载图标仍显示/ : /回调未收到.*加载图标已消失/,
+            );
+            return true;
+          },
+        );
+        assert.deepEqual(detailVisits, []);
+      });
+    }
+  });
+  await check("成长浮点截断边界通过真实表单提交，条件校验不放宽", async () => {
+    await withSource({}, {}, async ({ searchPage, control }) => {
+      await searchPage.goto(
+        "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=show_overall_search_pet",
+      );
+      const target = {
+        ...record().detail.tabs[0].pets[0],
+        name: "画魂",
+        level: 119,
+        skills: petSkills,
+      };
+      for (const growth of [1001, 1003, 1009, 1039, 1250, 1280]) {
+        const args = {
+          ...petQuery(target, {
+            names: { 2001: "画魂" },
+            skills: [
+              [1, "须弥真言"],
+              [2, "高级法术暴击"],
+            ],
+            highNeidans: [[9, "催心浪"]],
+            lowNeidans: [],
+          }),
+          growth,
+        };
+        const evidence = await fillPetSearchForm(searchPage, target, args, control.signal);
+        await searchPage.locator("#btn_pet_search").click();
+        const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
+        assert.equal(actual.growth, growth);
+        assertPetUIArguments(args, actual);
+        assert.equal(parseInt(parseFloat(evidence.inputs.txt_growth) * 1000, 10), growth);
+        assert.throws(
+          () => assertPetUIArguments(args, { ...actual, growth: growth - 1 }),
+          /growth/,
+        );
+      }
+    });
+  });
+  await check("成长1.009宝宝完整查价通过表单并取得可核验模拟样本", async () => {
+    const growthFields = petFields.map((field) =>
+      field.name === "成长" ? { ...field, value: "1.009" } : field,
+    );
+    const targetRecord = record();
+    targetRecord.detail.tabs[0].pets[0].fields = growthFields;
+    await withSource(
+      {},
+      { fields: growthFields, rawGrowth: 1.009 },
+      async ({ source, control }) => {
+        const result = await searchPetPricing(targetRecord, control.signal, source);
+        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].referencePrice, 368.6);
+        assert.ok(result.items[0].candidates.every((candidate) => candidate.verified));
+        const item = result.searchItems.find((entry) => entry.uiEvidence?.length);
+        assert.equal(item.uiEvidence[0].submittedArgs.growth, 1009);
+      },
+    );
+  });
   await check("相近分组保留须弥法宠核心，每组都有有限附近等级且同级优先", async () => {
     const skills = ["须弥真言", "高级法术连击", "高级魔之心", "法术暴击", "地狱烈火", "慧根"];
     const choices = skills.map((name, index) => [index + 1, name]);

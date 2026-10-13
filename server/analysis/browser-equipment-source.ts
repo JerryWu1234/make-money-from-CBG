@@ -39,6 +39,7 @@ import {
   type EquipmentPricingItem,
   type EquipmentSearchCursor,
   type EquipmentSource,
+  type PricingSearchProgress,
 } from "./equipment-pricing";
 
 export const EQUIPMENT_SEARCH_URL =
@@ -588,6 +589,21 @@ async function readMainEquipment(
       excluded,
     );
   if (directPanel) {
+    const supported = await page.evaluate((excluded) => {
+      const panels = Array.from(document.querySelectorAll<HTMLElement>("#equip_desc_panel")).filter(
+        (node) => node.checkVisibility() && !node.closest(excluded),
+      );
+      return (
+        panels.length === 1 &&
+        !!(
+          panels[0].closest(".goodsInfo, .independent-product, #equip_detail") ||
+          Array.from(document.querySelectorAll("#info_panel")).find(
+            (node) => node.checkVisibility() && !node.closest(excluded),
+          )
+        )
+      );
+    }, excluded);
+    if (!supported) throw new Error("商品页结构不支持：无法定位主商品容器，已保留待补齐项");
     await page.waitForFunction(
       (excluded) => {
         const panels = Array.from(
@@ -596,13 +612,20 @@ async function readMainEquipment(
         const info = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(
           (node) => node.checkVisibility() && !node.closest(excluded),
         );
+        const region =
+          info.length === 1
+            ? info[0]
+            : info.length === 0 && panels.length === 1
+              ? panels[0].closest<HTMLElement>(".goodsInfo, .independent-product, #equip_detail")
+              : null;
         return (
           panels.length === 1 &&
-          info.length === 1 &&
+          region?.checkVisibility() &&
+          !region.closest(excluded) &&
           panels[0].innerText.trim() &&
-          info[0].innerText.trim() &&
+          region.innerText.trim() &&
           Array.from(
-            info[0].querySelectorAll<HTMLElement>(".price, [data_price], [data-price]"),
+            region.querySelectorAll<HTMLElement>(".price, [data_price], [data-price]"),
           ).some(
             (node) =>
               node.checkVisibility() &&
@@ -680,7 +703,12 @@ async function readMainEquipment(
       const panels = directPanel ? visible("#equip_desc_panel") : [];
       const infos = directPanel ? visible("#info_panel") : [];
       const panel = panels.length === 1 ? panels[0] : null;
-      const info = infos.length === 1 ? infos[0] : null;
+      const info =
+        infos.length === 1
+          ? infos[0]
+          : infos.length === 0
+            ? panel?.closest<HTMLElement>(".goodsInfo, .independent-product, #equip_detail")
+            : null;
       let root = panel?.parentElement;
       while (root && root !== document.body && info && !root.contains(info))
         root = root.parentElement;
@@ -700,7 +728,10 @@ async function readMainEquipment(
       const name = directPanel
         ? info!.innerText
             .match(/(?:^|\s)ID\s*[：:]\s*(.+?)(?=\s+等级\s*[：:]|\r?\n|$)/i)?.[1]
-            ?.trim() || ""
+            ?.trim() ||
+          (typeof raw?.equip_name === "string" && info!.innerText.includes(raw.equip_name)
+            ? raw.equip_name
+            : "")
         : main!.getAttribute("data_equip_name") || main!.getAttribute("data-equip-name") || "";
       const tipId = main?.getAttribute("data_tip_box") || main?.getAttribute("data-tip-box");
       const tips = tipId
@@ -1405,6 +1436,7 @@ export function equipmentSourceFromPages(
   searchPage: Page,
   detailPage: Page,
   signal: AbortSignal,
+  onProgress?: (progress: PricingSearchProgress) => void,
 ): EquipmentSource & {
   close(): Promise<void>;
   discover(
@@ -1414,6 +1446,11 @@ export function equipmentSourceFromPages(
 } {
   const cache = new Map<string, string>();
   const deadline = Date.now() + 180_000;
+  let progress: PricingSearchProgress = { assetName: "", page: 1, validSamples: 0, retryCount: 0 };
+  const report = (patch: Partial<PricingSearchProgress>) => {
+    progress = { ...progress, ...patch };
+    onProgress?.(progress);
+  };
   let closing: Promise<void> | undefined;
   let marketScope: ReturnType<typeof createMarketScopeAudit> | undefined;
   const close = () => {
@@ -1434,14 +1471,29 @@ export function equipmentSourceFromPages(
     requestSignal.throwIfAborted();
     const safe = safeEquipmentUrl(url);
     if (cache.has(safe)) return cache.get(safe)!;
-    await pace(requestSignal, 600, 400);
-    await detailPage.goto(safe, { waitUntil: "domcontentloaded", timeout: 15000 });
-    requestSignal.throwIfAborted();
-    if (equipmentIdentity(detailPage.url()) !== equipmentIdentity(safe))
-      throw new Error("装备详情跳转到另一商品，报价未采用");
-    const value = await equipmentPageSource(detailPage, requestSignal);
-    cache.set(safe, value.html);
-    return value.html;
+    for (let attempt = 0; ; attempt++) {
+      report({ retryCount: attempt });
+      try {
+        await pace(requestSignal, 600, 400);
+        await detailPage.goto(safe, { waitUntil: "domcontentloaded", timeout: 15000 });
+        requestSignal.throwIfAborted();
+        if (equipmentIdentity(detailPage.url()) !== equipmentIdentity(safe))
+          throw new Error("装备详情跳转到另一商品，报价未采用");
+        const value = await equipmentPageSource(detailPage, requestSignal);
+        cache.set(safe, value.html);
+        return value.html;
+      } catch (error) {
+        requestSignal.throwIfAborted();
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          attempt >= 2 ||
+          Date.now() >= deadline ||
+          !/Timeout|timeout|net::ERR_|未加载完成|interrupted by another navigation/.test(message) ||
+          /登录|验证码|安全验证|频繁|繁忙|结构不支持/.test(message)
+        )
+          throw error;
+      }
+    }
   };
   return {
     close,
@@ -1511,6 +1563,12 @@ export function equipmentSourceFromPages(
       const results: Awaited<ReturnType<EquipmentSource["findCandidates"]>>["items"] = [];
       equipmentItems: for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
         const item = items[itemIndex];
+        report({
+          assetName: item.name,
+          page: item.searchCursor?.pageNumber || 1,
+          validSamples: 0,
+          retryCount: 0,
+        });
         requestSignal.throwIfAborted();
         const unsupported = equipmentLevelUnsupportedReason(item);
         if (unsupported) {
@@ -1745,6 +1803,7 @@ export function equipmentSourceFromPages(
           marketScope = createMarketScopeAudit(searchPage, yuanshen ? [act] : []);
           const planHash = digest({
             resumePolicy: PRICING_RESUME_POLICY,
+            firstPagePolicy: "empty-first-page-next-stage-v1",
             name: item.name,
             level: item.level,
             category: item.category,
@@ -1964,6 +2023,7 @@ export function equipmentSourceFromPages(
               if (candidate.verified && candidate.matchType === "similar") similar.push(candidate);
               else if (candidate.verified) candidates.push(candidate);
               else rejected.push(candidate);
+              report({ validSamples: candidates.length + similar.length });
               failed.delete(url);
               return !mismatch;
             } catch (error) {
@@ -2076,6 +2136,11 @@ export function equipmentSourceFromPages(
               submittedArgs?: Query;
             }>;
             const loadPage = async (pageNumber: number, first: boolean, replay = false) => {
+              report({
+                page: pageNumber,
+                validSamples: candidates.length + similar.length,
+                retryCount: 0,
+              });
               await pace(requestSignal);
               let form: Awaited<ReturnType<typeof applyEquipmentSearchForm>> | undefined;
               if (first) {
@@ -2442,6 +2507,23 @@ export function equipmentSourceFromPages(
                 }
               }
               if (!pageFullyRead || failed.size) break;
+              const verifiedFirstPage =
+                pageNumber === 1 &&
+                listing.rows.some((row) =>
+                  [...candidates, ...similar].some(
+                    (candidate) => equipmentIdentity(candidate.url) === equipmentIdentity(row.url),
+                  ),
+                );
+              if (pageNumber === 1 && listing.hasNext && !verifiedFirstPage) {
+                next.emptyFirstPageModes = [
+                  ...new Set([...(next.emptyFirstPageModes || []), modeIndex]),
+                ];
+                next.modeIndex = modeIndex + 1;
+                next.pageNumber = 1;
+                next.rowIndex = 0;
+                next.pageRowsHash = "";
+                break;
+              }
               if (!listing.hasNext) {
                 exhausted = !listing.hasNext;
                 // Exhausted same-config results use their actual count without mixing
@@ -2465,25 +2547,33 @@ export function equipmentSourceFromPages(
           const historyPending =
             (next.historyIndex || 0) > 0 &&
             (next.historyIndex || 0) < (next.pageHistory?.length || 0);
+          const samplingStopped =
+            !!next.emptyFirstPageModes?.length &&
+            next.modeIndex >= queryModes.length &&
+            !candidates.length &&
+            !similar.length;
           const completed =
+            !samplingStopped &&
             !orderChanged &&
             historyValidated &&
             !historyPending &&
             (enoughSamples() || next.modeIndex >= queryModes.length);
           next.seen = [...seen];
           next.failed = [...failed].map(([url, modeIndex]) => ({ url, modeIndex }));
-          const note = orderChanged
-            ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。"
-            : `本轮查询${roundPages}页、${count}个列表候选、${details}个详情；` +
-              (Object.keys(listingSkipCounts).length
-                ? `列表已排除${Object.values(listingSkipCounts).reduce((sum, n) => sum + n, 0)}个不匹配商品；`
-                : "") +
-              (completed && exhausted
-                ? "本次筛选结果已读完"
-                : completed
-                  ? "有限样本查询，未遍历全部在售商品"
-                  : "未遍历全部在售商品，本轮预算已用完，已保存筛选阶段、页码和行位置；继续查询剩余商品") +
-              "。";
+          const note = samplingStopped
+            ? "各筛选条件仅检查第一页，均未取得有效样本；已停止翻页，后续页未查询，价格待补齐。"
+            : orderChanged
+              ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。"
+              : `本轮查询${roundPages}页、${count}个列表候选、${details}个详情；` +
+                (Object.keys(listingSkipCounts).length
+                  ? `列表已排除${Object.values(listingSkipCounts).reduce((sum, n) => sum + n, 0)}个不匹配商品；`
+                  : "") +
+                (completed && exhausted
+                  ? "本次筛选结果已读完"
+                  : completed
+                    ? "有限样本查询，未遍历全部在售商品"
+                    : "未遍历全部在售商品，本轮预算已用完，已保存筛选阶段、页码和行位置；继续查询剩余商品") +
+                "。";
           records.push({
             key: item.key,
             searchUrl: currentRecord.searchUrl,
@@ -2502,6 +2592,9 @@ export function equipmentSourceFromPages(
             comparableCandidates: similar,
             rejectedCandidates: rejected,
             detailFailures,
+            ...(next.emptyFirstPageModes?.length
+              ? { emptyFirstPageModes: next.emptyFirstPageModes }
+              : {}),
             ...(!completed || failed.size ? { cursor: next } : {}),
           });
           const itemSearchState = failed.size ? "read_failed" : completed ? "completed" : "pending";
@@ -2509,6 +2602,7 @@ export function equipmentSourceFromPages(
             key: item.key,
             query,
             searchState: itemSearchState,
+            ...(samplingStopped ? { samplingStopped: true } : {}),
             ...(!completed || failed.size ? { searchCursor: next } : {}),
             candidates: returnedCandidates(),
             note,
@@ -2563,7 +2657,10 @@ export function equipmentSourceFromPages(
   };
 }
 
-export async function createEquipmentSource(signal: AbortSignal) {
+export async function createEquipmentSource(
+  signal: AbortSignal,
+  onProgress?: (progress: PricingSearchProgress) => void,
+) {
   signal.throwIfAborted();
   let searchPage: Page | undefined, detailPage: Page | undefined;
   try {
@@ -2573,7 +2670,7 @@ export async function createEquipmentSource(signal: AbortSignal) {
     signal.throwIfAborted();
     detailPage = await createHiddenPage(browser);
     signal.throwIfAborted();
-    return equipmentSourceFromPages(searchPage, detailPage, signal);
+    return equipmentSourceFromPages(searchPage, detailPage, signal, onProgress);
   } catch (error) {
     await Promise.allSettled([searchPage?.close(), detailPage?.close()]);
     throw error;

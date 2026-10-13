@@ -204,6 +204,8 @@ export function equipmentDetailDocument(options = {}) {
     modelId: null,
     kindId: null,
     independentPanels: false,
+    missingInfoPanel: false,
+    unsupportedContainer: false,
     panelDelay: 0,
     infoDelay: 0,
     ...options,
@@ -212,7 +214,7 @@ export function equipmentDetailDocument(options = {}) {
     `<img id="${recommended ? "recommended-icon" : "main-icon"}" width="50" height="50" src="${pixel}" data_equip_name="${escape(name)}" ${settings.linkedTooltip || recommended ? `data_tip_box="${tipId}"` : ""} ${recommended ? 'data_price="100"' : settings.visiblePrice ? `data_price="${settings.price}"` : ""} onmouseover="showTip('${tipId}')">`;
   // The live official template renders attributes directly, without a data_equip_name image.
   const main = settings.renderedPanel
-    ? `<div class="${settings.independentPanels ? "independent-product" : "infoList goodsInfo"}"><ul id="info_panel"><li>服务器：测试区 ID：${escape(settings.name)} 等级：100</li><li>状态：${escape(settings.status)}</li><li>价格：${settings.visiblePrice ? `<span class="price fB">￥${settings.price}（元）</span>` : ""}<span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul><div class="attribute"><p id="equip_desc_panel" style="white-space:pre-line">${escape(settings.description)}</p></div></div>`
+    ? `<div class="${settings.unsupportedContainer ? "unsupported-product" : settings.independentPanels ? "independent-product" : "infoList goodsInfo"}"><ul ${settings.missingInfoPanel ? 'class="product-info"' : 'id="info_panel"'}><li>服务器：测试区 ${settings.missingInfoPanel ? "名称" : "ID"}：${escape(settings.name)} 等级：100</li><li>状态：${escape(settings.status)}</li><li>价格：${settings.visiblePrice ? `<span class="price fB">￥${settings.price}（元）</span>` : ""}<span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul><div class="attribute"><p id="equip_desc_panel" style="white-space:pre-line">${escape(settings.description)}</p></div></div>`
     : `<main id="equip_detail">${icon(settings.name, "EquipTipsBox")}${settings.visiblePrice ? `<span class="price">¥${settings.price}</span>` : ""}<p>是否上架：${escape(settings.status)}</p></main>`;
   const recommendedName = settings.recommendSameName ? settings.name : "推荐腰带";
   const recommend = settings.recommend

@@ -6,6 +6,7 @@ import type { PetPricingSnapshot } from "./pet-pricing";
 import { petGearInventory, type PetGearPricingSnapshot } from "./pet-gear-inventory";
 import { ANALYSIS_SCHEMA, validateAnalysis } from "./contract";
 import { AnalysisStore } from "./store";
+import type { PricingSearchProgress } from "./equipment-pricing";
 import { VALUATION_SCHEMA, validateValuation } from "./valuation-contract";
 import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { CALCULATION_VERSION } from "./profile";
@@ -21,6 +22,7 @@ export type AnalysisClient = {
     signal: AbortSignal,
     settings?: ValuationSettings,
     previous?: EquipmentPricingSnapshot,
+    onProgress?: (progress: PricingSearchProgress) => void,
   ) => Promise<EquipmentPricingSnapshot>;
   searchPets?: (
     record: SavedRoleRecord,
@@ -43,6 +45,40 @@ export type AnalysisClient = {
     signal: AbortSignal,
   ) => Promise<{ text: string; usage?: unknown; truncated?: boolean }>;
 };
+export const MAX_PRICING_ROUNDS = 8;
+const MAX_ROLE_PRICING_MS = 15 * 60_000;
+function itemPricingError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (
+    /登录|验证码|安全验证|频繁|繁忙|权限|禁止|policy|security|未连接|无法连接|调试端口|分析锁|状态已变化|资料与当前任务不匹配/i.test(
+      message,
+    )
+  )
+    return false;
+  if (error instanceof Error && "code" in error && error.code === "PET_GROWTH_ARGUMENT_MISMATCH")
+    return true;
+  if (error instanceof Error && error.name === "TimeoutError") return true;
+  if (/条件|范围/.test(message)) return false;
+  return /详情|主商品|属性|页面结构|读取|未加载|游标|超时|TimeoutError|Timeout \d+ms exceeded/.test(
+    message,
+  );
+}
+/** Providers must settle on cancellation even if their own promise ignores abort. */
+export function pricingUntilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason);
+    };
+    if (signal.aborted) {
+      promise.catch(() => {});
+      abort();
+      return;
+    }
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
+}
 export class AnalysisRunner {
   private active: { id: string; controller: AbortController; completion: Promise<void> } | null =
     null;
@@ -123,7 +159,7 @@ export class AnalysisRunner {
     }
     const run = this.store.run(id);
     if (!run) throw new Error("分析任务不存在");
-    if (!run.queued && !run.failed) return id;
+    if (!run.queued && !(retryFailed && (run.failed || run.waitingPricing))) return id;
     if (run.calculationVersion && run.calculationVersion !== CALCULATION_VERSION)
       throw new Error("估值规则已更新，请按新规则开始分析；旧结果仍可查看");
     const client = await this.client(run.provider, run.model);
@@ -173,6 +209,7 @@ export class AnalysisRunner {
       });
   }
   private async process(id: string, owner: string, client: AnalysisClient, stop: AbortSignal) {
+    let budget = { taskId: "", started: Date.now(), rounds: 0 };
     while (!stop.aborted) {
       if (!this.store.owns(owner)) return;
       let task = this.store.next(id);
@@ -180,38 +217,81 @@ export class AnalysisRunner {
         this.store.setRun(id, "completed", null, owner);
         return;
       }
+      if (budget.taskId !== task.id) budget = { taskId: task.id, started: Date.now(), rounds: 0 };
+      const pendingPricing =
+        (task.profile?.equipmentSearch &&
+          (!task.equipmentPricing ||
+            task.equipmentPricing.searchComplete === false ||
+            !pricingTimestampFresh(task.equipmentPricing.searchedAt))) ||
+        (task.profile?.petSearch &&
+          (!task.petPricing ||
+            task.petPricing.searchComplete === false ||
+            !pricingTimestampFresh(task.petPricing.searchedAt))) ||
+        (task.profile?.petGearSearch &&
+          petGearInventory(task.record).items.length &&
+          (!task.petPricing?.gearPricing ||
+            task.petPricing.gearPricing.searchComplete === false ||
+            !pricingTimestampFresh(task.petPricing.gearPricing.searchedAt))) ||
+        (task.profile?.roleSearch && !validateRolePricing(task.rolePricing, task.record));
+      if (
+        pendingPricing &&
+        (budget.rounds >= MAX_PRICING_ROUNDS || Date.now() - budget.started >= MAX_ROLE_PRICING_MS)
+      ) {
+        this.store.deferPricing(task, owner, "达到本角色自动查价上限，报价仍未补齐");
+        continue;
+      }
+      const reportProgress = (progress: Partial<PricingSearchProgress> = {}) => {
+        this.store.pricingProgress(task!, owner, {
+          ...progress,
+          round: budget.rounds,
+          startedAt: new Date(budget.started).toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      };
       if (
         task.profile?.equipmentSearch &&
         (!task.equipmentPricing ||
           task.equipmentPricing.searchComplete === false ||
           !pricingTimestampFresh(task.equipmentPricing.searchedAt))
       ) {
-        const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
+        const signal = AbortSignal.any([
+          stop,
+          AbortSignal.timeout(
+            Math.max(1, Math.min(300_000, MAX_ROLE_PRICING_MS - (Date.now() - budget.started))),
+          ),
+        ]);
         try {
           this.store.beginEquipmentSearch(task, owner);
+          budget.rounds++;
+          reportProgress();
           if (!client.searchEquipment) throw new Error("装备联网查价尚未连接");
           const previousPricing = task.equipmentPricing;
-          const snapshot = await client.searchEquipment(
-            task.record,
+          const snapshot = await pricingUntilAborted(
+            client.searchEquipment(
+              task.record,
+              signal,
+              task.profile.settings,
+              task.equipmentPricing,
+              reportProgress,
+            ),
             signal,
-            task.profile.settings,
-            task.equipmentPricing,
           );
           signal.throwIfAborted();
           if (!this.store.owns(owner)) return;
           task = this.store.saveEquipmentPricing(task, snapshot, owner);
           if (snapshot.searchComplete === false) {
             if (pricingSearchAdvanced(previousPricing, snapshot)) continue;
-            this.store.setRun(
-              id,
-              "paused",
-              (snapshot.items.some((item) => item.searchState === "read_failed")
-                ? "装备详情读取失败"
-                : "装备查价游标未推进") +
-                "，已保存逐件进度；等待新的可核验数据或修复读取后继续查价",
+            this.store.deferPricing(
+              task,
               owner,
+              (snapshot.items.some((item) => item.samplingStopped)
+                ? "各筛选条件第一页未取得有效样本，已停止翻页"
+                : snapshot.items.some((item) => item.searchState === "read_failed")
+                  ? "装备详情读取失败"
+                  : "装备查价游标未推进") +
+                "，已保存逐件进度；等待新的可核验数据或修复读取后继续查价",
             );
-            return;
+            continue;
           }
         } catch (error) {
           if (!this.store.owns(owner)) return;
@@ -223,6 +303,10 @@ export class AnalysisRunner {
               : error instanceof Error
                 ? error.message
                 : "装备联网查价失败，请重试";
+          if (!stop.aborted && (signal.aborted || itemPricingError(error))) {
+            this.store.deferPricing(task, owner, message);
+            continue;
+          }
           this.store.setRun(id, "paused", message, owner);
           return;
         }
@@ -233,12 +317,22 @@ export class AnalysisRunner {
           task.petPricing.searchComplete === false ||
           !pricingTimestampFresh(task.petPricing.searchedAt))
       ) {
-        const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
+        const signal = AbortSignal.any([
+          stop,
+          AbortSignal.timeout(
+            Math.max(1, Math.min(300_000, MAX_ROLE_PRICING_MS - (Date.now() - budget.started))),
+          ),
+        ]);
         try {
           this.store.beginPetSearch(task, owner);
+          budget.rounds++;
+          reportProgress();
           if (!client.searchPets) throw new Error("宝宝联网查价尚未连接");
           const previousPricing = task.petPricing;
-          const snapshot = await client.searchPets(task.record, signal, task.petPricing);
+          const snapshot = await pricingUntilAborted(
+            client.searchPets(task.record, signal, task.petPricing),
+            signal,
+          );
           // Gear has its own cursor and expiry; the store verifies it against this frozen record.
           if (task.profile.petGearSearch && !snapshot.gearPricing && previousPricing?.gearPricing)
             snapshot.gearPricing = previousPricing.gearPricing;
@@ -247,16 +341,15 @@ export class AnalysisRunner {
           task = this.store.savePetPricing(task, snapshot, owner);
           if (snapshot.searchComplete === false) {
             if (pricingSearchAdvanced(previousPricing, snapshot)) continue;
-            this.store.setRun(
-              id,
-              "paused",
+            this.store.deferPricing(
+              task,
+              owner,
               (snapshot.items.some((item) => item.searchState === "read_failed")
                 ? "宝宝详情读取失败"
                 : "宝宝查价游标未推进") +
                 "，已保存逐件进度；等待新的可核验数据或修复读取后继续查价",
-              owner,
             );
-            return;
+            continue;
           }
         } catch (error) {
           if (!this.store.owns(owner)) return;
@@ -268,6 +361,10 @@ export class AnalysisRunner {
               : error instanceof Error
                 ? error.message
                 : "宝宝联网查价失败，请重试";
+          if (!stop.aborted && (signal.aborted || itemPricingError(error))) {
+            this.store.deferPricing(task, owner, message);
+            continue;
+          }
           this.store.setRun(id, "paused", message, owner);
           return;
         }
@@ -280,24 +377,30 @@ export class AnalysisRunner {
           task.petPricing.gearPricing.searchComplete === false ||
           !pricingTimestampFresh(task.petPricing.gearPricing.searchedAt))
       ) {
-        const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
+        const signal = AbortSignal.any([
+          stop,
+          AbortSignal.timeout(
+            Math.max(1, Math.min(300_000, MAX_ROLE_PRICING_MS - (Date.now() - budget.started))),
+          ),
+        ]);
         try {
           this.store.beginPetSearch(task, owner);
+          budget.rounds++;
+          reportProgress();
           if (!client.searchPetGear) throw new Error("宝宝装备联网查价尚未连接");
           const previousPricing = task.petPricing.gearPricing;
-          const gearPricing = await client.searchPetGear(
-            task.record,
+          const gearPricing = await pricingUntilAborted(
+            client.searchPetGear(task.record, signal, task.petPricing.gearPricing),
             signal,
-            task.petPricing.gearPricing,
           );
           signal.throwIfAborted();
           if (!this.store.owns(owner)) return;
           task = this.store.savePetPricing(task, { ...task.petPricing, gearPricing }, owner);
           if (gearPricing.searchComplete === false) {
             if (pricingSearchAdvanced(previousPricing, gearPricing)) continue;
-            this.store.setRun(
-              id,
-              "paused",
+            this.store.deferPricing(
+              task,
+              owner,
               (gearPricing.items.some((item) => item.searchState === "read_failed")
                 ? "宝宝装备详情读取失败"
                 : "宝宝装备查价游标未推进") +
@@ -305,9 +408,8 @@ export class AnalysisRunner {
                 (gearPricing.issues.length
                   ? "。" + gearPricing.issues.join("；").slice(0, 600)
                   : ""),
-              owner,
             );
-            return;
+            continue;
           }
         } catch (error) {
           if (!this.store.owns(owner)) return;
@@ -319,22 +421,44 @@ export class AnalysisRunner {
               : error instanceof Error
                 ? error.message
                 : "宝宝装备联网查价失败，请重试";
+          if (!stop.aborted && (signal.aborted || itemPricingError(error))) {
+            this.store.deferPricing(task, owner, message);
+            continue;
+          }
           this.store.setRun(id, "paused", message, owner);
           return;
         }
       }
       if (task.profile?.roleSearch && !validateRolePricing(task.rolePricing, task.record)) {
-        const signal = AbortSignal.any([stop, AbortSignal.timeout(900_000)]);
+        const signal = AbortSignal.any([
+          stop,
+          AbortSignal.timeout(Math.max(1, MAX_ROLE_PRICING_MS - (Date.now() - budget.started))),
+        ]);
         try {
           this.store.beginRoleSearch(task, owner);
+          budget.rounds++;
+          reportProgress();
           if (!client.searchRole) throw new Error("整号联网查价尚未连接");
-          const snapshot = await client.searchRole(task.record, signal, task.rolePricing);
+          const snapshot = await pricingUntilAborted(
+            client.searchRole(task.record, signal, task.rolePricing),
+            signal,
+          );
           signal.throwIfAborted();
           if (!this.store.owns(owner)) return;
           task = this.store.saveRolePricing(task, snapshot, owner);
         } catch (error) {
           if (!this.store.owns(owner)) return;
           this.store.abortRoleSearch(task, owner);
+          if (!stop.aborted && (signal.aborted || itemPricingError(error))) {
+            this.store.deferPricing(
+              task,
+              owner,
+              signal.aborted
+                ? "整号联网查价超时"
+                : String(error instanceof Error ? error.message : error),
+            );
+            continue;
+          }
           this.store.setRun(
             id,
             "paused",
@@ -351,7 +475,7 @@ export class AnalysisRunner {
         }
       }
       const prompt =
-        task.profile && task.lastError && task.attempts > 0
+        task.profile && task.lastError && !task.lastError.startsWith("已暂停") && task.attempts > 0
           ? task.prompt +
             "\n\n上次输出校验未通过：" +
             task.lastError.slice(0, 1000) +
@@ -363,9 +487,8 @@ export class AnalysisRunner {
       try {
         if (Buffer.byteLength(task.document.text, "utf8") > 128 * 1024)
           throw new Error("完整商品原文超过 128 KiB，已保留原文，请先核对资料长度后重试");
-        const response = await client.analyze(
-          prompt,
-          task.profile ? VALUATION_SCHEMA : ANALYSIS_SCHEMA,
+        const response = await pricingUntilAborted(
+          client.analyze(prompt, task.profile ? VALUATION_SCHEMA : ANALYSIS_SCHEMA, signal),
           signal,
         );
         raw = response.text;

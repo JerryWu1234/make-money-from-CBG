@@ -14,6 +14,7 @@ import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
 import { petGearInventory } from "./pet-gear-inventory";
 import { validateSampleSelection } from "./sample-selection";
 import { validateRolePricing, type RolePricingSnapshot } from "./role-pricing";
+import { captureIssues } from "../crawler/capture-readiness";
 import type {
   AnalysisDetail,
   AnalysisItem,
@@ -108,6 +109,7 @@ export class AnalysisStore {
       db.exec("ALTER TABLE analysis_tasks ADD COLUMN source_task_id TEXT");
     for (const [table, column] of [
       ["analysis_runs", "profile_json"],
+      ["analysis_tasks", "pricing_progress_json"],
       ["analysis_attempts", "request_text"],
       ["analysis_attempts", "request_hash"],
       ["analysis_tasks", "equipment_pricing_json"],
@@ -185,6 +187,8 @@ export class AnalysisStore {
       .prepare(`SELECT r.*,count(t.id) total,
       coalesce(sum(t.status='completed'),0) completed,coalesce(sum(t.status='failed'),0) failed,
       coalesce(sum(t.status='queued'),0) queued,coalesce(sum(t.reused),0) reused,
+      coalesce(sum(t.status='waiting_pricing'),0) waiting_pricing,
+      (SELECT pricing_progress_json FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) pricing_progress_json,
       (SELECT json_extract(source_listing_json,'$.name') FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current,
       (SELECT CASE
         WHEN (equipment_pricing_json IS NULL OR json_type(equipment_pricing_json,'$.searchComplete')='false' OR ${expiredPricingTimeSql("equipment_pricing_json", "$")}) AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search'
@@ -197,6 +201,9 @@ export class AnalysisStore {
       END FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) phase
       FROM analysis_runs r LEFT JOIN analysis_tasks t ON t.run_id=r.id WHERE r.id=? GROUP BY r.id`)
       .get(id);
+    const storedError = row ? nullable(row.error) : null;
+    const pauseNotice =
+      row?.status === "paused" && storedError?.startsWith("已暂停") ? storedError : null;
     return row
       ? {
           id: String(row.id),
@@ -206,11 +213,16 @@ export class AnalysisStore {
           status: String(row.status) as AnalysisRun["status"],
           createdAt: String(row.created_at),
           updatedAt: String(row.updated_at),
-          error: nullable(row.error),
+          error: pauseNotice ? null : storedError,
+          pauseNotice,
           total: Number(row.total),
           completed: Number(row.completed),
           failed: Number(row.failed),
           queued: Number(row.queued),
+          waitingPricing: Number(row.waiting_pricing),
+          pricingProgress: row.pricing_progress_json
+            ? JSON.parse(String(row.pricing_progress_json))
+            : null,
           reused: Number(row.reused),
           current: nullable(row.current),
           phase: nullable(row.phase) as AnalysisRun["phase"],
@@ -231,6 +243,58 @@ export class AnalysisStore {
       )
       .get();
     return row ? this.run(String(row.id)) : null;
+  }
+  /** Refresh unfinished inputs after collection, retaining the run's original settings. */
+  refreshPendingCaptures(id: string) {
+    const run = this.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(id);
+    if (!run) throw new Error("分析批次不存在");
+    const profile = run.profile_json
+      ? (JSON.parse(String(run.profile_json)) as AnalysisProfile)
+      : undefined;
+    const rows = this.db
+      .prepare(`SELECT t.id,t.source_listing_json,t.source_detail_json,l.listing_json,l.detail_json
+      FROM analysis_tasks t JOIN listings l ON l.key=t.listing_key
+      WHERE t.run_id=? AND t.status IN ('queued','waiting_pricing','failed') AND l.status='complete' AND l.detail_json IS NOT NULL`)
+      .all(id);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of rows) {
+        if (
+          row.source_listing_json === row.listing_json &&
+          row.source_detail_json === row.detail_json
+        )
+          continue;
+        const record: SavedRoleRecord = {
+          listing: JSON.parse(String(row.listing_json)),
+          detail: JSON.parse(String(row.detail_json)),
+          status: "complete",
+          error: null,
+        };
+        if (captureIssues(record.detail!).length)
+          throw new Error("采集完整性未核验，不能更新分析输入");
+        const document = buildProductDocument(record);
+        const prompt = profile
+          ? valuationPrompt(document, record, profile)
+          : analysisPrompt(document);
+        this.db
+          .prepare(`UPDATE analysis_tasks SET input_hash=?,input_text=?,prompt_hash=?,prompt_text=?,source_listing_json=?,source_detail_json=?,collected_at=?,
+          status='queued',error=NULL,result_json=NULL,completed_at=NULL,reused=0,source_task_id=NULL,equipment_pricing_json=NULL,pet_pricing_json=NULL,role_pricing_json=NULL,pricing_progress_json=NULL WHERE id=?`)
+          .run(
+            document.contentHash,
+            document.text,
+            textHash(prompt),
+            prompt,
+            row.listing_json,
+            row.detail_json,
+            document.collectedAt,
+            row.id,
+          );
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
   setRun(id: string, state: AnalysisRun["status"], error: string | null, owner: string) {
     this.db
@@ -398,6 +462,12 @@ export class AnalysisStore {
           error: null,
         };
         if (record.listing.key !== row.key) throw new Error("商品 ID 与数据库记录不一致");
+        if (
+          profile &&
+          (profile.equipmentSearch || profile.petSearch) &&
+          captureIssues(record.detail!).length
+        )
+          throw new Error("角色资料尚未完整采集，不能进入分析任务");
         const document = buildProductDocument(record);
         const prompt = profile
           ? valuationPrompt(document, record, profile)
@@ -478,6 +548,28 @@ export class AnalysisStore {
       ...(row.pet_pricing_json ? { petPricing: JSON.parse(String(row.pet_pricing_json)) } : {}),
       ...(row.role_pricing_json ? { rolePricing: JSON.parse(String(row.role_pricing_json)) } : {}),
     };
+  }
+  deferPricing(task: AnalysisTask, owner: string, error: string) {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    if (
+      this.db
+        .prepare(`UPDATE analysis_tasks SET status='waiting_pricing',error=?
+      WHERE id=? AND status IN ('queued','running')
+      AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')`)
+        .run(error + "；已保留查价进度，可单独重试待补齐项", task.id, task.id).changes !== 1
+    )
+      throw new Error("查价任务状态已变化");
+    this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
+  }
+  pricingProgress(
+    task: AnalysisTask,
+    owner: string,
+    progress: NonNullable<AnalysisRun["pricingProgress"]>,
+  ) {
+    if (!this.owns(owner)) return;
+    this.db
+      .prepare("UPDATE analysis_tasks SET pricing_progress_json=? WHERE id=? AND status='running'")
+      .run(JSON.stringify(progress), task.id);
   }
   beginEquipmentSearch(task: AnalysisTask, owner: string) {
     if (!this.owns(owner)) throw new Error("分析锁已失效");
@@ -680,7 +772,7 @@ export class AnalysisStore {
   retry(runId: string) {
     this.db
       .prepare(
-        "UPDATE analysis_tasks SET status='queued',error=NULL,attempt_count=0 WHERE run_id=? AND status='failed'",
+        "UPDATE analysis_tasks SET status='queued',error=NULL,attempt_count=0,pricing_progress_json=NULL WHERE run_id=? AND status IN ('failed','waiting_pricing')",
       )
       .run(runId);
   }

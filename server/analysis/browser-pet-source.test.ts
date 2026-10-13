@@ -8,6 +8,7 @@ import {
   petPageSource,
   petQuery,
   petQueries,
+  petGrowthInput,
   petSourceFromPages,
   petEvolutionPreview,
   type PetSearchConfig,
@@ -461,6 +462,24 @@ describe("官网宝宝查询参数", () => {
     expect(() => assertPetUIArguments(expected, { ...expected, serverid: "33" })).toThrow(
       "serverid",
     );
+  });
+  it("成长千分值通过官网浮点乘法和截断仍精确提交，保留严格校验", () => {
+    expect(parseInt(String(parseFloat("1.009") * 1000), 10)).toBe(1008);
+    for (let growth = 0; growth <= 2000; growth++) {
+      const input = petGrowthInput(growth);
+      const submitted = parseInt(String(parseFloat(input) * 1000), 10);
+      expect(submitted, `growth=${growth}, input=${input}`).toBe(growth);
+      expect(() => assertPetUIArguments({ growth }, { growth: submitted })).not.toThrow();
+    }
+    expect(petGrowthInput(1280)).toBe("1.280");
+    for (const growth of [NaN, Infinity, -1, 1009.5])
+      expect(() => petGrowthInput(growth)).toThrow("非负整数千分值");
+    expect(() => assertPetUIArguments({ growth: 1009 }, { growth: 1008 })).toThrow("growth");
+    try {
+      assertPetUIArguments({ growth: 1009 }, { growth: 1008 });
+    } catch (error) {
+      expect(error).toMatchObject({ code: "PET_GROWTH_ARGUMENT_MISMATCH" });
+    }
   });
   it("使用官方类型/技能/内丹ID，完整等级和成长单位，全服查询只取资质明确base", () => {
     expect(petQuery(item(), config)).toMatchObject({
@@ -1000,7 +1019,7 @@ describe("宝宝查询使用独立后台页", () => {
       for (const [id, value] of Object.entries(inputValues)) {
         if (id.startsWith("txt_") && value)
           currentArgs[id.slice(4)] =
-            id === "txt_growth" ? Math.round(Number(value) * 1000) : Number(value);
+            id === "txt_growth" ? Math.trunc(Number(value) * 1000) : Number(value);
       }
       if (baby) currentArgs.is_baobao = 1;
       for (const key of ["skill", "high_neidan", "low_neidan"]) {
@@ -1082,7 +1101,7 @@ describe("宝宝查询使用独立后台页", () => {
       goto: vi.fn(async () => {}),
       close: vi.fn(async () => {}),
       waitForFunction: vi.fn(async () => {}),
-      evaluate: vi.fn(async (fn: Function, arg: unknown) => {
+      evaluate: vi.fn(async (fn: Function, arg: unknown): Promise<unknown> => {
         if (fn.name === "readPageSnapshot")
           return {
             url: PET_SEARCH_URL,
@@ -1322,6 +1341,34 @@ describe("宝宝查询使用独立后台页", () => {
     const { source, detail } = queryPages(true, new AbortController(), false, {}, true);
     try {
       await expect(source.findCandidates([item()], new AbortController().signal)).rejects.toThrow();
+      expect(detail.goto).not.toHaveBeenCalled();
+    } finally {
+      await source.close();
+    }
+  });
+  it("宝宝结果等待超时保存回调和加载状态，不读取详情或掩盖超时类型", async () => {
+    const { source, search, detail } = queryPages(true);
+    search.waitForFunction.mockImplementation(async (...parameters: unknown[]) => {
+      const options = parameters[2] as { timeout?: number } | undefined;
+      if (options?.timeout === 20000)
+        throw Object.assign(new Error("page.waitForFunction: Timeout 20000ms exceeded."), {
+          name: "TimeoutError",
+        });
+    });
+    const original = search.evaluate.getMockImplementation()!;
+    search.evaluate.mockImplementation(async (fn: Function, arg: unknown) =>
+      fn.name === "readPetSearchWaitState"
+        ? { callbackReceived: false, callbackPage: null, loadingVisible: true }
+        : original(fn, arg),
+    );
+    try {
+      await expect(
+        source.findCandidates([item()], new AbortController().signal),
+      ).rejects.toMatchObject({
+        name: "TimeoutError",
+        code: "PET_SEARCH_RESULT_TIMEOUT",
+        message: expect.stringContaining("回调未收到，回调页未知，加载图标仍显示"),
+      });
       expect(detail.goto).not.toHaveBeenCalled();
     } finally {
       await source.close();

@@ -227,6 +227,7 @@ async function searchEquipment(
   signal: AbortSignal,
   settings?: ValuationSettings,
   previous?: EquipmentPricingSnapshot,
+  onProgress?: (progress: import("./analysis/equipment-pricing").PricingSearchProgress) => void,
 ) {
   try {
     signal.throwIfAborted();
@@ -236,7 +237,7 @@ async function searchEquipment(
       !plan.items.some((item) => item.searchState === "pending")
     )
       return await searchEquipmentPrices(record, signal, unusedEquipmentSource, settings, previous);
-    const source = await createEquipmentSource(signal);
+    const source = await createEquipmentSource(signal, onProgress);
     try {
       signal.throwIfAborted();
       return await searchEquipmentPrices(record, signal, source, settings, previous);

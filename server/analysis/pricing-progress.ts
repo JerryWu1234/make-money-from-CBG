@@ -17,6 +17,7 @@ export type PricingSearchAttempt = {
 
 /** Changed results invalidate both saved row positions and the adopted sample order. */
 export function resetPricingCursor(cursor: EquipmentSearchCursor) {
+  delete cursor.emptyFirstPageModes;
   Object.assign(cursor, {
     modeIndex: 0,
     pageNumber: 1,
@@ -95,6 +96,10 @@ export function resumePricingItems<T extends EquipmentPricingSnapshot>(
       if (["pending", "read_failed"].includes(resumed.searchState || "")) {
         resumed.searchState = "pending";
         resumed.issues = [...item.issues];
+        if (resumed.samplingStopped) {
+          delete resumed.searchCursor;
+          delete resumed.samplingStopped;
+        }
       }
       return resumed;
     }
@@ -154,7 +159,8 @@ export function pricingSearchAdvanced(
   previous: EquipmentPricingSnapshot | undefined,
   current: EquipmentPricingSnapshot,
 ) {
-  if (current.items.some((item) => item.searchState === "read_failed")) return false;
+  if (current.items.some((item) => item.searchState === "read_failed" || item.samplingStopped))
+    return false;
   return current.items.some((item) => {
     const saved = previous?.items.find((value) => value.key === item.key);
     if (
