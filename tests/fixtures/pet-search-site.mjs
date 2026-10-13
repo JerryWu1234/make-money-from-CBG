@@ -31,6 +31,10 @@ export function petSearchDocument(options = {}) {
     .replace(/\/\* EQUIPMENT_UI_START \*\/[\s\S]*?\/\* EQUIPMENT_UI_END \*\//, "")
     .replace("官方装备搜索结构模拟页", "官方宝宝搜索结构模拟页")
     .replace(
+      "onComplete(){document.querySelector('#loading_img').style.display='none';}",
+      "onComplete(){if(!settings.keepLoading)document.querySelector('#loading_img').style.display='none';}",
+    )
+    .replace(
       /window\.OverallSearchAct=[^;]+;/,
       `window.OverallSearchAct='overall_search_pet';window.SaleablePetNameInfo=${encoded(options.petNames || { 2001: "画魂", 3001: "幽灵" })};window.PetSkills=${encoded(
         options.petSkillChoices || [
@@ -155,7 +159,7 @@ export function petDetailDocument(options = {}) {
   const pet = {
     type_id: 2001,
     pet_grade: "119",
-    growth: 1.28,
+    growth: s.rawGrowth ?? 1.28,
     attack_aptitude: 1550,
     attack_ext: 22,
     defence_aptitude: 1400,

@@ -555,7 +555,7 @@ describe("持久化的商品分析队列", () => {
     expect(store.detail(taskId)?.result?.valuation?.equipment_pricing).toEqual(pricing);
   });
   it.each(["equipment", "pet"] as const)(
-    "%s未完成快照入库后暂停，不调用AI；恢复传递原进度并覆盖快照",
+    "%s未完成快照进入待补齐，不调用AI；显式重试传递原进度并覆盖快照",
     async (module) => {
       const { store, runner, analyze, profile, pricing, petPricing, searchEquipment, searchPets } =
         await valuationSetup();
@@ -567,11 +567,18 @@ describe("持久化的商品分析队列", () => {
       else searchPets.mockResolvedValueOnce({ ...petPricing, searchComplete: false });
       const id = await runner.start("codex", true, profile);
       await runner.settled();
-      expect(store.run(id)).toMatchObject({ status: "paused", completed: 0, queued: 1 });
+      expect(store.run(id)).toMatchObject({
+        status: "completed",
+        completed: 0,
+        queued: 0,
+        waitingPricing: 1,
+      });
       expect(analyze).not.toHaveBeenCalled();
-      expect(store.next(id)![module === "equipment" ? "equipmentPricing" : "petPricing"]).toEqual(
-        partial,
-      );
+      expect(
+        store.detail(store.overview({ runId: id }).records.items[0].taskId!)![
+          module === "equipment" ? "equipmentPricing" : "petPricing"
+        ],
+      ).toEqual(partial);
       let release!: () => void;
       const resumedSearch = new Promise<void>((resolve) => {
         release = resolve;
@@ -586,14 +593,14 @@ describe("持久化的商品分析队列", () => {
           await Promise.race([resumedSearch, untilAborted(signal)]);
           return petPricing;
         });
-      await runner.resume(id);
+      await runner.resume(id, true);
       await vi.waitFor(() => expect(search).toHaveBeenCalledTimes(2));
       expect(store.run(id)?.phase).toBe(module === "equipment" ? "equipment_search" : "pet_search");
       expect(analyze).not.toHaveBeenCalled();
       release();
       await runner.settled();
       expect(search).toHaveBeenCalledTimes(2);
-      expect(search.mock.calls[1].at(-1)).toEqual(partial);
+      expect(search.mock.calls[1][module === "equipment" ? 3 : 2]).toEqual(partial);
       expect(analyze).toHaveBeenCalledOnce();
       expect(store.run(id)).toMatchObject({ status: "completed", completed: 1, failed: 0 });
     },

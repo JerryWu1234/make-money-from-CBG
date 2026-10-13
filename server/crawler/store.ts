@@ -10,6 +10,7 @@ import {
   hasUnconfirmedEmptyEquipment,
 } from "./compact";
 import type { Checkpoint, Listing, RoleDetail, SavedListingPage } from "./types";
+import { captureIssues } from "./capture-readiness";
 
 export class CrawlStore {
   readonly db: DatabaseSync;
@@ -35,6 +36,23 @@ export class CrawlStore {
     this.ensureListingColumn("last_attempt_at", "TEXT");
     this.ensureCrawlStateColumn("backfill_complete", "INTEGER NOT NULL DEFAULT 0");
     this.compactExisting();
+    for (const row of this.db
+      .prepare(
+        "SELECT key,detail_json FROM listings WHERE status='complete' AND detail_json IS NOT NULL",
+      )
+      .all()) {
+      const detail = JSON.parse(String(row.detail_json)) as RoleDetail;
+      const issues = captureIssues(detail);
+      if (
+        (detail.equipmentCapture || detail.petCapture) &&
+        detail.captureVersion !== CAPTURE_VERSION
+      )
+        issues.push("采集核验规则已更新，需重新完整采集角色资料");
+      if (issues.length)
+        this.db
+          .prepare("UPDATE listings SET status='failed',error=? WHERE key=?")
+          .run("采集资料尚未完整：" + issues.join("；"), row.key);
+    }
   }
   acquire(owner: string, now = Date.now()): boolean {
     const result = this.db
@@ -157,18 +175,22 @@ export class CrawlStore {
     if (result.changes !== 1) throw new Error("待补采商品不存在或已完成");
   }
   save(item: Listing, detail: RoleDetail, checkpoint?: Checkpoint) {
+    const issues = captureIssues(detail);
+    const complete = issues.length === 0;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.archive(item.key, detail);
       detail = compactDetail(detail);
       const result = this.db
         .prepare(
-          "UPDATE listings SET listing_json=?,price=?,detail_json=?,status='complete',error=NULL,collected_at=? WHERE key=?",
+          "UPDATE listings SET listing_json=?,price=?,detail_json=?,status=?,error=?,collected_at=? WHERE key=?",
         )
         .run(
           JSON.stringify(compactListing(item)),
           item.price,
           JSON.stringify(detail),
+          complete ? "complete" : "failed",
+          complete ? null : "采集资料尚未完整：" + issues.join("；"),
           detail.collectedAt,
           item.key,
         );
@@ -201,13 +223,14 @@ export class CrawlStore {
       flatten(detail.raw, "");
       detail.tabs.forEach((tab, index) => flatten(tab.items || [], "", `items:${index}`));
       detail.tabs.forEach((tab, index) => flatten(tab.pets || [], "", `pets:${index}`));
-      if (checkpoint)
+      if (checkpoint && complete)
         this.db
           .prepare(
             "INSERT INTO crawl_state(id,checkpoint_json) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET checkpoint_json=excluded.checkpoint_json",
           )
           .run(JSON.stringify(checkpoint));
       this.db.exec("COMMIT");
+      return complete;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;

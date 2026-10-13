@@ -1285,9 +1285,14 @@ try {
           [item({ name, level: 80, category: "人物装备 · 耳饰", kindId: "62", description })],
           control.signal,
         );
-        assert.equal(result.items[0].candidates.length, 1);
-        assert.equal(result.items[0].candidates[0].verified, false);
-        assert.match(result.items[0].candidates[0].reason, /主属性.*法术伤害.*20%/);
+        assert.equal(
+          result.items[0].candidates.some((candidate) => candidate.verified),
+          false,
+        );
+        const rejected = result.searchItems.flatMap((record) => record.rejectedCandidates || []);
+        assert.equal(rejected.length, 1);
+        assert.equal(rejected[0].verified, false);
+        assert.match(rejected[0].reason, /主属性.*法术伤害.*20%/);
         assert.deepEqual(detailVisits, ["swapped-ear"]);
       },
     );
@@ -1614,14 +1619,82 @@ try {
       ),
     );
 
+  for (const failCount of [2, Infinity]) {
+    await check("导航被同页重定向中断时最多重试两次：" + failCount, () =>
+      withSource({}, {}, async ({ source, detailPage, control }) => {
+        const originalGoto = detailPage.goto.bind(detailPage);
+        let attempts = 0;
+        detailPage.goto = async (...args) => {
+          if (++attempts <= failCount)
+            throw new Error("page.goto: Navigation is interrupted by another navigation");
+          return originalGoto(...args);
+        };
+        const read = source.readSource(
+          "https://xyq.cbg.163.com/equip?s=1&eid=primary",
+          control.signal,
+        );
+        if (failCount === Infinity) await assert.rejects(read, /interrupted by another navigation/);
+        else assert.match(await read, /挂牌价：¥1000/);
+        assert.equal(attempts, 3);
+      }),
+    );
+  }
+  await check("主商品容器缺少info_panel仍核验价格，不串用同名推荐", () =>
+    withSource(
+      {},
+      {
+        renderedPanel: true,
+        missingInfoPanel: true,
+        selling: 1,
+        recommend: true,
+        recommendFirst: true,
+        recommendSameName: true,
+      },
+      async ({ source, control }) => {
+        const result = await source.findCandidates([item()], control.signal);
+        assert.equal(result.items[0].candidates[0].verified, true);
+        assert.equal(result.items[0].candidates[0].price, 1000);
+      },
+    ),
+  );
+  for (const options of [
+    { visiblePrice: false },
+    { unsupportedContainer: true },
+    { rawPriceValue: 999 },
+    { rawEid: "another-product" },
+    { selling: 0, status: "已下架" },
+  ])
+    await check("无info_panel模板保留价格、身份及下架保护：" + JSON.stringify(options), () =>
+      withSource(
+        {},
+        { renderedPanel: true, missingInfoPanel: true, selling: 1, recommend: true, ...options },
+        async ({ source, control }) => {
+          const result = await source.findCandidates([item()], control.signal);
+          assert.equal(
+            result.items[0].candidates.some((candidate) => candidate.verified),
+            false,
+          );
+          if (options.visiblePrice === false) assert.equal(detailVisits.length, 3);
+          if (options.unsupportedContainer) {
+            assert.equal(detailVisits.length, 1);
+            assert.equal(result.items[0].searchState, "read_failed");
+            assert.match(result.searchItems[0].detailFailures[0].reason, /结构不支持/);
+          }
+        },
+      ),
+    );
   await check("直排模板主商品下架，推荐仍上架也不能采用", () =>
     withSource(
       {},
       { renderedPanel: true, selling: 0, status: "上架中", recommend: true },
       async ({ source, control }) => {
         const result = await source.findCandidates([item()], control.signal);
-        assert.equal(result.items[0].candidates[0].verified, false);
-        assert.match(result.items[0].candidates[0].reason, /下架/);
+        assert.equal(
+          result.items[0].candidates.some((candidate) => candidate.verified),
+          false,
+        );
+        const rejected = result.searchItems.flatMap((record) => record.rejectedCandidates || []);
+        assert.match(rejected[0].reason, /下架/);
       },
     ),
   );
@@ -1763,7 +1836,7 @@ try {
     withSource({ pages: [[]] }, {}, async ({ source, control }) => {
       const input = item();
       let result = await source.findCandidates([input], control.signal);
-      assert.equal(result.items[0].searchState, "pending");
+      assert.equal(result.items[0].searchState, "completed");
       for (let round = 0; round < 3 && result.items[0].searchState === "pending"; round++)
         result = await source.findCandidates([{ ...input, ...result.items[0] }], control.signal);
       assert.equal(result.items[0].searchState, "completed");
@@ -1850,78 +1923,103 @@ try {
     );
   }
 
-  await check("最多三页，注明尚未遍历完", () =>
+  await check("第一页列表无同名装备直接换筛选，不查询后续页", () =>
     withSource(
       {
-        pages: Array.from({ length: 5 }, (_, page) => [{ eid: "other-" + page, name: "其他装备" }]),
+        pages: [
+          [{ eid: "wrong", name: "其他装备" }],
+          [{ eid: "later-match", name: equipmentName }],
+        ],
+      },
+      {},
+      async ({ source, searchPage, control }) => {
+        const result = await source.findCandidates(
+          [
+            item({
+              searchCursor: {
+                version: 1,
+                planHash: "old-policy",
+                modeIndex: 0,
+                pageNumber: 3,
+                rowIndex: 0,
+                pageRowsHash: "old",
+                seen: [],
+                failed: [],
+              },
+            }),
+          ],
+          control.signal,
+        );
+        const calls = await searchPage.evaluate(() => window.calls);
+        assert.ok(calls.length >= 1);
+        assert.ok(calls.every((call) => call.page === 1));
+        assert.deepEqual(detailVisits, []);
+        assert.equal(result.items[0].samplingStopped, true);
+        assert.equal(result.items[0].searchState, "pending");
+        assert.match(result.items[0].note, /后续页未查询/);
+        assert.ok(result.searchItems[0].modes.every((mode) => mode.exhausted === false));
+      },
+    ),
+  );
+  await check("第一页有价格但核验零有效样本，也不翻后续页", () =>
+    withSource(
+      {
+        pages: [
+          [{ eid: "rejected", name: equipmentName }],
+          [{ eid: "later-match", name: equipmentName }],
+        ],
+      },
+      (id) => ({
+        description:
+          id === "rejected"
+            ? equipmentDescription.replace("防御：50", "防御：99")
+            : equipmentDescription,
+      }),
+      async ({ source, searchPage, control }) => {
+        const result = await source.findCandidates([item()], control.signal);
+        assert.ok((await searchPage.evaluate(() => window.calls)).every((call) => call.page === 1));
+        assert.deepEqual(detailVisits, ["rejected"]);
+        assert.equal(result.items[0].samplingStopped, true);
+        assert.equal(
+          result.items[0].candidates.some((candidate) => candidate.verified),
+          false,
+        );
+        assert.ok(
+          result.searchItems[0].rejectedCandidates.some(
+            (candidate) => candidate.price === 1000 && !candidate.verified,
+          ),
+        );
+      },
+    ),
+  );
+  await check("第一页有有效样本时继续第二页，仍取前十件", () =>
+    withSource(
+      {
+        pages: [
+          [{ eid: "first-valid", name: equipmentName }],
+          Array.from({ length: 9 }, (_, i) => ({ eid: "next-valid-" + i, name: equipmentName })),
+        ],
       },
       {},
       async ({ source, searchPage, control }) => {
         const result = await source.findCandidates([item()], control.signal);
-        assert.equal((await searchPage.evaluate(() => window.calls)).length, 3);
-        assert.match(result.items[0].note, /未遍历/);
+        assert.deepEqual(
+          (await searchPage.evaluate(() => window.calls)).map((call) => call.page),
+          [1, 2],
+        );
+        assert.equal(
+          result.items[0].candidates.filter((candidate) => candidate.verified).length,
+          10,
+        );
+        assert.equal(result.items[0].searchState, "completed");
+        assert.notEqual(result.items[0].samplingStopped, true);
+        assert.equal(
+          new URL(result.items[0].candidates[0].url).searchParams.get("eid"),
+          "first-valid",
+        );
       },
     ),
   );
-
-  await check("续查通过官网按钮重建条件再跳第四页，保留实际重放范围证据", () =>
-    withSource(
-      {
-        pages: Array.from({ length: 5 }, (_, page) => [
-          { eid: "single-" + page, name: "其他装备" },
-        ]),
-      },
-      {},
-      async ({ source, searchPage, control }) => {
-        const input = item({ description: "等级100" });
-        const first = await source.findCandidates([input], control.signal);
-        assert.equal(first.items[0].searchState, "pending");
-        assert.equal(first.items[0].searchCursor.pageNumber, 4);
-        assert.deepEqual(
-          (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
-          [1, 2, 3],
-        );
-        const validation = await source.findCandidates(
-          [{ ...input, ...first.items[0] }],
-          control.signal,
-        );
-        assert.equal(validation.items[0].searchState, "pending");
-        assert.equal(validation.items[0].searchCursor.historyIndex, 3);
-        assert.deepEqual(
-          (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
-          [1, 2, 3],
-        );
-        const second = await source.findCandidates(
-          [{ ...input, ...validation.items[0] }],
-          control.signal,
-        );
-        assert.deepEqual(
-          (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
-          [1, 4, 5],
-        );
-        assert.equal(second.searchItems[0].scopeEvidence[0].replay, true);
-        assert.equal(second.items[0].searchState, "completed");
-        assert.match(second.items[0].note, /已读完/);
-        assert.deepEqual(
-          first.searchItems[0].scopeEvidence.map((entry) => entry.request.page),
-          [1, 2, 3],
-        );
-        assert.deepEqual(
-          second.searchItems[0].scopeEvidence.map((entry) => entry.request.page),
-          [1, 4, 5],
-        );
-        assert.ok(
-          second.searchItems[0].scopeEvidence.every(
-            (entry) =>
-              entry.request.serverType === "3" &&
-              Object.keys(entry.request.restrictions).length === 0,
-          ),
-        );
-        assert.deepEqual(detailVisits, []);
-      },
-    ),
-  );
-
   await check("保存的两条参考刷新途中超时，保留全部旧候选和后件断点", async () => {
     const fixture = {
       pages: Array.from({ length: 4 }, () => [
@@ -1938,7 +2036,17 @@ try {
     });
     let saved;
     await withSource(fixture, details, async ({ source, control }) => {
-      saved = (await source.findCandidates([item({ kindId: "20" })], control.signal)).items[0];
+      const originalNow = Date.now,
+        baseline = originalNow();
+      onDetailVisit = () => {
+        if (detailVisits.length === 2) Date.now = () => baseline + 180_001;
+      };
+      try {
+        saved = (await source.findCandidates([item({ kindId: "20" })], control.signal)).items[0];
+      } finally {
+        Date.now = originalNow;
+        onDetailVisit = null;
+      }
       assert.equal(saved.searchState, "pending");
       assert.equal(
         saved.candidates.filter((candidate) => candidate.verified).length,
@@ -1991,7 +2099,7 @@ try {
       async ({ source, control }) => {
         const first = (await source.findCandidates([item()], control.signal)).items[0];
         assert.equal(first.searchState, "read_failed");
-        assert.deepEqual(detailVisits, ["failure-0", "failure-1"]);
+        assert.deepEqual(detailVisits, ["failure-0", "failure-1", "failure-1", "failure-1"]);
         assert.equal(first.candidates.filter((x) => x.verified).length, 1);
         detailOptions = {};
         const second = (await source.findCandidates([{ ...item(), ...first }], control.signal))
@@ -2021,7 +2129,17 @@ try {
     });
     let saved;
     await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
-      saved = (await source.findCandidates([item()], control.signal)).items[0];
+      const originalNow = Date.now,
+        baseline = originalNow();
+      onDetailVisit = () => {
+        if (detailVisits.length === 20) Date.now = () => baseline + 180_001;
+      };
+      try {
+        saved = (await source.findCandidates([item()], control.signal)).items[0];
+      } finally {
+        Date.now = originalNow;
+        onDetailVisit = null;
+      }
       assert.equal(saved.searchState, "pending");
       assert.equal(saved.candidates.filter((x) => x.verified).length, 1);
     });
@@ -2069,7 +2187,17 @@ try {
       { pages: [rows.slice(0, 20), rows.slice(20)] },
       detail,
       async ({ source, control }) => {
-        saved = (await source.findCandidates([item()], control.signal)).items[0];
+        const originalNow = Date.now,
+          baseline = originalNow();
+        onDetailVisit = () => {
+          if (detailVisits.length === 20) Date.now = () => baseline + 180_001;
+        };
+        try {
+          saved = (await source.findCandidates([item()], control.signal)).items[0];
+        } finally {
+          Date.now = originalNow;
+          onDetailVisit = null;
+        }
         assert.equal(saved.searchCursor.pageNumber, 2);
         assert.equal(saved.searchCursor.pageHistory[0].pageNumber, 1);
       },
@@ -2126,14 +2254,11 @@ try {
     );
   });
 
-  await check("最多六十个列表候选，不无限请求详情", () =>
+  await check("零样本首屏立即切换阶段，不为行预算继续翻页", () =>
     withSource(
       {
-        pages: Array.from({ length: 3 }, (_, page) =>
-          Array.from({ length: 30 }, (_, row) => ({
-            eid: `${page}-${row}`,
-            name: "其他装备",
-          })),
+        pages: Array.from({ length: 6 }, (_, page) =>
+          Array.from({ length: 30 }, (_, row) => ({ eid: `${page}-${row}`, name: "其他装备" })),
         ),
       },
       {},
@@ -2142,18 +2267,17 @@ try {
           [item({ description: "等级100" })],
           control.signal,
         );
-        assert.equal((await searchPage.evaluate(() => window.calls)).length, 2);
-        assert.match(result.items[0].note, /60个列表候选/);
+        assert.ok((await searchPage.evaluate(() => window.calls)).every((call) => call.page === 1));
+        assert.equal(result.items[0].samplingStopped, true);
         assert.deepEqual(detailVisits, []);
       },
     ),
   );
-
-  await check("最多读取二十个详情，达到十件有效同配报价立即停", async () => {
+  await check("最多读取一百个详情，达到十件有效同配报价立即停", async () => {
     await withSource(
       {
         pages: Array.from({ length: 1 }, (_, page) =>
-          Array.from({ length: 25 }, (_, row) => ({
+          Array.from({ length: 105 }, (_, row) => ({
             eid: `${page}-${row}`,
             name: equipmentName,
           })),
@@ -2163,18 +2287,18 @@ try {
       async ({ source, searchPage, control }) => {
         const input = item({ description: "等级100" });
         const result = await source.findCandidates([input], control.signal);
-        assert.equal(detailVisits.length, 20);
-        assert.match(result.items[0].note, /20个详情/);
+        assert.equal(detailVisits.length, 100);
+        assert.match(result.items[0].note, /100个详情/);
         assert.equal(result.items[0].searchState, "pending");
-        assert.equal(result.items[0].searchCursor.rowIndex, 20);
+        assert.equal(result.items[0].searchCursor.rowIndex, 100);
         const resumed = await source.findCandidates(
           [{ ...input, ...result.items[0] }],
           control.signal,
         );
         assert.equal(resumed.searchItems[0].details, 5);
         assert.equal(resumed.items[0].searchState, "completed");
-        assert.equal(detailVisits.length, 25);
-        assert.equal(new Set(detailVisits).size, 25);
+        assert.equal(detailVisits.length, 105);
+        assert.equal(new Set(detailVisits).size, 105);
         assert.deepEqual(
           (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
           [1],

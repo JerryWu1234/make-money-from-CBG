@@ -200,6 +200,8 @@ export function validateExactPricing(
   let knownTotal = 0;
   for (const item of snapshot.items) {
     if (!Array.isArray(item.candidates)) return false;
+    if (item.samplingStopped && (item.searchState === "completed" || item.status === "priced"))
+      return false;
     if (
       (item.searchState === "completed" || item.status === "priced") &&
       unfinishedPricingSearch(item, snapshot.searchItems)

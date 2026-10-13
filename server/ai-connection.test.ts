@@ -358,9 +358,10 @@ describe("AI 连接验证", () => {
     const client = await prepareAnalysisClient("deepseek");
     const record = equipmentRecord(),
       signal = new AbortController().signal;
-    const snapshot = await client.searchEquipment(record, signal);
+    const onProgress = vi.fn();
+    const snapshot = await client.searchEquipment(record, signal, undefined, undefined, onProgress);
     expect(snapshot.provider).toBe("browser");
-    expect(mocks.createEquipmentSource).toHaveBeenCalledWith(signal);
+    expect(mocks.createEquipmentSource).toHaveBeenCalledWith(signal, onProgress);
     expect(mocks.searchEquipmentPrices).toHaveBeenCalledWith(
       record,
       signal,

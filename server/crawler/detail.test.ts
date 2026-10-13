@@ -9,6 +9,7 @@ import {
 } from "./detail";
 import { CAPTURE_VERSION, itemFromAttributes } from "./compact";
 import type { Listing, RoleDetail, TabSnapshot } from "./types";
+import { createCrawlSource } from "./source";
 
 vi.mock("./page", async (original) => ({
   ...(await original<typeof import("./page")>()),
@@ -81,6 +82,116 @@ describe("装备局部补采", () => {
   });
   afterAll(async () => {
     await browser?.close();
+  });
+  it("同一采集流程先缺武器属性，自动重新打开并读全后才返回完成", async () => {
+    const page = await browser.newPage();
+    let visits = 0;
+    await page.route("**/*", async (route) => {
+      if (route.request().isNavigationRequest()) visits++;
+      await route.fulfill({
+        contentType: "text/html",
+        body: fixture(visits === 1, undefined, undefined, "", "等级 100"),
+      });
+    });
+    const progress: string[] = [];
+    try {
+      const source = createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        signal: new AbortController().signal,
+        savedRecord: () => ({ listing, detail: previous(), status: "complete", error: null }),
+        onDetailProgress: (message) => progress.push(message),
+        log: () => {},
+      });
+      const result = await source.detail(listing);
+      expect(visits).toBe(2);
+      expect(result.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      expect(result.petCapture).toMatchObject({ complete: true, issues: [] });
+      expect(result.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description).toContain(
+        "伤害 +420",
+      );
+      expect(progress.some((message) => message.includes("本轮内自动重读"))).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 20000);
+  it("宝宝饰品带切换索引但只有提示框时仍读取，不能误当头像跳过", async () => {
+    const page = await browser.newPage();
+    const pet = completePet()
+      .replace("装备（1）", "装备（2）")
+      .replace(
+        "<p>内丹（1）</p>",
+        `<div id="RolePetShipin" data_idx="0" data_tip_box="PetAccessoryTipsBox"><img width="30" height="30" src="/images/pet_shipin/small/1.gif" onmouseover="document.getElementById('PetAccessoryTipsBox').style.display='block'" onmouseout="document.getElementById('PetAccessoryTipsBox').style.display='none'"></div><div id="PetAccessoryTipsBox" style="display:none">雷龙饰品<br>装备对象：雷龙<br>完整的外观说明</div><p>内丹（1）</p>`,
+      );
+    await page.route("**/*", (route) =>
+      route.fulfill({ contentType: "text/html", body: fixture(false, pet) }),
+    );
+    try {
+      const result = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(result.petCapture).toMatchObject({ complete: true, issues: [] });
+      const captured = result.tabs.find((tab) => tab.name === "召唤兽/孩子")!.pets![0];
+      expect(captured.equipment).toHaveLength(2);
+      expect(captured.equipment[1]).toMatchObject({ name: "雷龙饰品", location: "RolePetShipin" });
+    } finally {
+      await page.close();
+    }
+  });
+  it("名称和等级已显示时仍等待延迟的完整属性，不能提前当作读全", async () => {
+    const page = await browser.newPage();
+    const original =
+      "document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'";
+    const html = fixture(false, undefined, undefined, "", "等级 100").replace(
+      original,
+      "document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100';setTimeout(()=>{document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'},800)",
+    );
+    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+    try {
+      const result = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(result.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      expect(result.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description).toContain(
+        "伤害 +420",
+      );
+    } finally {
+      await page.close();
+    }
+  });
+  it("明确属于召唤兽的命中率护腕不要求人物装备属性，仍核验人物装备库存", () => {
+    const snapshot = {
+      ...tab("道具/法宝"),
+      items: [
+        {
+          index: 0,
+          name: "测试刀",
+          kind: "equipment" as const,
+          description: "等级 100\n伤害 +420",
+        },
+        {
+          index: 1,
+          name: "玳瑁护腕",
+          kind: "equipment" as const,
+          description: "等级 105\n命中率 +14%\n耐久度 500",
+          attributes: { 装备对象: "召唤兽" },
+        },
+      ],
+    };
+    expect(equipmentCaptureSummary([snapshot], "now")).toMatchObject({
+      complete: true,
+      issues: [],
+    });
+    snapshot.items.shift();
+    expect(equipmentCaptureSummary([snapshot], "now").issues).toContain(
+      "人物装备库存是否为空尚未核对，需确认穿戴与随身装备区域后再计价",
+    );
   });
   it.each([
     ["已上架", "已下架", true],

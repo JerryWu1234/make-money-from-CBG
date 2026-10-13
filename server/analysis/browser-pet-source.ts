@@ -501,6 +501,19 @@ export type PetUIEvidence = {
   submittedArgs?: Record<string, string | number>;
 };
 
+/** The legacy form truncates growth * 1000, so 1.009 would otherwise submit 1008. */
+export function petGrowthInput(growth: string | number): string {
+  const target = Number(growth);
+  if (!Number.isSafeInteger(target) || target < 0)
+    throw new Error("宝宝成长筛选值必须是非负整数千分值");
+  const decimal = target / 1000;
+  let value = decimal.toFixed(3);
+  if (Math.trunc(Number(value) * 1000) !== target)
+    value = (decimal + Number.EPSILON * Math.max(1, Math.abs(decimal))).toString();
+  if (Math.trunc(Number(value) * 1000) !== target) throw new Error("宝宝成长筛选值无法精确提交");
+  return value;
+}
+
 /** Check what the official click actually submitted, including unexpected restored filters. */
 export function assertPetUIArguments(
   expected: Record<string, string | number>,
@@ -514,14 +527,17 @@ export function assertPetUIArguments(
       .join(",");
   for (const [key, value] of Object.entries(expected))
     if (actual[key] === undefined || normalized(actual[key]) !== normalized(value))
-      throw new Error(
-        "宝宝官网表单实际条件与计划不一致：" +
-          key +
-          " (expected: " +
-          value +
-          ", actual: " +
-          actual[key] +
-          ")",
+      throw Object.assign(
+        new Error(
+          "宝宝官网表单实际条件与计划不一致：" +
+            key +
+            " (expected: " +
+            value +
+            ", actual: " +
+            actual[key] +
+            ")",
+        ),
+        key === "growth" ? { code: "PET_GROWTH_ARGUMENT_MISMATCH" } : {},
       );
   for (const [key, value] of Object.entries(actual))
     if (
@@ -554,7 +570,7 @@ export async function fillPetSearchForm(
     inputs[id] = value;
   }
   if (args.growth !== undefined) {
-    const value = (Number(args.growth) / 1000).toFixed(3);
+    const value = petGrowthInput(args.growth);
     await page.locator("#txt_growth").fill(value);
     inputs.txt_growth = value;
   }
@@ -1802,12 +1818,12 @@ export function petSourceFromPages(
                   success?.(result);
                 },
                 onFailure(...values: unknown[]) {
-                  failure?.(...values);
                   g.__cbgPetResult = {
                     page: Number(options.data?.page),
                     ok: false,
                     error: "官网查询请求失败",
                   };
+                  failure?.(...values);
                 },
               },
               ...rest,
@@ -1888,27 +1904,56 @@ export function petSourceFromPages(
               });
               await clickPetSearchPage(searchPage, pageNumber);
             }
-            await searchPage.waitForFunction(
-              (wanted) => {
-                const globals = window as unknown as Record<string, any>;
-                if (
-                  globals.CaptchaCheck?.need_captcha ||
-                  globals.IsLogin === 0 ||
-                  globals.LoginInfo?.login === 0 ||
-                  /show_login\.py/.test(location.pathname) ||
-                  Array.from(
-                    document.querySelectorAll(".yidun_popup, .geetest_panel, #captcha_container"),
-                  ).some((el) => el.checkVisibility()) ||
-                  /系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText)
-                )
-                  return true;
-                const result = globals.__cbgPetResult;
-                const loading = document.querySelector("#loading_img");
-                return result?.page === wanted && (!loading || !loading.checkVisibility());
-              },
-              pageNumber,
-              { timeout: 20000, polling: 200 },
-            );
+            try {
+              await searchPage.waitForFunction(
+                (wanted) => {
+                  const globals = window as unknown as Record<string, any>;
+                  if (
+                    globals.CaptchaCheck?.need_captcha ||
+                    globals.IsLogin === 0 ||
+                    globals.LoginInfo?.login === 0 ||
+                    /show_login\.py/.test(location.pathname) ||
+                    Array.from(
+                      document.querySelectorAll(".yidun_popup, .geetest_panel, #captcha_container"),
+                    ).some((el) => el.checkVisibility()) ||
+                    /系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText)
+                  )
+                    return true;
+                  const result = globals.__cbgPetResult;
+                  const loading = document.querySelector("#loading_img");
+                  return (
+                    result?.page === wanted &&
+                    (result.ok === false || !loading || !loading.checkVisibility())
+                  );
+                },
+                pageNumber,
+                { timeout: 20000, polling: 200 },
+              );
+            } catch (error) {
+              requestSignal.throwIfAborted();
+              if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+              await assertAvailable(searchPage);
+              const state = await searchPage
+                .evaluate(function readPetSearchWaitState() {
+                  const g = window as unknown as Record<string, any>;
+                  const result = g.__cbgPetResult;
+                  return {
+                    callbackReceived: !!result,
+                    callbackPage: Number.isFinite(result?.page) ? result.page : null,
+                    loadingVisible: !!document.querySelector("#loading_img")?.checkVisibility(),
+                  };
+                })
+                .catch(() => null);
+              const message =
+                `宝宝搜索结果等待超时：${item.name} · ${matchType} · 第${pageNumber}页；` +
+                (state
+                  ? `回调${state.callbackReceived ? "已收到" : "未收到"}，回调页${state.callbackPage ?? "未知"}，加载图标${state.loadingVisible ? "仍显示" : "已消失"}`
+                  : "等待状态读取失败");
+              throw Object.assign(new Error(message, { cause: error }), {
+                name: "TimeoutError",
+                code: "PET_SEARCH_RESULT_TIMEOUT",
+              });
+            }
             requestSignal.throwIfAborted();
             await assertAvailable(searchPage);
             const request = marketScope.confirm();

@@ -328,3 +328,15 @@ describe("精确查价快照完整性", () => {
     expect(validateExactPricing(expired, [item()], now)).toBe(false);
   });
 });
+
+it("首屏停止取样不能伪装成已完成或有价格的快照", () => {
+  const source: EquipmentPricingSnapshot = complete();
+  source.items[0].samplingStopped = true;
+  expect(validateExactPricing(source, [item()], now)).toBe(false);
+  source.items[0] = { ...item(), samplingStopped: true, searchState: "pending" };
+  source.total = null;
+  source.knownTotal = 0;
+  expect(validateExactPricing(source, [item()], now)).toBe(true);
+  source.items[0].searchState = "completed";
+  expect(validateExactPricing(source, [item()], now)).toBe(false);
+});

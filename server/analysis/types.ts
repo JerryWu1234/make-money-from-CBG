@@ -28,10 +28,21 @@ export type AnalysisRun = {
   createdAt: string;
   updatedAt: string;
   error: string | null;
+  pauseNotice?: string | null;
   total: number;
   completed: number;
   failed: number;
   queued: number;
+  waitingPricing?: number;
+  pricingProgress?: {
+    assetName?: string;
+    page?: number;
+    validSamples?: number;
+    retryCount?: number;
+    round: number;
+    startedAt: string;
+    updatedAt: string;
+  } | null;
   reused: number;
   current: string | null;
   phase?: "equipment_search" | "pet_search" | "pet_gear_search" | "role_search" | "analysis" | null;
@@ -41,6 +52,7 @@ export type AnalysisRun = {
 export type AnalysisItemState =
   | "ready"
   | "waiting_detail"
+  | "waiting_pricing"
   | "queued"
   | "running"
   | "completed"
@@ -77,6 +89,12 @@ export type AnalysisResultItem = {
   result: ProductAnalysis;
 };
 export type AnalysisOverview = {
+  capturePreparation?: {
+    total: number;
+    completed: number;
+    current: string | null;
+    message: string;
+  };
   profile?: Pick<
     AnalysisProfile,
     "hash" | "version" | "promptHash" | "calculationCompatible" | "calculationVersion"

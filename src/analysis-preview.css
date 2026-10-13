@@ -960,7 +960,8 @@ body:has(.analysis-page) #root {
   color: #c4b5fd;
   background: rgba(167, 139, 250, 0.13);
 }
-.analysis-state-waiting_detail {
+.analysis-state-waiting_detail,
+.analysis-state-waiting_pricing {
   color: #e6bd74;
   background: rgba(251, 191, 36, 0.1);
 }

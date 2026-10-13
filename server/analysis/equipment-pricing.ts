@@ -59,6 +59,7 @@ export type EquipmentSearchCursor = {
   historyIndex?: number;
   seen: string[];
   failed: Array<{ url: string; modeIndex: number }>;
+  emptyFirstPageModes?: number[];
 };
 export type EquipmentPricingItem = {
   exclusion?: EquipmentExclusion;
@@ -80,6 +81,7 @@ export type EquipmentPricingItem = {
   baselineInvalidReason?: string;
   searchState?: PricingSearchState;
   searchCursor?: EquipmentSearchCursor;
+  samplingStopped?: boolean;
 };
 export type EquipmentPricingSnapshot = {
   version: 1;
@@ -115,6 +117,7 @@ export type EquipmentSource = {
       searchState?: PricingSearchState;
       searchCursor?: EquipmentSearchCursor;
       skipped?: boolean;
+      samplingStopped?: boolean;
     }>;
     searchItems?: unknown[];
   }>;
@@ -573,6 +576,13 @@ export function equipmentCaptureSearchable(
   );
 }
 
+export type PricingSearchProgress = {
+  assetName: string;
+  page: number;
+  validSamples: number;
+  retryCount: number;
+};
+
 export async function searchEquipmentPrices(
   record: SavedRoleRecord,
   signal: AbortSignal,
@@ -662,6 +672,7 @@ export async function searchEquipmentPrices(
     if (result.skipped === true) continue;
     item.query = typeof result.query === "string" ? result.query : "";
     item.searchCursor = result.searchCursor as EquipmentSearchCursor | undefined;
+    item.samplingStopped = result.samplingStopped === true;
     item.candidates = [];
     item.searchState = ["pending", "read_failed", "unsupported"].includes(
       String(result.searchState),

@@ -18,6 +18,7 @@ import "./analysis-preview.css";
 const labels = {
   ready: "待分析",
   waiting_detail: "待补采",
+  waiting_pricing: "价格待补齐",
   queued: "排队中",
   running: "分析中",
   completed: "已分析",
@@ -82,7 +83,8 @@ export function AnalysisPreview() {
   const operation = useRef(false);
   const run = data?.run;
   const active = data?.activeRun;
-  const running = !!active;
+  const preparation = data?.capturePreparation;
+  const running = !!active || !!preparation;
   const searchingEquipment =
     active?.phase === "equipment_search" ||
     active?.phase === "pet_search" ||
@@ -96,7 +98,8 @@ export function AnalysisPreview() {
         : active?.phase === "pet_search"
           ? "宝宝"
           : "装备";
-  const finished = (run?.completed || 0) + (run?.failed || 0);
+  const waitingPricing = run?.waitingPricing || 0;
+  const finished = (run?.completed || 0) + (run?.failed || 0) + waitingPricing;
   const sameCalculation =
     !run?.calculationVersion || run.calculationVersion === data?.profile?.calculationVersion;
   const selectedModel = selectedModels[provider];
@@ -143,7 +146,7 @@ export function AnalysisPreview() {
         setLoadError(null);
         if (next.records.page !== page) setPage(next.records.page);
         if (next.results && next.results.page !== resultsPage) setResultsPage(next.results.page);
-        timer = setTimeout(refresh, next.activeRun ? 1500 : 5000);
+        timer = setTimeout(refresh, next.activeRun || next.capturePreparation ? 1500 : 5000);
       } catch (failure) {
         if (controller.signal.aborted) return;
         setLoadError(failure instanceof Error ? failure.message : "无法加载分析记录");
@@ -158,7 +161,7 @@ export function AnalysisPreview() {
   }, [provider, page, resultsPage, search, filter, revision]);
 
   const mutate = useCallback(async (path: string, body: unknown) => {
-    if (operation.current) return;
+    if (operation.current && path !== "/api/analysis/pause") return;
     operation.current = true;
     setBusy(true);
     setError(null);
@@ -171,7 +174,8 @@ export function AnalysisPreview() {
       }
       setRevision((value) => value + 1);
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "操作失败，请重试");
+      const message = failure instanceof Error ? failure.message : "操作失败，请重试";
+      setError(message === "已暂停完整资料采集准备" ? null : message);
     } finally {
       operation.current = false;
       setBusy(false);
@@ -203,21 +207,23 @@ export function AnalysisPreview() {
     if (item.taskId) setTaskId(item.taskId);
     else setRoleKey(item.key);
   };
-  const startLabel = busy
-    ? "正在处理…"
-    : running
-      ? searchingEquipment
-        ? "正在查价…"
-        : "正在分析…"
-      : run && !sameModel
-        ? "按新模型开始分析"
-        : run && !sameCalculation
-          ? "按新规则开始分析"
-          : run?.status === "paused"
-            ? "继续分析"
-            : run?.status === "completed"
-              ? "分析新增或已更新商品"
-              : "开始分析已有商品";
+  const startLabel = preparation
+    ? "正在完整采集…"
+    : busy
+      ? "正在处理…"
+      : running
+        ? searchingEquipment
+          ? "正在查价…"
+          : "正在分析…"
+        : run && !sameModel
+          ? "按新模型开始分析"
+          : run && !sameCalculation
+            ? "按新规则开始分析"
+            : run?.status === "paused"
+              ? "继续分析"
+              : run?.status === "completed"
+                ? "分析新增或已更新商品"
+                : "开始分析已有商品";
 
   return (
     <div className="analysis-page">
@@ -255,7 +261,7 @@ export function AnalysisPreview() {
               onDefaultModelChange={updateDefaultModel}
               onStart={start}
               startLabel={startLabel}
-              disabled={busy || running || !data || data.counts.complete === 0}
+              disabled={busy || running || !data || data.counts.total === 0}
               locked={busy || running}
             />
             <div className="analysis-hero-actions">
@@ -266,22 +272,22 @@ export function AnalysisPreview() {
               >
                 分析设置
               </button>
-              {active && (
+              {(active || preparation) && (
                 <button
                   className="analysis-button analysis-button-stop"
-                  disabled={busy}
-                  onClick={() => void mutate("/api/analysis/pause", { runId: active.id })}
+                  disabled={busy && !preparation}
+                  onClick={() => void mutate("/api/analysis/pause", { runId: active?.id })}
                 >
-                  暂停分析
+                  {preparation ? "暂停资料采集" : "暂停分析"}
                 </button>
               )}
-              {!running && sameCalculation && !!run?.failed && (
+              {!running && sameCalculation && run && !!(run.failed + waitingPricing) && (
                 <button
                   className="analysis-button analysis-button-outline"
                   disabled={busy}
                   onClick={() => void mutate("/api/analysis/retry", { runId: run.id })}
                 >
-                  重试失败的 {run.failed} 件
+                  重试失败及待补齐的 {run.failed + waitingPricing} 件
                 </button>
               )}
             </div>
@@ -298,22 +304,37 @@ export function AnalysisPreview() {
             <p className="analysis-start-hint" role="status">
               {!data
                 ? "正在读取已采集商品…"
-                : data.counts.total === 0
-                  ? "尚未采集商品，请先回到采集工作台采集详情。"
-                  : active
-                    ? searchingEquipment
-                      ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
-                      : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed}/${active.total} 件已完成`
-                    : run && !sameModel
-                      ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
-                      : run && !sameCalculation
-                        ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
-                        : run?.status === "paused"
-                          ? "分析已暂停，已完成结果保留；继续分析会沿用任务开始时的设置。"
-                          : run?.status === "completed"
-                            ? `分析完成：${run.completed} 件成功，${run.failed} 件失败。再次开始只分析新增或已更新商品。`
-                            : `${data.counts.complete} 件资料完整，可以开始分析；${data.counts.waitingDetail} 件等待补采。`}
+                : preparation
+                  ? `正在采集并核验角色资料：${preparation.completed}/${preparation.total} 个 · ${preparation.current || "准备下一角色"} · ${preparation.message}`
+                  : data.counts.total === 0
+                    ? "尚未采集商品，请先回到采集工作台采集详情。"
+                    : active
+                      ? searchingEquipment
+                        ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                        : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                      : run && !sameModel
+                        ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
+                        : run && !sameCalculation
+                          ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
+                          : run?.status === "paused"
+                            ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续分析会沿用任务开始时的设置。`
+                            : run?.status === "completed"
+                              ? `本批次已处理：${run.completed} 件成功，${run.failed} 件失败，${waitingPricing} 件价格待补齐。待补齐项保留进度，需单独重试。`
+                              : `${data.counts.complete} 件资料完整，可以开始分析；${data.counts.waitingDetail} 件等待补采。`}
             </p>
+            {active && searchingEquipment && active.pricingProgress && (
+              <p className="analysis-start-hint" role="status">
+                {active.pricingProgress.assetName || searchAsset}
+                {active.pricingProgress.page ? ` · 第 ${active.pricingProgress.page} 页` : ""}
+                {active.pricingProgress.validSamples !== undefined
+                  ? ` · 已核验 ${active.pricingProgress.validSamples} 个样本`
+                  : ""}
+                {active.pricingProgress.retryCount
+                  ? ` · 重试 ${active.pricingProgress.retryCount}/2`
+                  : ""}
+                {` · 本角色第 ${active.pricingProgress.round} 轮 · 最近进度 ${displayTime(active.pricingProgress.updatedAt)}`}
+              </p>
+            )}
             {(error || loadError || run?.error) && (
               <p className="analysis-auth-notice" role="alert">
                 {error || loadError || run?.error}
@@ -334,15 +355,19 @@ export function AnalysisPreview() {
             <div className="analysis-visual-focus">
               <small>当前状态</small>
               <strong>
-                {running
-                  ? searchingEquipment
-                    ? "联网查价中"
-                    : "分析中"
-                  : run?.status === "paused"
-                    ? "已暂停"
-                    : run?.status === "completed"
-                      ? "已完成"
-                      : "待开始"}
+                {preparation
+                  ? "完整采集中"
+                  : running
+                    ? searchingEquipment
+                      ? "联网查价中"
+                      : "分析中"
+                    : run?.status === "paused"
+                      ? "已暂停"
+                      : run?.status === "completed"
+                        ? waitingPricing
+                          ? "有价格待补齐"
+                          : "已处理"
+                        : "待开始"}
               </strong>
               <span>
                 {run
@@ -375,7 +400,9 @@ export function AnalysisPreview() {
             <small>已完成分析</small>
             <strong>{data?.results?.total || 0} 件已有结果</strong>
             <p>
-              {run ? `${run.failed} 件失败 · ${run.queued} 件排队中` : "选择 AI 后点击开始分析"}
+              {run
+                ? `${waitingPricing} 件价格待补齐 · ${run.failed} 件失败 · ${run.queued} 件排队中`
+                : "选择 AI 后点击开始分析"}
             </p>
           </div>
           <div>

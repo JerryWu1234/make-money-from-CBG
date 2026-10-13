@@ -69,6 +69,9 @@ export function savedDetail(key: string) {
 export function crawlDatabase() {
   return store().db;
 }
+export function captureRetryItems(keys?: string[]) {
+  return store().retryItems(keys);
+}
 export function savedRecords(page: number, pageSize: number) {
   return store().records(page, pageSize);
 }

@@ -156,11 +156,23 @@ async function inspectItems(
     const rawYupo =
       item.category === "上古玉魄" &&
       /^\s*\{\s*"minghun"\s*:\s*\{|<json>/i.test(attrs.data_equip_desc || "");
-    const incompleteEquipment =
+    const incompletePetEquipment =
+      petItems &&
       item.kind === "equipment" &&
-      /^道具\/法宝(?:\s*\/|$)/.test(snapshot.name) &&
-      !equipmentCaptureSummary([{ ...snapshot, items: [item] }], snapshot.collectedAt || "")
-        .complete;
+      item.location !== "RolePetShipin" &&
+      !/(?:命中(?:率)?|伤害|防御|气血|魔法|速度|敏捷|力量|体质|耐力|灵力|魔力|镶嵌)\s*[：:]?\s*[+＋−-]?\d/.test(
+        (item.description || "") +
+          "\n" +
+          Object.entries(item.attributes || {})
+            .map(([key, value]) => key + " " + value)
+            .join("\n"),
+      );
+    const incompleteEquipment =
+      incompletePetEquipment ||
+      (item.kind === "equipment" &&
+        /^道具\/法宝(?:\s*\/|$)/.test(snapshot.name) &&
+        !equipmentCaptureSummary([{ ...snapshot, items: [item] }], snapshot.collectedAt || "")
+          .complete);
     // 官网元素可能只有等级；缺属性时仍须悬停，不能把非空描述当作已读完整。
     if (
       (attrs.data_equip_desc?.trim() && !rawYupo && !incompleteEquipment) ||
@@ -170,22 +182,41 @@ async function inspectItems(
       continue;
     }
     // 头像仅用于切换，不作为一件待估价装备。
-    if (attrs.data_idx !== undefined && !attrs.data_equip_name) continue;
+    if (
+      attrs.data_idx !== undefined &&
+      !attrs.data_equip_name &&
+      !attrs.data_tip_box &&
+      !attrs.data_equip_desc
+    )
+      continue;
     await hoverForInspection(page, icon);
     await pace(signal, 300, 200);
     const tipId = attrs.data_tip_box;
-    if (tipId)
+    if (tipId || incompleteEquipment)
       await page
         .waitForFunction(
-          ({ id, name }) => {
-            const box = document.getElementById(id);
-            return (
-              box?.checkVisibility() &&
-              box.innerText.trim() &&
-              (!name || box.innerText.includes(name))
-            );
+          ({ id, name, requireStats }) => {
+            const boxes = id
+              ? [document.getElementById(id)]
+              : Array.from(
+                  document.querySelectorAll<HTMLElement>(
+                    '[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"], .tips, .tooltip, #tips_box, #role_tips_box, .equip_tips',
+                  ),
+                );
+            return boxes.some((box) => {
+              const text = box?.innerText.trim() || "";
+              return (
+                box?.checkVisibility() &&
+                text &&
+                (!name || text.includes(name)) &&
+                (!requireStats ||
+                  /(?:命中(?:率)?|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|抗物理暴击|抗法术暴击|抗固伤|固伤暴击|穿刺|狂暴|治疗能力|格挡|抵抗|抗封印)(?:等级|值)?\s*[：:]?\s*[+＋−-]?\d/.test(
+                    text,
+                  ))
+              );
+            });
           },
-          { id: tipId, name: attrs.data_equip_name || "" },
+          { id: tipId || "", name: attrs.data_equip_name || "", requireStats: incompleteEquipment },
           { timeout: 4000 },
         )
         .catch((error: unknown) => {
@@ -265,7 +296,9 @@ export function equipmentCaptureSummary(
       const category = observedEquipmentCategory(item.category, item.location, item.modelId);
       if (
         item.kind !== "equipment" ||
-        /法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(category || "")
+        /法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(category || "") ||
+        /召唤兽/.test(item.attributes?.装备对象 || "") ||
+        /装备对象[：:]?\s*召唤兽/.test(item.description || "")
       )
         continue;
       if (

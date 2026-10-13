@@ -186,3 +186,55 @@ it("结果变化清空旧取样位置，只允许一次自动重建，避免行�
   resetPricingCursor(repeated.items[0].searchCursor!);
   expect(pricingSearchAdvanced(current, repeated)).toBe(false);
 });
+
+it("首屏无样本主动停止后，游标推进也不自动重查；显式重试重新检查第一页", () => {
+  const initial: EquipmentPricingSnapshot = {
+    version: 1,
+    inputHash: "first-page",
+    searchedAt: new Date().toISOString(),
+    provider: "browser",
+    model: "browser",
+    captureComplete: true,
+    total: null,
+    knownTotal: 0,
+    queries: [],
+    rawResponse: null,
+    issues: [],
+    searchComplete: false,
+    items: [
+      {
+        key: "a",
+        name: "测试腰带",
+        category: "腰带",
+        level: 100,
+        description: "等级100",
+        query: "",
+        status: "no_match",
+        referencePrice: null,
+        candidates: [],
+        issues: [],
+        searchState: "pending",
+      },
+    ],
+  };
+  const stopped = structuredClone(initial);
+  stopped.items[0].samplingStopped = true;
+  stopped.items[0].searchCursor = {
+    version: 1,
+    planHash: "plan",
+    modeIndex: 2,
+    pageNumber: 1,
+    rowIndex: 0,
+    pageRowsHash: "",
+    seen: [],
+    failed: [],
+    emptyFirstPageModes: [0, 1],
+  };
+  expect(pricingSearchAdvanced(initial, stopped)).toBe(false);
+  const retried = resumePricingItems(structuredClone(initial), stopped);
+  expect(retried.items[0].samplingStopped).toBeUndefined();
+  expect(retried.items[0].searchCursor).toBeUndefined();
+  expect(retried.items[0].referencePrice).toBeNull();
+  resetPricingCursor(stopped.items[0].searchCursor!);
+  expect(stopped.items[0].searchCursor!.emptyFirstPageModes).toBeUndefined();
+});

@@ -1,6 +1,6 @@
 import type { DetailItem, Listing, RoleDetail, TabSnapshot } from "./types";
 
-export const CAPTURE_VERSION = 8;
+export const CAPTURE_VERSION = 9;
 export function cleanDescription(value: string) {
   return value
     .replace(/#r/g, "\n")

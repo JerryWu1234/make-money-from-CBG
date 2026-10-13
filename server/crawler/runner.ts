@@ -89,10 +89,14 @@ export async function crawl(
         }
         // 补采旧记录只补详情，不改变正常列表续采的成功断点。
         const price = detail.valuation?.source.askingPrice;
-        store.save(
+        const complete = store.save(
           typeof price === "string" && /^\d+(?:\.\d+)?$/.test(price) ? { ...item, price } : item,
           detail,
         );
+        if (!complete)
+          throw Object.assign(new Error("采集完整性校验未通过，已保留本次资料供重读"), {
+            name: "IncompleteDetailError",
+          });
         saved++;
         publish({ saved, retryCompleted: index + 1, totalSaved: store.count() });
       } catch (error) {
@@ -208,7 +212,10 @@ export async function crawl(
           page: number,
           savedAt: detail.collectedAt,
         };
-        store.save(item, detail, checkpoint);
+        if (!store.save(item, detail, checkpoint))
+          throw Object.assign(new Error("采集完整性校验未通过，未推进成功断点"), {
+            name: "IncompleteDetailError",
+          });
         saved++;
         publish({ saved, totalSaved: store.count(), checkpoint });
       } catch (error) {
