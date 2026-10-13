@@ -1,13 +1,20 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { valuationRecord } from "../../tests/fixtures/analysis";
+import { legacyEquipmentPricing } from "../../tests/fixtures/legacy-equipment-pricing";
 import {
   equipmentPricingPlan,
   combineEquipmentPricing,
   searchEquipmentPrices,
   type EquipmentPricingItem,
 } from "./equipment-pricing";
-import { createProfile, DEFAULT_SETTINGS, normalizeSettings, PROMPT_FILE } from "./profile";
+import {
+  createProfile,
+  DEFAULT_SETTINGS,
+  normalizeSettings,
+  PROMPT_FILE,
+  CALCULATION_VERSION,
+} from "./profile";
 import { calculateValuation } from "./valuation-calculator";
 import { buildProductDocument } from "./product-document";
 import { validateValuation, valuationPrompt } from "./valuation-contract";
@@ -76,32 +83,25 @@ function scenario() {
   return { record, settings, source };
 }
 
-describe("普通装备先分流再查价", () => {
-  it("已知历史环价、待补默认价和明确低值排除全部跳过联网，保存策略与金价", async () => {
+describe("普通装备实际查价与旧默认价报告兼容", () => {
+  it("普通70/60级装备也进入查价，不能用历史预设或低值策略补齐新报告", async () => {
     const { record, settings, source } = scenario();
     const snapshot = await searchEquipmentPrices(record, signal(), source, settings);
-    expect(source.findCandidates).not.toHaveBeenCalled();
+    expect(source.findCandidates).toHaveBeenCalledOnce();
     expect(source.readSource).not.toHaveBeenCalled();
-    expect(snapshot.queries).toEqual([]);
+    expect(snapshot.queries).toEqual(["模拟特殊装备筛选"]);
     expect(snapshot.items).toHaveLength(3);
-    expect(snapshot.items[0].baselineEstimate).toMatchObject({
-      kind: "ring",
-      gameCurrency: 110000,
-      amount: 0.77,
-      goldPrice: 210,
-      goldUnit: 30000000,
-      source: { basis: "historical", publishedAt: "2025-11-22" },
-    });
-    expect(snapshot.items[1].baselineEstimate).toMatchObject({ gameCurrency: null, amount: null });
-    expect(snapshot.items[2].baselineEstimate).toMatchObject({ kind: "ignored", amount: 0 });
+    expect(snapshot.items.every((item) => !item.baselineEstimate)).toBe(true);
+    expect(snapshot.items[2].status).toBe("unsupported");
     expect(snapshot).toMatchObject({ total: null, knownTotal: 0 });
     expect(snapshot.items.every((item) => item.referencePrice === null)).toBe(true);
-    expect(JSON.parse(snapshot.requestText!).baselineItems).toHaveLength(3);
-    expect(JSON.parse(snapshot.requestText!).prices).toEqual(settings.equipmentBaselinePrices);
+    expect(
+      JSON.parse(snapshot.requestText!).map((item: EquipmentPricingItem) => item.name),
+    ).toEqual(["测试普通长剑", "测试待补长剑"]);
     expect(snapshot.requestHash).toHaveLength(64);
   });
 
-  it("混合库存只把特殊装备传给查价模块，缺默认价不退回逐件检索", async () => {
+  it("混合库存把普通装备和特殊装备都传给对应查价模块", async () => {
     const { record, settings, source } = scenario();
     record.detail!.tabs.at(-1)!.items!.push({
       index: 3,
@@ -113,10 +113,13 @@ describe("普通装备先分流再查价", () => {
     const snapshot = await searchEquipmentPrices(record, signal(), source, settings);
     expect(source.findCandidates).toHaveBeenCalledOnce();
     const lookups = source.findCandidates.mock.calls[0][0];
-    expect(lookups.map((item: { name: string }) => item.name)).toEqual(["测试套装项链"]);
+    expect(lookups.map((item: { name: string }) => item.name)).toEqual([
+      "测试普通长剑",
+      "测试待补长剑",
+      "测试套装项链",
+    ]);
     expect(snapshot.items[3].baselineEstimate).toBeUndefined();
-    expect(JSON.parse(snapshot.requestText!).baselineItems).toHaveLength(3);
-    expect(JSON.parse(snapshot.requestText!).lookupItems).toHaveLength(1);
+    expect(JSON.parse(snapshot.requestText!)).toHaveLength(3);
   });
 
   it("采集不完整不套默认价，低值标记也不能掩盖缺资料", async () => {
@@ -128,17 +131,18 @@ describe("普通装备先分流再查价", () => {
     expect(source.findCandidates).not.toHaveBeenCalled();
   });
 
-  it("金价单位未确认仍识别环装但不给金额，也不触发浏览器", () => {
+  it("新装备搜索不依赖预设金价单位，也不提前产生默认金额", () => {
     const { record, settings } = scenario();
     settings.servers[0].baselineUnitConfirmed = false;
     const plan = equipmentPricingPlan(record, settings);
-    expect(plan.items[0].baselineEstimate).toMatchObject({ kind: "ring", amount: null });
+    expect(plan.items[0]).toMatchObject({ status: "no_match", referencePrice: null });
+    expect(plan.items[0].baselineEstimate).toBeUndefined();
   });
 
   it("失效默认价不计入金额，保留原始证据并提示重新分析", () => {
     const { record, settings } = scenario();
     const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), settings);
-    const plan = equipmentPricingPlan(record, settings);
+    const plan = legacyEquipmentPricing(record, settings);
     plan.items[0].baselineEstimate!.amount = 12345;
     const result = combineEquipmentPricing(
       calculateValuation(record, profile),
@@ -163,7 +167,7 @@ describe("普通装备先分流再查价", () => {
     const { record, settings } = scenario();
     record.detail!.tabs.at(-1)!.items = [record.detail!.tabs.at(-1)!.items![0]];
     const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), settings, true, false);
-    const plan = equipmentPricingPlan(record, settings);
+    const plan = legacyEquipmentPricing(record, settings);
     const document = buildProductDocument(record);
     const prompt = valuationPrompt(document, record, profile, plan);
     expect(prompt).toContain('"estimated_sources":["baseline"]');
@@ -195,7 +199,7 @@ describe("普通装备默认价格的批次冻结", () => {
     prices["90"].weapon = 100000;
     const changed = createProfile(template, { ...base.settings, equipmentBaselinePrices: prices });
     expect(changed.calculationCompatible).toBe(true);
-    expect(changed.calculationVersion).toBe("price-comparison-v10");
+    expect(changed.calculationVersion).toBe(CALCULATION_VERSION);
     expect(changed.settingsHash).not.toBe(base.settingsHash);
     expect(changed.hash).not.toBe(base.hash);
     expect(base.settings.equipmentBaselinePrices!["90"].weapon).toBeNull();

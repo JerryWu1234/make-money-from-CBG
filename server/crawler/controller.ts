@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getBrowser, getCbgPage, createHiddenPage } from "../session";
 import { checkCbgStatus } from "../cbg";
-import { crawl } from "./runner";
+import { crawl, validateCrawlOptions, type CrawlOptions } from "./runner";
 import { createCrawlSource } from "./source";
 import { CrawlStore } from "./store";
 import type { CrawlStatus, SavedRoleRecord } from "./types";
@@ -81,8 +81,10 @@ export function stopCrawl(reason: "manual" | "time_limit" = "manual") {
 export async function startCrawl(
   origin: CrawlOrigin = "manual",
   canStart?: () => boolean,
-  options: { backfillOnly?: boolean; keys?: string[] } = {},
+  options: CrawlOptions = {},
 ): Promise<CrawlStartResult> {
+  validateCrawlOptions(options);
+  if (options.refresh) store().retryItems(options.keys, true);
   if (isCrawling()) return { status: crawlStatus(), started: false, activity: activeRun };
   const current = await checkCbgStatus();
   const page = getCbgPage();
@@ -127,7 +129,7 @@ export async function startCrawl(
     }
   }, 30000);
   const runningTask = (async () => {
-    const detailPage = await createHiddenPage(await getBrowser());
+    const detailPage = await createHiddenPage(await getBrowser(true));
     watchWorkPage(detailPage, "detail");
     log("page.ready", { kind: "detail" });
     detailPage.setDefaultTimeout(15000);
@@ -138,9 +140,10 @@ export async function startCrawl(
           detailPage,
           signal: control.signal,
           preferredOrder,
-          savedRecord: options.backfillOnly
-            ? (key) => db.detail(key) as SavedRoleRecord | null
-            : undefined,
+          savedRecord:
+            options.backfillOnly && !options.refresh
+              ? (key) => db.detail(key) as SavedRoleRecord | null
+              : undefined,
           onDetailProgress: (message) => {
             status = { ...status, detailProgress: message };
           },

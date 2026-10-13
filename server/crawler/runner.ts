@@ -7,18 +7,36 @@ import {
 } from "./types";
 import type { CrawlStore } from "./store";
 import { prepareCrawlPages } from "./resume";
+import { CAPTURE_VERSION, hasUnconfirmedEmptyEquipment } from "./compact";
+import { MAIN_TABS } from "./detail";
+export interface CrawlOptions {
+  backfillOnly?: boolean;
+  keys?: string[];
+  refresh?: boolean;
+}
+export function validateCrawlOptions(options: CrawlOptions) {
+  if (
+    options.refresh &&
+    (!options.backfillOnly ||
+      options.keys?.length !== 1 ||
+      !options.keys[0]?.trim() ||
+      options.keys[0] !== options.keys[0].trim())
+  )
+    throw new Error("刷新采集仅支持明确指定一个已保存商品");
+}
 export async function crawl(
   source: CrawlSource,
   store: CrawlStore,
   signal: AbortSignal,
   publish: (state: Partial<CrawlStatus>) => void,
-  options: { backfillOnly?: boolean; keys?: string[] } = {},
+  options: CrawlOptions = {},
 ) {
   signal.throwIfAborted();
+  validateCrawlOptions(options);
   let saved = 0,
     skipped = 0,
     failed = 0;
-  const retries = store.retryItems(options.keys);
+  const retries = store.retryItems(options.keys, options.refresh);
   const retryFailed = new Set<string>();
   if (retries.length) {
     publish({
@@ -31,15 +49,44 @@ export async function crawl(
     });
     for (const [index, item] of retries.entries()) {
       signal.throwIfAborted();
-      store.beginRetry(item.key);
+      store.beginRetry(item.key, options.refresh);
       publish({
         current: item.name || item.eid,
         retryCompleted: index,
         detailProgress: `正在补采 ${index + 1}/${retries.length}：打开已保存商品链接…`,
       });
       try {
+        if (options.refresh && !(await source.onShelf(item)))
+          throw new Error("刷新前未确认商品仍在售，旧详情已保留");
         const detail = await source.detail(item);
         signal.throwIfAborted();
+        if (options.refresh) {
+          const asking = detail.valuation?.source.askingPrice;
+          const askingText =
+            typeof asking === "string" || typeof asking === "number" ? String(asking) : "";
+          if (
+            detail.captureVersion !== CAPTURE_VERSION ||
+            !MAIN_TABS.every((name) => detail.tabs.some((tab) => tab.name === name)) ||
+            !detail.equipmentCapture?.complete ||
+            detail.equipmentCapture.issues.length ||
+            hasUnconfirmedEmptyEquipment(detail) ||
+            !detail.petCapture?.complete ||
+            detail.petCapture.issues.length ||
+            !detail.valuation ||
+            detail.valuation.issues.length ||
+            String(detail.valuation.source.eid) !== item.eid ||
+            String(detail.valuation.source.serverId) !== item.serverId ||
+            !/^\d+(?:\.\d{1,2})?$/.test(askingText) ||
+            Number(askingText) <= 0
+          ) {
+            const error = new Error("刷新详情的标签、资产、商品身份或价格未核对完整，旧详情已保留");
+            error.name = "IncompleteDetailError";
+            throw error;
+          }
+          if (!(await source.onShelf(item)))
+            throw new Error("刷新后未确认商品仍在售，旧详情已保留");
+          signal.throwIfAborted();
+        }
         // 补采旧记录只补详情，不改变正常列表续采的成功断点。
         const price = detail.valuation?.source.askingPrice;
         store.save(

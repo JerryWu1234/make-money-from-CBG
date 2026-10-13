@@ -6,12 +6,14 @@ import type { Listing, SavedRoleRecord } from "../crawler/types";
 import { analysisPrompt, RULE_VERSION, textHash } from "./contract";
 import { buildProductDocument } from "./product-document";
 import { valuationPrompt, validateValuation } from "./valuation-contract";
-import { validateExactPricing } from "./pricing-integrity";
+import { inventoryMatchesSnapshot, validateExactPricing } from "./pricing-integrity";
 import type { AnalysisProfile } from "./valuation-types";
 import type { ProductDocument } from "./product-document";
 import { equipmentInventory, type EquipmentPricingSnapshot } from "./equipment-pricing";
 import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
+import { petGearInventory } from "./pet-gear-inventory";
 import { validateSampleSelection } from "./sample-selection";
+import { validateRolePricing, type RolePricingSnapshot } from "./role-pricing";
 import type {
   AnalysisDetail,
   AnalysisItem,
@@ -32,13 +34,22 @@ export type AnalysisTask = {
   lastError: string | null;
   equipmentPricing?: EquipmentPricingSnapshot;
   petPricing?: PetPricingSnapshot;
+  rolePricing?: RolePricingSnapshot;
 };
 const now = () => new Date().toISOString();
 const nullable = (value: SQLOutputValue | undefined) => (value == null ? null : String(value));
-const expiredPricingSql = ["equipment_pricing", "pet_pricing"]
+const expiredPricingTimeSql = (column: string, path: string) => {
+  const time = `julianday(json_extract(${column},'${path}.searchedAt'))`;
+  return `(${time} IS NULL OR ${time}<=julianday('now','-24 hours') OR ${time}>julianday('now','+1 minute'))`;
+};
+const expiredPricingSql = [
+  "equipment_pricing",
+  "pet_pricing",
+  "pet_pricing.gearPricing",
+  "role_pricing",
+]
   .map((key) => {
-    const time = `julianday(json_extract(t.result_json,'$.valuation.${key}.searchedAt'))`;
-    return `(json_type(t.result_json,'$.valuation.${key}')='object' AND (${time} IS NULL OR ${time}<=julianday('now','-24 hours') OR ${time}>julianday('now','+1 minute')))`;
+    return `(json_type(t.result_json,'$.valuation.${key}')='object' AND ${expiredPricingTimeSql("t.result_json", "$.valuation." + key)})`;
   })
   .join(" OR ");
 const stateSql = `CASE WHEN l.status!='complete' OR l.detail_json IS NULL THEN 'waiting_detail'
@@ -57,6 +68,8 @@ function profileScope(value: AnalysisProfile | null | undefined, serverId: strin
         calculationCompatible: value.calculationCompatible,
         equipmentSearch: !!value.equipmentSearch,
         petSearch: !!value.petSearch,
+        petGearSearch: !!value.petGearSearch,
+        roleSearch: !!value.roleSearch,
         settings: {
           ...value.settings,
           servers: value.settings.servers.filter((server) => server.serverId === serverId),
@@ -99,6 +112,7 @@ export class AnalysisStore {
       ["analysis_attempts", "request_hash"],
       ["analysis_tasks", "equipment_pricing_json"],
       ["analysis_tasks", "pet_pricing_json"],
+      ["analysis_tasks", "role_pricing_json"],
     ]) {
       if (
         !db
@@ -173,8 +187,12 @@ export class AnalysisStore {
       coalesce(sum(t.status='queued'),0) queued,coalesce(sum(t.reused),0) reused,
       (SELECT json_extract(source_listing_json,'$.name') FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current,
       (SELECT CASE
-        WHEN (equipment_pricing_json IS NULL OR json_type(equipment_pricing_json,'$.searchComplete')='false') AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search'
-        WHEN (pet_pricing_json IS NULL OR json_type(pet_pricing_json,'$.searchComplete')='false') AND json_extract(r.profile_json,'$.petSearch')=1 THEN 'pet_search'
+        WHEN (equipment_pricing_json IS NULL OR json_type(equipment_pricing_json,'$.searchComplete')='false' OR ${expiredPricingTimeSql("equipment_pricing_json", "$")}) AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search'
+        WHEN (pet_pricing_json IS NULL OR json_type(pet_pricing_json,'$.searchComplete')='false' OR ${expiredPricingTimeSql("pet_pricing_json", "$")}) AND json_extract(r.profile_json,'$.petSearch')=1 THEN 'pet_search'
+        WHEN json_extract(r.profile_json,'$.petGearSearch')=1 AND (json_extract(pet_pricing_json,'$.gearPricing.searchComplete') IS NOT 1 OR ${expiredPricingTimeSql("pet_pricing_json", "$.gearPricing")})
+          AND EXISTS(SELECT 1 FROM json_each(source_detail_json,'$.tabs') tab,json_each(tab.value,'$.pets') pet,json_each(pet.value,'$.equipment') gear WHERE json_extract(tab.value,'$.name')='召唤兽/孩子')
+          AND NOT EXISTS(SELECT 1 FROM analysis_attempts a WHERE a.task_id=analysis_tasks.id AND a.state='running') THEN 'pet_gear_search'
+        WHEN json_extract(r.profile_json,'$.roleSearch')=1 AND NOT EXISTS(SELECT 1 FROM analysis_attempts a WHERE a.task_id=analysis_tasks.id AND a.state='running') THEN 'role_search'
         ELSE 'analysis'
       END FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) phase
       FROM analysis_runs r LEFT JOIN analysis_tasks t ON t.run_id=r.id WHERE r.id=? GROUP BY r.id`)
@@ -264,6 +282,10 @@ export class AnalysisStore {
         const pets: PetPricingSnapshot | undefined = row.pet_pricing_json
           ? JSON.parse(String(row.pet_pricing_json))
           : undefined;
+        const role: RolePricingSnapshot | undefined = row.role_pricing_json
+          ? JSON.parse(String(row.role_pricing_json))
+          : undefined;
+        if (profile.roleSearch && !validateRolePricing(role, record)) continue;
         if (
           profile.equipmentSearch &&
           (equipment?.searchComplete !== true ||
@@ -275,6 +297,20 @@ export class AnalysisStore {
           (pets?.searchComplete !== true || !validateExactPricing(pets, petInventory(record).items))
         )
           continue;
+        if (profile.petGearSearch && petGearInventory(record).items.length) {
+          const gear = pets?.gearPricing;
+          const age = gear ? Date.now() - Date.parse(gear.searchedAt) : Infinity;
+          if (
+            !gear ||
+            gear.searchComplete !== true ||
+            gear.inputHash !== petGearInventory(record).inputHash ||
+            !inventoryMatchesSnapshot(gear, petGearInventory(record).items) ||
+            !Number.isFinite(age) ||
+            age < -60_000 ||
+            age >= 24 * 60 * 60 * 1000
+          )
+            continue;
+        }
         const attempt = this.db
           .prepare(`SELECT raw_response FROM analysis_attempts
           WHERE task_id=? AND state='completed' ORDER BY finished_at DESC LIMIT 1`)
@@ -287,6 +323,7 @@ export class AnalysisStore {
           profile,
           equipment,
           pets,
+          role,
         );
         if (
           isDeepStrictEqual(
@@ -350,7 +387,7 @@ export class AnalysisStore {
       }
       if (!rows.length) throw new Error("暂无详情完整的商品，请先采集商品详情");
       const insert = this.db.prepare(
-        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json,role_pricing_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       );
       let inserted = 0;
       rows.forEach((row, index) => {
@@ -389,6 +426,7 @@ export class AnalysisStore {
           previous ? previous.source_task_id || previous.id : null,
           previous?.equipment_pricing_json ?? null,
           previous?.pet_pricing_json ?? null,
+          previous?.role_pricing_json ?? null,
         );
       });
       if (!inserted) {
@@ -438,6 +476,7 @@ export class AnalysisStore {
         ? { equipmentPricing: JSON.parse(String(row.equipment_pricing_json)) }
         : {}),
       ...(row.pet_pricing_json ? { petPricing: JSON.parse(String(row.pet_pricing_json)) } : {}),
+      ...(row.role_pricing_json ? { rolePricing: JSON.parse(String(row.role_pricing_json)) } : {}),
     };
   }
   beginEquipmentSearch(task: AnalysisTask, owner: string) {
@@ -468,6 +507,7 @@ export class AnalysisStore {
       task.profile,
       snapshot,
       task.petPricing,
+      task.rolePricing,
     );
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -516,12 +556,22 @@ export class AnalysisStore {
   savePetPricing(task: AnalysisTask, snapshot: PetPricingSnapshot, owner: string): AnalysisTask {
     if (!task.profile?.petSearch || snapshot.inputHash !== petInventory(task.record).inputHash)
       throw new Error("宝宝查价资料与当前任务不匹配");
+    if (
+      snapshot.gearPricing &&
+      (!task.profile.petGearSearch ||
+        snapshot.gearPricing.inputHash !== petGearInventory(task.record).inputHash ||
+        !inventoryMatchesSnapshot(snapshot.gearPricing, petGearInventory(task.record).items) ||
+        snapshot.gearPricing.total !== null ||
+        snapshot.gearPricing.knownTotal !== 0)
+    )
+      throw new Error("宝宝装备查价资料与当前任务不匹配");
     const prompt = valuationPrompt(
       task.document,
       task.record,
       task.profile,
       task.equipmentPricing,
       snapshot,
+      task.rolePricing,
     );
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -634,6 +684,61 @@ export class AnalysisStore {
       )
       .run(runId);
   }
+  beginRoleSearch(task: AnalysisTask, owner: string) {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    if (
+      this.db
+        .prepare(
+          "UPDATE analysis_tasks SET status='running',error=NULL WHERE id=? AND status='queued' AND role_pricing_json IS ?",
+        )
+        .run(task.id, task.rolePricing ? JSON.stringify(task.rolePricing) : null).changes !== 1
+    )
+      throw new Error("整号查价任务状态已变化");
+  }
+  saveRolePricing(task: AnalysisTask, snapshot: RolePricingSnapshot, owner: string): AnalysisTask {
+    if (!task.profile?.roleSearch || !validateRolePricing(snapshot, task.record))
+      throw new Error("整号查价资料与当前任务或来源证据不匹配");
+    const prompt = valuationPrompt(
+      task.document,
+      task.record,
+      task.profile,
+      task.equipmentPricing,
+      task.petPricing,
+      snapshot,
+    );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.owns(owner)) throw new Error("分析锁已失效");
+      if (
+        this.db
+          .prepare(
+            "UPDATE analysis_tasks SET role_pricing_json=?,prompt_text=?,prompt_hash=?,status='queued',error=NULL WHERE id=? AND status='running' AND role_pricing_json IS ?",
+          )
+          .run(
+            JSON.stringify(snapshot),
+            prompt,
+            textHash(prompt),
+            task.id,
+            task.rolePricing ? JSON.stringify(task.rolePricing) : null,
+          ).changes !== 1
+      )
+        throw new Error("整号查价任务状态已变化");
+      this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
+      this.db.exec("COMMIT");
+      return { ...task, rolePricing: snapshot, prompt, lastError: null };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  abortRoleSearch(task: AnalysisTask, owner: string) {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    this.db
+      .prepare(
+        "UPDATE analysis_tasks SET status='queued' WHERE id=? AND status='running' AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')",
+      )
+      .run(task.id, task.id);
+  }
   detail(id: string, currentProfile?: AnalysisProfile): AnalysisDetail | null {
     const row = this.db
       .prepare(
@@ -686,11 +791,15 @@ export class AnalysisStore {
         ? JSON.parse(String(row.equipment_pricing_json))
         : null,
       petPricing: row.pet_pricing_json ? JSON.parse(String(row.pet_pricing_json)) : null,
+      rolePricing: row.role_pricing_json ? JSON.parse(String(row.role_pricing_json)) : null,
       attempts,
     };
   }
-  private item(row: Row): AnalysisItem {
+  private item(row: Row, currentProfile?: AnalysisProfile): AnalysisItem {
     const listing = JSON.parse(String(row.listing_json)) as Listing;
+    const savedProfile = row.profile_json
+      ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
+      : null;
     const result: ProductAnalysis | null = row.result_json
       ? JSON.parse(String(row.result_json))
       : null;
@@ -708,6 +817,13 @@ export class AnalysisStore {
       summary: result?.summary ?? null,
       highlights: row.state === "completed" ? result?.highlights || [] : listing.highlights || [],
       error: nullable(row.task_error),
+      profileChanged:
+        !!row.task_id &&
+        !!currentProfile &&
+        !isDeepStrictEqual(
+          profileScope(savedProfile, listing.serverId),
+          profileScope(currentProfile, listing.serverId),
+        ),
       valuation: row.state === "completed" ? result?.valuation : undefined,
     };
   }
@@ -740,7 +856,7 @@ export class AnalysisStore {
           AND candidate.source_detail_json=l.detail_json
           AND coalesce((${expiredPricingSql.replaceAll("t.", "candidate.")}),0)=0 THEN 0 ELSE 1 END,
         r.created_at DESC,candidate.ordinal DESC,candidate.id DESC LIMIT 1)`;
-    const source = `SELECT l.key,l.listing_json,l.collected_at,l.status collection_status,t.id task_id,t.result_json,t.error task_error,${stateSql} state FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection}`;
+    const source = `SELECT l.key,l.listing_json,l.collected_at,l.status collection_status,t.id task_id,t.result_json,t.error task_error,selected_run.profile_json,${stateSql} state FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN analysis_runs selected_run ON selected_run.id=t.run_id`;
     const conditions: string[] = [],
       values: string[] = [...sourceValues];
     if (options.search?.trim()) {
@@ -758,13 +874,18 @@ export class AnalysisStore {
     const records = this.db
       .prepare(`${query} ORDER BY key ASC LIMIT 20 OFFSET ?`)
       .all(...values, (page - 1) * 20)
-      .map((row) => this.item(row));
-    const ranking = this.db
+      .map((row) => this.item(row, options.currentProfile));
+    const ranking: AnalysisItem[] = [];
+    const rankedRows = this.db
       .prepare(
-        `WITH products AS (${source}) SELECT * FROM products WHERE state='completed' AND (json_extract(result_json,'$.valuation.decision')='BUY' OR (json_extract(result_json,'$.valuation') IS NULL AND json_extract(result_json,'$.score') IS NOT NULL)) ORDER BY coalesce(json_extract(result_json,'$.valuation.price_difference_ratio'),json_extract(result_json,'$.valuation.margin_of_safety')) DESC,json_extract(result_json,'$.score') DESC,key ASC LIMIT 10`,
+        `WITH products AS (${source}) SELECT * FROM products WHERE state='completed' AND (json_extract(result_json,'$.valuation.decision')='BUY' OR (json_extract(result_json,'$.valuation') IS NULL AND json_extract(result_json,'$.score') IS NOT NULL)) ORDER BY coalesce(json_extract(result_json,'$.valuation.price_difference_ratio'),json_extract(result_json,'$.valuation.margin_of_safety')) DESC,json_extract(result_json,'$.score') DESC,key ASC`,
       )
-      .all(...sourceValues)
-      .map((row) => this.item(row));
+      .iterate(...sourceValues);
+    for (const row of rankedRows) {
+      const item = this.item(row, options.currentProfile);
+      if (!item.profileChanged) ranking.push(item);
+      if (ranking.length === 10) break;
+    }
     const history = this.db
       .prepare(
         `SELECT a.*,t.id task_id,json_extract(t.source_listing_json,'$.name') name FROM analysis_attempts a JOIN analysis_tasks t ON a.task_id=t.id WHERE t.run_id=? ORDER BY a.created_at DESC,a.id ASC LIMIT 30`,

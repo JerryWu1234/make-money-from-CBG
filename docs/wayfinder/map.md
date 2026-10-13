@@ -11,18 +11,18 @@
 
 ## Decisions so far
 
-| 决策 | 结果 |
-|---|---|
-| 首发平台 | macOS V1；Windows 11 x64 延后 |
-| UI | Vite + React + TypeScript |
-| 浏览器边界 | Stagehand 运行于 Node，经 `127.0.0.1` CDP 连接专用 Chrome profile |
-| 采集机制 | Stagehand 导航/等待/展开页面，随后保存 rendered DOM HTML |
-| HTML 定义 | 页面稳定后的 `document.documentElement.outerHTML`，不等同于网络 response body |
-| 解析机制 | 版本化离线 parser 从 HTML 确定性生成 `RoleListingV1`；`extract()` 不作 canonical 来源 |
-| 数据分层 | frozen HTML crawl → frozen role batch → analysis run，三层不可变且可追溯 |
-| MVP 存储 | HTML + JSON/NDJSON + manifest + SHA-256，不先引入数据库 |
-| 分析原则 | 纯离线、确定性、每个分数可解释；不猜测 Excel 语义 |
-| 交易边界 | 不购买、付款、议价、上架，不绕过验证码或风控 |
+| 决策       | 结果                                                                                  |
+| ---------- | ------------------------------------------------------------------------------------- |
+| 首发平台   | macOS V1；Windows 11 x64 延后                                                         |
+| UI         | Vite + React + TypeScript                                                             |
+| 浏览器边界 | Stagehand 运行于 Node，经 `127.0.0.1` CDP 连接专用 Chrome profile                     |
+| 采集机制   | Stagehand 导航/等待/展开页面，随后保存 rendered DOM HTML                              |
+| HTML 定义  | 页面稳定后的 `document.documentElement.outerHTML`，不等同于网络 response body         |
+| 解析机制   | 版本化离线 parser 从 HTML 确定性生成 `RoleListingV1`；`extract()` 不作 canonical 来源 |
+| 数据分层   | frozen HTML crawl → frozen role batch → analysis run，三层不可变且可追溯              |
+| MVP 存储   | HTML + JSON/NDJSON + manifest + SHA-256，不先引入数据库                               |
+| 分析原则   | 纯离线、确定性、每个分数可解释；不猜测 Excel 语义                                     |
+| 交易边界   | 不购买、付款、议价、上架，不绕过验证码或风控                                          |
 
 ## Frontier：当前可处理的独立决策票
 

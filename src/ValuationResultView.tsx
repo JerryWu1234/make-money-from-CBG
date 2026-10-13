@@ -88,17 +88,29 @@ function ValuationPriceOverview({ result }: { result: ValuationResult }) {
     asset: "装备" | "宝宝",
     value: number | null | undefined,
     snapshot: ValuationResult["equipment_pricing"],
+    range: ValuationResult["estimated_equipment_range"],
   ) => {
     if (snapshot?.captureComplete && snapshot.items.length === 0) return "无" + asset;
+    const ignored = (item: NonNullable<typeof snapshot>["items"][number]) =>
+      item.baselineEstimate?.kind === "ignored" && !item.baselineInvalidReason;
+    if (snapshot?.items.length && snapshot.items.every(ignored))
+      return snapshot.captureComplete ? "低值未计入" : "资料未采齐";
+    if (range?.min === 0 && range.max === 0 && snapshot?.items.some(ignored))
+      return snapshot.captureComplete ? "未定价" : "资料未采齐";
     if (value != null) return valuationMoney(value);
+    if (range) {
+      const partial =
+        !snapshot?.captureComplete ||
+        snapshot.items.some(
+          (item) =>
+            item.status !== "priced" &&
+            !item.similarEstimate?.range &&
+            (item.baselineInvalidReason || item.baselineEstimate?.amount == null),
+        );
+      return (partial ? "已算小计区间 " : "参考区间 ") + valuationRangeMoney(range);
+    }
     if (!snapshot) return "未计价";
     if (!snapshot.captureComplete) return "资料未采齐";
-    if (
-      snapshot.items.every(
-        (item) => item.baselineEstimate?.kind === "ignored" && !item.baselineInvalidReason,
-      )
-    )
-      return "低值未计入";
     if (
       snapshot.knownTotal > 0 ||
       snapshot.items.some(
@@ -137,11 +149,20 @@ function ValuationPriceOverview({ result }: { result: ValuationResult }) {
         </div>
         <div>
           <dt>装备</dt>
-          <dd>{assetPrice("装备", result.equipment_value, result.equipment_pricing)}</dd>
+          <dd>
+            {assetPrice(
+              "装备",
+              result.equipment_value,
+              result.equipment_pricing,
+              result.estimated_equipment_range,
+            )}
+          </dd>
         </div>
         <div>
           <dt>宝宝</dt>
-          <dd>{assetPrice("宝宝", result.pet_value, result.pet_pricing)}</dd>
+          <dd>
+            {assetPrice("宝宝", result.pet_value, result.pet_pricing, result.estimated_pet_range)}
+          </dd>
         </div>
         <div>
           <dt>其他（锦衣、道具）</dt>
@@ -150,6 +171,67 @@ function ValuationPriceOverview({ result }: { result: ValuationResult }) {
       </dl>
       <p className="analysis-valuation-scope">锦衣和其他道具未计入总估值。</p>
     </>
+  );
+}
+function RoleMarketPricingView({
+  snapshot,
+}: {
+  snapshot: NonNullable<ValuationResult["role_pricing"]>;
+}) {
+  const reference = snapshot.marketReference;
+  const range = reference.status === "range" && snapshot.searchComplete ? reference.range : null;
+  const officialLink = (url: string) => {
+    try {
+      const parsed = new URL(url);
+      return parsed.origin === "https://xyq.cbg.163.com" && parsed.pathname === "/equip";
+    } catch {
+      return false;
+    }
+  };
+  return (
+    <section className="analysis-evidence-card" aria-label="整号市场参考">
+      <header>
+        <strong>整号市场参考</strong>
+        <span>{range ? valuationRangeMoney(range) : "样本不足，暂无法形成整号参考"}</span>
+      </header>
+      {range && reference.median != null && (
+        <p>相关样本挂牌中位数：{valuationMoney(reference.median)}</p>
+      )}
+      <p>
+        有效整号样本：{reference.sampleCount} 条。{reference.scope}
+      </p>
+      {!!reference.issues.length && (
+        <ul>
+          {reference.issues.map((issue) => (
+            <li key={issue}>{issue}</li>
+          ))}
+        </ul>
+      )}
+      {!!snapshot.candidates.length && (
+        <details>
+          <summary>查看整号样本与配置差异</summary>
+          {snapshot.candidates.map((candidate) => (
+            <section key={candidate.key} className="analysis-evidence-card">
+              <header>
+                {officialLink(candidate.url) ? (
+                  <a href={candidate.url} target="_blank" rel="noreferrer">
+                    {candidate.title}
+                  </a>
+                ) : (
+                  <strong>{candidate.title}</strong>
+                )}
+                <span>{valuationMoney(candidate.price)}</span>
+              </header>
+              <p>{candidate.verified && candidate.active ? "配置核验通过" : "未纳入整号参考"}</p>
+              {!!candidate.reasons.length && <p>{candidate.reasons.join("；")}</p>}
+              {!!candidate.differences.length && (
+                <p>配置差异：{candidate.differences.join("；")}</p>
+              )}
+            </section>
+          ))}
+        </details>
+      )}
+    </section>
   );
 }
 export function ValuationResultView({
@@ -225,6 +307,41 @@ export function ValuationResultView({
           </div>
         </>
       )}
+      {result.role_pricing && <RoleMarketPricingView snapshot={result.role_pricing} />}
+      {result.special_asset_reference && (
+        <section className="analysis-evidence-card" aria-label="特殊资产整体参考">
+          <h3>专用／绑定资产整体参考</h3>
+          <p>
+            {result.special_asset_reference.assets.map((asset) => asset.name).join("、")}
+            ：分项价格未知。
+          </p>
+          <p>{result.special_asset_reference.note}</p>
+          <ul>
+            {result.special_asset_reference.assets.map((asset) => (
+              <li key={asset.key}>
+                {asset.name}：{asset.roleUse}
+              </li>
+            ))}
+          </ul>
+          {result.special_asset_reference.value !== null && (
+            <p>
+              独立整号参考：{valuationMoney(result.special_asset_reference.value)}；范围：
+              {valuationRangeMoney(result.special_asset_reference.range!)}。
+            </p>
+          )}
+          {result.special_asset_reference.listingDifference !== null && (
+            <p>
+              整号参考减挂牌价：{valuationMoney(result.special_asset_reference.listingDifference)}。
+            </p>
+          )}
+        </section>
+      )}
+      {!!result.excluded_assets?.length && (
+        <p className="analysis-pending-note">
+          无匹配，未计入参考合计：{result.excluded_assets.map((asset) => asset.name).join("、")}
+          。市场售价未知。
+        </p>
+      )}
       <details className="analysis-valuation-details" open={expanded || !comparison}>
         <summary>查看估值依据与查价记录</summary>
         {comparison && <p>{result.reason}</p>}
@@ -253,7 +370,10 @@ export function ValuationResultView({
         )}
         {result.estimated_value_range && !result.estimated_sources?.includes("baseline") && (
           <p className="analysis-pending-note">
-            这是基于相近配置挂牌样本的完整参考区间，配置差异已列明，不能视为精确成交价值。
+            {result.excluded_assets?.length
+              ? "这是已计入资产的参考范围，已披露的排除项未计入。"
+              : "这是基于相近配置挂牌样本的完整参考区间，配置差异已列明。"}
+            不能视为精确成交价值。
           </p>
         )}
         {result.model_value === null && !result.estimated_value_range && (
@@ -324,6 +444,13 @@ export function ValuationResultView({
         )}
         {result.equipment_pricing && <EquipmentPricingView snapshot={result.equipment_pricing} />}
         {result.pet_pricing && <EquipmentPricingView snapshot={result.pet_pricing} asset="宝宝" />}
+        {result.pet_pricing?.gearPricing && (
+          <EquipmentPricingView
+            snapshot={result.pet_pricing.gearPricing}
+            asset="宝宝装备"
+            accounting={result.pet_pricing.gearPricing.accounting}
+          />
+        )}
         <h3>估值明细</h3>
         <p>
           已核算分项小计：{valuationMoney(result.known_subtotal)}

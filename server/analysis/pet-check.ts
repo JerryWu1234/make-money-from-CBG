@@ -12,13 +12,31 @@ export async function checkPet(input: Record<string, unknown>, requestSignal: Ab
       throw new Error(key + " 必须是非空字符串，且不超过100字");
     return value.trim();
   };
-  const productKey = identifier("productKey"),
-    petKey = identifier("petKey");
+  const productKey = identifier("productKey");
+  if (input.mode !== undefined && input.mode !== "discover")
+    throw new Error("宝宝检查 mode 只支持 discover，留空为指定宝宝查价");
+  const petKey = input.mode === "discover" ? undefined : identifier("petKey");
   const record = savedDetail(productKey) as SavedRoleRecord | null;
   if (!record) throw new Error("已保存商品不存在");
   if (record.listing.key !== productKey) throw new Error("商品 ID 与保存记录不一致");
   if (record.status !== "complete" || !record.detail)
     throw new Error("商品详情尚未采集完整，请先补采");
+  if (input.mode === "discover") {
+    const signal = AbortSignal.any([requestSignal, AbortSignal.timeout(150_000)]);
+    signal.throwIfAborted();
+    const source = await createPetSource(signal);
+    try {
+      const form = await source.discover();
+      signal.throwIfAborted();
+      return {
+        mode: "discover",
+        target: { productKey, name: record.listing.name, url: record.listing.url },
+        form,
+      };
+    } finally {
+      await source.close();
+    }
+  }
   const inventory = petInventory(record);
   if (!inventory.captureComplete)
     throw new Error("宝宝资料尚未采集完整：" + inventory.issues.join("；"));

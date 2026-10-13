@@ -63,10 +63,11 @@ async function valuationSetup() {
       collectedAt: record.detail!.collectedAt,
       complete: true,
       issues: [],
+      emptyProof: "explicit-text",
     };
     record.detail!.tabs.push({
       name: "道具/法宝",
-      text: "",
+      text: "没有装备",
       fields: [],
       tables: [],
       elements: [],
@@ -86,10 +87,16 @@ async function valuationSetup() {
     return record;
   });
   const record = context.crawl.detail("a") as SavedRoleRecord;
-  const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), {
-    ...DEFAULT_SETTINGS,
-    servers: [{ serverId: record.listing.serverId, age: "three", rank: 10 }],
-  });
+  const profile = createProfile(
+    readFileSync(PROMPT_FILE, "utf8"),
+    {
+      ...DEFAULT_SETTINGS,
+      servers: [{ serverId: record.listing.serverId, age: "three", rank: 10 }],
+    },
+    true,
+    true,
+    false,
+  );
   const noNetwork = vi.fn().mockRejectedValue(new Error("empty equipment must not search"));
   const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
     findCandidates: noNetwork,
@@ -147,35 +154,57 @@ describe("持久化的商品分析队列", () => {
     const { store, runner, analyze, profile, searchEquipment } = await valuationSetup();
     const first = await runner.start("codex", false, profile);
     await runner.settled();
-    const otherServer = createProfile(profile.template, {
-      ...profile.settings,
-      servers: [...profile.settings.servers, { serverId: "999999", age: "older", rank: 50 }],
-    });
+    const otherServer = createProfile(
+      profile.template,
+      {
+        ...profile.settings,
+        servers: [...profile.settings.servers, { serverId: "999999", age: "older", rank: 50 }],
+      },
+      true,
+      true,
+      false,
+    );
     const savedTask = store.overview().results.items[0].taskId;
     expect(otherServer.hash).not.toBe(profile.hash);
     expect(store.overview({ currentProfile: otherServer }).results.items[0]).toMatchObject({
       profileHash: profile.hash,
       profileChanged: false,
     });
+    expect(store.overview({ currentProfile: otherServer }).records.items[0].profileChanged).toBe(
+      false,
+    );
     expect(store.detail(savedTask, otherServer)?.profileChanged).toBe(false);
     expect(await runner.start("codex", false, otherServer)).toBe(first);
     await runner.settled();
     expect(analyze).toHaveBeenCalledTimes(1);
-    const changed = createProfile(profile.template, {
-      ...otherServer.settings,
-      servers: otherServer.settings.servers.map((server) =>
-        server.serverId === profile.settings.servers[0].serverId
-          ? { ...server, rank: 100 }
-          : server,
-      ),
-    });
+    const changed = createProfile(
+      profile.template,
+      {
+        ...otherServer.settings,
+        servers: otherServer.settings.servers.map((server) =>
+          server.serverId === profile.settings.servers[0].serverId
+            ? { ...server, rank: 100 }
+            : server,
+        ),
+      },
+      true,
+      true,
+      false,
+    );
     expect(changed.calculationVersion).toBe(profile.calculationVersion);
     expect(store.overview({ currentProfile: changed }).results.items[0].profileChanged).toBe(true);
+    expect(store.overview({ currentProfile: changed }).records.items[0]).toMatchObject({
+      state: "completed",
+      profileChanged: true,
+      valuation: store.detail(savedTask)!.result!.valuation,
+    });
+    expect(store.overview({ currentProfile: changed }).ranking).toHaveLength(0);
+    expect(store.overview({ currentProfile: otherServer }).ranking).toHaveLength(1);
     expect(store.detail(savedTask, changed)?.profileChanged).toBe(true);
     for (const changedSettings of [
-      createProfile(profile.template + "\n请补充价格说明。", profile.settings),
+      createProfile(profile.template + "\n请补充价格说明。", profile.settings, true, true, false),
       createProfile(profile.template, profile.settings, false, true),
-      createProfile(profile.template, profile.settings, true, false),
+      createProfile(profile.template, profile.settings, true, false, false),
     ]) {
       expect(changedSettings.calculationVersion).toBe(profile.calculationVersion);
       expect(
@@ -192,6 +221,8 @@ describe("持久化的商品分析队列", () => {
       changed.hash,
     );
     expect(store.overview({ currentProfile: changed }).results.items[0].profileChanged).toBe(false);
+    expect(store.overview({ currentProfile: changed }).records.items[0].profileChanged).toBe(false);
+    expect(store.overview({ currentProfile: changed }).ranking).toHaveLength(1);
     expect(store.detail(savedTask, changed)?.profileChanged).toBe(true);
   });
   it("增量任务只处理新增商品；新任务排队时保留之前的完整结果", async () => {

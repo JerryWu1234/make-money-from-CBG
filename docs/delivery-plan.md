@@ -14,15 +14,15 @@
 
 ## 2. 票总览
 
-| 票 | 独立可运行结果 | 状态 / 阻塞 |
-|---|---|---|
-| M0 | Vite/Node 基线和全部 V1 契约可构建 | Ready，唯一基线 |
-| M1 | HTML snapshots 可写入、校验并冻结成 crawl run | M0 后 Ready |
-| M2 | Stagehand 经 CDP 抓取动态页面的 rendered HTML | M0 后 Ready；生产 scope 阻塞于 WF-01 |
-| M3 | HTML fixtures 可离线解析并冻结成角色批次 | M0 后 Ready；最终字段阻塞于 WF-04 |
-| M4 | 脱敏 Excel 可转换为标准规则 JSON | 阻塞于 WF-02/WF-03 |
-| M5 | 角色 fixture + 规则 fixture 可输出确定性排名 | M0 后 Ready |
-| M6 | Vite 可展示 crawl、解析和排名 fixture | M0 后 Ready |
+| 票  | 独立可运行结果                                | 状态 / 阻塞                          |
+| --- | --------------------------------------------- | ------------------------------------ |
+| M0  | Vite/Node 基线和全部 V1 契约可构建            | Ready，唯一基线                      |
+| M1  | HTML snapshots 可写入、校验并冻结成 crawl run | M0 后 Ready                          |
+| M2  | Stagehand 经 CDP 抓取动态页面的 rendered HTML | M0 后 Ready；生产 scope 阻塞于 WF-01 |
+| M3  | HTML fixtures 可离线解析并冻结成角色批次      | M0 后 Ready；最终字段阻塞于 WF-04    |
+| M4  | 脱敏 Excel 可转换为标准规则 JSON              | 阻塞于 WF-02/WF-03                   |
+| M5  | 角色 fixture + 规则 fixture 可输出确定性排名  | M0 后 Ready                          |
+| M6  | Vite 可展示 crawl、解析和排名 fixture         | M0 后 Ready                          |
 
 ## 3. 实现票
 
@@ -269,15 +269,15 @@ WF-01 + WF-04 关闭后：最小生产 smoke test
 
 ## 6. 主要风险与停机条件
 
-| 风险 | 最小控制 | 停机条件 |
-|---|---|---|
-| 生产采集范围无授权依据 | `CrawlScopeV1` + `authorizationRef` 前置校验 | 无依据时生产命令在导航前失败 |
-| rendered HTML 不含 iframe/shadow/canvas/懒加载 | 每种 page kind 定义稳定条件与 required fields | HTML 无法表达必填字段时不宣称全量 |
-| Stagehand 页面动作不稳定 | selector/locator 优先，动作白名单，保留失败 draft | 未知弹窗、验证码、URL 越界立即停止 |
-| HTML 含脚本或敏感标记 | `var/`、当前用户权限、离线无脚本 parser、UI 不渲染 HTML | 快照进入 Git 或浏览器执行则阻断发布 |
-| 页面改版导致 parser 漂移 | parser version + 多版本 fixtures + 来源追溯 | 未知页面版本不自动猜测 |
-| 全服完整性无法证明 | 服务器清单、分页终止证据、发现/抓取集合对账 | 任一失败 URL 或缺终止证据时不冻结 |
-| HTML 体积和运行时间超预期 | 首次运行记录字节数/耗时，再决定压缩或数据库 | 无测量证据前不引入复杂存储 |
-| Excel 语义被误读 | 逐列映射 + 3 个手算案例 | 任一列/公式无法解释时 M4 不完成 |
-| CDP 暴露本机会话 | loopback + 专用 profile | 非 loopback CDP 立即拒绝 |
-| 过早复杂化 | 单进程、文件批次、单并发默认值 | 在真实规模证据前不引入队列/微服务 |
+| 风险                                           | 最小控制                                                | 停机条件                            |
+| ---------------------------------------------- | ------------------------------------------------------- | ----------------------------------- |
+| 生产采集范围无授权依据                         | `CrawlScopeV1` + `authorizationRef` 前置校验            | 无依据时生产命令在导航前失败        |
+| rendered HTML 不含 iframe/shadow/canvas/懒加载 | 每种 page kind 定义稳定条件与 required fields           | HTML 无法表达必填字段时不宣称全量   |
+| Stagehand 页面动作不稳定                       | selector/locator 优先，动作白名单，保留失败 draft       | 未知弹窗、验证码、URL 越界立即停止  |
+| HTML 含脚本或敏感标记                          | `var/`、当前用户权限、离线无脚本 parser、UI 不渲染 HTML | 快照进入 Git 或浏览器执行则阻断发布 |
+| 页面改版导致 parser 漂移                       | parser version + 多版本 fixtures + 来源追溯             | 未知页面版本不自动猜测              |
+| 全服完整性无法证明                             | 服务器清单、分页终止证据、发现/抓取集合对账             | 任一失败 URL 或缺终止证据时不冻结   |
+| HTML 体积和运行时间超预期                      | 首次运行记录字节数/耗时，再决定压缩或数据库             | 无测量证据前不引入复杂存储          |
+| Excel 语义被误读                               | 逐列映射 + 3 个手算案例                                 | 任一列/公式无法解释时 M4 不完成     |
+| CDP 暴露本机会话                               | loopback + 专用 profile                                 | 非 loopback CDP 立即拒绝            |
+| 过早复杂化                                     | 单进程、文件批次、单并发默认值                          | 在真实规模证据前不引入队列/微服务   |

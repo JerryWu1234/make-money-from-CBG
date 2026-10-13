@@ -31,6 +31,8 @@ export type AnalysisProfile = {
   marketSources?: import("./market").MarketServer[];
   equipmentSearch?: boolean;
   petSearch?: boolean;
+  petGearSearch?: boolean;
+  roleSearch?: boolean;
   version: "role-valuation-v1";
   template: string;
   promptHash: string;
@@ -56,6 +58,15 @@ export type ValuationFact = {
   quote: string;
 };
 export type ValuationResult = {
+  excluded_assets?: Array<{ key: string; name: string; reason: string }>;
+  special_asset_reference?: {
+    method: "whole-role-market";
+    assets: Array<{ key: string; name: string; roleUse: string; individualPrice: null }>;
+    value: number | null;
+    range: import("./pricing-estimate").PriceRange | null;
+    listingDifference: number | null;
+    note: string;
+  };
   decision: Decision;
   comparison_mode?: "listing-only";
   price_difference?: number | null;
@@ -65,6 +76,8 @@ export type ValuationResult = {
   estimated_subtotal_value?: number;
   estimated_value_range?: import("./pricing-estimate").PriceRange;
   estimated_subtotal_range?: import("./pricing-estimate").PriceRange;
+  estimated_equipment_range?: import("./pricing-estimate").PriceRange;
+  estimated_pet_range?: import("./pricing-estimate").PriceRange;
   estimated_price_difference?: import("./pricing-estimate").PriceRange;
   estimated_comparison?: "below" | "within" | "above";
   estimate_missing_count?: number;
@@ -90,6 +103,7 @@ export type ValuationResult = {
   equipment_pricing?: import("./equipment-pricing").EquipmentPricingSnapshot;
   pet_value?: number | null;
   pet_pricing?: import("./pet-pricing").PetPricingSnapshot;
+  role_pricing?: import("./role-pricing").RolePricingSnapshot;
   suggestions?: string[];
   extracted_facts?: ValuationFact[];
   ai_explanation?: string;

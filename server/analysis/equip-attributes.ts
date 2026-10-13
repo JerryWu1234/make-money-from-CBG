@@ -1,10 +1,11 @@
-import { cleanDescription } from "../crawler/compact";
+import { cleanDescription, jewelryDescriptionSections } from "../crawler/compact";
 
 export type EquipmentAttributes = {
   level: number | null;
   fields: Record<string, string[]>;
   restrictions: string[];
   unknownLines: string[];
+  jewelrySections?: { main: Record<string, string[]>; added: Record<string, string[]> };
 };
 
 const aliases: Record<string, string> = {
@@ -14,8 +15,13 @@ const aliases: Record<string, string> = {
   熔炼效果: "熔炼",
   套装效果: "套装",
   点化特效: "点化",
+  初防: "初始防御",
+  总防御: "防御",
 };
 const labels = [
+  "初始防御",
+  "初防",
+  "总防御",
   "等级",
   "五行",
   "命中",
@@ -93,6 +99,54 @@ const fieldPattern = new RegExp(
 const conditionPattern =
   /(?:^|[\s【[])(装备角色|装备对象|装备条件|使用条件|门派条件|部位条件)(?=[：:】\]]|\s)/g;
 const normalize = (value: string) => value.replace(/[\s：:，,；;【】[\]]/g, "").toLowerCase();
+/** Main description stats exclude separately rendered melting; only gem defense is removed. */
+export function equipmentInitialDefense(
+  attributes: EquipmentAttributes,
+  partial = false,
+): number | null {
+  const fields = attributes.fields;
+  if (fields.精炼等级 || attributes.jewelrySections) return null;
+  const integer = (values?: string[]) => {
+    if (values?.length !== 1 || !/^\+?\d+$/.test(values[0])) return null;
+    const value = Number(values[0]);
+    return Number.isSafeInteger(value) && value <= 10000 ? value : null;
+  };
+  const explicit = integer(fields.初始防御);
+  if (fields.初始防御 && explicit === null) return null;
+  const defense = integer(fields.防御);
+  const gems = [
+    ...new Set(
+      (fields.宝石 || []).flatMap((value) => value.split(/[、，,；;\s]+/)).filter(Boolean),
+    ),
+  ];
+  const grade = fields.锻炼等级 === undefined ? null : integer(fields.锻炼等级);
+  let derived: number | null = null;
+  if (defense !== null) {
+    if (!gems.length && (fields.锻炼等级 === undefined || grade === 0)) {
+      if (!partial || grade === 0) derived = defense;
+    } else if (grade !== null && grade > 0) {
+      // Official gem rules: https://xyq.163.com/introduce/dj008.html.
+      const withoutDefense = new Set([
+        "光芒石",
+        "太阳石",
+        "红宝石",
+        "黄宝石",
+        "蓝宝石",
+        "绿宝石",
+        "黑宝石",
+        "红玛瑙",
+        "舍利子",
+        "神秘石",
+        "翡翠石",
+      ]);
+      if (gems.length === 1 && gems[0] === "月亮石") derived = defense - grade * 12;
+      else if (gems.length && gems.every((gem) => withoutDefense.has(gem))) derived = defense;
+    }
+  }
+  if (derived !== null && derived < 0) return null;
+  if (explicit !== null && derived !== null && explicit !== derived) return null;
+  return explicit ?? derived;
+}
 function canonical(value: string) {
   const normalized = normalize(value).replace(/＋/g, "+").replace(/−/g, "-");
   const number = normalized.match(/^([+-]?\d+(?:\.\d+)?)(?:点|级|次|锻)?$/)?.[1];
@@ -241,7 +295,82 @@ export function parseEquipmentAttributes(description: string): EquipmentAttribut
   ].map((match) => normalize(match[0]));
   const levels = fields.等级?.map((value) => canonical(value));
   const level = levels?.length === 1 && /^\d+$/.test(levels[0]) ? Number(levels[0]) : null;
-  return { level, fields, restrictions, unknownLines };
+  let sections = jewelry ? jewelryDescriptionSections(description) : null;
+  if (jewelry && !sections) {
+    // Independent listings often omit the color-derived header in innerText. The observed
+    // bracketed refinement bonuses identify their contiguous two/three added stat rows.
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    const indexes = lines.flatMap((line, index) =>
+      /^[\u4e00-\u9fff]+\s*[+＋−-]?\d+(?:\.\d+)?\s*\[[+＋−-]?\d+(?:\.\d+)?\]$/.test(line)
+        ? [index]
+        : [],
+    );
+    if (
+      [2, 3].includes(indexes.length) &&
+      indexes.every((index, offset) => index === indexes[0] + offset)
+    )
+      sections = {
+        main: lines.slice(0, indexes[0]).join("\n"),
+        added: indexes.map((index) => lines[index]),
+      };
+  }
+  return {
+    level,
+    fields,
+    restrictions,
+    unknownLines,
+    ...(sections
+      ? {
+          jewelrySections: {
+            main: parseEquipmentAttributes(sections.main).fields,
+            added: parseEquipmentAttributes(sections.added.join("\n")).fields,
+          },
+        }
+      : {}),
+  };
+}
+
+/** Same-named primary and added jewelry stats must never trade places in a comparison. */
+export function separateJewelryAttributes(
+  target: EquipmentAttributes,
+  source: EquipmentAttributes,
+  partial = false,
+) {
+  const overlap = [
+    ...new Set(
+      [target, source].flatMap((value) =>
+        value.jewelrySections
+          ? Object.keys(value.jewelrySections.main).filter(
+              (name) =>
+                Object.hasOwn(value.jewelrySections!.added, name) &&
+                (Object.hasOwn(target.fields, name) || Object.hasOwn(source.fields, name)),
+            )
+          : [],
+      ),
+    ),
+  ];
+  if (!overlap.length || (partial && !source.jewelrySections))
+    return { target, source, reason: null };
+  if (!target.jewelrySections || !source.jewelrySections)
+    return { target, source, reason: "灵饰主属性与附加属性缺少分段证据，不能混合比较" };
+  const separate = (value: EquipmentAttributes) => {
+    const fields = { ...value.fields };
+    for (const name of overlap) {
+      delete fields[name];
+      for (const [section, prefix] of [
+        ["main", "主属性"],
+        ["added", "附加属性"],
+      ] as const) {
+        const values = value.jewelrySections![section][name];
+        if (values?.length) fields[prefix + "·" + name] = values;
+      }
+    }
+    return { ...value, fields };
+  };
+  return { target: separate(target), source: separate(source), reason: null };
 }
 
 /** Strict matching does not infer premiums, discounts or substitute superior items. */
@@ -249,6 +378,10 @@ export function compareEquipmentAttributes(
   target: EquipmentAttributes,
   source: EquipmentAttributes,
 ) {
+  const separated = separateJewelryAttributes(target, source);
+  if (separated.reason) return separated.reason;
+  target = separated.target;
+  source = separated.source;
   const sorted = (values: string[]) => values.flatMap(canonicalValues).sort();
   const same = (left: string[], right: string[]) =>
     JSON.stringify(sorted(left)) === JSON.stringify(sorted(right));

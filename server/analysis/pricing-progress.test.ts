@@ -1,0 +1,188 @@
+import { expect, it } from "vite-plus/test";
+import {
+  pricingSearchAdvanced,
+  resetPricingCursor,
+  resumePricingItems,
+  rememberPricingPage,
+  validPricingPageHistory,
+} from "./pricing-progress";
+import type { EquipmentSearchCursor } from "./equipment-pricing";
+
+it("已读完前页的身份指纹也保留，后续当前页不变时仍发现前页重排", () => {
+  const cursor: EquipmentSearchCursor = {
+    version: 1,
+    planHash: "plan",
+    modeIndex: 0,
+    pageNumber: 2,
+    rowIndex: 1,
+    pageRowsHash: "second",
+    seen: [],
+    failed: [],
+  };
+  expect(rememberPricingPage(cursor, 0, 1, "first")).toBe(true);
+  expect(rememberPricingPage(cursor, 0, 2, "second")).toBe(true);
+  expect(validPricingPageHistory(cursor)).toBe(true);
+  expect(rememberPricingPage(cursor, 0, 1, "first-reordered")).toBe(false);
+  resetPricingCursor(cursor);
+  expect(cursor.pageHistory).toEqual([]);
+  expect(cursor.historyIndex).toBe(0);
+});
+import type { EquipmentPricingSnapshot } from "./equipment-pricing";
+
+it("清单有未采齐单件时，完整装备仍进入查价队列", () => {
+  const snapshot: EquipmentPricingSnapshot = {
+    version: 1,
+    inputHash: "partial",
+    searchedAt: new Date().toISOString(),
+    provider: "browser",
+    model: "browser",
+    captureComplete: false,
+    total: null,
+    knownTotal: 0,
+    queries: [],
+    rawResponse: null,
+    issues: ["第二件未采齐"],
+    items: ["no_match", "incomplete"].map((status, index) => ({
+      key: String(index),
+      name: "装备",
+      level: 70,
+      category: "腰带",
+      description: "等级70",
+      query: "",
+      status: status as "no_match" | "incomplete",
+      referencePrice: null,
+      candidates: [],
+      issues: [],
+    })),
+  };
+  expect(resumePricingItems(structuredClone(snapshot)).items[0].searchState).toBeUndefined();
+  const ready = resumePricingItems(snapshot, undefined, true);
+  expect(ready.items[0].searchState).toBe("pending");
+  expect(ready.items[1].searchState).toBeUndefined();
+  expect(ready.captureComplete).toBe(false);
+});
+
+it("自动续查需要游标确实前进，读取失败和未前进不会自动循环", () => {
+  const current = {
+    items: [
+      {
+        key: "a",
+        searchState: "pending",
+        searchCursor: {
+          version: 1,
+          planHash: "plan",
+          modeIndex: 0,
+          pageNumber: 1,
+          rowIndex: 10,
+          pageRowsHash: "page",
+          seen: ["1:item"],
+          failed: [],
+        },
+      },
+    ],
+  } as unknown as EquipmentPricingSnapshot;
+  expect(pricingSearchAdvanced(undefined, current)).toBe(true);
+  expect(pricingSearchAdvanced(structuredClone(current), current)).toBe(false);
+  const next = structuredClone(current);
+  next.items[0].searchCursor!.rowIndex = 11;
+  expect(pricingSearchAdvanced(current, next)).toBe(true);
+  next.items[0].searchState = "read_failed";
+  expect(pricingSearchAdvanced(current, next)).toBe(false);
+});
+
+it("只有同计划的查询位置前进才自动续查，seen、页面指纹或倒退不制造进展", () => {
+  const current = {
+    items: [
+      {
+        key: "a",
+        searchState: "pending",
+        searchCursor: {
+          version: 1,
+          planHash: "plan",
+          modeIndex: 1,
+          pageNumber: 2,
+          rowIndex: 10,
+          pageRowsHash: "page",
+          seen: ["1:one"],
+          failed: [],
+        },
+      },
+    ],
+  } as unknown as EquipmentPricingSnapshot;
+  for (const change of [
+    { seen: ["1:one", "1:two"] },
+    { pageRowsHash: "new-page-fingerprint" },
+    { rowIndex: 9 },
+    { pageNumber: 1, rowIndex: 30 },
+    { modeIndex: 0, pageNumber: 10, rowIndex: 30 },
+    { planHash: "changed-plan", rowIndex: 11 },
+  ]) {
+    const next = structuredClone(current);
+    Object.assign(next.items[0].searchCursor!, change);
+    expect(pricingSearchAdvanced(current, next), JSON.stringify(change)).toBe(false);
+  }
+  for (const change of [
+    { rowIndex: 11 },
+    { pageNumber: 3, rowIndex: 0 },
+    { modeIndex: 2, pageNumber: 1, rowIndex: 0 },
+  ]) {
+    const next = structuredClone(current);
+    Object.assign(next.items[0].searchCursor!, change);
+    expect(pricingSearchAdvanced(current, next), JSON.stringify(change)).toBe(true);
+  }
+});
+
+it("一件完成且其余装备尚未轮到时也属于真实进展，不要求后件游标变化", () => {
+  const previous = {
+    items: [
+      { key: "first", searchState: "pending" },
+      { key: "later", searchState: "pending" },
+    ],
+  } as EquipmentPricingSnapshot;
+  const current = structuredClone(previous);
+  current.items[0].searchState = "completed";
+  expect(pricingSearchAdvanced(previous, current)).toBe(true);
+  expect(pricingSearchAdvanced(current, structuredClone(current))).toBe(false);
+  current.items[1].searchState = "read_failed";
+  expect(pricingSearchAdvanced(previous, current)).toBe(false);
+});
+
+it("结果变化清空旧取样位置，只允许一次自动重建，避免行情变动造成无限循环", () => {
+  const previous = {
+    items: [
+      {
+        key: "a",
+        searchState: "pending",
+        searchCursor: {
+          version: 1,
+          planHash: "same-plan",
+          modeIndex: 2,
+          pageNumber: 3,
+          rowIndex: 8,
+          pageRowsHash: "old-page",
+          seen: ["1:old"],
+          failed: [{ url: "https://xyq.cbg.163.com/equip/1/failed", modeIndex: 2 }],
+        },
+      },
+    ],
+  } as EquipmentPricingSnapshot;
+  const current = structuredClone(previous);
+  resetPricingCursor(current.items[0].searchCursor!);
+  expect(current.items[0].searchCursor).toEqual({
+    version: 1,
+    planHash: "same-plan",
+    modeIndex: 0,
+    pageNumber: 1,
+    rowIndex: 0,
+    pageRowsHash: "",
+    pageHistory: [],
+    historyIndex: 0,
+    seen: [],
+    failed: [],
+    restartCount: 1,
+  });
+  expect(pricingSearchAdvanced(previous, current)).toBe(true);
+  const repeated = structuredClone(current);
+  resetPricingCursor(repeated.items[0].searchCursor!);
+  expect(pricingSearchAdvanced(current, repeated)).toBe(false);
+});

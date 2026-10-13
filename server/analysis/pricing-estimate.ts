@@ -1,23 +1,31 @@
 import type { EquipmentCandidate } from "./equipment-pricing";
-import { candidateQuoteMatchesPrice, officialSourceIdentity } from "./pricing-integrity";
+import {
+  candidateQuoteMatchesPrice,
+  officialSourceIdentity,
+  priceMedian,
+  priceAverage,
+  EQUIPMENT_QUOTE_LIMIT,
+} from "./pricing-integrity";
 
 export type PriceRange = { min: number; max: number };
 export type SimilarEstimate = {
   policyVersion: string;
   status: "range" | "insufficient" | "dispersed";
   range: PriceRange | null;
+  observedRange?: PriceRange;
   sampleCount: number;
   median?: number;
+  average?: number;
   issues: string[];
 };
-export const SIMILAR_POLICY_VERSION = "same-level-comparables-v1";
-export const EQUIPMENT_SIMILAR_POLICY_VERSION = "same-core-equipment-v3";
+export const SIMILAR_POLICY_VERSION = "protected-core-first-ten-average-v5";
+export const EQUIPMENT_SIMILAR_POLICY_VERSION = "bounded-attributes-first-ten-average-v7";
 
 export function buildEquipmentEstimate(candidates: EquipmentCandidate[]): SimilarEstimate {
   return buildSimilarEstimate(candidates, true);
 }
 
-/** Observed listing bounds, not a confidence interval or an invented adjustment. */
+/** Keep official listing order, deduplicate, and average up to ten verified quotations. */
 export function buildSimilarEstimate(
   candidates: EquipmentCandidate[],
   equipment = false,
@@ -56,44 +64,35 @@ export function buildSimilarEstimate(
     }
     distinct.set(identity, candidate.price);
   }
-  const prices = [...distinct.values()].sort((a, b) => a - b);
-  const base = { policyVersion, sampleCount: prices.length };
-  if (prices.length < 3)
+  const prices = [...distinct.values()].slice(0, EQUIPMENT_QUOTE_LIMIT).sort((a, b) => a - b);
+  const base = {
+    policyVersion,
+    sampleCount: prices.length,
+    ...(prices.length ? { observedRange: { min: prices[0], max: prices[prices.length - 1] } } : {}),
+  };
+  if (!prices.length)
     return {
       ...base,
       status: "insufficient",
       range: null,
-      issues: [
-        equipment
-          ? "相近装备有效挂牌样本不足3条，暂不生成参考价"
-          : "相近配置有效挂牌样本不足3条，暂不生成估价区间",
-      ],
+      issues: ["没有已核验的独立在售商品，无法计算挂牌平均价"],
     };
   const min = Math.min(...prices),
     max = Math.max(...prices);
-  if (max / min > 1.5)
-    return {
-      ...base,
-      status: "dispersed",
-      range: null,
-      issues: ["相近样本最高价超过最低价的1.5倍，报价过于分散，需要继续核实"],
-    };
   return {
     ...base,
     status: "range",
     range: { min, max },
-    ...(equipment
-      ? {
-          median:
-            prices.length % 2
-              ? prices[Math.floor(prices.length / 2)]
-              : Math.round((prices[prices.length / 2 - 1] + prices[prices.length / 2]) * 50) / 100,
-        }
-      : {}),
+    median: priceMedian(prices)!,
+    average: priceAverage(prices)!,
     issues: [
-      equipment
-        ? "参考价为同级同类型、核心特技/特效一致的挂牌样本中位数；套装、宝石、熔炼等差异已保留，未推测折价，不代表成交价"
-        : "区间为相近配置的在售挂牌价范围，未根据属性差异推测折价，不代表成交价",
+      `参考价为前${prices.length}件已核实相近在售商品的算术平均价，目标为${EQUIPMENT_QUOTE_LIMIT}件；保留挂牌范围及配置差异，不代表成交价`,
+      ...(prices.length < EQUIPMENT_QUOTE_LIMIT
+        ? [`仅${prices.length}件样本，须确认本次检索已结束后才采用实际样本数`]
+        : []),
+      ...(max / min > 1.5
+        ? ["挂牌价差超过1.5倍，均价受高价样本影响，需结合范围和配置差异判断"]
+        : []),
     ],
   };
 }
