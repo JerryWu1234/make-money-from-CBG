@@ -8,9 +8,20 @@ import { validEquipmentExclusion } from "./equipment-exclusion";
 
 type PricingItem = EquipmentPricingItem | PetPricingItem;
 type PricingSnapshot = EquipmentPricingSnapshot | PetPricingSnapshot;
+
+export function skippedPricingItem(item: PricingItem) {
+  return (
+    item.searchState === "skipped" &&
+    (item.status === "no_match" ||
+      (["untradable", "unsupported"].includes(item.status) && !!item.skipReason)) &&
+    item.referencePrice === null &&
+    !item.baselineEstimate &&
+    !item.candidates.some((candidate) => candidate.verified)
+  );
+}
 const round = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
-export const EQUIPMENT_QUOTE_LIMIT = 10;
-export const EQUIPMENT_QUOTE_POLICY = "first-ten-average-v2";
+export const EQUIPMENT_QUOTE_LIMIT = 5;
+export const EQUIPMENT_QUOTE_POLICY = "first-five-average-v3";
 export const PRICING_RESUME_POLICY = "revalidate-pages-and-completion-evidence-v3";
 
 /** Average validated yuan quotations in integer cents, rounded half up. */
@@ -200,6 +211,7 @@ export function validateExactPricing(
   let knownTotal = 0;
   for (const item of snapshot.items) {
     if (!Array.isArray(item.candidates)) return false;
+    if (item.searchState === "skipped" && !skippedPricingItem(item)) return false;
     if (item.samplingStopped && (item.searchState === "completed" || item.status === "priced"))
       return false;
     if (
@@ -213,6 +225,11 @@ export function validateExactPricing(
     )
       return false;
     const inventoryItem = inventoryItems.find((value) => value.key === item.key)!;
+    if (
+      inventoryItem.searchState === "skipped" &&
+      (item.searchState !== "skipped" || item.skipReason !== inventoryItem.skipReason)
+    )
+      return false;
     if (
       inventoryItem.status !== "no_match" &&
       (item.status !== inventoryItem.status || item.referencePrice !== null)

@@ -1383,7 +1383,7 @@ try {
       },
     ),
   );
-  await check("前十件宝宝跨页去重和断点续查后计算均价，不采用第十一件低价", async () => {
+  await check("前五件宝宝跨页去重和断点续查后计算均价，不采用第六件低价", async () => {
     const prices = [100, 110, 120, 130, 140, 150, 160, 170, 180, 900, 1];
     const rows = prices.map((_, index) => ({ eid: `ten-${index}`, name: "宝宝昵称" }));
     const pages = [rows.slice(0, 5), [rows[0], ...rows.slice(5)]];
@@ -1404,14 +1404,14 @@ try {
     }
     assert.equal(previous.searchComplete, true);
     assert.equal(previous.items[0].searchState, "completed");
-    assert.equal(previous.total, 216);
-    assert.equal(previous.items[0].priceMethod, "first-ten-average-v2");
+    assert.equal(previous.total, 120);
+    assert.equal(previous.items[0].priceMethod, "first-five-average-v3");
     assert.deepEqual(
       previous.items[0].candidates.map(({ price }) => price),
-      prices.slice(0, 10),
+      prices.slice(0, 5),
     );
     assert.ok(previous.items[0].candidates.every(({ verified }) => verified));
-    assert.ok(!visits.includes("ten-10"));
+    assert.ok(!visits.includes("ten-5"));
   });
   await check("官网空结果保留未定价，验证码/查询失败中止而非伪造无匹配", async () => {
     await withSource({ pages: [[]] }, {}, async ({ source, control }) => {

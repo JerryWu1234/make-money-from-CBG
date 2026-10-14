@@ -14,6 +14,7 @@ import { createProfile, DEFAULT_SETTINGS, PROMPT_FILE } from "./profile";
 import { equipmentPricingPlan } from "./equipment-pricing";
 import { petInventory } from "./pet-pricing";
 import { assertPetUIArguments } from "./browser-pet-source";
+import { finishPricingSearch } from "./pricing-progress";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -62,7 +63,6 @@ function setup(petSearch = false) {
     DEFAULT_SETTINGS,
     true,
     petSearch,
-    false,
   );
   const analyze = vi.fn<AnalysisClient["analyze"]>().mockResolvedValue({
     text: JSON.stringify({
@@ -357,7 +357,7 @@ it("单次查价超时推进下一角色，忽略迟到的快照", async () => {
   expect(c.analyze).toHaveBeenCalledOnce();
 });
 
-it("首屏无样本的主动停止直接进入待补齐，不再自动查询同一角色", async () => {
+it("首屏无样本跳过单件后继续AI分析和下一角色", async () => {
   const c = setup();
   const record = c.crawl.detail("a") as SavedRoleRecord;
   record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items = [
@@ -370,38 +370,40 @@ it("首屏无样本的主动停止直接进入待补齐，不再自动查询同�
     },
   ];
   c.crawl.save(record.listing, record.detail!);
-  c.search.mockImplementationOnce(async (record) => ({
-    ...equipmentPricingPlan(record),
-    searchComplete: false,
-    items: equipmentPricingPlan(record).items.map((item) => ({
-      ...item,
-      searchState: "pending",
-      samplingStopped: true,
-      searchCursor: {
-        version: 1,
-        planHash: "plan",
-        modeIndex: 4,
-        pageNumber: 1,
-        rowIndex: 0,
-        pageRowsHash: "",
-        seen: [],
-        failed: [],
-        emptyFirstPageModes: [0, 1, 2, 3],
-      },
-    })),
-  }));
+  c.search.mockImplementationOnce(async (record) =>
+    finishPricingSearch({
+      ...equipmentPricingPlan(record),
+      searchComplete: false,
+      items: equipmentPricingPlan(record).items.map((item) => ({
+        ...item,
+        searchState: "pending",
+        samplingStopped: true,
+        searchCursor: {
+          version: 1,
+          planHash: "plan",
+          modeIndex: 4,
+          pageNumber: 1,
+          rowIndex: 0,
+          pageRowsHash: "",
+          seen: [],
+          failed: [],
+          emptyFirstPageModes: [0, 1, 2, 3],
+        },
+      })),
+    }),
+  );
   const id = await c.runner.start("codex", true, c.profile);
   await c.runner.settled();
   expect(c.search).toHaveBeenCalledTimes(2);
-  expect(c.store.run(id)).toMatchObject({ completed: 1, waitingPricing: 1, queued: 0 });
-  const waiting = c.store
-    .overview({ runId: id })
-    .records.items.find((item) => item.state === "waiting_pricing")!;
-  const detail = c.store.detail(waiting.taskId!)!;
-  expect(detail.error).toContain("第一页未取得有效样本");
+  expect(c.store.run(id)).toMatchObject({ completed: 2, waitingPricing: 0, queued: 0 });
+  expect(c.analyze).toHaveBeenCalledTimes(2);
+  const completed = c.store.overview({ runId: id }).records.items.find((item) => item.key === "a")!;
+  const detail = c.store.detail(completed.taskId!)!;
+  expect(detail.error).toBeNull();
   expect(detail.equipmentPricing?.total).toBeNull();
   expect(detail.equipmentPricing?.items[0].samplingStopped).toBe(true);
-  expect(detail.result).toBeNull();
+  expect(detail.equipmentPricing?.items[0].searchState).toBe("skipped");
+  expect(detail.result).not.toBeNull();
 });
 
 it("主动暂停只显示通知，忽略取消的AI调用也能结束；继续复用报价完成队列", async () => {

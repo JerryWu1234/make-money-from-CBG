@@ -11,7 +11,7 @@ import {
   EQUIPMENT_SIMILAR_POLICY_VERSION,
   type PriceRange,
 } from "./pricing-estimate";
-import { validateExactPricing } from "./pricing-integrity";
+import { skippedPricingItem, validateExactPricing } from "./pricing-integrity";
 import { validateEquipmentBaseline } from "./equipment-baseline";
 import { validEquipmentExclusion } from "./equipment-exclusion";
 import type { AnalysisProfile, ValuationResult } from "./valuation-types";
@@ -90,6 +90,14 @@ export function applyValuationRange(
     };
     missingFields.push(...snapshot.issues);
     for (const item of snapshot.items) {
+      if (skippedPricingItem(item)) {
+        excludedAssets.push({
+          key: item.key,
+          name: item.name,
+          reason: item.skipReason || "无样本，未计入参考合计",
+        });
+        continue;
+      }
       if (allowBaseline && validEquipmentExclusion(item, snapshot.searchItems)) {
         excludedAssets.push({ key: item.key, name: item.name, reason: item.exclusion!.label });
         continue;
@@ -213,7 +221,9 @@ export function applyValuationRange(
   };
   const disclosure =
     (excludedAssets.length
-      ? "有" + excludedAssets.length + "件普通资产无匹配，未计入参考合计；其市场售价未知。"
+      ? "有" +
+        excludedAssets.length +
+        "件资产按规则跳过或无匹配样本，未计入参考合计；其市场售价未知。"
       : "") +
     (similar ? "包含相近配置挂牌样本，未推测属性差异折价。" : "") +
     (baseline

@@ -17,6 +17,76 @@ import { equipmentExclusion } from "./equipment-exclusion";
 import { validateExactPricing } from "./pricing-integrity";
 import { buildProductDocument } from "./product-document";
 import { validateValuation, valuationPrompt } from "./valuation-contract";
+import { finishPricingSearch } from "./pricing-progress";
+
+it.each(["equipment", "pet"] as const)("无样本%s跳过后只汇总其余资产，并公开未计价项目", (kind) => {
+  const value = petMedianFixture();
+  const snapshot = kind === "equipment" ? value.equipment : value.pet;
+  const skipped = snapshot.items[0];
+  Object.assign(skipped, {
+    status: "no_match",
+    referencePrice: null,
+    candidates: [],
+    searchState: "completed",
+    similarEstimate: undefined,
+  });
+  finishPricingSearch(snapshot);
+  const result = value.combine();
+  expect(skipped.searchState).toBe("skipped");
+  expect(result.estimate_missing_count).toBe(0);
+  expect(result.estimated_value).toBe(
+    value.bare.model_value! + (kind === "equipment" ? 1000 : 100),
+  );
+  expect(result.excluded_assets).toContainEqual({
+    key: skipped.key,
+    name: skipped.name,
+    reason: "无样本，未计入参考合计",
+  });
+  expect(result.missing_fields.join(" ")).not.toContain(skipped.name + "：");
+  expect(result.items.find((item) => item.name.includes(skipped.key))?.amount).toBeNull();
+  expect(result.reason).toContain("市场售价未知");
+});
+
+it("专用装备排除后保留裸号参考报价，金额未知且列明排除原因", () => {
+  const value = fixture();
+  value.record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description +=
+    "\n玩家123专用";
+  const inventory = equipmentInventory(value.record);
+  value.equipment.inputHash = inventory.inputHash;
+  value.equipment.items = inventory.items;
+  finishPricingSearch(value.equipment);
+  const result = value.combine();
+  expect(result.estimate_missing_count).toBe(0);
+  expect(result.estimated_value).toBe(value.bare.model_value);
+  expect(result.excluded_assets).toContainEqual({
+    key: inventory.items[0].key,
+    name: inventory.items[0].name,
+    reason: "专用或绑定装备，未计入参考合计",
+  });
+  expect(
+    result.items.find((item) => item.name.includes(inventory.items[0].key))?.amount,
+  ).toBeNull();
+  expect(result.reason).toContain("市场售价未知");
+});
+
+it("官网不支持等级的装备排除后保留参考报价并公开原因", () => {
+  const value = fixture();
+  const original = value.record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
+  original.description = original.description!.replace("等级：100", "等级：50");
+  const inventory = equipmentInventory(value.record);
+  value.equipment.inputHash = inventory.inputHash;
+  value.equipment.items = inventory.items;
+  finishPricingSearch(value.equipment);
+  const result = value.combine();
+  expect(result.estimate_missing_count).toBe(0);
+  expect(result.estimated_value).toBe(value.bare.model_value);
+  expect(result.excluded_assets).toContainEqual({
+    key: inventory.items[0].key,
+    name: inventory.items[0].name,
+    reason: "官网检索不支持的等级装备，未计入参考合计",
+  });
+  expect(inventory.items[0].referencePrice).toBeNull();
+});
 
 const candidates = (prices = [100, 120, 140]): EquipmentCandidate[] =>
   prices.map((price, index) => ({
@@ -220,7 +290,7 @@ function petMedianFixture() {
       name: "泡泡",
       fields: Object.entries({
         类型: "泡泡",
-        等级: "0",
+        等级: "1",
         成长: "1.2",
         攻击资质: "1200",
         防御资质: "1200",
@@ -401,7 +471,7 @@ describe("最终缺项的恢复建议与数量", () => {
         name: "泡泡",
         fields: Object.entries({
           类型: "泡泡",
-          等级: "0",
+          等级: "1",
           成长: "1.2",
           攻击资质: "1200",
           防御资质: "1200",
@@ -550,16 +620,16 @@ describe("旧报告默认装备参考价与挂牌比较", () => {
     expect(partial.estimate_missing_count).toBe(1);
   });
 
-  it("明确忽略的0级普通装备可按0元参考比较，未知60/90/100级价格仍是缺项", () => {
+  it("新等级跳过规则不采用旧0元默认价，未知60/90/100级价格仍是缺项", () => {
     const { equipment, bare, combine } = baselineFixture(0, false);
     expect(equipment.items[0].status).toBe("unsupported");
     expect(equipment.items[0].baselineEstimate?.kind).toBe("ignored");
     expect(equipment.items[0].baselineEstimate?.amount).toBe(0);
     const result = combine();
-    expect(result.estimated_value_range).toEqual({ min: bare.model_value, max: bare.model_value });
-    expect(result.estimated_price_difference).toBeDefined();
-    expect(result.reason).toContain("低值未计入");
-    expect(result.reason).toContain("不代表其市场售价为0");
+    expect(result.estimated_value_range).toBeUndefined();
+    expect(result.estimated_price_difference).toBeUndefined();
+    expect(result.missing_fields.join(" ")).toContain("快照");
+    expect(result.model_value).toBeNull();
     expect(result.known_subtotal).toBe(bare.model_value);
     for (const level of [60, 90, 100]) {
       const value = baselineFixture(level);
@@ -833,7 +903,7 @@ describe("相近配置报价与完整区间", () => {
     const tab = record.detail!.tabs.find((row) => row.name === "召唤兽/孩子")!;
     const fields = {
       类型: "泡泡",
-      等级: "0",
+      等级: "1",
       攻击资质: "1200",
       防御资质: "1200",
       体力资质: "3000",

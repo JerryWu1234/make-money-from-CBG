@@ -32,7 +32,6 @@ export type AnalysisProfile = {
   equipmentSearch?: boolean;
   petSearch?: boolean;
   petGearSearch?: boolean;
-  roleSearch?: boolean;
   version: "role-valuation-v1";
   template: string;
   promptHash: string;
@@ -59,14 +58,6 @@ export type ValuationFact = {
 };
 export type ValuationResult = {
   excluded_assets?: Array<{ key: string; name: string; reason: string }>;
-  special_asset_reference?: {
-    method: "whole-role-market";
-    assets: Array<{ key: string; name: string; roleUse: string; individualPrice: null }>;
-    value: number | null;
-    range: import("./pricing-estimate").PriceRange | null;
-    listingDifference: number | null;
-    note: string;
-  };
   decision: Decision;
   comparison_mode?: "listing-only";
   price_difference?: number | null;
@@ -103,7 +94,6 @@ export type ValuationResult = {
   equipment_pricing?: import("./equipment-pricing").EquipmentPricingSnapshot;
   pet_value?: number | null;
   pet_pricing?: import("./pet-pricing").PetPricingSnapshot;
-  role_pricing?: import("./role-pricing").RolePricingSnapshot;
   suggestions?: string[];
   extracted_facts?: ValuationFact[];
   ai_explanation?: string;

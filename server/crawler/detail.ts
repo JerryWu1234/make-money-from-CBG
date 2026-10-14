@@ -57,7 +57,10 @@ async function capture(page: Page, name: string): Promise<TabSnapshot> {
           (element) =>
             /\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#].*)?$/i.test(
               element.getAttribute("src") || "",
-            ),
+            ) ||
+            // Observed official model 17320 is a task consumable, not role equipment.
+            (element.getAttribute("data_equip_type") === "17320" &&
+              element.getAttribute("data_equip_name") === "三界密令"),
         ),
       );
     return {

@@ -5,6 +5,7 @@ import {
   resumePricingItems,
   rememberPricingPage,
   validPricingPageHistory,
+  finishPricingSearch,
 } from "./pricing-progress";
 import type { EquipmentSearchCursor } from "./equipment-pricing";
 
@@ -187,7 +188,7 @@ it("结果变化清空旧取样位置，只允许一次自动重建，避免行�
   expect(pricingSearchAdvanced(current, repeated)).toBe(false);
 });
 
-it("首屏无样本主动停止后，游标推进也不自动重查；显式重试重新检查第一页", () => {
+it("首屏无样本跳过单件，旧进度恢复后也不重查；价格仍未知", () => {
   const initial: EquipmentPricingSnapshot = {
     version: 1,
     inputHash: "first-page",
@@ -230,11 +231,63 @@ it("首屏无样本主动停止后，游标推进也不自动重查；显式重�
     failed: [],
     emptyFirstPageModes: [0, 1],
   };
-  expect(pricingSearchAdvanced(initial, stopped)).toBe(false);
+  const oldProgress = structuredClone(stopped);
+  finishPricingSearch(stopped);
+  expect(stopped.items[0].searchState).toBe("skipped");
+  expect(stopped.searchComplete).toBe(true);
+  expect(stopped.total).toBeNull();
+  expect(stopped.knownTotal).toBe(0);
+  expect(pricingSearchAdvanced(initial, stopped)).toBe(true);
   const retried = resumePricingItems(structuredClone(initial), stopped);
-  expect(retried.items[0].samplingStopped).toBeUndefined();
-  expect(retried.items[0].searchCursor).toBeUndefined();
+  expect(retried.items[0].searchState).toBe("skipped");
   expect(retried.items[0].referencePrice).toBeNull();
+  expect(resumePricingItems(structuredClone(initial), oldProgress).items[0].searchState).toBe(
+    "skipped",
+  );
   resetPricingCursor(stopped.items[0].searchCursor!);
   expect(stopped.items[0].searchCursor!.emptyFirstPageModes).toBeUndefined();
+});
+
+it("无样本跳过规则不隐藏读取失败、未查完、有样本或未采齐的项目", () => {
+  const item = {
+    key: "a",
+    name: "装备",
+    category: "腰带",
+    level: 100,
+    description: "等级100",
+    query: "query",
+    status: "no_match" as const,
+    referencePrice: null,
+    candidates: [],
+    issues: [],
+    searchState: "completed" as const,
+  };
+  const snapshot = {
+    version: 1,
+    inputHash: "skip",
+    searchedAt: new Date().toISOString(),
+    provider: "browser",
+    model: "browser",
+    captureComplete: true,
+    total: null,
+    knownTotal: 0,
+    queries: ["query"],
+    rawResponse: null,
+    issues: [],
+    items: [item],
+  } as EquipmentPricingSnapshot;
+  expect(finishPricingSearch(structuredClone(snapshot)).items[0].searchState).toBe("skipped");
+  for (const change of [
+    { searchState: "pending" },
+    { searchState: "read_failed", samplingStopped: true },
+    { status: "incomplete" },
+    { candidates: [{ verified: true }] },
+  ]) {
+    const value = structuredClone(snapshot);
+    Object.assign(value.items[0], change);
+    expect(finishPricingSearch(value).items[0].searchState).not.toBe("skipped");
+  }
+  const unfinished = structuredClone(snapshot);
+  unfinished.searchItems = [{ key: "a", modes: [{ mode: "exact", exhausted: false }] }];
+  expect(finishPricingSearch(unfinished).items[0].searchState).toBe("pending");
 });

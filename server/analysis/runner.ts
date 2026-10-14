@@ -13,7 +13,6 @@ import { CALCULATION_VERSION } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
 import { pricingSearchAdvanced } from "./pricing-progress";
 import { pricingTimestampFresh } from "./pricing-integrity";
-import { validateRolePricing, type RolePricingSnapshot } from "./role-pricing";
 
 export type AnalysisClient = {
   model: string;
@@ -34,11 +33,6 @@ export type AnalysisClient = {
     signal: AbortSignal,
     previous?: PetGearPricingSnapshot,
   ) => Promise<PetGearPricingSnapshot>;
-  searchRole?: (
-    record: SavedRoleRecord,
-    signal: AbortSignal,
-    previous?: RolePricingSnapshot,
-  ) => Promise<RolePricingSnapshot>;
   analyze: (
     prompt: string,
     schema: unknown,
@@ -231,8 +225,7 @@ export class AnalysisRunner {
           petGearInventory(task.record).items.length &&
           (!task.petPricing?.gearPricing ||
             task.petPricing.gearPricing.searchComplete === false ||
-            !pricingTimestampFresh(task.petPricing.gearPricing.searchedAt))) ||
-        (task.profile?.roleSearch && !validateRolePricing(task.rolePricing, task.record));
+            !pricingTimestampFresh(task.petPricing.gearPricing.searchedAt)));
       if (
         pendingPricing &&
         (budget.rounds >= MAX_PRICING_ROUNDS || Date.now() - budget.started >= MAX_ROLE_PRICING_MS)
@@ -284,10 +277,16 @@ export class AnalysisRunner {
             this.store.deferPricing(
               task,
               owner,
-              (snapshot.items.some((item) => item.samplingStopped)
-                ? "各筛选条件第一页未取得有效样本，已停止翻页"
-                : snapshot.items.some((item) => item.searchState === "read_failed")
-                  ? "装备详情读取失败"
+              (snapshot.items.some((item) => item.searchState === "read_failed")
+                ? "装备查询或详情读取失败：" +
+                  snapshot.items
+                    .filter((item) => item.searchState === "read_failed")
+                    .map((item) => item.name)
+                    .join("、")
+                : snapshot.items.some(
+                      (item) => item.samplingStopped && item.searchState !== "skipped",
+                    )
+                  ? "各筛选条件第一页未取得有效样本，已停止翻页"
                   : "装备查价游标未推进") +
                 "，已保存逐件进度；等待新的可核验数据或修复读取后继续查价",
             );
@@ -429,51 +428,6 @@ export class AnalysisRunner {
           return;
         }
       }
-      if (task.profile?.roleSearch && !validateRolePricing(task.rolePricing, task.record)) {
-        const signal = AbortSignal.any([
-          stop,
-          AbortSignal.timeout(Math.max(1, MAX_ROLE_PRICING_MS - (Date.now() - budget.started))),
-        ]);
-        try {
-          this.store.beginRoleSearch(task, owner);
-          budget.rounds++;
-          reportProgress();
-          if (!client.searchRole) throw new Error("整号联网查价尚未连接");
-          const snapshot = await pricingUntilAborted(
-            client.searchRole(task.record, signal, task.rolePricing),
-            signal,
-          );
-          signal.throwIfAborted();
-          if (!this.store.owns(owner)) return;
-          task = this.store.saveRolePricing(task, snapshot, owner);
-        } catch (error) {
-          if (!this.store.owns(owner)) return;
-          this.store.abortRoleSearch(task, owner);
-          if (!stop.aborted && (signal.aborted || itemPricingError(error))) {
-            this.store.deferPricing(
-              task,
-              owner,
-              signal.aborted
-                ? "整号联网查价超时"
-                : String(error instanceof Error ? error.message : error),
-            );
-            continue;
-          }
-          this.store.setRun(
-            id,
-            "paused",
-            stop.aborted
-              ? "已暂停整号查价，继续时只重试未完成的整号阶段"
-              : signal.aborted
-                ? "整号联网查价超时，请重试"
-                : error instanceof Error
-                  ? error.message
-                  : "整号联网查价失败，请重试",
-            owner,
-          );
-          return;
-        }
-      }
       const prompt =
         task.profile && task.lastError && !task.lastError.startsWith("已暂停") && task.attempts > 0
           ? task.prompt +
@@ -504,7 +458,6 @@ export class AnalysisRunner {
               task.profile,
               task.equipmentPricing,
               task.petPricing,
-              task.rolePricing,
             )
           : validateAnalysis(raw, task.document, task.record);
         this.store.finish(task, attempt, owner, { state: "completed", result, raw, usage });

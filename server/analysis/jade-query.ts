@@ -67,7 +67,8 @@ export function jadeQuery(item: EquipmentPricingItem, config: JadeSearchConfig, 
     if (id) {
       const lower = similar && equipmentAttributeLowerBound(parsed!.name, Number(parsed!.value));
       args[key] = JSON.stringify({
-        [id]: lower === false || lower === null ? parsed!.value : String(Math.ceil(lower)),
+        [id]:
+          lower === false || lower === null ? parsed!.value : String(Math.max(1, Math.ceil(lower))),
       });
     }
   };

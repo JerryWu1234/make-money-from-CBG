@@ -29,17 +29,17 @@ it("少样本与分散报价计算实际均价并披露限制", () => {
   });
   expect(dispersed.issues.join("；")).toContain("1.5倍");
 });
-it("装备与宝宝取官网顺序前十件，重复、坏证据及第十一件不能替换样本", () => {
+it("装备与宝宝只取官网顺序前五件，重复、坏证据及第六件不能替换样本", () => {
   const prices = [100, 110, 120, 130, 140, 150, 160, 170, 180, 1000, 1];
   const rows = prices.map((price, index) => sample(price, index));
   rows.splice(1, 0, sample(100, 0), { ...sample(1, 99), verified: false });
   for (const estimate of [buildEquipmentEstimate(rows), buildSimilarEstimate(rows)]) {
     expect(estimate).toMatchObject({
       status: "range",
-      sampleCount: 10,
-      average: 226,
-      median: 145,
-      range: { min: 100, max: 1000 },
+      sampleCount: 5,
+      average: 120,
+      median: 120,
+      range: { min: 100, max: 140 },
     });
   }
 });

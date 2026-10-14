@@ -670,7 +670,7 @@ describe("官网宝宝查询参数", () => {
         },
         "similar",
       ),
-    ).toThrow(/特殊类型保留未定价/);
+    ).toThrow(/特殊类型按规则跳过/);
   });
   it("诊断查询只取官方类型、同等级和明确宝宝flag，不携带估值筛选字段", () => {
     const target = { ...item(), fields: [...fields, { name: "是否宝宝", value: "是" }] };
@@ -1236,6 +1236,116 @@ describe("宝宝查询使用独立后台页", () => {
       await source.close();
     }
   });
+  it("各筛选第一页无有效样本时停止翻页，避免零样本游标反复重建", async () => {
+    const { source, search } = queryPages(true);
+    const evaluate = search.evaluate.getMockImplementation()!;
+    search.evaluate.mockImplementation(async (fn: Function, arg: unknown) => {
+      const result = await evaluate(fn, arg);
+      return typeof arg === "number" ? { ...(result as object), hasNext: true } : result;
+    });
+    const target = item();
+    target.fields = target.fields.map((field) =>
+      field.name === "成长" ? { ...field, value: "1.0" } : field,
+    );
+    try {
+      const result = await source.findCandidates([target], new AbortController().signal);
+      expect(result.items[0]).toMatchObject({ searchState: "pending", samplingStopped: true });
+      expect(result.items[0].candidates.some((candidate) => candidate.verified)).toBe(false);
+      expect(search.evaluate.mock.calls.some(([, arg]) => typeof arg === "number" && arg > 1)).toBe(
+        false,
+      );
+      expect(result.items[0].note).toContain("第一页");
+    } finally {
+      await source.close();
+    }
+  });
+  it("无报价的已完成筛选页变动时，续跑只校验尚未完成的条件", async () => {
+    const first = queryPages(true);
+    const target = item();
+    target.fields = target.fields.map((field) =>
+      field.name === "成长" ? { ...field, value: "1.0" } : field,
+    );
+    const now = Date.now();
+    const originalEvaluate = first.search.evaluate.getMockImplementation()!;
+    first.search.evaluate.mockImplementation(async (fn: Function, arg: unknown) => {
+      const value = await originalEvaluate(fn, arg);
+      return typeof arg === "number" ? { ...(value as object), hasNext: true } : value;
+    });
+    const originalDetail = first.detail.evaluate.getMockImplementation()!;
+    let reads = 0;
+    first.detail.evaluate.mockImplementation(async () => {
+      const value = await originalDetail();
+      if (++reads === 3) vi.spyOn(Date, "now").mockReturnValue(now + 300_000);
+      return value;
+    });
+    let saved: PetPricingItem;
+    try {
+      const result = await first.source.findCandidates([target], new AbortController().signal);
+      expect(result.items[0]).toMatchObject({
+        searchState: "pending",
+        searchCursor: { modeIndex: 1 },
+      });
+      expect(result.items[0].candidates.some((candidate) => candidate.verified)).toBe(false);
+      saved = { ...target, ...result.items[0] };
+      // An unfinished active page can change on the next official recommendation request.
+      saved.searchCursor!.rowIndex = 2;
+      saved.searchCursor!.pageRowsHash = "changed-active-page";
+      saved.searchCursor!.pageHistory!.push({
+        modeIndex: 1,
+        pageNumber: 1,
+        rowsHash: "changed-active-page",
+      });
+    } finally {
+      vi.restoreAllMocks();
+      await first.source.close();
+    }
+    const second = queryPages(true);
+    const secondEvaluate = second.search.evaluate.getMockImplementation()!;
+    second.search.evaluate.mockImplementation(async (fn: Function, arg: unknown) => {
+      const value = await secondEvaluate(fn, arg);
+      return typeof arg === "number" ? { ...(value as object), hasNext: true } : value;
+    });
+    try {
+      const result = await second.source.findCandidates([saved!], new AbortController().signal);
+      expect(second.calls[0]).toMatchObject(petQueries(target, config)[1].args);
+      expect(result.items[0].note).not.toContain("顺序已变化");
+      expect(result.items[0]).toMatchObject({ samplingStopped: true });
+      expect(result.searchItems).not.toContainEqual(
+        expect.objectContaining({ reason: "result_order_changed" }),
+      );
+    } finally {
+      await second.source.close();
+    }
+  });
+
+  it("官方特殊类型无独立交易筛选时只核验目录并排除，不替换其他类型", async () => {
+    const { source, search, calls } = queryPages(true);
+    const evaluate = search.evaluate.getMockImplementation()!;
+    search.evaluate.mockImplementation(async (fn: Function, arg: unknown) =>
+      typeof arg === "string"
+        ? { ...config, officialTypeIds: ["112058", "112073"] }
+        : evaluate(fn, arg),
+    );
+    const target = { ...item(), name: "恶魔泡泡" };
+    try {
+      const result = await source.findCandidates([target], new AbortController().signal);
+      expect(calls).toHaveLength(0);
+      expect(result.items[0]).toMatchObject({
+        searchState: "skipped",
+        skipReason: "官网无独立交易筛选的特殊宝宝，未计入参考合计",
+        candidates: [],
+      });
+      expect(result.searchItems).toContainEqual(
+        expect.objectContaining({
+          reason: "official_non_saleable_type",
+          officialTypeIds: ["112058", "112073"],
+        }),
+      );
+    } finally {
+      await source.close();
+    }
+  });
+
   it("每页保存最终市场请求与服务器候选分布，空页也保留证据", async () => {
     const { source, search } = queryPages(false);
     try {
@@ -1448,7 +1558,7 @@ describe("宝宝查询使用独立后台页", () => {
       await source.close();
     }
   });
-  it("严格筛选详情预算耗尽保留游标，继续读取后面的有效商品", async () => {
+  it("第一页前六条无效时仍读取后面的有效商品，不提前误跳过", async () => {
     const first = queryPages(true);
     const prepare = (value: ReturnType<typeof queryPages>) => {
       const evaluateSearch = value.search.evaluate.getMockImplementation()!;
@@ -1469,37 +1579,17 @@ describe("宝宝查询使用独立后台页", () => {
       });
     };
     prepare(first);
-    let cursor;
     try {
       const result = await first.source.findCandidates([item()], new AbortController().signal);
-      expect(first.detail.goto).toHaveBeenCalledTimes(6);
-      expect(result.items[0]).toMatchObject({
-        searchState: "pending",
-        searchCursor: { modeIndex: 0, pageNumber: 1, rowIndex: 6 },
-      });
-      cursor = result.items[0].searchCursor;
-    } finally {
-      await first.source.close();
-    }
-    const second = queryPages(true);
-    prepare(second);
-    try {
-      const result = await second.source.findCandidates(
-        [{ ...item(), searchCursor: cursor }],
-        new AbortController().signal,
-      );
-      expect(second.detail.goto).toHaveBeenCalledTimes(3);
-      expect(second.detail.goto.mock.calls.map(([url]) => url)).toEqual(
-        [6, 7, 8].map((index) => `https://xyq.cbg.163.com/equip?s=1&eid=sample-${index}`),
-      );
+      expect(first.detail.goto).toHaveBeenCalledTimes(9);
       expect(result.items[0].searchState).toBe("completed");
       expect(result.items[0].candidates.filter((candidate) => candidate.verified)).toHaveLength(3);
       expect(result.items[0]).not.toHaveProperty("searchCursor");
     } finally {
-      await second.source.close();
+      await first.source.close();
     }
   });
-  it("相近详情前五个无效不结束查价，游标恢复后得到三条独立价格", async () => {
+  it("第一页前五个相近候选无效时继续核验整页，采用后续三条有效价格", async () => {
     const prepare = (value: ReturnType<typeof queryPages>) => {
       const evaluate = value.search.evaluate.getMockImplementation()!;
       value.search.evaluate.mockImplementation(async (fn: Function, arg: unknown) => {
@@ -1523,35 +1613,18 @@ describe("宝宝查询使用独立后台页", () => {
     };
     const first = queryPages(false);
     prepare(first);
-    let cursor;
     try {
       const result = await first.source.findCandidates([item()], new AbortController().signal);
-      expect(first.detail.goto).toHaveBeenCalledTimes(5);
-      expect(result.items[0]).toMatchObject({
-        searchState: "pending",
-        searchCursor: { modeIndex: 1, rowIndex: 5 },
-      });
-      cursor = result.items[0].searchCursor;
+      expect(first.detail.goto).toHaveBeenCalledTimes(8);
+      expect(result.items[0].searchState).toBe("completed");
+      expect(result.items[0].candidates.filter((candidate) => candidate.verified)).toHaveLength(3);
+      expect(
+        result.items[0].candidates
+          .filter((candidate) => candidate.verified)
+          .every((candidate) => candidate.verified && candidate.matchType === "similar"),
+      ).toBe(true);
     } finally {
       await first.source.close();
-    }
-    const second = queryPages(false);
-    prepare(second);
-    try {
-      const result = await second.source.findCandidates(
-        [{ ...item(), searchCursor: cursor }],
-        new AbortController().signal,
-      );
-      expect(second.detail.goto).toHaveBeenCalledTimes(3);
-      expect(result.items[0].candidates).toHaveLength(3);
-      expect(
-        result.items[0].candidates.every(
-          (candidate) => candidate.verified && candidate.matchType === "similar",
-        ),
-      ).toBe(true);
-      expect(result.items[0].searchState).toBe("completed");
-    } finally {
-      await second.source.close();
     }
   });
   it("翻页预算耗尽恢复到第四页，经官网重放表单后取得报价", async () => {
@@ -1570,38 +1643,35 @@ describe("宝宝查询使用独立后台页", () => {
       value.detail.evaluate.mockImplementation(async () => {
         const observed = await evaluateDetail();
         const index = Number(value.detail.goto.mock.calls.at(-1)![0].match(/sample-(\d+)/)?.[1]);
-        return index < 4 ? { ...observed, skills: [], expectedSkills: [] } : observed;
+        return index > 1 && index < 4 ? { ...observed, skills: [], expectedSkills: [] } : observed;
       });
     };
     const first = queryPages(true);
     prepare(first);
-    let cursor;
+    let saved: PetPricingItem;
     try {
       const result = await first.source.findCandidates([item()], new AbortController().signal);
       expect(result.items[0]).toMatchObject({
         searchState: "pending",
         searchCursor: { modeIndex: 0, pageNumber: 4, rowIndex: 0 },
       });
-      cursor = result.items[0].searchCursor;
+      saved = { ...item(), ...result.items[0] };
     } finally {
       await first.source.close();
     }
     const second = queryPages(true);
     prepare(second);
     try {
-      const validation = await second.source.findCandidates(
-        [{ ...item(), searchCursor: cursor }],
-        new AbortController().signal,
-      );
+      const validation = await second.source.findCandidates([saved!], new AbortController().signal);
       expect(validation.items[0].searchState).toBe("pending");
       expect(validation.items[0].searchCursor?.historyIndex).toBe(3);
-      expect(second.detail.goto).not.toHaveBeenCalled();
+      expect(second.detail.goto).toHaveBeenCalledTimes(1);
       const result = await second.source.findCandidates(
         [{ ...item(), ...validation.items[0] }],
         new AbortController().signal,
       );
       expect(second.calls).toHaveLength(5);
-      expect(second.detail.goto).toHaveBeenCalledTimes(3);
+      expect(second.detail.goto).toHaveBeenCalledTimes(4);
       expect(result.items[0].searchState).toBe("completed");
       expect(result.queries).toHaveLength(1);
       expect(result.searchItems).toEqual(
@@ -1732,7 +1802,7 @@ describe("宝宝查询使用独立后台页", () => {
       await second.source.close();
     }
   });
-  it("前十件按官网顺序保存，后续更近的配置不能挤掉前面的有效样本", async () => {
+  it("前五件按官网顺序保存，后续更近的配置不能挤掉前面的有效样本", async () => {
     const prepare = (value: ReturnType<typeof queryPages>) => {
       const evaluate = value.search.evaluate.getMockImplementation()!;
       value.search.evaluate.mockImplementation(async (fn: Function, arg: unknown) => {
@@ -1766,11 +1836,10 @@ describe("宝宝查询使用独立后台页", () => {
     };
     const first = queryPages(false);
     prepare(first);
-    let saved: ReturnType<typeof item>;
     try {
       const result = await first.source.findCandidates([item()], new AbortController().signal);
       expect(first.detail.goto).toHaveBeenCalledTimes(5);
-      expect(result.items[0].searchState).toBe("pending");
+      expect(result.items[0].searchState).toBe("completed");
       expect(result.searchItems).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -1782,27 +1851,13 @@ describe("宝宝查询使用独立后台页", () => {
           }),
         ]),
       );
-      saved = {
-        ...item(),
-        candidates: result.items[0].candidates,
-        searchCursor: result.items[0].searchCursor,
-      };
-    } finally {
-      await first.source.close();
-    }
-    const second = queryPages(false);
-    prepare(second);
-    try {
-      const result = await second.source.findCandidates([saved!], new AbortController().signal);
-      expect(result.items[0].searchState).toBe("completed");
       expect(
         result.items[0].candidates
           .filter((candidate) => candidate.verified)
           .map((candidate) => candidate.price),
-      ).toEqual([100, 900, 100, 900, 100, 400, 420, 440]);
-      expect(second.detail.goto).toHaveBeenCalledTimes(8);
+      ).toEqual([100, 900, 100, 900, 100]);
     } finally {
-      await second.source.close();
+      await first.source.close();
     }
   });
   it("exact及similar均0行后最多读3个同等级诊断详情，绝不误计匹配样本", async () => {

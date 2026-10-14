@@ -37,7 +37,6 @@ const postRoutes = new Set([
   "/api/analysis/equipment/check",
   "/api/analysis/pet/check",
   "/api/analysis/pet-gear/check",
-  "/api/analysis/role/check",
   "/api/analysis/settings/save",
 ]);
 
@@ -100,21 +99,18 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
       switch (pathname) {
         case "/api/analysis/equipment/check":
         case "/api/analysis/pet/check":
-        case "/api/analysis/pet-gear/check":
-        case "/api/analysis/role/check": {
+        case "/api/analysis/pet-gear/check": {
           if (res.destroyed) return;
           const controller = new AbortController();
           const cancel = () => controller.abort(new Error("查价请求已断开"));
           res.once("close", cancel);
           try {
             const check =
-              pathname === "/api/analysis/role/check"
-                ? (await import("./analysis/role-check")).checkRole
-                : pathname === "/api/analysis/pet-gear/check"
-                  ? (await import("./analysis/pet-gear-check")).checkPetGear
-                  : pathname === "/api/analysis/pet/check"
-                    ? (await import("./analysis/pet-check")).checkPet
-                    : (await import("./analysis/equipment-check")).checkEquipment;
+              pathname === "/api/analysis/pet-gear/check"
+                ? (await import("./analysis/pet-gear-check")).checkPetGear
+                : pathname === "/api/analysis/pet/check"
+                  ? (await import("./analysis/pet-check")).checkPet
+                  : (await import("./analysis/equipment-check")).checkEquipment;
             const result = await check(body as Record<string, unknown>, controller.signal);
             if (!res.destroyed) res.end(JSON.stringify(result));
           } finally {

@@ -19,7 +19,6 @@ const mocks = vi.hoisted(() => ({
   checkEquipment: vi.fn(),
   checkPet: vi.fn(),
   checkPetGear: vi.fn(),
-  checkRole: vi.fn(),
   equipmentCheckImported: vi.fn(),
   startAnalysis: vi.fn(),
   aiProvider: vi.fn(),
@@ -32,7 +31,6 @@ vi.mock("./ai-connection", () => mocks);
 vi.mock("./analysis/equipment-check", () => mocks);
 vi.mock("./analysis/pet-check", () => mocks);
 vi.mock("./analysis/pet-gear-check", () => mocks);
-vi.mock("./analysis/role-check", () => mocks);
 vi.mock("./diagnostics", () => ({ diagnostics: { record: mocks.record } }));
 
 function request(pathname: string, body: Record<string, unknown> = {}) {
@@ -89,20 +87,6 @@ describe("指定商品试分析", () => {
     expect(res.listenerCount("close")).toBe(0);
     expect(mocks.analysisControllerImported).not.toHaveBeenCalled();
     expect(mocks.startAnalysis).not.toHaveBeenCalled();
-  });
-  it("整号查价沿用请求取消，不启动AI或分析队列", async () => {
-    const input = { productKey: "941:role", mode: "discover" };
-    const result = { target: { productKey: input.productKey }, form: { controls: [] } };
-    mocks.checkRole.mockResolvedValue(result);
-    const { apiMiddleware } = await import("./api");
-    const res = response();
-    await apiMiddleware(request("/api/analysis/role/check", input), res, vi.fn());
-    expect(mocks.checkRole).toHaveBeenCalledExactlyOnceWith(input, expect.any(AbortSignal));
-    expect(res.end).toHaveBeenCalledWith(JSON.stringify(result));
-    expect(res.listenerCount("close")).toBe(0);
-    expect(mocks.analysisControllerImported).not.toHaveBeenCalled();
-    expect(mocks.startAnalysis).not.toHaveBeenCalled();
-    expect(mocks.prepareAnalysisClient).not.toHaveBeenCalled();
   });
   it("宝宝单项诊断沿用请求校验，不准备AI或创建分析批次", async () => {
     const input = { productKey: "941:role", petKey: "召唤兽/孩子:1" };

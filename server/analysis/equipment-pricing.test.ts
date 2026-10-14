@@ -103,6 +103,59 @@ async function matchedPricing(record = recordWithEquipment()) {
 }
 
 describe("装备联网查价的来源核对", () => {
+  it("首屏无样本跳过这一件，另一件正常计价；恢复旧查价进度也不重新查询空样本项", async () => {
+    const record = recordWithEquipment();
+    const tab = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!;
+    tab.items!.push({ ...tab.items![0], index: 1 });
+    const row = candidate(100);
+    const find = vi.fn().mockResolvedValue({
+      ...searchResponse([]),
+      items: [
+        {
+          key: "道具/法宝:0",
+          candidates: [],
+          samplingStopped: true,
+          searchState: "pending",
+          searchCursor: {
+            version: 1,
+            planHash: "plan",
+            modeIndex: 4,
+            pageNumber: 1,
+            rowIndex: 0,
+            pageRowsHash: "",
+            seen: [],
+            failed: [],
+            emptyFirstPageModes: [0, 1, 2, 3],
+          },
+        },
+        { key: "道具/法宝:1", candidates: [row], searchState: "completed" },
+      ],
+      searchItems: [{ key: "道具/法宝:0", modes: [{ mode: "exact", exhausted: false }] }],
+    });
+    const source = { findCandidates: find, readSource: vi.fn().mockResolvedValue(sourcePage(100)) };
+    const pricing = await searchEquipmentPrices(record, new AbortController().signal, source);
+    expect(pricing).toMatchObject({ searchComplete: true, total: null, knownTotal: 100 });
+    expect(pricing.items[0]).toMatchObject({ searchState: "skipped", referencePrice: null });
+    expect(pricing.items[1]).toMatchObject({
+      searchState: "completed",
+      referencePrice: 100,
+      status: "priced",
+    });
+    // Persisted snapshots from before the change used pending + samplingStopped.
+    pricing.items[0].searchState = "pending";
+    pricing.searchComplete = false;
+    const resumed = await searchEquipmentPrices(
+      record,
+      new AbortController().signal,
+      source,
+      undefined,
+      pricing,
+    );
+    expect(find).toHaveBeenCalledOnce();
+    expect(resumed.searchComplete).toBe(true);
+    expect(resumed.knownTotal).toBe(100);
+    expect(resumed.items[0].searchState).toBe("skipped");
+  });
   it("查价器误报完成但证据未穷尽时保持待续查，下一轮读完才采用价格", async () => {
     const record = recordWithEquipment();
     const row = candidate(100);
@@ -165,7 +218,7 @@ describe("装备联网查价的来源核对", () => {
     });
     expect(result).toMatchObject({ total: 121, knownTotal: 121, searchComplete: true });
     expect(result.items[0]).toMatchObject({
-      priceMethod: "first-ten-average-v2",
+      priceMethod: "first-five-average-v3",
       referencePrice: 121,
       searchState: "completed",
     });
@@ -574,7 +627,7 @@ describe("装备联网查价的来源核对", () => {
         false,
       );
   });
-  it("实际0级双短剑保留为装备，官网检索不覆盖时明确缺价，不当空装或发越界查询", async () => {
+  it("实际0级双短剑保留为装备并按规则排除，不当空装或发越界查询", async () => {
     const record = recordWithEquipment();
     const item = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
     delete item.category;
@@ -588,6 +641,8 @@ describe("装备联网查价的来源核对", () => {
       level: 0,
       category: "人物装备",
       status: "unsupported",
+      searchState: "skipped",
+      skipReason: "官网检索不支持的等级装备，未计入参考合计",
       referencePrice: null,
     });
     expect(inventory.items[0].issues.join(" ")).toContain("0级装备尚缺");
@@ -602,7 +657,7 @@ describe("装备联网查价的来源核对", () => {
   });
 
   it.each([10, 20, 30, 40, 50, 170])(
-    "%i级特殊人物装备保留缺价并跳过，后面的可查询装备继续查价",
+    "%i级特殊人物装备不计价并跳过，后面的可查询装备继续查价",
     async (level) => {
       const record = recordWithEquipment();
       const tab = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!;
@@ -619,6 +674,8 @@ describe("装备联网查价的来源核对", () => {
       expect(pricing.items[0]).toMatchObject({
         level,
         status: "unsupported",
+        searchState: "skipped",
+        skipReason: "官网检索不支持的等级装备，未计入参考合计",
         referencePrice: null,
       });
       expect(pricing.items[0].issues.join(" ")).toContain(level + "级装备尚缺");
@@ -1165,7 +1222,7 @@ describe("装备联网查价的来源核对", () => {
   });
 
   it.each(["专用", "玩家 123 专用", "绑定", "不可交易", "不能交易"])(
-    "%s装备保留未定价，不查询可交易装备来套价",
+    "%s装备跳过且不计价，不查询可交易装备来套价",
     async (restriction) => {
       const record = recordWithEquipment();
       record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description +=
@@ -1176,13 +1233,20 @@ describe("装备联网查价的来源核对", () => {
         findCandidates,
         readSource,
       });
-      expect(pricing.items[0]).toMatchObject({ status: "untradable", referencePrice: null });
+      expect(pricing.items[0]).toMatchObject({
+        status: "untradable",
+        searchState: "skipped",
+        skipReason: "专用或绑定装备，未计入参考合计",
+        referencePrice: null,
+      });
       const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), DEFAULT_SETTINGS, false);
       const report = combineEquipmentPricing(calculateValuation(record, profile), record, pricing);
       const equipmentLine = report.items.find((item) => item.name.startsWith("装备："));
       expect(equipmentLine).toMatchObject({ amount: null, confirmed: false });
-      expect(equipmentLine?.formula).toContain("无法独立挂牌查价");
-      expect(equipmentLine?.formula).toContain("分项金额未知");
+      expect(equipmentLine?.formula).toContain("专用或绑定装备，未计入参考合计");
+      expect(equipmentLine?.formula).toContain("市场售价未知");
+      expect(equipmentLine?.referenceBasis).toBe("excluded");
+      expect(report.missing_fields.join(" ")).not.toContain("专用或绑定装备");
       expect(equipmentLine?.formula).not.toMatch(/中位数|0条样本|¥0/);
       expect(pricing.total).toBeNull();
       expect(findCandidates).not.toHaveBeenCalled();

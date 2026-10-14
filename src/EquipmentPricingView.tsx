@@ -60,9 +60,9 @@ export function EquipmentPricingView({
         {queried ? "联网查价" : "查价"}
       </h3>
       {browserQuery && queried && <p>查价方式：程序通过已登录藏宝阁查询，AI只接收核实后的结果。</p>}
-      {queried && snapshot.items.some((item) => item.priceMethod === "first-ten-average-v2") && (
+      {queried && snapshot.items.some((item) => item.priceMethod === "first-five-average-v3") && (
         <p>
-          每件资产优先收集前10件有效在售商品，按实际样本数计算算术平均价；同配与相近样本分别计价。
+          每件资产优先收集前5件有效在售商品，按实际样本数计算算术平均价；同配与相近样本分别计价。
         </p>
       )}
       {hasBaseline && <p>普通装备默认参考价来自历史资料或人工预设，未实时核实藏宝阁报价。</p>}
@@ -79,6 +79,8 @@ export function EquipmentPricingView({
       )}
       {snapshot.captureComplete && snapshot.items.length === 0 ? (
         <p>已确认没有{asset}。</p>
+      ) : snapshot.items.length && snapshot.items.every((item) => item.skipReason) ? (
+        <p>本次{asset}按规则跳过，未计入参考合计；未发起查价。</p>
       ) : accounting ? (
         <p>逐件参考报价与匹配依据见下方。</p>
       ) : hasBaseline && snapshot.total === null && snapshot.knownTotal === 0 ? (
@@ -135,13 +137,15 @@ export function EquipmentPricingView({
             : null;
         const baselineLabel = baseline?.kind === "ignored" ? "低值未计入" : "默认参考价";
         const searchLabel =
-          item.searchState === "read_failed"
-            ? "详情读取失败，需重试"
-            : item.searchState === "pending"
-              ? "查价未完成，继续时重试"
-              : item.exclusion
-                ? "无匹配，未计入参考合计"
-                : label(item.status);
+          item.searchState === "skipped"
+            ? item.skipReason || "无样本，未计入参考合计"
+            : item.searchState === "read_failed"
+              ? "详情读取失败，需重试"
+              : item.searchState === "pending"
+                ? "查价未完成，继续时重试"
+                : item.exclusion
+                  ? "无匹配，未计入参考合计"
+                  : label(item.status);
         const pendingAverage =
           !!item.priceMethod && ["pending", "read_failed"].includes(item.searchState || "");
         return (
@@ -294,7 +298,9 @@ export function EquipmentPricingView({
             </p>
             {!baseline && (
               <p>
-                {browserQuery ? "筛选条件" : "搜索关键词"}：{item.query || "资料不足，未发起查价"}
+                {browserQuery ? "筛选条件" : "搜索关键词"}：
+                {item.query ||
+                  (item.skipReason ? "按规则跳过，未发起查价" : "资料不足，未发起查价")}
               </p>
             )}
             {!!itemIssues.length && (

@@ -69,7 +69,7 @@ describe("通用宝宝装备属性与估值证据", () => {
     "pet-gear-trimmed-suit-v2",
     "pet-gear-trimmed-suit-median-v3",
     "pet-gear-trimmed-suit-cent-median-v4",
-  ])("十件均价策略不复用旧算法 %s 的输入hash", (comparisonVersion) => {
+  ])("五件均价策略不复用旧算法 %s 的输入hash", (comparisonVersion) => {
     const record = { detail: null } as SavedRoleRecord;
     const pets = petInventory(record);
     const gear = petGearInventory(record);
@@ -207,7 +207,7 @@ describe("通用宝宝装备属性与估值证据", () => {
       similarEstimate: { status: "insufficient", range: null },
     });
   });
-  it("持久候选保留各组前十件独立商品，始终按官网顺序", () => {
+  it("持久候选保留各组前五件独立商品，始终按官网顺序", () => {
     const exact = [100, 300, 200, 400].map((price, index) => quote("exact-" + index, price));
     const similar = [5, 1, 3, 2, 4].map((score) => ({
       ...quote("similar-" + score, 200 + score * 10),

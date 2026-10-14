@@ -9,6 +9,7 @@ import {
   EQUIPMENT_QUOTE_LIMIT,
   EQUIPMENT_QUOTE_POLICY,
   PRICING_RESUME_POLICY,
+  skippedPricingItem,
 } from "./pricing-integrity";
 import { parseEquipmentAttributes } from "./equip-attributes";
 import { hasUnconfirmedEmptyEquipment, observedEquipmentCategory } from "../crawler/compact";
@@ -82,6 +83,7 @@ export type EquipmentPricingItem = {
   searchState?: PricingSearchState;
   searchCursor?: EquipmentSearchCursor;
   samplingStopped?: boolean;
+  skipReason?: string;
 };
 export type EquipmentPricingSnapshot = {
   version: 1;
@@ -279,6 +281,14 @@ export function equipmentInventory(record: SavedRoleRecord) {
               ? "incomplete"
               : "no_match",
         referencePrice: null,
+        ...(dedicated || unsupported
+          ? {
+              searchState: "skipped" as const,
+              skipReason: dedicated
+                ? "专用或绑定装备，未计入参考合计"
+                : "官网检索不支持的等级装备，未计入参考合计",
+            }
+          : {}),
         candidates: [],
         issues: dedicated ? ["专用或绑定装备不能套用可交易装备价格"] : issues,
       });
@@ -817,7 +827,7 @@ export function combineEquipmentPricing(
     fresh &&
     verified &&
     snapshot?.provider === "browser" &&
-    validEquipmentExclusion(item, snapshot.searchItems);
+    (skippedPricingItem(item) || validEquipmentExclusion(item, snapshot.searchItems));
   if (snapshot)
     snapshot = {
       ...snapshot,
@@ -917,9 +927,11 @@ export function combineEquipmentPricing(
           name: "装备：" + item.name + "（" + item.key + "）",
           input: item.description,
           formula: excluded(item)
-            ? "无匹配，未计入参考合计；同配与相近全服结果已读完。市场售价未知，不记作0元。"
+            ? skippedPricingItem(item)
+              ? (item.skipReason || "无样本，未计入参考合计") + "；市场售价未知，不记作0元。"
+              : "无匹配，未计入参考合计；同配与相近全服结果已读完。市场售价未知，不记作0元。"
             : item.status === "untradable"
-              ? "专用或绑定装备无法独立挂牌查价，需结合整号参考评估；分项金额未知。"
+              ? "专用或绑定装备无法独立挂牌查价，分项金额未知。"
               : baseline
                 ? baseline.kind === "ignored"
                   ? "普通低值装备按明确排除策略未计入，保留记录；不表示市场售价为0。"
@@ -938,7 +950,7 @@ export function combineEquipmentPricing(
                 : item.baselineInvalidReason
                   ? "默认参考价已失效：" + item.baselineInvalidReason
                   : (item.priceMethod === EQUIPMENT_QUOTE_POLICY
-                      ? "已核对同配置装备前十件有效挂牌价的算术平均值（"
+                      ? "已核对同配置装备前五件有效挂牌价的算术平均值（"
                       : "已核对同配置装备挂牌价的中位数（") +
                     item.candidates.filter(
                       (candidate) => candidate.verified && candidate.matchType !== "similar",

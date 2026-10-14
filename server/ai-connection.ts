@@ -35,8 +35,6 @@ import {
 import { createPetSource } from "./analysis/browser-pet-source";
 import { searchPetGearPricing } from "./analysis/pet-gear-search";
 import type { PetGearPricingSnapshot } from "./analysis/pet-gear-inventory";
-import { searchRolePricing } from "./analysis/role-search";
-import type { RolePricingSnapshot } from "./analysis/role-pricing";
 
 export { startCodexLogin, codexLoginStatus, cancelCodexLogin } from "./ai/codex";
 
@@ -164,7 +162,8 @@ export async function verifyAi(
     let response: string;
     let status: AiConnectionStatus;
     if (provider === "codex") {
-      if (before.state === "error") throw new Error(before.error || "Codex 登录服务不可用");
+      if (before.state === "error" && !before.account)
+        throw new Error(before.error || "Codex 登录服务不可用");
       if (!before.account) return (connections.codex = { state: "login_required" });
       response = await probeCodex(PROBE_PROMPT, signal);
       const account = await codexAccount();
@@ -294,18 +293,6 @@ async function searchPetGear(
   }
 }
 
-async function searchRole(
-  record: SavedRoleRecord,
-  signal: AbortSignal,
-  previous?: RolePricingSnapshot,
-) {
-  try {
-    return await searchRolePricing(record, signal, previous);
-  } catch (error) {
-    throw new Error(publicError(error));
-  }
-}
-
 export async function prepareAnalysisClient(provider: AiProvider, selectedModel?: string) {
   if (provider === "codex") {
     const account = await codexAccount();
@@ -318,7 +305,6 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
       searchEquipment,
       searchPets,
       searchPetGear,
-      searchRole,
       async analyze(prompt: string, schema: unknown, signal: AbortSignal) {
         const current = await codexAccount();
         if (!current || current.email !== account.email)
@@ -342,7 +328,6 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
     searchEquipment,
     searchPets,
     searchPetGear,
-    searchRole,
     async analyze(prompt: string, _schema: unknown, signal: AbortSignal) {
       try {
         return await requestDeepSeek(key, model, prompt, signal, 8192);

@@ -29,7 +29,6 @@ const mocks = vi.hoisted(() => ({
   readPetSource: vi.fn(),
   closePetSource: vi.fn(),
   searchPetGearPricing: vi.fn(),
-  searchRolePricing: vi.fn(),
 }));
 vi.mock("./ai/codex", () => mocks);
 vi.mock("./ai/deepseek", () => ({
@@ -58,7 +57,6 @@ vi.mock("./analysis/pet-pricing", async (importOriginal) => ({
   searchPetPricing: mocks.searchPetPricing,
 }));
 vi.mock("./analysis/pet-gear-search", () => ({ searchPetGearPricing: mocks.searchPetGearPricing }));
-vi.mock("./analysis/role-search", () => ({ searchRolePricing: mocks.searchRolePricing }));
 const account = { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" };
 const fakeKey = "test-only-deepseek-key";
 
@@ -101,20 +99,6 @@ beforeEach(() => {
   mocks.closePetSource.mockResolvedValue(undefined);
   mocks.searchPetPricing.mockResolvedValue({ ...petPricingFixture(), provider: "browser" });
   mocks.searchPetGearPricing.mockResolvedValue({ items: [], total: null, knownTotal: 0 });
-});
-
-it.each(["codex", "deepseek"] as const)("%s 客户端接入整号参考而不调用AI查价", async (provider) => {
-  if (provider === "deepseek") vi.stubEnv("DEEPSEEK_API_KEY", fakeKey);
-  const { prepareAnalysisClient } = await import("./ai-connection");
-  const client = await prepareAnalysisClient(provider);
-  const record = valuationRecord(),
-    signal = new AbortController().signal;
-  const snapshot = { marketReference: { status: "insufficient", range: null, median: null } };
-  mocks.searchRolePricing.mockResolvedValue(snapshot);
-  await expect(client.searchRole(record, signal)).resolves.toEqual(snapshot);
-  expect(mocks.searchRolePricing).toHaveBeenCalledExactlyOnceWith(record, signal, undefined);
-  expect(mocks.requestCodex).not.toHaveBeenCalled();
-  expect(mocks.requestDeepSeek).not.toHaveBeenCalled();
 });
 
 it.each(["codex", "deepseek"] as const)(
@@ -604,6 +588,28 @@ describe("AI 连接验证", () => {
     const result = await verifyAi("codex", {}, new AbortController().signal);
     expect(result.state).toBe("error");
     expect(result.error).toContain("账号已变化");
+  });
+
+  it("同一已登录账号验证失败后，重试会重新调用 SDK 并可恢复连接", async () => {
+    mocks.probeCodex.mockRejectedValueOnce(new Error("连接验证超时，请重试"));
+    const { verifyAi, aiStatus } = await import("./ai-connection");
+    const failed = await verifyAi("codex", {}, new AbortController().signal);
+    expect(failed.state).toBe("error");
+    expect((await aiStatus()).codex.state).toBe("error");
+    const retried = await verifyAi("codex", {}, new AbortController().signal);
+    expect(retried).toMatchObject({ state: "connected", response: "READY" });
+    expect(mocks.probeCodex).toHaveBeenCalledTimes(2);
+    expect((await aiStatus()).codex.state).toBe("connected");
+  });
+
+  it("重试时读取账号失败，仍停止验证而不采用旧账号", async () => {
+    const { verifyAi } = await import("./ai-connection");
+    expect((await verifyAi("codex", {}, new AbortController().signal)).state).toBe("connected");
+    mocks.codexAccount.mockRejectedValueOnce(new Error("Codex 登录服务不可用"));
+    const failed = await verifyAi("codex", {}, new AbortController().signal);
+    expect(failed.state).toBe("error");
+    expect(failed.error).toContain("登录服务不可用");
+    expect(mocks.probeCodex).toHaveBeenCalledTimes(1);
   });
 
   it("DeepSeek 通过 Pi SDK 验证后才保存，状态和回复均不包含 Key", async () => {

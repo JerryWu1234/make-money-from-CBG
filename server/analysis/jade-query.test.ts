@@ -127,6 +127,21 @@ describe("官方上古玉魄查询", () => {
     expect(result.args.base_attrs1).toBe('{"209":"6"}');
   });
 
+  it("相近玉魄属性下限不低于官网允许的1，避免0被表单拒绝", () => {
+    const result = jadeQuery(
+      item({
+        name: "上古玉魄·阴",
+        modelId: "61717",
+        description: "气血回复效果 +9\n耐久度 244\n法术防御 +14 [+48]\n防御 +14 [+48]",
+      }),
+      config,
+      true,
+    );
+    expect(result.args.init_attrs).toBe('{"108":"1"}');
+    expect(result.args.base_attrs1).toBe('{"103":"12"}');
+    expect(result.args.base_attrs2).toBe('{"102":"11"}');
+  });
+
   it("拒绝不匹配的玉魄型号与普通装备", () => {
     expect(() => jadeQuery(item({ modelId: "61717" }), config)).toThrow("阴阳类型");
     expect(() => jadeQuery(item({ modelId: "12345" }), config)).toThrow("阴阳类型");

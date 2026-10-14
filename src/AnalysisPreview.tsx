@@ -88,16 +88,13 @@ export function AnalysisPreview() {
   const searchingEquipment =
     active?.phase === "equipment_search" ||
     active?.phase === "pet_search" ||
-    active?.phase === "pet_gear_search" ||
-    active?.phase === "role_search";
+    active?.phase === "pet_gear_search";
   const searchAsset =
-    active?.phase === "role_search"
-      ? "整号"
-      : active?.phase === "pet_gear_search"
-        ? "宝宝装备"
-        : active?.phase === "pet_search"
-          ? "宝宝"
-          : "装备";
+    active?.phase === "pet_gear_search"
+      ? "宝宝装备"
+      : active?.phase === "pet_search"
+        ? "宝宝"
+        : "装备";
   const waitingPricing = run?.waitingPricing || 0;
   const finished = (run?.completed || 0) + (run?.failed || 0) + waitingPricing;
   const sameCalculation =
@@ -136,8 +133,8 @@ export function AnalysisPreview() {
         if (controller.signal.aborted) return;
         if (firstLoad.current) {
           const saved = next.activeRun || next.run;
-          if (saved) {
-            setProvider(saved.provider);
+          if (saved) setProvider(saved.provider);
+          if (saved && saved.status !== "completed") {
             setSelectedModels((previous) => ({ ...previous, [saved.provider]: saved.model }));
           }
         }

@@ -275,6 +275,8 @@ export type PetSearchConfig = {
   traits?: Choices;
   officialTypeIds?: string[];
 };
+class NonSaleablePetTypeError extends Error {}
+
 class UnsupportedPetDescriptionError extends Error {
   override name = "UnsupportedPetDescriptionError";
 }
@@ -294,8 +296,8 @@ export function petQuery(
     .map(([id]) => id);
   if (!ids.length) {
     if (config.officialTypeIds?.length)
-      throw new Error(
-        `官网类型目录确认“${item.name}”（${config.officialTypeIds.join(",")}），但没有独立可交易筛选定义；特殊类型保留未定价，不替换为其他宝宝`,
+      throw new NonSaleablePetTypeError(
+        `官网类型目录确认“${item.name}”（${config.officialTypeIds.join(",")}），但没有独立可交易筛选定义；特殊类型按规则跳过，不计入参考合计，不替换为其他宝宝`,
       );
     throw new Error("官网召唤兽类型目录未识别“" + item.name + "”，未发起宽泛查询");
   }
@@ -1607,10 +1609,19 @@ export function petSourceFromPages(
         try {
           args = petQuery(item, config);
         } catch (error) {
+          const nonSaleable = error instanceof NonSaleablePetTypeError;
+          if (nonSaleable)
+            records.push({
+              key: item.key,
+              reason: "official_non_saleable_type",
+              name: item.name,
+              officialTypeIds: config.officialTypeIds,
+            });
           results.push({
             key: item.key,
             candidates: [],
-            searchState: "unsupported",
+            searchState: nonSaleable ? "skipped" : "unsupported",
+            ...(nonSaleable ? { skipReason: "官网无独立交易筛选的特殊宝宝，未计入参考合计" } : {}),
             note: error instanceof Error ? error.message : "官网宝宝类型未识别",
           });
           continue;
@@ -1625,7 +1636,7 @@ export function petSourceFromPages(
         const planHash = petDigest({
           resumePolicy: PRICING_RESUME_POLICY,
           policy: PET_COMPARISON_POLICY_VERSION,
-          method: "official-ui-v1",
+          method: "official-ui-first-page-empty-stop-v2",
           priceMethod: EQUIPMENT_QUOTE_POLICY,
           description: item.description,
           fields: item.fields,
@@ -1830,8 +1841,26 @@ export function petSourceFromPages(
             );
           };
         });
+        // With no adopted quote, re-read the active first page from row zero.
+        // Completed conditions stay completed; no stale row position is reused.
+        // Adopted quotes and failed reads retain the full history guard.
+        if (
+          savedCursor &&
+          !item.candidates.some((candidate) => candidate.verified) &&
+          !candidates.length &&
+          !failed.size &&
+          next.pageNumber === 1
+        ) {
+          next.pageHistory = [];
+          next.historyIndex = 0;
+          next.rowIndex = 0;
+          next.pageRowsHash = "";
+          next.seen = [];
+          seenRows.clear();
+        }
+        const history = structuredClone(next.pageHistory || []);
         let orderChanged = false;
-        let historyValidated = !savedCursor?.pageHistory?.length;
+        let historyValidated = !history.length;
         queryStages: for (let modeIndex = 0; modeIndex < plans.length; modeIndex++) {
           const { matchType, args: queryArgs } = plans[modeIndex];
 
@@ -2042,7 +2071,6 @@ export function petSourceFromPages(
             });
             return { listing, request };
           };
-          const history = savedCursor?.pageHistory || [];
           let uiReady = false;
           while (
             (next.historyIndex || 0) < history.length &&
@@ -2184,7 +2212,13 @@ export function petSourceFromPages(
                 (!sourceCached &&
                   (details >= MAX_DETAILS ||
                     readDetails >=
-                      (matchType === "exact" ? 6 : matchType === "similar" ? 5 : 3))) ||
+                      (pageNumber === 1
+                        ? listing.rows.length
+                        : matchType === "exact"
+                          ? 6
+                          : matchType === "similar"
+                            ? 5
+                            : 3))) ||
                 Date.now() >= deadline
               ) {
                 pageFullyRead = false;
@@ -2206,6 +2240,24 @@ export function petSourceFromPages(
                 pageFullyRead = rowIndex === listing.rows.length - 1;
                 break;
               }
+            }
+            if (
+              pageNumber === 1 &&
+              !candidates.length &&
+              !failed.size &&
+              !detailFailures.length &&
+              !unsupportedDescriptions.length &&
+              pageFullyRead &&
+              listing.hasNext
+            ) {
+              next.emptyFirstPageModes = [
+                ...new Set([...(next.emptyFirstPageModes || []), modeIndex]),
+              ];
+              next.modeIndex = modeIndex + 1;
+              next.pageNumber = 1;
+              next.rowIndex = 0;
+              next.pageRowsHash = "";
+              break;
             }
             if (matchType === "diagnostic" && acceptedCount() >= sampleLimit) {
               next.modeIndex = modeIndex + 1;
@@ -2261,8 +2313,18 @@ export function petSourceFromPages(
           const identity = equipmentIdentity(candidate.url);
           if (!distinct.has(identity)) distinct.set(identity, candidate);
         }
+        const samplingStopped =
+          !!next.emptyFirstPageModes?.length &&
+          next.modeIndex >= plans.length &&
+          !candidates.length &&
+          !failed.size &&
+          !orderChanged &&
+          historyValidated;
         const completed =
-          !orderChanged && historyValidated && (enoughSamples() || next.modeIndex >= plans.length);
+          !samplingStopped &&
+          !orderChanged &&
+          historyValidated &&
+          (enoughSamples() || next.modeIndex >= plans.length);
         next.seen = [...seenRows];
         next.failed = [...failed].map(([url, modeIndex]) => ({ url, modeIndex }));
         results.push({
@@ -2270,15 +2332,19 @@ export function petSourceFromPages(
           query: item.query,
           searchState: failed.size ? "read_failed" : completed ? "completed" : "pending",
           ...(!completed || failed.size ? { searchCursor: next } : {}),
+          ...(samplingStopped ? { samplingStopped: true } : {}),
           candidates: [...distinct.values()].slice(0, EQUIPMENT_QUOTE_LIMIT),
           similarAttempted,
           diagnosticSources,
           note:
+            (samplingStopped
+              ? "各筛选条件仅检查第一页，均未取得有效样本；按规则跳过，不继续翻页，不计入参考合计；市场售价未知。 "
+              : "") +
             (orderChanged
               ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。 "
               : "") +
             notes.join(" ") +
-            (!completed
+            (!completed && !samplingStopped
               ? " 已保存筛选阶段、页码和行位置，下轮继续剩余候选；当前样本不足或配置最近的报价分散，尚未结束查价。"
               : "") +
             (unsupportedDetails

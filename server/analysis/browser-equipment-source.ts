@@ -2561,7 +2561,7 @@ export function equipmentSourceFromPages(
           next.seen = [...seen];
           next.failed = [...failed].map(([url, modeIndex]) => ({ url, modeIndex }));
           const note = samplingStopped
-            ? "各筛选条件仅检查第一页，均未取得有效样本；已停止翻页，后续页未查询，价格待补齐。"
+            ? "各筛选条件仅检查第一页，均未取得有效样本；已停止翻页，后续页未查询。本件跳过，未计入参考合计；市场售价未知。"
             : orderChanged
               ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。"
               : `本轮查询${roundPages}页、${count}个列表候选、${details}个详情；` +

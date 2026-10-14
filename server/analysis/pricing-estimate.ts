@@ -18,14 +18,14 @@ export type SimilarEstimate = {
   average?: number;
   issues: string[];
 };
-export const SIMILAR_POLICY_VERSION = "protected-core-first-ten-average-v5";
-export const EQUIPMENT_SIMILAR_POLICY_VERSION = "bounded-attributes-first-ten-average-v7";
+export const SIMILAR_POLICY_VERSION = "protected-core-first-five-average-v6";
+export const EQUIPMENT_SIMILAR_POLICY_VERSION = "bounded-attributes-first-five-average-v8";
 
 export function buildEquipmentEstimate(candidates: EquipmentCandidate[]): SimilarEstimate {
   return buildSimilarEstimate(candidates, true);
 }
 
-/** Keep official listing order, deduplicate, and average up to ten verified quotations. */
+/** Keep official listing order, deduplicate, and average up to five verified quotations. */
 export function buildSimilarEstimate(
   candidates: EquipmentCandidate[],
   equipment = false,

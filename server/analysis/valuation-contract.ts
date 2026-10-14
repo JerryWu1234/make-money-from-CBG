@@ -7,11 +7,6 @@ import { validateValuationFacts } from "./valuation-facts";
 import { combineEquipmentPricing, type EquipmentPricingSnapshot } from "./equipment-pricing";
 import { combinePetPricing, type PetPricingSnapshot } from "./pet-pricing";
 import { applyValuationRange } from "./valuation-range";
-import {
-  attachRolePricing,
-  rolePricingPromptEvidence,
-  type RolePricingSnapshot,
-} from "./role-pricing";
 
 const nullableNumber = { type: ["number", "null"] };
 const strings = { type: "array", items: { type: "string" } };
@@ -96,7 +91,6 @@ export function valuationPrompt(
   profile: AnalysisProfile,
   equipmentPricing?: EquipmentPricingSnapshot,
   petPricing?: PetPricingSnapshot,
-  rolePricing?: RolePricingSnapshot,
 ) {
   const bare = calculateValuation(record, profile);
   const withEquipment = profile.equipmentSearch
@@ -105,9 +99,7 @@ export function valuationPrompt(
   const withPets = profile.petSearch
     ? combinePetPricing(withEquipment, record, petPricing)
     : withEquipment;
-  const computed = profile.roleSearch
-    ? attachRolePricing(applyValuationRange(withPets, bare, record, profile), record, rolePricing)
-    : applyValuationRange(withPets, bare, record, profile);
+  const computed = applyValuationRange(withPets, bare, record, profile);
   const {
     b: _b,
     a: _a,
@@ -137,19 +129,13 @@ export function valuationPrompt(
     "以下参数是本批次实际使用的计价设置。只比较估值与挂牌价，不考虑费用、预算或买入折扣。null表示尚未提供，不能猜金价或排名。区服数据只匹配当前serverId。",
     JSON.stringify(pricingSettings),
     "自动区服参数的来源与读取时间：" + JSON.stringify(profile.marketSources || []),
-    "detail.valuation.fields 是已经从网页角色数据核对的字段，直接使用，不能重复补提或用标签原文覆盖。只有程序未识别的缺失事实才可补提；装备和宝宝参考价采用下方已保存的查价快照。人物装备、灵饰、宝宝及宝宝装备按官网固定结果顺序取前10件不同的有效在售商品，用人民币挂牌价的算术平均值计价；不足10件须先确认结果已读完，再注明实际样本数。相近资产使用similarEstimate.average并披露配置差异及范围；pending或read_failed表示搜索未完成，不能称已补齐。整号市场参考保留已核验样本中位数；宝宝装备只作包价核对，不与宝宝价格重复相加。baselineEstimate仅为旧报告保存的默认参考价或低值排除政策，新搜索不以预设价跳过普通装备查询；金额为空仍是缺价，不能补成0或自行联网猜价。存在baselineInvalidReason的默认价已失效，只说明原因，不采用其中金额。所有需要的角色事实都已核对时 extracted_facts 必须是空数组。",
+    "detail.valuation.fields 是已经从网页角色数据核对的字段，直接使用，不能重复补提或用标签原文覆盖。只有程序未识别的缺失事实才可补提；装备和宝宝参考价采用下方已保存的查价快照。人物装备、灵饰、宝宝及宝宝装备按官网固定结果顺序取前5件不同的有效在售商品，用人民币挂牌价的算术平均值计价；不足5件须先确认结果已读完，再注明实际样本数。相近资产使用similarEstimate.average并披露配置差异及范围；pending或read_failed表示搜索未完成，不能称已补齐；skipped表示按用户规则跳过：skipReason标明0级或明确野生的宝宝，不发起查价；没有skipReason时表示查询无有效样本。跳过项目不计入价格，市场售价仍未知。宝宝装备只作包价核对，不与宝宝价格重复相加。baselineEstimate仅为旧报告保存的默认参考价或低值排除政策，新搜索不以预设价跳过普通装备查询；金额为空仍是缺价，不能补成0或自行联网猜价。存在baselineInvalidReason的默认价已失效，只说明原因，不采用其中金额。所有需要的角色事实都已核对时 extracted_facts 必须是空数组。",
     "下方是初步计算，尚未识别的原文资料可通过 extracted_facts 补提后重新计算；不要仅复述待确认。补提仅支持神器套数、坐骑总数、进阶状态、主属性百分比，以及神器1至3的满槽/类型/总分、坐骑1至9的成长/进阶状态/主属性百分比。",
-    "exclusion和excluded_assets是程序已核验穷尽证据后作出的核算排除，须披露无匹配且未计入合计，价格仍未知，不能写0元或称全部资产都有实价。special_asset_reference单列专用/绑定资产的角色用途与整体价值影响；individualPrice为空，整号参考与分项合计绝不相加。没有有效整号样本时value为空，保留未知。",
+    "exclusion表示已核验穷尽证据后的核算排除；excluded_assets也包含按规则或无样本而跳过的项目。须按reason披露跳过原因及未计入合计，价格仍未知，不能写0元或称全部资产都有实价，也不能把skipped要求补价。专用或绑定装备、官网检索不支持的等级装备、官网确认但无独立交易筛选定义的特殊宝宝按用户规则跳过，不发起查价、不计入参考合计，须披露排除原因；其市场售价仍未知。",
     "每条补提必须给出原文 JSON Pointer path 和逐字 quote。quote 须包含对应名称及冒号标记的值，或明确“共有N套神器/共有N只坐骑”；分项可引用“第N套神器/第N只坐骑”下的满槽、五行类型、总分、成长、进阶及主属性比例。进阶可引用“坐骑·已进阶”，明确“没有/未开启/未解锁神器”可提为神器套数0。标题空白、未看到、祥瑞数量不能作为不存在或坐骑总数的证据。没有可补提的事实时 extracted_facts 返回空数组。",
     "decision必须符合程序价格关系：BUY表示挂牌低于精确参考估值，WATCH表示相等，PASS表示挂牌高于精确参考估值，NEED_INFO表示没有完整精确估值。采用相近配置或默认参考价时保留NEED_INFO，按estimated_value_range与estimated_comparison解释完整参考估值和挂牌差额；只有estimated_subtotal_range时仍是部分金额。estimated_sources含baseline时说明历史/预设参考价或低值排除政策，不能称实时报价。这里不做购买建议。reason解释价差与范围；200字以内。缺资料或报价时明确缺什么，不猜完整价格。",
-    ...(profile.roleSearch
-      ? [
-          "role_pricing是通过官网界面及实际全服三年以上查询核验的整号挂牌参考，已含角色、装备及宝宝；与程序分项估值独立解释，绝不相加或替代model_value/known_subtotal，目标挂牌价不作为估值样本。marketReference.status为insufficient时没有可信完整市场参考，range和median为空；说明样本不足或分散的具体原因，不按0解释。",
-        ]
-      : []),
     JSON.stringify({
       ...report,
-      role_pricing: rolePricingPromptEvidence(report.role_pricing),
       ...(report.equipment_pricing
         ? {
             equipment_pricing: {
@@ -198,7 +184,6 @@ export function validateValuation(
   profile: AnalysisProfile,
   equipmentPricing?: EquipmentPricingSnapshot,
   petPricing?: PetPricingSnapshot,
-  rolePricing?: RolePricingSnapshot,
 ): ProductAnalysis {
   let parsed: unknown;
   try {
@@ -222,9 +207,7 @@ export function validateValuation(
   const withPets = profile.petSearch
     ? combinePetPricing(withEquipment, record, petPricing)
     : withEquipment;
-  const expected = profile.roleSearch
-    ? attachRolePricing(applyValuationRange(withPets, bare, record, profile), record, rolePricing)
-    : applyValuationRange(withPets, bare, record, profile);
+  const expected = applyValuationRange(withPets, bare, record, profile);
   const money = [
     "asking_price",
     "extra_cost",

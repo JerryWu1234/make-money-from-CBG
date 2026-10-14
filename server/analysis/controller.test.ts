@@ -124,7 +124,7 @@ function captureFixture() {
         signal.addEventListener("abort", () => reject(signal.reason), { once: true });
       }),
   );
-  mocks.profile.mockReturnValue(createProfile("capture first", undefined, true, true, false));
+  mocks.profile.mockReturnValue(createProfile("capture first", undefined, true, true));
   mocks.connect.mockResolvedValue({
     model: "test-model",
     analyze,

@@ -91,6 +91,14 @@ function ValuationPriceOverview({ result }: { result: ValuationResult }) {
     range: ValuationResult["estimated_equipment_range"],
   ) => {
     if (snapshot?.captureComplete && snapshot.items.length === 0) return "无" + asset;
+    if (
+      snapshot?.captureComplete &&
+      snapshot.items.length &&
+      snapshot.items.every((item) => item.searchState === "skipped")
+    )
+      return snapshot.items.some((item) => item.skipReason)
+        ? "按规则跳过，未计入参考合计"
+        : "无样本，未计入参考合计";
     const ignored = (item: NonNullable<typeof snapshot>["items"][number]) =>
       item.baselineEstimate?.kind === "ignored" && !item.baselineInvalidReason;
     if (snapshot?.items.length && snapshot.items.every(ignored))
@@ -103,6 +111,7 @@ function ValuationPriceOverview({ result }: { result: ValuationResult }) {
         !snapshot?.captureComplete ||
         snapshot.items.some(
           (item) =>
+            item.searchState !== "skipped" &&
             item.status !== "priced" &&
             !item.similarEstimate?.range &&
             (item.baselineInvalidReason || item.baselineEstimate?.amount == null),
@@ -171,67 +180,6 @@ function ValuationPriceOverview({ result }: { result: ValuationResult }) {
       </dl>
       <p className="analysis-valuation-scope">锦衣和其他道具未计入总估值。</p>
     </>
-  );
-}
-function RoleMarketPricingView({
-  snapshot,
-}: {
-  snapshot: NonNullable<ValuationResult["role_pricing"]>;
-}) {
-  const reference = snapshot.marketReference;
-  const range = reference.status === "range" && snapshot.searchComplete ? reference.range : null;
-  const officialLink = (url: string) => {
-    try {
-      const parsed = new URL(url);
-      return parsed.origin === "https://xyq.cbg.163.com" && parsed.pathname === "/equip";
-    } catch {
-      return false;
-    }
-  };
-  return (
-    <section className="analysis-evidence-card" aria-label="整号市场参考">
-      <header>
-        <strong>整号市场参考</strong>
-        <span>{range ? valuationRangeMoney(range) : "样本不足，暂无法形成整号参考"}</span>
-      </header>
-      {range && reference.median != null && (
-        <p>相关样本挂牌中位数：{valuationMoney(reference.median)}</p>
-      )}
-      <p>
-        有效整号样本：{reference.sampleCount} 条。{reference.scope}
-      </p>
-      {!!reference.issues.length && (
-        <ul>
-          {reference.issues.map((issue) => (
-            <li key={issue}>{issue}</li>
-          ))}
-        </ul>
-      )}
-      {!!snapshot.candidates.length && (
-        <details>
-          <summary>查看整号样本与配置差异</summary>
-          {snapshot.candidates.map((candidate) => (
-            <section key={candidate.key} className="analysis-evidence-card">
-              <header>
-                {officialLink(candidate.url) ? (
-                  <a href={candidate.url} target="_blank" rel="noreferrer">
-                    {candidate.title}
-                  </a>
-                ) : (
-                  <strong>{candidate.title}</strong>
-                )}
-                <span>{valuationMoney(candidate.price)}</span>
-              </header>
-              <p>{candidate.verified && candidate.active ? "配置核验通过" : "未纳入整号参考"}</p>
-              {!!candidate.reasons.length && <p>{candidate.reasons.join("；")}</p>}
-              {!!candidate.differences.length && (
-                <p>配置差异：{candidate.differences.join("；")}</p>
-              )}
-            </section>
-          ))}
-        </details>
-      )}
-    </section>
   );
 }
 export function ValuationResultView({
@@ -307,38 +255,12 @@ export function ValuationResultView({
           </div>
         </>
       )}
-      {result.role_pricing && <RoleMarketPricingView snapshot={result.role_pricing} />}
-      {result.special_asset_reference && (
-        <section className="analysis-evidence-card" aria-label="特殊资产整体参考">
-          <h3>专用／绑定资产整体参考</h3>
-          <p>
-            {result.special_asset_reference.assets.map((asset) => asset.name).join("、")}
-            ：分项价格未知。
-          </p>
-          <p>{result.special_asset_reference.note}</p>
-          <ul>
-            {result.special_asset_reference.assets.map((asset) => (
-              <li key={asset.key}>
-                {asset.name}：{asset.roleUse}
-              </li>
-            ))}
-          </ul>
-          {result.special_asset_reference.value !== null && (
-            <p>
-              独立整号参考：{valuationMoney(result.special_asset_reference.value)}；范围：
-              {valuationRangeMoney(result.special_asset_reference.range!)}。
-            </p>
-          )}
-          {result.special_asset_reference.listingDifference !== null && (
-            <p>
-              整号参考减挂牌价：{valuationMoney(result.special_asset_reference.listingDifference)}。
-            </p>
-          )}
-        </section>
-      )}
       {!!result.excluded_assets?.length && (
         <p className="analysis-pending-note">
-          无匹配，未计入参考合计：{result.excluded_assets.map((asset) => asset.name).join("、")}
+          未计入参考合计：
+          {result.excluded_assets
+            .map((asset) => asset.name + "（" + asset.reason + "）")
+            .join("、")}
           。市场售价未知。
         </p>
       )}

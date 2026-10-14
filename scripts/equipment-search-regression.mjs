@@ -376,7 +376,7 @@ try {
     }),
   );
 
-  await check("前十件均价完整经过表单提交、翻页、详情核验和计价，不读取第十一件", () => {
+  await check("前五件均价完整经过表单提交、翻页、详情核验和计价，不读取第六件", () => {
     const prices = [145, 100, 130, 110, 120, 101, 102, 103, 104, 105, 1];
     return withSource(
       {
@@ -415,21 +415,21 @@ try {
           },
         };
         const result = await searchEquipmentPrices(record, control.signal, source);
-        assert.equal(result.total, 112, JSON.stringify(result));
+        assert.equal(result.total, 121, JSON.stringify(result));
         assert.equal(result.searchComplete, true);
-        assert.equal(result.items[0].referencePrice, 112);
+        assert.equal(result.items[0].referencePrice, 121);
         assert.deepEqual(
           result.items[0].candidates.map((value) => value.price),
-          prices.slice(0, 10),
+          prices.slice(0, 5),
         );
         assert.deepEqual(
           detailVisits,
-          Array.from({ length: 10 }, (_, index) => "mean-" + index),
+          Array.from({ length: 5 }, (_, index) => "mean-" + index),
         );
         const calls = await searchPage.evaluate(() => window.calls);
         assert.deepEqual(
           calls.map((call) => call.page),
-          [1, 2],
+          [1],
         );
         assert.ok(calls.every((call) => call.server_type === "3" && call.level_min === 100));
         assert.equal(result.searchItems[0].uiQueries[0].submittedArgs.gem_level, 8);
@@ -437,7 +437,7 @@ try {
     );
   });
 
-  await check("前十件相近报价保留官网顺序，不按属性距离重新挑样本", () => {
+  await check("前五件相近报价保留官网顺序，不按属性距离重新挑样本", () => {
     const prices = [145, 100, 130, 110, 120, 101, 102, 103, 104, 105, 1];
     const defenses = [55, 49, 54, 48, 51, 52, 53, 49, 47, 46, 50];
     return withSource(
@@ -463,10 +463,10 @@ try {
         assert.equal(result.items[0].searchState, "completed");
         assert.deepEqual(
           result.items[0].candidates.map((value) => value.price),
-          prices.slice(0, 10),
+          prices.slice(0, 5),
         );
-        assert.equal(buildEquipmentEstimate(result.items[0].candidates).average, 112);
-        assert.equal(detailVisits.includes("similar-mean-10"), false);
+        assert.equal(buildEquipmentEstimate(result.items[0].candidates).average, 121);
+        assert.equal(detailVisits.includes("similar-mean-5"), false);
       },
     );
   });
@@ -1510,13 +1510,13 @@ try {
         const finished = first;
         assert.equal(finished.items[0].searchState, "completed");
         const selected = finished.items[0].candidates.filter((value) => value.verified);
-        assert.equal(selected.length, 8);
+        assert.equal(selected.length, 5);
         assert.deepEqual(
           selected.map((value) => value.price),
-          [100, 200, 300, 400, 500, 1000, 1010, 1020],
+          [100, 200, 300, 400, 500],
         );
         assert.equal(buildEquipmentEstimate(selected).status, "range");
-        assert.equal(buildEquipmentEstimate(selected).average, 566.25);
+        assert.equal(buildEquipmentEstimate(selected).average, 300);
         assert.ok(first.searchItems[0].comparableCandidates.length >= 5);
         assert.ok(finished.searchItems[0].comparableCandidates.length >= 5);
       },
@@ -1992,7 +1992,7 @@ try {
       },
     ),
   );
-  await check("第一页有有效样本时继续第二页，仍取前十件", () =>
+  await check("第一页有有效样本时继续第二页，仍取前五件", () =>
     withSource(
       {
         pages: [
@@ -2009,7 +2009,7 @@ try {
         );
         assert.equal(
           result.items[0].candidates.filter((candidate) => candidate.verified).length,
-          10,
+          5,
         );
         assert.equal(result.items[0].searchState, "completed");
         assert.notEqual(result.items[0].samplingStopped, true);
@@ -2085,7 +2085,7 @@ try {
     });
   });
 
-  await check("前排装备详情失败不跳过它凑十件，重试后仍保留官网商品顺序", () =>
+  await check("前排装备详情失败不跳过它凑五件，重试后仍保留官网商品顺序", () =>
     withSource(
       {
         pages: [
@@ -2109,9 +2109,9 @@ try {
           second.candidates
             .filter((x) => x.verified)
             .map((x) => new URL(x.url).searchParams.get("eid")),
-          Array.from({ length: 10 }, (_, index) => `failure-${index}`),
+          Array.from({ length: 5 }, (_, index) => `failure-${index}`),
         );
-        assert.ok(!detailVisits.includes("failure-10"));
+        assert.ok(!detailVisits.includes("failure-5"));
       },
     ),
   );
@@ -2273,7 +2273,7 @@ try {
       },
     ),
   );
-  await check("最多读取一百个详情，达到十件有效同配报价立即停", async () => {
+  await check("最多读取一百个详情，达到五件有效同配报价立即停", async () => {
     await withSource(
       {
         pages: Array.from({ length: 1 }, (_, page) =>
@@ -2314,13 +2314,13 @@ try {
       {},
       async ({ source, control }) => {
         const result = await source.findCandidates([item()], control.signal);
-        assert.equal(detailVisits.length, 8);
-        assert.equal(result.items[0].candidates.length, 8);
+        assert.equal(detailVisits.length, 5);
+        assert.equal(result.items[0].candidates.length, 5);
       },
     );
   });
 
-  await check("单页11条取到10件早停，不能误报所有商品已读完", () =>
+  await check("单页11条取到5件早停，不能误报所有商品已读完", () =>
     withSource(
       {
         pages: [
@@ -2333,8 +2333,8 @@ try {
       {},
       async ({ source, control }) => {
         const result = await source.findCandidates([item()], control.signal);
-        assert.equal(detailVisits.length, 10);
-        assert.equal(result.items[0].candidates.length, 10);
+        assert.equal(detailVisits.length, 5);
+        assert.equal(result.items[0].candidates.length, 5);
         assert.equal(result.searchItems[0].exhausted, false);
         assert.match(result.items[0].note, /未遍历/);
       },

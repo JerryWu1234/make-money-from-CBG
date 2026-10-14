@@ -366,7 +366,7 @@ try {
       ),
     );
   });
-  await check("前十件宝宝装备跨页去重计算均价，不采用第十一件低价", async () => {
+  await check("前五件宝宝装备跨页去重计算均价，不采用第六件低价", async () => {
     const prices = [100, 110, 120, 130, 140, 150, 160, 170, 180, 900, 1];
     const ids = prices.map((_, index) => `ten-${index}`);
     const result = await run(target, {
@@ -374,15 +374,15 @@ try {
       prices: Object.fromEntries(ids.map((id, index) => [id, prices[index]])),
     });
     assert.equal(result.items[0].searchStatus, "completed", result.items[0].note);
-    assert.deepEqual(detailVisits, ids.slice(0, 10));
+    assert.deepEqual(detailVisits, ids.slice(0, 5));
     assert.deepEqual(
       result.items[0].candidates.map(({ price }) => price),
-      prices.slice(0, 10),
+      prices.slice(0, 5),
     );
-    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 216);
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 120);
     assert.deepEqual(
       requests.map(({ page }) => page),
-      ["1", "2"],
+      ["1"],
     );
   });
   await check("游标续查：详情预算保留当前页行位置与候选", async () => {

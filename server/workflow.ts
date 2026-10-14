@@ -1,5 +1,5 @@
 import type { Page } from "playwright-core";
-import { CBG_HOME_URL } from "./config";
+import { CBG_HOME_URL, CBG_CROSS_SERVER_URL } from "./config";
 import { buildPageState, readPageSnapshot, type PageSnapshot } from "./page-state";
 import type { OpenCbgResult, RoleList, WorkflowStep } from "./types";
 
@@ -193,16 +193,26 @@ export async function completeLogin(
 export async function runFixedWorkflow(page: Page, publish: Publish): Promise<OpenCbgResult> {
   const stage = (workflowStep: WorkflowStep, message: string) =>
     publish({ workflowStep, message, running: true, qrCodeUrl: undefined });
-  stage("logging_in", "正在后台打开藏宝阁并读取登录状态…");
+  stage("logging_in", "正在核验已有藏宝阁登录状态…");
   try {
-    await page.goto(CBG_HOME_URL, { waitUntil: "commit", timeout: 60000 });
+    await page.goto(CBG_CROSS_SERVER_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
   } catch (error) {
     if (!isNavigationTransition(error)) throw error;
   }
-  await completeLogin(page, publish);
-
-  stage("cross_server", "已登录，正在进入跨服购买…");
-  await clickInWorkPage(page, "#cross_server_buy");
+  const current = buildPageState(await readStableSnapshot(page));
+  if (current.isLoggedIn) {
+    publish({ ...current, workflowStep: "cross_server", running: true });
+    stage("cross_server", "当前登录仍有效，正在复用跨服购买入口…");
+  } else {
+    try {
+      await page.goto(CBG_HOME_URL, { waitUntil: "commit", timeout: 60000 });
+    } catch (error) {
+      if (!isNavigationTransition(error)) throw error;
+    }
+    await completeLogin(page, publish);
+    stage("cross_server", "已登录，正在进入跨服购买…");
+    await clickInWorkPage(page, "#cross_server_buy");
+  }
   await page.locator("#server_type_panel li").first().waitFor({ state: "visible", timeout: 30000 });
   stage("server_age", "正在选择开服时间：3年以上服…");
   await selectServerAge(page, "#server_type_panel");

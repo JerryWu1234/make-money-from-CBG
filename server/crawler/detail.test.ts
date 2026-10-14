@@ -282,54 +282,66 @@ describe("装备局部补采", () => {
     }
   }, 15000);
 
-  it.each(["cash", "artifacts", "hidden", "empty", "explicit"])(
-    "空装备只有实际容器或明确文字可确认：%s",
-    async (kind) => {
-      const page = await browser.newPage();
-      try {
-        const artifacts =
-          '<div id="RoleUsingFabao"><img data_equip_name="法宝" data_equip_type="6033" src="/images/fabao.png"></div>';
-        const empty =
-          '<table id="RoleUsingEquips"><tbody><tr><td></td></tr></tbody></table><table id="RoleStoreEquips"><tbody><tr><td></td></tr></tbody></table>';
-        const body =
-          kind === "cash"
-            ? "<p>现金：100</p><p>存银：0</p>"
-            : kind === "artifacts"
-              ? artifacts
-              : kind === "hidden"
-                ? empty.replace('id="RoleStoreEquips"', 'id="RoleStoreEquips" style="display:none"')
+  it.each([
+    "cash",
+    "artifacts",
+    "hidden",
+    "empty",
+    "explicit",
+    "material",
+    "unknown-item",
+    "wrong-name",
+  ])("空装备只有实际容器或明确文字可确认：%s", async (kind) => {
+    const page = await browser.newPage();
+    try {
+      const artifacts =
+        '<div id="RoleUsingFabao"><img data_equip_name="法宝" data_equip_type="6033" src="/images/fabao.png"></div>';
+      const empty =
+        '<table id="RoleUsingEquips"><tbody><tr><td></td></tr></tbody></table><table id="RoleStoreEquips"><tbody><tr><td></td></tr></tbody></table>';
+      const material = `<img width="50" height="50" src="/images/equip/small/17320.gif" data_equip_name="${kind === "wrong-name" ? "未知物品" : "三界密令"}" data_equip_type="${kind === "unknown-item" ? "17321" : "17320"}" data_equip_desc="灵气：158" data_equip_type_desc="流传于三界之间的神秘信物，内藏乾坤，完成密令任务获得奖励（转换月卡可得，右键使用）">`;
+      const body =
+        kind === "cash"
+          ? "<p>现金：100</p><p>存银：0</p>"
+          : kind === "artifacts"
+            ? artifacts
+            : kind === "hidden"
+              ? empty.replace('id="RoleStoreEquips"', 'id="RoleStoreEquips" style="display:none"')
+              : ["material", "unknown-item", "wrong-name"].includes(kind)
+                ? empty.replace(
+                    '<table id="RoleStoreEquips"><tbody><tr><td>',
+                    `<table id="RoleStoreEquips"><tbody><tr><td>${material}`,
+                  )
                 : kind === "explicit"
                   ? "<p>没有装备</p>"
                   : empty + artifacts;
-        await page.route("**/images/**", (route) => route.abort());
-        await page.route(url, (route) =>
-          route.fulfill({
-            contentType: "text/html",
-            body: fixture(false, undefined, undefined, "", "", body),
-          }),
-        );
-        const captured = await collectValuationDetail(
-          page,
-          listing,
-          previous(),
-          new AbortController().signal,
-        );
-        const expected = ["empty", "explicit"].includes(kind);
-        expect(captured.equipmentCapture?.complete).toBe(expected);
-        expect(captured.equipmentCapture?.emptyProof).toBe(
-          kind === "empty"
-            ? "official-containers"
-            : kind === "explicit"
-              ? "explicit-text"
-              : undefined,
-        );
-        if (!expected)
-          expect(captured.equipmentCapture?.issues.join(" ")).toContain("库存是否为空尚未核对");
-      } finally {
-        await page.close();
-      }
-    },
-  );
+      await page.route("**/images/**", (route) => route.abort());
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, "", "", body),
+        }),
+      );
+      const captured = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      const expected = ["empty", "explicit", "material"].includes(kind);
+      expect(captured.equipmentCapture?.complete).toBe(expected);
+      expect(captured.equipmentCapture?.emptyProof).toBe(
+        ["empty", "material"].includes(kind)
+          ? "official-containers"
+          : kind === "explicit"
+            ? "explicit-text"
+            : undefined,
+      );
+      if (!expected)
+        expect(captured.equipmentCapture?.issues.join(" ")).toContain("库存是否为空尚未核对");
+    } finally {
+      await page.close();
+    }
+  });
 
   it("新采保存官网模型号，玉魄和技能书不误报普通装备等级缺失", async () => {
     const page = await browser.newPage();

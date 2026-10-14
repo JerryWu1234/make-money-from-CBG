@@ -7,14 +7,13 @@ import { AnalysisRunner, type AnalysisClient } from "./runner";
 import { createProfile, PROMPT_FILE } from "./profile";
 import { equipmentInventory } from "./equipment-pricing";
 import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
-import { blockedRolePricing } from "./role-pricing";
 import {
   PET_GEAR_ACCOUNTING,
   petGearInventory,
   type PetGearPricingSnapshot,
 } from "./pet-gear-inventory";
 
-function setup(captureComplete = true, roleSearch = false, petCount = 1) {
+function setup(captureComplete = true, petCount = 1) {
   const record = valuationRecord("generic-pet-gear");
   record.detail!.petCapture = {
     version: 1,
@@ -86,13 +85,7 @@ function setup(captureComplete = true, roleSearch = false, petCount = 1) {
   crawl.observe(record.listing);
   crawl.save(record.listing, record.detail!);
   const store = new AnalysisStore(crawl.db);
-  const profile = createProfile(
-    readFileSync(PROMPT_FILE, "utf8"),
-    undefined,
-    true,
-    true,
-    roleSearch,
-  );
+  const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), undefined, true, true);
   const base = {
     version: 1 as const,
     searchedAt: new Date().toISOString(),
@@ -121,9 +114,6 @@ function setup(captureComplete = true, roleSearch = false, petCount = 1) {
   const searchPetGear = vi
     .fn<NonNullable<AnalysisClient["searchPetGear"]>>()
     .mockResolvedValue(gear);
-  const searchRole = vi
-    .fn<NonNullable<AnalysisClient["searchRole"]>>()
-    .mockImplementation(async (target) => blockedRolePricing(target));
   const analyze = vi.fn<AnalysisClient["analyze"]>().mockResolvedValue({
     text: JSON.stringify({
       decision: "NEED_INFO",
@@ -137,7 +127,6 @@ function setup(captureComplete = true, roleSearch = false, petCount = 1) {
     searchEquipment,
     searchPets,
     searchPetGear,
-    searchRole,
   }));
   return {
     record,
@@ -151,14 +140,13 @@ function setup(captureComplete = true, roleSearch = false, petCount = 1) {
     searchEquipment,
     searchPets,
     searchPetGear,
-    searchRole,
   };
 }
 
 it.each(["pet", "pet-gear"] as const)(
   "%s 每轮完成一件时自动查完全部六件，保留已完成阶段且只分析一次",
   async (phase) => {
-    const c = setup(true, false, 6);
+    const c = setup(true, 6);
     let searches = 0;
     if (phase === "pet")
       c.searchPets.mockImplementation(async () => ({
@@ -280,18 +268,12 @@ it("宝宝装备自动查价，暂停和刷新后复用父宝宝进度，完成�
   }
 });
 
-it("宠装暂停恢复后才整号、再AI，已完成父宝宝不重复查", async () => {
-  const c = setup(true, true);
+it("宠装暂停恢复后直接AI，已完成父宝宝不重复查", async () => {
+  const c = setup(true);
   c.searchPetGear.mockResolvedValueOnce({
     ...c.gear,
     searchComplete: false,
     items: c.gear.items.map((item) => ({ ...item, searchStatus: "read_failed" })),
-  });
-  c.searchRole.mockImplementationOnce(async (record) => {
-    expect(c.searchPetGear).toHaveBeenCalledTimes(2);
-    expect(c.analyze).not.toHaveBeenCalled();
-    expect(c.store.activeRun()?.phase).toBe("role_search");
-    return blockedRolePricing(record);
   });
   try {
     const id = await c.runner.start("codex", false, c.profile);
@@ -302,17 +284,12 @@ it("宠装暂停恢复后才整号、再AI，已完成父宝宝不重复查", as
       completed: 0,
       queued: 0,
     });
-    expect(c.searchRole).not.toHaveBeenCalled();
     await c.runner.resume(id, true);
     await c.runner.settled();
     expect(c.store.run(id)?.status).toBe("completed");
     expect(c.searchEquipment).toHaveBeenCalledOnce();
     expect(c.searchPets).toHaveBeenCalledOnce();
-    expect(c.searchRole).toHaveBeenCalledOnce();
     expect(c.analyze).toHaveBeenCalledOnce();
-    expect(
-      c.store.overview().results.items[0].result.valuation?.role_pricing?.marketReference,
-    ).toMatchObject({ status: "insufficient", range: null, median: null });
   } finally {
     await c.runner.shutdown();
     c.crawl.db.close();

@@ -85,13 +85,15 @@ describe("精确查价快照完整性", () => {
     expect(unfinishedPricingSearch(row, records)).toBe(true);
   });
 
-  it("零报价和URL别名不足十件不能冒充完成，十件不同商品允许结束", () => {
+  it("四件和URL别名不足五件不能冒充完成，五件不同商品允许结束", () => {
     const row = item();
     const records = [{ key: row.key, modes: [{ mode: "exact", exhausted: false }] }];
     expect(unfinishedPricingSearch(row, records)).toBe(true);
     row.candidates = Array.from({ length: 10 }, () => candidate(100, "same"));
     expect(unfinishedPricingSearch(row, records)).toBe(true);
-    row.candidates = Array.from({ length: 10 }, (_, index) => candidate(100, `sample-${index}`));
+    row.candidates = Array.from({ length: 4 }, (_, index) => candidate(100, `sample-${index}`));
+    expect(unfinishedPricingSearch(row, records)).toBe(true);
+    row.candidates.push(candidate(100, "sample-4"));
     expect(unfinishedPricingSearch(row, records)).toBe(false);
   });
 
@@ -117,12 +119,12 @@ describe("精确查价快照完整性", () => {
     expect(unfinishedPricingSearch(row, records)).toBe(true);
   });
 
-  it("新的十件均价快照重算平均值，不能以中位数或旧计价策略冒充", () => {
+  it("五件均价快照不能复用旧十件价格，第六件及以后不参与", () => {
     const inventory: EquipmentPricingItem[] = [{ ...item(), priceMethod: EQUIPMENT_QUOTE_POLICY }];
     const row: EquipmentPricingItem = {
       ...inventory[0],
       status: "priced" as const,
-      referencePrice: 226,
+      referencePrice: 120,
       candidates: [100, 110, 120, 130, 140, 150, 160, 170, 180, 1000, 1].map((price, index) =>
         candidate(price, `mean-${index}`),
       ),
@@ -131,9 +133,9 @@ describe("精确查价快照完整性", () => {
       ...candidate(100, "mean-0"),
       url: "https://xyq.cbg.163.com/equip/1/mean-0",
     });
-    const source = { ...snapshot([row]), total: 226, knownTotal: 226 };
+    const source = { ...snapshot([row]), total: 120, knownTotal: 120 };
     expect(validateExactPricing(source, inventory, now)).toBe(true);
-    row.referencePrice = source.total = source.knownTotal = 120;
+    row.referencePrice = source.total = source.knownTotal = 226;
     expect(validateExactPricing(source, inventory, now)).toBe(false);
     delete row.priceMethod;
     expect(inventoryMatchesSnapshot(source, inventory)).toBe(false);
@@ -339,4 +341,20 @@ it("首屏停止取样不能伪装成已完成或有价格的快照", () => {
   expect(validateExactPricing(source, [item()], now)).toBe(true);
   source.items[0].searchState = "completed";
   expect(validateExactPricing(source, [item()], now)).toBe(false);
+});
+
+it("跳过只允许无有效样本且金额未知的单件", () => {
+  const source = snapshot([{ ...item(), searchState: "skipped", samplingStopped: true }]);
+  source.total = null;
+  expect(validateExactPricing(source, [item()], now)).toBe(true);
+  for (const change of [
+    { status: "priced" },
+    { referencePrice: 0 },
+    { candidates: [candidate(100, "one")] },
+    { candidates: [{ ...candidate(100, "one"), matchType: "similar" }] },
+  ]) {
+    const invalid = structuredClone(source);
+    Object.assign(invalid.items[0], change);
+    expect(validateExactPricing(invalid, [item()], now)).toBe(false);
+  }
 });

@@ -63,7 +63,6 @@ it.each([
       },
       true,
       true,
-      false,
     );
     const inventory = equipmentInventory(record),
       pets = petInventory(record);

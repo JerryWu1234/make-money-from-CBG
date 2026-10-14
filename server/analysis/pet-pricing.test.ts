@@ -12,6 +12,128 @@ import {
   searchPetPricing,
   verifyPetCandidate,
 } from "./pet-pricing";
+import { petGearInventory } from "./pet-gear-inventory";
+
+it.each([
+  ["0", "是", "0级宝宝，未计入参考合计"],
+  ["119", "否", "野生宝宝，未计入参考合计"],
+  ["119", "0", "野生宝宝，未计入参考合计"],
+])("等级%s、是否宝宝%s直接跳过，保留原因且不查询随身装备", async (level, baby, reason) => {
+  const pet = setField(setField(makePet(), "等级", level), "是否宝宝", baby);
+  pet.equipment = [
+    { index: 0, kind: "equipment", name: "测试项圈", description: "等级95\n速度+20\n耐久100" },
+  ];
+  const record = recordWithPets([pet]);
+  const source = { findCandidates: vi.fn(), readSource: vi.fn() };
+  const result = await searchPetPricing(record, new AbortController().signal, source);
+  expect(source.findCandidates).not.toHaveBeenCalled();
+  expect(source.readSource).not.toHaveBeenCalled();
+  expect(result).toMatchObject({ searchComplete: true, total: null, knownTotal: 0 });
+  expect(result.items[0]).toMatchObject({
+    searchState: "skipped",
+    skipReason: reason,
+    referencePrice: null,
+  });
+  expect(result.items[0].equipment).toHaveLength(1);
+  expect(petGearInventory(record).items).toEqual([]);
+  await searchPetPricing(record, new AbortController().signal, source, result);
+  expect(source.findCandidates).not.toHaveBeenCalled();
+  const oldPrice = structuredClone(result);
+  Object.assign(oldPrice.items[0], {
+    searchState: "completed",
+    status: "priced",
+    referencePrice: 100,
+  });
+  oldPrice.total = oldPrice.knownTotal = 100;
+  const refreshed = await searchPetPricing(record, new AbortController().signal, source, oldPrice);
+  expect(refreshed.items[0].referencePrice).toBeNull();
+  expect(refreshed.knownTotal).toBe(0);
+  expect(source.findCandidates).not.toHaveBeenCalled();
+});
+
+it("正常宝宝及是否宝宝未知的项目不误跳过，混合清单只查询正常项", async () => {
+  const zero = setField(makePet(1), "等级", "0");
+  const wild = setField(makePet(2), "是否宝宝", "否");
+  const normal = makePet(3);
+  const unknown = makePet(4);
+  unknown.fields = unknown.fields.filter((field) => field.name !== "是否宝宝");
+  const record = recordWithPets([zero, wild, normal, unknown]);
+  const source = {
+    findCandidates: vi.fn().mockImplementation(async (items) => ({
+      queries: ["模拟查询"],
+      items: items.map((item: { key: string }) => ({
+        key: item.key,
+        candidates: [],
+        searchState: "completed",
+      })),
+    })),
+    readSource: vi.fn(),
+  };
+  await searchPetPricing(record, new AbortController().signal, source);
+  expect(source.findCandidates.mock.calls[0][0].map((item: { key: string }) => item.key)).toEqual([
+    "召唤兽/孩子:3",
+    "召唤兽/孩子:4",
+  ]);
+});
+
+it("官网已确认且无独立交易筛选的特殊宝宝排除，不把目录核验当作缺少市场查询", async () => {
+  const record = recordWithPets();
+  const source = {
+    findCandidates: vi.fn().mockImplementation(async (items) => ({
+      queries: [],
+      items: items.map((item: { key: string }) => ({
+        key: item.key,
+        candidates: [],
+        searchState: "skipped",
+        skipReason: "官网无独立交易筛选的特殊宝宝，未计入参考合计",
+        note: "官网类型目录确认该类型，但没有独立可交易筛选定义",
+      })),
+    })),
+    readSource: vi.fn(),
+  };
+  const result = await searchPetPricing(record, new AbortController().signal, source);
+  expect(result).toMatchObject({ searchComplete: true, total: null, knownTotal: 0, issues: [] });
+  expect(result.items[0]).toMatchObject({
+    status: "unsupported",
+    searchState: "skipped",
+    skipReason: "官网无独立交易筛选的特殊宝宝，未计入参考合计",
+    referencePrice: null,
+  });
+  expect(source.readSource).not.toHaveBeenCalled();
+  const old = structuredClone(result);
+  old.items[0].searchState = "unsupported";
+  delete old.items[0].skipReason;
+  const refreshed = await searchPetPricing(record, new AbortController().signal, source, old);
+  expect(source.findCandidates).toHaveBeenCalledTimes(2);
+  expect(refreshed.items[0].searchState).toBe("skipped");
+});
+
+it.each([
+  ["pending", true, "skipped"],
+  ["pending", false, "pending"],
+  ["read_failed", true, "read_failed"],
+] as const)(
+  "首次取样%s，停止标记%s后为%s；失败或未完成不冒充无样本",
+  async (state, stopped, expected) => {
+    const record = recordWithPets();
+    const result = await searchPetPricing(record, new AbortController().signal, {
+      findCandidates: async (items) => ({
+        queries: ["已提交的模拟官网条件"],
+        searchItems: items.map((item) => ({ key: item.key, exhausted: false })),
+        items: items.map((item) => ({
+          key: item.key,
+          candidates: [],
+          searchState: state,
+          samplingStopped: stopped,
+        })),
+      }),
+      readSource: vi.fn(),
+    });
+    expect(result.items[0].searchState).toBe(expected);
+    expect(result.items[0].referencePrice).toBeNull();
+    expect(result.searchComplete).toBe(expected === "skipped");
+  },
+);
 
 const makePet = (index = 1): PetSnapshot => ({
   index,
@@ -247,7 +369,8 @@ it("宝宝详情读取失败与真实空结果分别保存，恢复会重试读�
   );
   expect(find).toHaveBeenCalledOnce();
   expect(empty).toMatchObject({ searchComplete: true, total: null });
-  expect(empty.items[0].searchState).toBe("completed");
+  expect(empty.items[0].searchState).toBe("skipped");
+  expect(empty.items[0].referencePrice).toBeNull();
   expect(empty.items[0].issues).not.toContain("18个独立详情读取失败");
   expect(empty.searchAttempts).toHaveLength(2);
   const readFailure = await searchPetPricing(record, signal, {
@@ -426,7 +549,7 @@ describe("宝宝来源核对与挂牌比价", () => {
       (await pricing(record, candidates, offPages)).snapshot.items[0].similarEstimate,
     ).toMatchObject({ status: "range", sampleCount: 2, average: 950 });
   });
-  it("不足十件且仍有详情失败时保存候选，保持未完成", async () => {
+  it("不足五件且仍有详情失败时保存候选，保持未完成", async () => {
     const candidates = [900, 1000, 1100].map((price, index) => ({
       ...candidate(price, "similar-" + index),
       matchType: "similar" as const,

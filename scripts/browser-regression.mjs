@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ts from "typescript";
@@ -68,6 +68,7 @@ try {
   let startCount = 0;
   const stages = [];
   let searchArgs;
+  let sessionReady = false;
   const requests = [];
   // 所有网络请求只使用本地固定数据，绝不访问真实网站或日常浏览器。
   await context.route("**/*", async (route) => {
@@ -124,8 +125,10 @@ try {
     else if (url.pathname.endsWith("query.py") && !url.pathname.endsWith("equipquery.py")) {
       // 模拟角色已提交、网站 6 秒后才登录成功的真实导航，不重复点击。
       await new Promise((resolve) => setTimeout(resolve, 6000));
+      sessionReady = true;
       body = postLogin;
-    } else if (url.pathname.endsWith("equipquery.py")) body = equipment;
+    } else if (url.pathname.endsWith("equipquery.py"))
+      body = sessionReady ? equipment : html("尚未登录", false);
     else if (url.searchParams.get("act") === "show_search_role_form") body = roleForm;
     else if (request.method() === "POST") {
       const data = new URLSearchParams(request.postData());
@@ -200,6 +203,43 @@ try {
     "PASS: delayed login succeeds after one submission; fixed cross-server → 3+ years → role search → result flow uses one work page",
   );
   await helper.screenshot({ path: "/tmp/cbg-role-results-regression.png", fullPage: true });
+
+  // Failure cases: stale cookies bypass authentication, or a valid server session asks for QR again.
+  const loginRequestsBefore = requests.filter(
+    (url) => url === "/" || url.includes("show_login.py"),
+  ).length;
+  const reusePage = await context.newPage();
+  const reuseStates = [];
+  const reused = await runFixedWorkflow(reusePage, (state) => reuseStates.push(state));
+  assert.equal(reused.isLoggedIn, true);
+  assert.equal(reused.roleList.rows.length, 1);
+  assert.ok(!reuseStates.some((state) => state.qrCodeUrl || state.step === "waiting_qr"));
+  const loginRequestsAfter = requests.filter(
+    (url) => url === "/" || url.includes("show_login.py"),
+  ).length;
+  assert.equal(loginRequestsAfter, loginRequestsBefore);
+  await reusePage.screenshot({ path: "/tmp/cbg-login-reuse-regression.png", fullPage: true });
+  await writeFile(
+    "/tmp/cbg-login-reuse-regression.json",
+    JSON.stringify(
+      {
+        scenario: "隔离模拟网站；首次未登录须扫码，重建工作页后复用有效服务端登录",
+        firstLoginConfirmed: result.isLoggedIn,
+        reusedLoginConfirmed: reused.isLoggedIn,
+        roleRows: reused.roleList.rows.length,
+        loginRequestsBefore,
+        loginRequestsAfter,
+        repeatedQR: reuseStates.some((state) => state.qrCodeUrl || state.step === "waiting_qr"),
+        repeatCommand: "node scripts/browser-regression.mjs",
+      },
+      null,
+      2,
+    ),
+  );
+  await reusePage.close();
+  console.log(
+    "PASS: a fresh work page reuses the verified server login without repeating QR or entering the default server",
+  );
 
   await workPage.evaluate(() => {
     window.QueryArgs.server_type = "1,3";

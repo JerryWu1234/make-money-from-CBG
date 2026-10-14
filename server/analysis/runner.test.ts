@@ -95,7 +95,6 @@ async function valuationSetup() {
     },
     true,
     true,
-    false,
   );
   const noNetwork = vi.fn().mockRejectedValue(new Error("empty equipment must not search"));
   const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
@@ -162,7 +161,6 @@ describe("持久化的商品分析队列", () => {
       },
       true,
       true,
-      false,
     );
     const savedTask = store.overview().results.items[0].taskId;
     expect(otherServer.hash).not.toBe(profile.hash);
@@ -189,7 +187,6 @@ describe("持久化的商品分析队列", () => {
       },
       true,
       true,
-      false,
     );
     expect(changed.calculationVersion).toBe(profile.calculationVersion);
     expect(store.overview({ currentProfile: changed }).results.items[0].profileChanged).toBe(true);
@@ -202,9 +199,9 @@ describe("持久化的商品分析队列", () => {
     expect(store.overview({ currentProfile: otherServer }).ranking).toHaveLength(1);
     expect(store.detail(savedTask, changed)?.profileChanged).toBe(true);
     for (const changedSettings of [
-      createProfile(profile.template + "\n请补充价格说明。", profile.settings, true, true, false),
+      createProfile(profile.template + "\n请补充价格说明。", profile.settings, true, true),
       createProfile(profile.template, profile.settings, false, true),
-      createProfile(profile.template, profile.settings, true, false, false),
+      createProfile(profile.template, profile.settings, true, false),
     ]) {
       expect(changedSettings.calculationVersion).toBe(profile.calculationVersion);
       expect(

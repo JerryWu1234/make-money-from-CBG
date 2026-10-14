@@ -13,7 +13,6 @@ import { equipmentInventory, type EquipmentPricingSnapshot } from "./equipment-p
 import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
 import { petGearInventory } from "./pet-gear-inventory";
 import { validateSampleSelection } from "./sample-selection";
-import { validateRolePricing, type RolePricingSnapshot } from "./role-pricing";
 import { captureIssues } from "../crawler/capture-readiness";
 import type {
   AnalysisDetail,
@@ -35,7 +34,6 @@ export type AnalysisTask = {
   lastError: string | null;
   equipmentPricing?: EquipmentPricingSnapshot;
   petPricing?: PetPricingSnapshot;
-  rolePricing?: RolePricingSnapshot;
 };
 const now = () => new Date().toISOString();
 const nullable = (value: SQLOutputValue | undefined) => (value == null ? null : String(value));
@@ -43,12 +41,7 @@ const expiredPricingTimeSql = (column: string, path: string) => {
   const time = `julianday(json_extract(${column},'${path}.searchedAt'))`;
   return `(${time} IS NULL OR ${time}<=julianday('now','-24 hours') OR ${time}>julianday('now','+1 minute'))`;
 };
-const expiredPricingSql = [
-  "equipment_pricing",
-  "pet_pricing",
-  "pet_pricing.gearPricing",
-  "role_pricing",
-]
+const expiredPricingSql = ["equipment_pricing", "pet_pricing", "pet_pricing.gearPricing"]
   .map((key) => {
     return `(json_type(t.result_json,'$.valuation.${key}')='object' AND ${expiredPricingTimeSql("t.result_json", "$.valuation." + key)})`;
   })
@@ -70,7 +63,6 @@ function profileScope(value: AnalysisProfile | null | undefined, serverId: strin
         equipmentSearch: !!value.equipmentSearch,
         petSearch: !!value.petSearch,
         petGearSearch: !!value.petGearSearch,
-        roleSearch: !!value.roleSearch,
         settings: {
           ...value.settings,
           servers: value.settings.servers.filter((server) => server.serverId === serverId),
@@ -114,7 +106,6 @@ export class AnalysisStore {
       ["analysis_attempts", "request_hash"],
       ["analysis_tasks", "equipment_pricing_json"],
       ["analysis_tasks", "pet_pricing_json"],
-      ["analysis_tasks", "role_pricing_json"],
     ]) {
       if (
         !db
@@ -196,7 +187,6 @@ export class AnalysisStore {
         WHEN json_extract(r.profile_json,'$.petGearSearch')=1 AND (json_extract(pet_pricing_json,'$.gearPricing.searchComplete') IS NOT 1 OR ${expiredPricingTimeSql("pet_pricing_json", "$.gearPricing")})
           AND EXISTS(SELECT 1 FROM json_each(source_detail_json,'$.tabs') tab,json_each(tab.value,'$.pets') pet,json_each(pet.value,'$.equipment') gear WHERE json_extract(tab.value,'$.name')='召唤兽/孩子')
           AND NOT EXISTS(SELECT 1 FROM analysis_attempts a WHERE a.task_id=analysis_tasks.id AND a.state='running') THEN 'pet_gear_search'
-        WHEN json_extract(r.profile_json,'$.roleSearch')=1 AND NOT EXISTS(SELECT 1 FROM analysis_attempts a WHERE a.task_id=analysis_tasks.id AND a.state='running') THEN 'role_search'
         ELSE 'analysis'
       END FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) phase
       FROM analysis_runs r LEFT JOIN analysis_tasks t ON t.run_id=r.id WHERE r.id=? GROUP BY r.id`)
@@ -278,7 +268,7 @@ export class AnalysisStore {
           : analysisPrompt(document);
         this.db
           .prepare(`UPDATE analysis_tasks SET input_hash=?,input_text=?,prompt_hash=?,prompt_text=?,source_listing_json=?,source_detail_json=?,collected_at=?,
-          status='queued',error=NULL,result_json=NULL,completed_at=NULL,reused=0,source_task_id=NULL,equipment_pricing_json=NULL,pet_pricing_json=NULL,role_pricing_json=NULL,pricing_progress_json=NULL WHERE id=?`)
+          status='queued',error=NULL,result_json=NULL,completed_at=NULL,reused=0,source_task_id=NULL,equipment_pricing_json=NULL,pet_pricing_json=NULL,pricing_progress_json=NULL WHERE id=?`)
           .run(
             document.contentHash,
             document.text,
@@ -346,10 +336,6 @@ export class AnalysisStore {
         const pets: PetPricingSnapshot | undefined = row.pet_pricing_json
           ? JSON.parse(String(row.pet_pricing_json))
           : undefined;
-        const role: RolePricingSnapshot | undefined = row.role_pricing_json
-          ? JSON.parse(String(row.role_pricing_json))
-          : undefined;
-        if (profile.roleSearch && !validateRolePricing(role, record)) continue;
         if (
           profile.equipmentSearch &&
           (equipment?.searchComplete !== true ||
@@ -387,7 +373,6 @@ export class AnalysisStore {
           profile,
           equipment,
           pets,
-          role,
         );
         if (
           isDeepStrictEqual(
@@ -451,7 +436,7 @@ export class AnalysisStore {
       }
       if (!rows.length) throw new Error("暂无详情完整的商品，请先采集商品详情");
       const insert = this.db.prepare(
-        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json,role_pricing_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       );
       let inserted = 0;
       rows.forEach((row, index) => {
@@ -496,7 +481,6 @@ export class AnalysisStore {
           previous ? previous.source_task_id || previous.id : null,
           previous?.equipment_pricing_json ?? null,
           previous?.pet_pricing_json ?? null,
-          previous?.role_pricing_json ?? null,
         );
       });
       if (!inserted) {
@@ -546,7 +530,6 @@ export class AnalysisStore {
         ? { equipmentPricing: JSON.parse(String(row.equipment_pricing_json)) }
         : {}),
       ...(row.pet_pricing_json ? { petPricing: JSON.parse(String(row.pet_pricing_json)) } : {}),
-      ...(row.role_pricing_json ? { rolePricing: JSON.parse(String(row.role_pricing_json)) } : {}),
     };
   }
   deferPricing(task: AnalysisTask, owner: string, error: string) {
@@ -599,7 +582,6 @@ export class AnalysisStore {
       task.profile,
       snapshot,
       task.petPricing,
-      task.rolePricing,
     );
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -663,7 +645,6 @@ export class AnalysisStore {
       task.profile,
       task.equipmentPricing,
       snapshot,
-      task.rolePricing,
     );
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -776,61 +757,6 @@ export class AnalysisStore {
       )
       .run(runId);
   }
-  beginRoleSearch(task: AnalysisTask, owner: string) {
-    if (!this.owns(owner)) throw new Error("分析锁已失效");
-    if (
-      this.db
-        .prepare(
-          "UPDATE analysis_tasks SET status='running',error=NULL WHERE id=? AND status='queued' AND role_pricing_json IS ?",
-        )
-        .run(task.id, task.rolePricing ? JSON.stringify(task.rolePricing) : null).changes !== 1
-    )
-      throw new Error("整号查价任务状态已变化");
-  }
-  saveRolePricing(task: AnalysisTask, snapshot: RolePricingSnapshot, owner: string): AnalysisTask {
-    if (!task.profile?.roleSearch || !validateRolePricing(snapshot, task.record))
-      throw new Error("整号查价资料与当前任务或来源证据不匹配");
-    const prompt = valuationPrompt(
-      task.document,
-      task.record,
-      task.profile,
-      task.equipmentPricing,
-      task.petPricing,
-      snapshot,
-    );
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      if (!this.owns(owner)) throw new Error("分析锁已失效");
-      if (
-        this.db
-          .prepare(
-            "UPDATE analysis_tasks SET role_pricing_json=?,prompt_text=?,prompt_hash=?,status='queued',error=NULL WHERE id=? AND status='running' AND role_pricing_json IS ?",
-          )
-          .run(
-            JSON.stringify(snapshot),
-            prompt,
-            textHash(prompt),
-            task.id,
-            task.rolePricing ? JSON.stringify(task.rolePricing) : null,
-          ).changes !== 1
-      )
-        throw new Error("整号查价任务状态已变化");
-      this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
-      this.db.exec("COMMIT");
-      return { ...task, rolePricing: snapshot, prompt, lastError: null };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-  abortRoleSearch(task: AnalysisTask, owner: string) {
-    if (!this.owns(owner)) throw new Error("分析锁已失效");
-    this.db
-      .prepare(
-        "UPDATE analysis_tasks SET status='queued' WHERE id=? AND status='running' AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')",
-      )
-      .run(task.id, task.id);
-  }
   detail(id: string, currentProfile?: AnalysisProfile): AnalysisDetail | null {
     const row = this.db
       .prepare(
@@ -883,7 +809,6 @@ export class AnalysisStore {
         ? JSON.parse(String(row.equipment_pricing_json))
         : null,
       petPricing: row.pet_pricing_json ? JSON.parse(String(row.pet_pricing_json)) : null,
-      rolePricing: row.role_pricing_json ? JSON.parse(String(row.role_pricing_json)) : null,
       attempts,
     };
   }
