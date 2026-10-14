@@ -59,3 +59,21 @@ CBG_LIVE_E2E=1 CBG_LIVE_RUN_DIR=data/live-valuation-e2e/run-实际目录 vp run 
 本项目新分析默认选用 `gpt-6-luna`，通过 SDK 设置 `modelReasoningEffort: "max"` 和 `service_tier: "fast"`。模型必须在当前账号的官方列表中；不可用时说明原因，不静默换模型。连接验证保持低推理强度。用户仍可明确选择其他模型，已保存批次继续沿用其冻结模型；不修改用户全局 Codex 配置。
 
 配置依据：[官方模型说明](https://learn.chatgpt.com/docs/models)、[官方配置说明](https://learn.chatgpt.com/docs/config-file/config-reference)。fast 的实际处理速度由服务端决定。
+
+## 10角色边采集边分析
+
+新案例按官网当前列表顺序取10个不同角色，不设3000元门槛，不替换失败角色。第1个采齐后马上启动默认 Luna · Max · Fast 分析，同时继续逐个采集第2～10个。采集成功事件自动追加到当前普通分析批次，使用该批次冻结的模型和Prompt；指定商品试分析不会扩大范围。队列暂空且采集仍进行时继续等待，暂停可打断等待，续跑会补入暂停期间新采齐的角色。
+
+隔离验证前列出的失败情况：清空或续跑错误；跨页漏项或重复；等全部采齐才分析；没有真实采集/分析重叠；后续入队遗漏或重复；未完整资料提前入队；试分析范围扩大；冻结配置改变；工作页互相干扰；重复扫码或绕过验证；并发确认互相覆盖；单件错误停止整个流程；不足十份报价却通过；刷新丢失结果；把未知价格当零。
+
+```bash
+CBG_LIVE_E2E=1 vp exec playwright test tests/live/streaming-valuation.live.ts --config playwright.live.config.ts
+```
+
+续跑时加上同一运行目录：
+
+```bash
+CBG_LIVE_E2E=1 CBG_LIVE_RUN_DIR=data/live-valuation-e2e/run-实际目录 vp exec playwright test tests/live/streaming-valuation.live.ts --config playwright.live.config.ts
+```
+
+需人工扫码或决策时仍使用 `scripts/live-e2e-continue.mjs` 确认当前等待点。不同流程的确认串行等待，避免覆盖。证据包括 `timeline.json`、官网列表顺序、清空证明、10份采集详情、10份分析、`quotations.json`、最终截图与哈希。时间线必须证明第1个采齐后开始分析，第2个采集时该分析批次仍在运行；最终同一批次有10份真实报价，失败与待补齐均为0，并通过页面刷新检查。

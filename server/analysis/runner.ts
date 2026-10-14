@@ -74,12 +74,22 @@ export function pricingUntilAborted<T>(promise: Promise<T>, signal: AbortSignal)
   });
 }
 export class AnalysisRunner {
-  private active: { id: string; controller: AbortController; completion: Promise<void> } | null =
-    null;
+  private active: {
+    id: string;
+    owner: string;
+    controller: AbortController;
+    completion: Promise<void>;
+  } | null = null;
   constructor(
     readonly store: AnalysisStore,
     private client: (provider: AiProvider, model?: string) => Promise<AnalysisClient>,
+    private captureRunning: () => boolean = () => false,
   ) {}
+  appendCaptured() {
+    const active = this.active;
+    if (!active || active.controller.signal.aborted) return 0;
+    return this.store.appendCaptured(active.id, active.owner);
+  }
   isRunning() {
     return this.active !== null || this.store.activeRun() !== null;
   }
@@ -153,7 +163,12 @@ export class AnalysisRunner {
     }
     const run = this.store.run(id);
     if (!run) throw new Error("分析任务不存在");
-    if (!run.queued && !(retryFailed && (run.failed || run.waitingPricing))) return id;
+    if (
+      !run.queued &&
+      !(retryFailed && (run.failed || run.waitingPricing)) &&
+      !this.store.hasCapturedPending(id)
+    )
+      return id;
     if (run.calculationVersion && run.calculationVersion !== CALCULATION_VERSION)
       throw new Error("估值规则已更新，请按新规则开始分析；旧结果仍可查看");
     const client = await this.client(run.provider, run.model);
@@ -177,7 +192,7 @@ export class AnalysisRunner {
   }
   private launch(id: string, owner: string, client: AnalysisClient) {
     const controller = new AbortController();
-    const activity = { id, controller, completion: Promise.resolve() };
+    const activity = { id, owner, controller, completion: Promise.resolve() };
     this.active = activity;
     const heartbeat = setInterval(() => {
       try {
@@ -206,8 +221,21 @@ export class AnalysisRunner {
     let budget = { taskId: "", started: Date.now(), rounds: 0 };
     while (!stop.aborted) {
       if (!this.store.owns(owner)) return;
+      this.store.appendCaptured(id, owner);
       let task = this.store.next(id);
       if (!task) {
+        if (this.store.followsCapture(id) && this.captureRunning()) {
+          await new Promise<void>((resolve) => {
+            const done = () => {
+              clearTimeout(timer);
+              stop.removeEventListener("abort", done);
+              resolve();
+            };
+            const timer = setTimeout(done, 1000);
+            stop.addEventListener("abort", done, { once: true });
+          });
+          continue;
+        }
         this.store.setRun(id, "completed", null, owner);
         return;
       }

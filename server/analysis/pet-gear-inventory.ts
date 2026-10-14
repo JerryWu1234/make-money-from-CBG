@@ -36,6 +36,7 @@ export type PetGearPricingItem = EquipmentPricingItem & {
   searchStatus?:
     | "pending"
     | "completed"
+    | "skipped"
     | "read_failed"
     | "unsupported"
     | "incomplete"

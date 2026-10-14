@@ -101,6 +101,7 @@ export class AnalysisStore {
       db.exec("ALTER TABLE analysis_tasks ADD COLUMN source_task_id TEXT");
     for (const [table, column] of [
       ["analysis_runs", "profile_json"],
+      ["analysis_runs", "follow_capture"],
       ["analysis_tasks", "pricing_progress_json"],
       ["analysis_attempts", "request_text"],
       ["analysis_attempts", "request_hash"],
@@ -402,7 +403,7 @@ export class AnalysisStore {
     try {
       this.db
         .prepare(
-          "INSERT INTO analysis_runs(id,provider,model,rule_version,status,created_at,updated_at,error,profile_json) VALUES(?,?,?,?,?,?,?,NULL,?)",
+          "INSERT INTO analysis_runs(id,provider,model,rule_version,status,created_at,updated_at,error,profile_json,follow_capture) VALUES(?,?,?,?,?,?,?,NULL,?,?)",
         )
         .run(
           id,
@@ -413,6 +414,7 @@ export class AnalysisStore {
           now(),
           now(),
           profile ? JSON.stringify(profile) : null,
+          sample ? "0" : "1",
         );
       const selected = productKeys
         ? " AND key IN (" + productKeys.map(() => "?").join(",") + ")"
@@ -499,6 +501,101 @@ export class AnalysisStore {
       throw error;
     }
   }
+  followsCapture(id: string) {
+    return (
+      this.db.prepare("SELECT follow_capture FROM analysis_runs WHERE id=?").get(id)
+        ?.follow_capture === "1"
+    );
+  }
+  hasCapturedPending(id: string) {
+    return (
+      this.followsCapture(id) &&
+      !!this.db
+        .prepare(`SELECT 1 FROM listings l
+      WHERE l.status='complete' AND l.detail_json IS NOT NULL
+      AND NOT EXISTS(SELECT 1 FROM analysis_tasks t WHERE t.run_id=? AND t.listing_key=l.key) LIMIT 1`)
+        .get(id)
+    );
+  }
+  appendCaptured(id: string, owner: string) {
+    if (!this.owns(owner)) return 0;
+    const run = this.db
+      .prepare("SELECT * FROM analysis_runs WHERE id=? AND status='running' AND follow_capture='1'")
+      .get(id);
+    if (!run) return 0;
+    const profile = run.profile_json
+      ? (JSON.parse(String(run.profile_json)) as AnalysisProfile)
+      : undefined;
+    const rows = this.db
+      .prepare(`SELECT l.key,l.listing_json,l.detail_json FROM listings l
+      WHERE l.status='complete' AND l.detail_json IS NOT NULL
+      AND NOT EXISTS(SELECT 1 FROM analysis_tasks t WHERE t.run_id=? AND t.listing_key=l.key)
+      ORDER BY l.first_seen_at ASC,l.key ASC`)
+      .all(id);
+    let ordinal = Number(
+      this.db
+        .prepare("SELECT coalesce(max(ordinal),-1)+1 n FROM analysis_tasks WHERE run_id=?")
+        .get(id)!.n,
+    );
+    let added = 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of rows) {
+        const record: SavedRoleRecord = {
+          listing: JSON.parse(String(row.listing_json)),
+          detail: JSON.parse(String(row.detail_json)),
+          status: "complete",
+          error: null,
+        };
+        if (record.listing.key !== row.key) throw new Error("商品 ID 与数据库记录不一致");
+        if (
+          profile &&
+          (profile.equipmentSearch || profile.petSearch) &&
+          captureIssues(record.detail!).length
+        )
+          continue;
+        const document = buildProductDocument(record);
+        const prompt = profile
+          ? valuationPrompt(document, record, profile)
+          : analysisPrompt(document);
+        if (
+          this.reusableResult(
+            String(run.provider) as AiProvider,
+            String(run.model),
+            record,
+            document,
+            prompt,
+            profile,
+          )
+        )
+          continue;
+        this.db
+          .prepare(`INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued')`)
+          .run(
+            randomUUID(),
+            id,
+            ordinal++,
+            String(row.key),
+            document.contentHash,
+            document.text,
+            textHash(prompt),
+            prompt,
+            String(row.listing_json),
+            String(row.detail_json),
+            document.collectedAt,
+          );
+        added++;
+      }
+      if (added) this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), id);
+      this.db.exec("COMMIT");
+      return added;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   next(runId: string): AnalysisTask | null {
     const row = this.db
       .prepare(

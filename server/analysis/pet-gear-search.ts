@@ -41,7 +41,7 @@ export async function searchPetGearPricing(
       const saved = reusable ? previous.items.find((value) => value.key === item.key) : undefined;
       const savedAge = saved?.queriedAt ? Date.now() - Date.parse(saved.queriedAt) : Infinity;
       return saved &&
-        ["completed", "pending", "read_failed"].includes(saved.searchStatus || "") &&
+        ["completed", "skipped", "pending", "read_failed"].includes(saved.searchStatus || "") &&
         savedAge >= -60_000 &&
         savedAge < 24 * 60 * 60 * 1000 &&
         (saved.searchStatus !== "completed" ||
@@ -67,7 +67,7 @@ export async function searchPetGearPricing(
   const pending = snapshot.items.filter(
     (item) =>
       !["unsupported", "untradable", "incomplete"].includes(item.status) &&
-      item.searchStatus !== "completed",
+      !["completed", "skipped"].includes(item.searchStatus || ""),
   );
   if (pending.length) {
     const source = await createPetGearSource(signal);
@@ -99,6 +99,18 @@ export async function searchPetGearPricing(
         item.searchStatus = found.searchStatus;
         item.searchState = found.searchStatus;
         item.searchCursor = found.searchCursor;
+        if (
+          found.samplingStopped &&
+          found.searchStatus === "pending" &&
+          found.searchCursor?.modeIndex === 2 &&
+          !found.candidates.some((candidate) => candidate.verified) &&
+          !found.searchCursor?.failed.length
+        ) {
+          item.searchStatus = "skipped";
+          item.searchState = "skipped";
+          item.samplingStopped = true;
+          item.skipReason = "无样本，宝宝装备不计价；市场售价未知";
+        } else delete item.samplingStopped;
         item.queriedAt = new Date().toISOString();
         item.issues = [
           ...(reference.referencePrice === null ? reference.similarEstimate.issues : []),
@@ -111,7 +123,8 @@ export async function searchPetGearPricing(
   }
   snapshot.searchComplete = snapshot.items.every(
     (item) =>
-      item.searchStatus === "completed" || ["unsupported", "untradable"].includes(item.status),
+      ["completed", "skipped"].includes(item.searchStatus || "") ||
+      ["unsupported", "untradable"].includes(item.status),
   );
   snapshot.issues = [
     ...new Set([

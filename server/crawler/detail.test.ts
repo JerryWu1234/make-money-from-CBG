@@ -343,15 +343,21 @@ describe("装备局部补采", () => {
     }
   });
 
-  it("新采保存官网模型号，玉魄和技能书不误报普通装备等级缺失", async () => {
+  it("新采保存官网模型号，玉魄、技能书和镶嵌材料不误报装备属性缺失", async () => {
     const page = await browser.newPage();
     try {
       const others =
         '<div id="store_equip_tips1"><img width="40" height="40" data_equip_name="上古玉魄·阴" data_equip_type="61717" data_equip_desc="防御 +25#r耐久度 102#r抵抗封印等级 +13 [+48]#r奇袭法术：弱点击破"></div><div id="store_equip_tips2"><img width="40" height="40" data_equip_name="魔兽要诀" data_equip_type="611" data_equip_desc="召唤兽技能：高级反震"></div>';
+      const materials = [4036, 4037, 4038]
+        .map(
+          (model) =>
+            `<div id="store_equip_tips${model}"><img width="40" height="40" data_equip_name="精魄灵石" data_equip_type="${model}" data_equip_desc="等级:7,增加10点伤害"></div>`,
+        )
+        .join("");
       await page.route(url, (route) =>
         route.fulfill({
           contentType: "text/html",
-          body: fixture(false, undefined, undefined, others),
+          body: fixture(false, undefined, undefined, others + materials),
         }),
       );
       const detail = await collectValuationDetail(
@@ -365,6 +371,11 @@ describe("装备局部补采", () => {
       expect(items[1]).toMatchObject({ modelId: "61717", category: "上古玉魄" });
       expect(items[1].description).toContain("奇袭法术：弱点击破");
       expect(items[2]).toMatchObject({ modelId: "611", category: "道具 · 召唤兽技能书" });
+      expect(items.slice(3)).toHaveLength(3);
+      for (const item of items.slice(3)) {
+        expect(item.category).toBe("材料 · 精魄灵石");
+        expect(item.description).toContain("增加10点伤害");
+      }
     } finally {
       await page.close();
     }

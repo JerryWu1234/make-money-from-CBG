@@ -155,7 +155,14 @@ export async function startCrawl(
         db,
         control.signal,
         (update) => {
+          const captured = (update.saved || 0) > status.saved;
           status = { ...status, ...update };
+          if (captured)
+            void import("../analysis/controller")
+              .then((analysis) => analysis.appendCapturedAnalysis())
+              .catch((error: unknown) =>
+                diagnostics.record("analysis.capture_enqueue_failed", { error }),
+              );
         },
         options,
       );

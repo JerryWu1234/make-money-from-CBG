@@ -401,6 +401,44 @@ try {
     assert.equal(petGearReference(second.items[0].candidates).referencePrice, 220);
     assertClearedFilters();
   });
+  await check("无样本第一页停止翻页，未读完页面变动后仍完整重读当前条件", async () => {
+    const ids = ["empty-one", "empty-two", "empty-three"];
+    const overrides = {
+      pages: [ids, ["later-valid"]],
+      descriptions: Object.fromEntries(
+        ids.map((id) => [id, target.description.replace("+20", "+100")]),
+      ),
+    };
+    const first = await run(target, overrides, {}, { maxDetails: 2 });
+    assert.equal(first.items[0].searchStatus, "pending");
+    assert.equal(first.items[0].searchCursor.rowIndex, 2);
+    assert.equal(
+      first.items[0].candidates.some((candidate) => candidate.verified),
+      false,
+    );
+    const second = await run(
+      { ...target, ...first.items[0] },
+      { ...overrides, pages: [[...ids].reverse(), ["later-valid"]] },
+    );
+    assert.equal(second.items[0].samplingStopped, true, second.items[0].note);
+    assert.equal(second.items[0].searchStatus, "pending");
+    assert.equal(
+      second.items[0].candidates.some((candidate) => candidate.verified),
+      false,
+    );
+    assert.ok(requests.every((request) => request.page === "1"));
+    assert.equal(
+      second.searchItems.some((record) => record.reason === "result_order_changed"),
+      false,
+    );
+    assert.ok(second.items[0].note.includes("市场售价未知"));
+    await mkdir("data/pr27-fix-validation", { recursive: true });
+    await writeFile(
+      "data/pr27-fix-validation/pet-gear-empty-first-page.json",
+      JSON.stringify({ simulated: true, first, second, requests, detailVisits }, null, 2),
+    );
+  });
+
   await check("游标续查：页面重排或清空时废弃旧取样组，从第一页重建", async () => {
     const first = await run(target, { pages: [["one", "two", "three"]] }, {}, { maxDetails: 2 });
     for (const changed of [["three", "one", "two"], []]) {
@@ -429,7 +467,7 @@ try {
     const overrides = {
       pages: [["badOne"], ["badTwo"], ["good"]],
       descriptions: {
-        badOne: target.description.replace("+20", "+100"),
+        badOne: target.description,
         badTwo: target.description.replace("+20", "+100"),
       },
     };
@@ -443,12 +481,12 @@ try {
       requests.map((request) => request.page),
       ["1", "2"],
     );
-    assert.deepEqual(detailVisits, ["badTwo"]);
+    assert.deepEqual(detailVisits, ["badOne", "badTwo"]);
     assert.equal(second.searchItems[0].replay, true);
     assert.equal(second.searchItems[1].page, 2);
     assertClearedFilters();
   });
-  await check("官网顺序的六条相近报价全部计均价，价差与距离不删样本", async () => {
+  await check("官网顺序只取前五件相近报价均价，不因距离或价差删除有效样本", async () => {
     const ids = ["farOne", "farTwo", "farThree", "nearOne", "nearTwo", "nearThree"];
     const result = await run(target, {
       pages: [ids],
@@ -460,9 +498,9 @@ try {
       ),
     });
     assert.equal(result.items[0].searchStatus, "completed", result.items[0].note);
-    assert.deepEqual(detailVisits, ids);
-    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 265);
-    assert.equal(result.items[0].candidates.filter((candidate) => candidate.verified).length, 6);
+    assert.deepEqual(detailVisits, ids.slice(0, 5));
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 270);
+    assert.equal(result.items[0].candidates.filter((candidate) => candidate.verified).length, 5);
   });
   await check("游标续查：失败详情先重试，再继续保存行之后的商品", async () => {
     const first = await run(target, {}, { kindId: 1 });

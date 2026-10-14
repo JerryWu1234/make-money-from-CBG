@@ -110,6 +110,7 @@ export type PetGearSearchResult = {
     searchStatus: "completed" | "read_failed" | "pending";
     searchCursor?: EquipmentSearchCursor;
     skipped?: boolean;
+    samplingStopped?: boolean;
     scopeEvidence: GlobalMarketRequest[];
   }[];
   searchItems: unknown[];
@@ -119,7 +120,7 @@ export function petGearSearchPlanHash(item: PetGearPricingItem) {
   return createHash("sha256")
     .update(
       JSON.stringify({
-        version: "official-pet-gear-resumable-ui-v1",
+        version: "official-pet-gear-first-page-empty-stop-v2",
         resumePolicy: PRICING_RESUME_POLICY,
         priceMethod: EQUIPMENT_QUOTE_POLICY,
         name: item.name,
@@ -501,6 +502,20 @@ export async function createPetGearSource(
               if (details >= maxDetails || Date.now() >= deadline) break;
               await readCandidate(url, modeIndex);
             }
+            // Never reuse an old row offset when no quote has ever been adopted.
+            // Freshly read the active first page while preserving completed conditions.
+            if (
+              reusable &&
+              next.pageNumber === 1 &&
+              !failedUrls.size &&
+              !item.candidates.some((candidate) => candidate.verified) &&
+              ![...candidates.values()].some((candidate) => candidate.verified)
+            ) {
+              next.rowIndex = 0;
+              next.pageRowsHash = "";
+              next.seen = [];
+              seen.clear();
+            }
             queryStages: for (let modeIndex = next.modeIndex; modeIndex < 2; modeIndex++) {
               if (budgetEnded() || failedUrls.size || (queried && enoughSamples())) break;
               const similar = modeIndex === 1;
@@ -612,6 +627,22 @@ export async function createPetGearSource(
                   await readCandidate(url, modeIndex);
                 }
                 if (!fullyRead || enoughSamples()) break;
+                if (
+                  pageNumber === 1 &&
+                  fullyRead &&
+                  !failedUrls.size &&
+                  ![...candidates.values()].some((candidate) => candidate.verified) &&
+                  listing.totalPages > 1
+                ) {
+                  next.emptyFirstPageModes = [
+                    ...new Set([...(next.emptyFirstPageModes || []), modeIndex]),
+                  ];
+                  next.modeIndex = modeIndex + 1;
+                  next.pageNumber = 1;
+                  next.rowIndex = 0;
+                  next.pageRowsHash = "";
+                  break;
+                }
                 if (pageNumber >= listing.totalPages) {
                   next.modeIndex = [...candidates.values()].some((candidate) => candidate.verified)
                     ? 2
@@ -640,20 +671,31 @@ export async function createPetGearSource(
             )
               halted = note;
           }
+          const samplingStopped =
+            !!next?.emptyFirstPageModes?.length &&
+            next.modeIndex >= 2 &&
+            !failed &&
+            !refreshSkipped &&
+            !failedUrls.size &&
+            !orderChanged &&
+            ![...candidates.values()].some((candidate) => candidate.verified);
           const completed =
+            !samplingStopped &&
             !failed &&
             !refreshSkipped &&
             !failedUrls.size &&
             !!next &&
             ((queried && enoughSamples()) || next.modeIndex >= 2);
           if (!failed)
-            note = orderChanged
-              ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。"
-              : completed
-                ? enoughSamples()
-                  ? "已核验官网结果顺序中的前5件有效宝宝装备挂牌样本，采用算术平均价；有限样本不代表遍历全部在售商品。"
-                  : "本次筛选结果已读完，按实际有效样本数计算平均价；没有有效样本则保留未定价。"
-                : "本轮宝宝装备查询预算已用完，已保存筛选阶段、页码和行位置，下一轮继续补查。";
+            note = samplingStopped
+              ? "严格与相近筛选第一页均未取得有效宝宝装备样本，按规则跳过；不继续翻页，不计价，市场售价未知。"
+              : orderChanged
+                ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。"
+                : completed
+                  ? enoughSamples()
+                    ? "已核验官网结果顺序中的前5件有效宝宝装备挂牌样本，采用算术平均价；有限样本不代表遍历全部在售商品。"
+                    : "本次筛选结果已读完，按实际有效样本数计算平均价；没有有效样本则保留未定价。"
+                  : "本轮宝宝装备查询预算已用完，已保存筛选阶段、页码和行位置，下一轮继续补查。";
           if (Date.now() >= deadline) halted ||= note;
           const values = [...candidates.values()];
           result.items.push({
@@ -674,6 +716,7 @@ export async function createPetGearSource(
                   : "pending",
             ...(!completed && next ? { searchCursor: saveCursor() } : {}),
             ...(refreshSkipped ? { skipped: true } : {}),
+            ...(samplingStopped ? { samplingStopped: true } : {}),
             scopeEvidence: [...(item.scopeEvidence || []), ...scopeEvidence],
           });
         }

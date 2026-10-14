@@ -21,6 +21,8 @@ export function observedEquipmentCategory(category = "", location = "", modelId 
     ].includes(Number(modelId))
   )
     return "元身";
+  // Official equip_info identifies these as summon-equipment embedding materials.
+  if ([4036, 4037, 4038].includes(Number(modelId))) return "材料 · 精魄灵石";
   if ([611, 18521, 56870].includes(Number(modelId))) return "道具 · 召唤兽技能书";
   if (category.trim() && !/^(?:\d+|人物装备|装备|武器|灵饰)$/.test(category.trim()))
     return category;
@@ -220,7 +222,7 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
   const observedCategory = observedEquipmentCategory(declaredCategory, location, modelId);
   // 玉魄的奇袭/效形/到期描述和技能书内容不能按普通装备字段精简。
   const description =
-    /上古玉魄|召唤兽技能书/.test(observedCategory || "") || location === "RolePetShipin"
+    /上古玉魄|召唤兽技能书|材料/.test(observedCategory || "") || location === "RolePetShipin"
       ? cleanDescription(rawDescription)
       : coreEquipmentDescription(rawDescription);
   // model/type 不作 kindid；仅明确核对过的模型和官网容器参与分类。

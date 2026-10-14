@@ -59,6 +59,46 @@ beforeEach(() => {
 });
 
 describe("分析自动宝宝装备查价与增量复用", () => {
+  it("已核验各筛选第一页无样本则跳过，未知价格保持null并在续跑时复用", async () => {
+    mocks.findCandidates.mockImplementationOnce(async (items: PetGearPricingItem[]) => ({
+      queries: ["【模拟测试】严格与相近第一页"],
+      searchItems: [{ simulated: true }],
+      items: items.map((value) => ({
+        key: value.key,
+        candidates: [],
+        searchStatus: "pending",
+        samplingStopped: true,
+        scopeEvidence: [],
+        note: "第一页无样本，市场售价未知",
+        searchCursor: {
+          version: 1,
+          planHash: "fixture-plan",
+          modeIndex: 2,
+          pageNumber: 1,
+          rowIndex: 0,
+          pageRowsHash: "",
+          seen: [],
+          failed: [],
+        },
+      })),
+    }));
+    const first = await searchPetGearPricing(record, new AbortController().signal);
+    expect(first.searchComplete).toBe(true);
+    expect(
+      first.items.every(
+        (value) =>
+          value.searchStatus === "skipped" &&
+          value.searchState === "skipped" &&
+          value.referencePrice === null,
+      ),
+    ).toBe(true);
+    expect(first.total).toBeNull();
+    mocks.findCandidates.mockClear();
+    const resumed = await searchPetGearPricing(record, new AbortController().signal, first);
+    expect(resumed.searchComplete).toBe(true);
+    expect(mocks.findCandidates).not.toHaveBeenCalled();
+  });
+
   it.each(["pending", "read_failed"] as const)(
     "%s保存筛选游标与候选，下一轮交给来源重新核验",
     async (searchStatus) => {

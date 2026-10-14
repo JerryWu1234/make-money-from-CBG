@@ -295,3 +295,22 @@ it("完整流程：采集发现缺项、自动重读、保存完整资料、查�
   expect(read).toHaveBeenCalledTimes(2);
   expect(analyze).toHaveBeenCalledOnce();
 });
+
+it("普通分析在采集仍进行时立即处理已采齐角色，不等待后续补采", async () => {
+  const { record } = captureFixture();
+  crawl.save(record.listing, record.detail!);
+  crawl.observe(analysisRecord("pending-later").listing);
+  mocks.crawling.mockReturnValue(true);
+  mocks.activity.mockReturnValue({
+    completion: new Promise(() => {}),
+    origin: "manual",
+    startedAt: Date.now(),
+  });
+  const controller = await import("./controller");
+  const run = await controller.startAnalysis("codex");
+  expect(run).toMatchObject({ total: 1, status: "running" });
+  expect(mocks.startCrawl).not.toHaveBeenCalled();
+  expect(mocks.activity).not.toHaveBeenCalled();
+  expect(controller.analysisOverview({}).capturePreparation).toBeUndefined();
+  expect(controller.appendCapturedAnalysis()).toBe(0);
+});

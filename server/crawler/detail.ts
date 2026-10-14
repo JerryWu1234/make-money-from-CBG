@@ -152,7 +152,7 @@ async function inspectItems(
     // 名称、技能类别或装备属性已在元素里时直接读取，不触发无意义的提示框。
     let item = itemFromAttributes(attrs, index);
     // 已明确不在人物装备计价范围内的物品不要求普通装备属性。
-    if (/^(?:法宝|灵宝|神器|道具 · 召唤兽技能书)$/.test(item.category || "")) {
+    if (/^(?:法宝|灵宝|神器|道具 · 召唤兽技能书|材料 · 精魄灵石)$/.test(item.category || "")) {
       snapshot.items!.push(item);
       continue;
     }

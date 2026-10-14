@@ -43,10 +43,13 @@ function service() {
     const store = new AnalysisStore(crawlDatabase());
     analysis = runtime[serviceKey] = {
       store,
-      runner: new AnalysisRunner(store, prepareAnalysisClient),
+      runner: new AnalysisRunner(store, prepareAnalysisClient, isCrawling),
     };
   }
   return analysis;
+}
+export function appendCapturedAnalysis() {
+  return runtime[serviceKey]?.runner.appendCaptured() || 0;
 }
 export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[0]) {
   service().store.recover();
@@ -169,6 +172,7 @@ export async function startAnalysis(
   const preparationProfile = loadProfile(analysis.store.db);
   if (
     !analysis.runner.isRunning() &&
+    !(!sample && !productKeys && isCrawling() && analysis.store.counts().complete > 0) &&
     (preparationProfile.equipmentSearch ||
       preparationProfile.petSearch ||
       preparationProfile.petGearSearch)
