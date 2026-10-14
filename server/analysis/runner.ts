@@ -475,8 +475,8 @@ export class AnalysisRunner {
       const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
       let raw: string | undefined, usage: unknown;
       try {
-        if (Buffer.byteLength(task.document.text, "utf8") > 128 * 1024)
-          throw new Error("完整商品原文超过 128 KiB，已保留原文，请先核对资料长度后重试");
+        if (Buffer.byteLength(task.document.text, "utf8") > 256 * 1024)
+          throw new Error("完整商品原文超过 256 KiB，已保留原文，请先核对资料长度后重试");
         const response = await pricingUntilAborted(
           client.analyze(prompt, task.profile ? VALUATION_SCHEMA : ANALYSIS_SCHEMA, signal),
           signal,
@@ -510,7 +510,7 @@ export class AnalysisRunner {
           /401|403|429|unauth|authentication|api.?key|登录|quota|rate.?limit|额度|余额|insufficient|账号已变化|model.*(?:not available|not found|unsupported)/i.test(
             message,
           );
-        const retry = !stop.aborted && !fatal && task.attempts < 1 && !message.includes("128 KiB");
+        const retry = !stop.aborted && !fatal && task.attempts < 1 && !message.includes("256 KiB");
         this.store.finish(task, attempt, owner, {
           state: stop.aborted ? "interrupted" : "failed",
           error: message,

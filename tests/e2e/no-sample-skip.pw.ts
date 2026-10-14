@@ -13,6 +13,7 @@ import {
 import { searchPetPricing } from "../../server/analysis/pet-pricing";
 import { searchPetGearPricing } from "../../server/analysis/pet-gear-search";
 import { valuationRecord } from "../fixtures/analysis";
+import { buildProductDocument } from "../../server/analysis/product-document";
 
 // Isolated workflow failure cases: empty samples block AI, other assets lose their price,
 // excluded assets become zero-valued, zero-level/wild pets or their gear still query the market,
@@ -20,10 +21,19 @@ import { valuationRecord } from "../fixtures/analysis";
 // or refresh searches/analyzes the same record again.
 // A no-sample parent must skip its carried gear, keep unknown prices/reasons, and reach AI.
 // Search responses and AI are synthetic; runner, source verification, storage and UI are real.
-for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const) {
+for (const rule of [
+  "no-sample",
+  "no-sample-large-input",
+  "zero-level",
+  "wild",
+  "special-type",
+] as const) {
   test(`资产查价直接分析 ${rule}：汇总、详情与刷新`, async ({ page }, testInfo) => {
     const crawl = new CrawlStore(":memory:");
     const record = valuationRecord("skip-workflow");
+    const noSample = rule.startsWith("no-sample");
+    if (rule === "no-sample-large-input")
+      record.detail!.tabs[0].text += "\n【模拟长原文】" + "x".repeat(140 * 1024);
     const captured = {
       version: 1 as const,
       collectedAt: record.detail!.collectedAt,
@@ -101,6 +111,11 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
     });
     crawl.observe(record.listing);
     crawl.save(record.listing, record.detail!);
+    const inputBytes = Buffer.byteLength(buildProductDocument(record).text);
+    if (rule === "no-sample-large-input") {
+      expect(inputBytes).toBeGreaterThan(128 * 1024);
+      expect(inputBytes).toBeLessThan(256 * 1024);
+    }
     const store = new AnalysisStore(crawl.db);
     const profile = createProfile(
       await readFile(PROMPT_FILE, "utf8"),
@@ -287,7 +302,7 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
         searchState: "skipped",
         referencePrice: null,
       });
-      if (rule === "no-sample") {
+      if (noSample) {
         expect(result.pet_pricing?.gearPricing).toMatchObject({
           searchComplete: true,
           total: null,
@@ -311,14 +326,14 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
       );
       const breakdown = dialog.locator('dl[aria-label="价格组成"]');
       await expect(breakdown).toContainText(
-        rule === "no-sample" ? "无样本，未计入参考合计" : "按规则跳过，未计入参考合计",
+        noSample ? "无样本，未计入参考合计" : "按规则跳过，未计入参考合计",
       );
       await expect(breakdown).not.toContainText("未定价");
       await expect(breakdown).not.toContainText("已算小计区间");
       await dialog.getByText("查看估值依据与查价记录", { exact: true }).click();
       for (const asset of ["装备", "宝宝"]) {
         const skipLabel =
-          asset === "装备" || rule === "no-sample"
+          asset === "装备" || noSample
             ? "无样本，未计入参考合计"
             : rule === "zero-level"
               ? "0级宝宝，未计入参考合计"
@@ -327,24 +342,24 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
                 : "野生宝宝，未计入参考合计";
         await expect(
           dialog.getByRole("region", {
-            name: asset + (asset === "宝宝" && rule !== "no-sample" ? "查价" : "联网查价"),
+            name: asset + (asset === "宝宝" && !noSample ? "查价" : "联网查价"),
             exact: true,
           }),
         ).toContainText(skipLabel);
       }
       await expect(dialog).toContainText("市场售价未知");
-      if (rule === "no-sample") await expect(dialog).toContainText("随身装备不再核验");
+      if (noSample) await expect(dialog).toContainText("随身装备不再核验");
       await expect(dialog.getByRole("region", { name: "装备联网查价", exact: true })).toContainText(
         "专用或绑定装备，未计入参考合计",
       );
       await expect(dialog.getByRole("region", { name: "装备联网查价", exact: true })).toContainText(
         "官网检索不支持的等级装备，未计入参考合计",
       );
-      if (rule !== "no-sample")
+      if (!noSample)
         await expect(dialog.getByRole("region", { name: "宝宝查价", exact: true })).toContainText(
           "按规则跳过",
         );
-      if (rule !== "no-sample")
+      if (!noSample)
         await expect(dialog.getByRole("region", { name: "宝宝查价", exact: true })).toContainText(
           "未发起查价",
         );
@@ -354,16 +369,17 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
       await expect(completed.getByRole("article")).toHaveCount(1);
       expect([equipmentCalls, petCalls, aiCalls]).toEqual([
         1,
-        rule === "no-sample" || rule === "special-type" ? 1 : 0,
+        noSample || rule === "special-type" ? 1 : 0,
         1,
       ]);
-      expect(gearCalls).toBe(rule === "no-sample" ? 1 : 0);
+      expect(gearCalls).toBe(noSample ? 1 : 0);
       await writeFile(
         testInfo.outputPath("no-sample-skip.json"),
         JSON.stringify(
           {
             scenario: "仅裸号本体、装备和宝宝估值的完整流程；模拟行情和AI，不代表真实市场验收",
             skipRule: rule,
+            inputBytes,
             samplePrices,
             sampleAverage,
             calls: { equipmentCalls, petCalls, gearCalls, aiCalls },

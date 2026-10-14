@@ -851,7 +851,7 @@ describe("持久化的商品分析队列", () => {
       .prepare(
         "UPDATE listings SET detail_json=json_set(detail_json,'$.raw.large',?) WHERE key='a'",
       )
-      .run("大".repeat(50_000));
+      .run("大".repeat(100_000));
     const large = await runner.start("codex");
     await runner.settled();
     expect(store.run(large)).toMatchObject({ failed: 1, completed: 0, total: 1 });
@@ -859,7 +859,7 @@ describe("持久化的商品分析队列", () => {
     const item = store
       .overview({ runId: large })
       .records.items.find((item) => item.state === "failed")!;
-    expect(store.detail(item.taskId!)?.inputText).toContain("大".repeat(50_000));
+    expect(store.detail(item.taskId!)?.inputText).toContain("大".repeat(100_000));
   });
   it("空库不连接 AI，分页查询覆盖全部记录，暂停后清空同时删除分析历史", async () => {
     const { crawl, store, runner, connect } = setup([]);
