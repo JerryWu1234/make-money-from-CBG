@@ -52,7 +52,45 @@ const stateSql = `CASE WHEN l.status!='complete' OR l.detail_json IS NULL THEN '
   WHEN t.status='completed' AND (${expiredPricingSql}) THEN 'stale'
   ELSE t.status END`;
 
+function overviewResult(result: ProductAnalysis | null, summary: boolean) {
+  if (!summary || !result?.valuation) return result;
+  const value = result.valuation;
+  return {
+    ...result,
+    valuation: {
+      ...value,
+      equipment_pricing: value.equipment_pricing
+        ? {
+            ...value.equipment_pricing,
+            items: [],
+            queries: [],
+            rawResponse: "",
+            searchItems: [],
+            searchAttempts: [],
+            requestText: undefined,
+          }
+        : undefined,
+      pet_pricing: value.pet_pricing
+        ? {
+            ...value.pet_pricing,
+            items: [],
+            queries: [],
+            rawResponse: "",
+            searchItems: [],
+            searchAttempts: [],
+            requestText: undefined,
+            gearPricing: undefined,
+          }
+        : undefined,
+    },
+  };
+}
+
 function profileScope(value: AnalysisProfile | null | undefined, serverId: string) {
+  const configured = value?.settings.servers.find((server) => server.serverId === serverId);
+  const source = value?.marketSources?.find((server) => server.serverId === serverId);
+  const { serverName: _name, fetchedAt: _at, sources: _sources, ...automatic } = source || {};
+  const servers = configured ? [configured] : source ? [automatic] : [];
   // Only this role's server affects its calculation; other servers and source bookkeeping do not.
   return value
     ? {
@@ -65,7 +103,7 @@ function profileScope(value: AnalysisProfile | null | undefined, serverId: strin
         petGearSearch: !!value.petGearSearch,
         settings: {
           ...value.settings,
-          servers: value.settings.servers.filter((server) => server.serverId === serverId),
+          servers,
         },
       }
     : null;
@@ -909,7 +947,7 @@ export class AnalysisStore {
       attempts,
     };
   }
-  private item(row: Row, currentProfile?: AnalysisProfile): AnalysisItem {
+  private item(row: Row, currentProfile?: AnalysisProfile, summary = false): AnalysisItem {
     const listing = JSON.parse(String(row.listing_json)) as Listing;
     const savedProfile = row.profile_json
       ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
@@ -938,7 +976,7 @@ export class AnalysisStore {
           profileScope(savedProfile, listing.serverId),
           profileScope(currentProfile, listing.serverId),
         ),
-      valuation: row.state === "completed" ? result?.valuation : undefined,
+      valuation: row.state === "completed" ? overviewResult(result, summary)?.valuation : undefined,
     };
   }
   overview(
@@ -950,6 +988,7 @@ export class AnalysisStore {
       currentProfile?: AnalysisProfile;
       search?: string;
       filter?: string;
+      summary?: boolean;
     } = {},
   ): AnalysisOverview {
     const ids = this.db
@@ -988,7 +1027,7 @@ export class AnalysisStore {
     const records = this.db
       .prepare(`${query} ORDER BY key ASC LIMIT 20 OFFSET ?`)
       .all(...values, (page - 1) * 20)
-      .map((row) => this.item(row, options.currentProfile));
+      .map((row) => this.item(row, options.currentProfile, options.summary));
     const ranking: AnalysisItem[] = [];
     const rankedRows = this.db
       .prepare(
@@ -996,7 +1035,7 @@ export class AnalysisStore {
       )
       .iterate(...sourceValues);
     for (const row of rankedRows) {
-      const item = this.item(row, options.currentProfile);
+      const item = this.item(row, options.currentProfile, options.summary);
       if (!item.profileChanged) ranking.push(item);
       if (ranking.length === 10) break;
     }
@@ -1054,7 +1093,10 @@ export class AnalysisStore {
               profileScope(savedProfile, listing.serverId),
               profileScope(options.currentProfile, listing.serverId),
             ),
-          result: JSON.parse(String(row.result_json)) as ProductAnalysis,
+          result: overviewResult(
+            JSON.parse(String(row.result_json)) as ProductAnalysis,
+            !!options.summary,
+          )!,
         };
       });
     return {

@@ -323,7 +323,7 @@ it("查价累计时间到上限时隔离当前角色，即使仍有翻页进展"
   });
   const id = await c.runner.start("codex", true, c.profile);
   await c.runner.settled();
-  expect(firstRoleRounds).toBe(2);
+  expect(firstRoleRounds).toBe(6);
   expect(c.store.run(id)).toMatchObject({ completed: 1, waitingPricing: 1 });
   clock.mockRestore();
 });

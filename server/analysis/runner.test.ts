@@ -134,6 +134,28 @@ function untilAborted(signal: AbortSignal): Promise<never> {
 }
 
 describe("持久化的商品分析队列", () => {
+  it("列表摘要保留报价，详情仍返回完整证据，读取不改写保存结果", async () => {
+    const { store, runner, profile } = await valuationSetup();
+    await runner.start("codex", false, profile);
+    await runner.settled();
+    const taskId = store.overview().records.items[0].taskId!;
+    const result = store.detail(taskId)!.result!;
+    const evidence = "真实查价证据".repeat(10000);
+    result.valuation!.equipment_pricing!.rawResponse = evidence;
+    result.valuation!.pet_pricing!.rawResponse = evidence;
+    store.db
+      .prepare("UPDATE analysis_tasks SET result_json=? WHERE id=?")
+      .run(JSON.stringify(result), taskId);
+    const full = store.overview().results.items[0].result;
+    const summary = store.overview({ summary: true }).results.items[0].result!;
+    expect(summary.valuation!.estimated_value).toBe(full!.valuation!.estimated_value);
+    expect(summary.summary).toEqual(full!.summary);
+    expect(summary.valuation!.equipment_pricing!.rawResponse).toBe("");
+    expect(summary.valuation!.pet_pricing!.rawResponse).toBe("");
+    expect(JSON.stringify(summary).length).toBeLessThan(JSON.stringify(full).length / 10);
+    expect(store.detail(taskId)!.result).toEqual(result);
+    expect(store.overview().results.items[0].result).toEqual(full);
+  });
   it("联网查价结果有效时再次开始不创建任务，也不重复查价或 AI", async () => {
     const { store, runner, analyze, profile, searchEquipment, searchPets } = await valuationSetup();
     const first = await runner.start("codex", false, profile);

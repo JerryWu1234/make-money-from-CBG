@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { marketServers, parseMarketPages, refreshMarket, SERVER_DIRECTORY_URL } from "./market";
 import { DEFAULT_SETTINGS, loadProfile, PROMPT_FILE } from "./profile";
+import { calculateValuation } from "./valuation-calculator";
+import { valuationRecord } from "../../tests/fixtures/analysis";
 const directory =
   'var server_data = {"1":[["北京1区",""],[[132,"西栅老街",0],[173,"逍遥城",0]]],"2":[["北京2区",""],[[132,"旧区别名",0]] ]};';
 const heat =
@@ -52,9 +54,49 @@ describe("全服行情自动匹配", () => {
         }),
       );
       expect(loadProfile(db).settings.servers[0].rank).toBe(5);
-      expect(loadProfile(db).marketSources).toHaveLength(0);
+      expect(loadProfile(db).marketSources?.map((row) => row.serverId)).toEqual(["173"]);
       expect(profile.calculationCompatible).toBe(true);
       expect(profile.template).toBe(readFileSync(PROMPT_FILE, "utf8"));
+    } finally {
+      db.close();
+    }
+  });
+  it("后采齐区服使用启动时的全服行情，手动设置仍优先，缺区服不借用其他服", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      db.exec(
+        "CREATE TABLE listings(server_id TEXT); INSERT INTO listings VALUES('132'); CREATE TABLE analysis_market(id INTEGER PRIMARY KEY,snapshot_json TEXT)",
+      );
+      db.prepare("INSERT INTO analysis_market VALUES(1,?)").run(
+        JSON.stringify({ fetchedAt: new Date().toISOString(), servers: parsed() }),
+      );
+      const frozen = loadProfile(db);
+      const later = valuationRecord();
+      later.listing.serverId = "173";
+      later.listing.summary = {
+        ...(later.listing.summary as Record<string, unknown>),
+        iCash: 30000000,
+      };
+      const value = calculateValuation(later, frozen);
+      expect(value.items.find((item) => item.name === "现金")).toMatchObject({
+        confirmed: true,
+        amount: 199.5,
+      });
+      const manuallyMissing = {
+        ...frozen,
+        settings: {
+          ...frozen.settings,
+          servers: [{ ...parsed()[0], source: "manual" as const, goldPrice: null }],
+        },
+      };
+      expect(
+        calculateValuation(later, manuallyMissing).items.find((item) => item.name === "现金")
+          ?.confirmed,
+      ).toBe(false);
+      later.listing.serverId = "999";
+      expect(
+        calculateValuation(later, frozen).items.find((item) => item.name === "现金")?.confirmed,
+      ).toBe(false);
     } finally {
       db.close();
     }

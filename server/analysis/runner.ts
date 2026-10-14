@@ -39,8 +39,8 @@ export type AnalysisClient = {
     signal: AbortSignal,
   ) => Promise<{ text: string; usage?: unknown; truncated?: boolean }>;
 };
-export const MAX_PRICING_ROUNDS = 8;
-const MAX_ROLE_PRICING_MS = 15 * 60_000;
+export const MAX_PRICING_ROUNDS = 16;
+const MAX_ROLE_PRICING_MS = 45 * 60_000;
 function itemPricingError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   if (

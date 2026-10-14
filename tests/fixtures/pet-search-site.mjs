@@ -145,6 +145,7 @@ export function petDetailDocument(options = {}) {
     footerStatus: "",
     encodedJson: false,
     legacyDescription: false,
+    prepayTemplate: false,
     missingPetParser: false,
     petParserFailure: false,
     panelLevel: "119",
@@ -247,8 +248,8 @@ export function petDetailDocument(options = {}) {
       return `<img width="40" height="40" src="${src}" ${inline} ${linked} onmouseenter="document.getElementById('${tipId}').style.display='block'" onmouseleave="document.getElementById('${tipId}').style.display='none'"><pre id="${tipId}" ${tipKind} style="display:none">${escape(text)}</pre>`;
     })
     .join("");
-  const info = `<ul id="info_panel"><li>服务器：测试区 ID：${escape(s.nickname)} 等级：${escape(s.infoLevel)}</li><li>状态：${escape(s.status)}</li><li>价格：<span class="price">￥${s.price}（元）</span><span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul>`;
-  const panel = `<div class="attribute"><div${s.noPanelId ? "" : ' id="equip_desc_panel"'}><p>名字：${escape(s.nickname)}${s.panelLevel === null ? "" : ` 等级：${escape(s.panelLevel)}`}</p><table>${table}</table><h4>赐福技能</h4>${previewImages}${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div></div>`;
+  const info = `<ul${s.prepayTemplate ? "" : ' id="info_panel"'}><li>服务器：测试区 ${s.prepayTemplate ? "名称" : "ID"}：${escape(s.nickname)} 等级：${escape(s.infoLevel)}</li><li>状态：${escape(s.status)}</li><li>价格：<span class="price">￥${s.price}（元）</span><span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul>`;
+  const panel = `${s.prepayTemplate ? "" : '<div class="attribute">'}<div${s.prepayTemplate ? ' id="pet_attr_panel" class="tabCont"' : s.noPanelId ? "" : ' id="equip_desc_panel"'}><p>名字：${escape(s.nickname)}${s.panelLevel === null ? "" : ` 等级：${escape(s.panelLevel)}`}</p><table>${table}</table><h4>赐福技能</h4>${previewImages}${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div>${s.prepayTemplate ? "" : "</div>"}`;
   const main = s.splitRegions
     ? `<section>${info}</section><section>${panel}</section>`
     : `<div class="${escape(s.wrapperClass)}">${info}${panel}${s.duplicatePanel ? panel : ""}${s.footerStatus ? `<footer>${escape(s.footerStatus)}</footer>` : ""}</div>`;
@@ -258,7 +259,7 @@ export function petDetailDocument(options = {}) {
   const visibleMain = s.panelDelay ? '<div id="delayed-main"></div>' : main;
   return `<meta charset="utf-8"><title>独立宝宝详情结构模拟页</title>
 ${s.recommendationFirst ? recommendation + visibleMain : visibleMain + recommendation}
-<input type="hidden" id="equip_desc_value" value="${escape(s.encodedJson ? "@Sfixture@" : description)}">
+${s.prepayTemplate ? `<textarea id="pet_desc" style="display:none">${escape(s.encodedJson ? "@Sfixture@" : description)}</textarea>` : `<input type="hidden" id="equip_desc_value" value="${escape(s.encodedJson ? "@Sfixture@" : description)}">`}
 <script>window.IsLogin=1;window.StorageStype={pet:2,role:3};window.equip={storage_type:2,equip_name:${encoded(s.rawName)},price:${encoded(s.rawPrice)},eid:${s.rawEid ? encoded(s.rawEid) : "new URL(location.href).searchParams.get('eid')"},server_id:1,is_selling:${encoded(s.selling)}};window.CBG_GAME_CONFIG=${encoded(gameConfig)};
 ${s.encodedJson && !s.missingDecoder ? `window.decodeCalls=0;window.decode_desc=value=>{window.decodeCalls++;if(value!=='@Sfixture@' || ${encoded(s.decoderFailure)})throw new Error('SIMULATED decode failure');return ${encoded(s.malformedDecoded ? "not JSON" : description)};};` : ""}
 ${s.legacyDescription && !s.missingPetParser ? `window.petParseCalls=0;window.get_pet_attrs_info=(value, options)=>{window.petParseCalls++;if(value!==${encoded(legacy)} || !options.only_basic_attr || ${encoded(s.petParserFailure)})throw new Error('SIMULATED legacy parser failure');return ${encoded(pet)};};` : ""}

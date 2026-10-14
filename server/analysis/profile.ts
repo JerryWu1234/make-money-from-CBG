@@ -225,7 +225,11 @@ export function loadProfile(db: DatabaseSync, file = PROMPT_FILE) {
     ...settings,
     servers: [...manual, ...available],
   });
-  return { ...profile, marketSources: available };
+  // A streaming batch must retain the original market facts for roles captured later.
+  return {
+    ...profile,
+    marketSources: market.filter((row) => !manual.some((item) => item.serverId === row.serverId)),
+  };
 }
 export function saveProfile(db: DatabaseSync, input: unknown, file = PROMPT_FILE) {
   if (!input || typeof input !== "object" || Array.isArray(input))

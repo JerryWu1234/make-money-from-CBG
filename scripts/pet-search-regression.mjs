@@ -386,7 +386,7 @@ try {
     });
   });
   await check("详情预算耗尽自动保存官方表单游标，恢复后读取后面的有效宝宝报价", async () => {
-    const rows = Array.from({ length: 9 }, (_, index) => ({
+    const rows = Array.from({ length: 43 }, (_, index) => ({
       eid: `sample-${index}`,
       name: "画魂",
       type: "2001",
@@ -396,7 +396,7 @@ try {
       return {
         price: 300 + index * 10,
         rawPrice: 300 + index * 10,
-        ...(index < 6 ? { skills: [], parsedSkillIds: [] } : {}),
+        ...(index > 0 && index < 40 ? { skills: [], parsedSkillIds: [] } : {}),
       };
     };
     const target = {
@@ -415,30 +415,31 @@ try {
       issues: [],
       query: "",
     };
-    let cursor;
+    let cursor, savedCandidates;
     await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
       const result = await source.findCandidates([target], control.signal);
       assert.equal(result.items[0].searchState, "pending");
       cursor = result.items[0].searchCursor;
-      assert.equal(cursor.rowIndex, 6);
-      assert.equal(detailVisits.length, 6);
+      savedCandidates = result.items[0].candidates;
+      assert.equal(cursor.rowIndex, 40);
+      assert.equal(detailVisits.length, 40);
     });
     await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
       const result = await source.findCandidates(
-        [{ ...target, searchCursor: cursor }],
+        [{ ...target, searchCursor: cursor, candidates: savedCandidates }],
         control.signal,
       );
       assert.equal(result.items[0].searchState, "completed");
-      assert.deepEqual(detailVisits, ["sample-6", "sample-7", "sample-8"]);
+      assert.deepEqual(detailVisits, ["sample-0", "sample-40", "sample-41", "sample-42"]);
       assert.deepEqual(
         result.items[0].candidates.map(({ price }) => price),
-        [360, 370, 380],
+        [300, 700, 710, 720],
       );
       assert.ok(result.items[0].candidates.every(({ verified }) => verified));
     });
   });
   await check("续查宝宝页面重排或清空时清除旧候选，重新按官网顺序收集", async () => {
-    const rows = Array.from({ length: 9 }, (_, index) => ({
+    const rows = Array.from({ length: 43 }, (_, index) => ({
       eid: `order-${index}`,
       name: "画魂",
       type: "2001",
@@ -448,7 +449,7 @@ try {
       return {
         price: 300 + index,
         rawPrice: 300 + index,
-        ...(index > 0 && index < 6 ? { skills: [], parsedSkillIds: [] } : {}),
+        ...(index > 0 && index < 40 ? { skills: [], parsedSkillIds: [] } : {}),
       };
     };
     const target = {
@@ -473,7 +474,7 @@ try {
       assert.equal(saved.searchState, "pending");
       assert.equal(saved.candidates.filter((x) => x.verified).length, 1);
     });
-    for (const changed of [[rows[8], ...rows.slice(0, 8)], []]) {
+    for (const changed of [[rows[42], ...rows.slice(0, 42)], []]) {
       await withSource({ pages: [changed] }, detail, async ({ source, control }) => {
         const result = await source.findCandidates([{ ...target, ...saved }], control.signal);
         const reset = result.items[0];
@@ -494,7 +495,7 @@ try {
             rebuilt.candidates
               .filter((x) => x.verified)
               .map((x) => new URL(x.url).searchParams.get("eid")),
-            ["order-8", "order-0", "order-6", "order-7"],
+            ["order-42", "order-0", "order-40", "order-41"],
           );
         }
       });
@@ -502,7 +503,7 @@ try {
   });
 
   await check("续查宝宝当前页未变也核验已读完前页", async () => {
-    const rows = Array.from({ length: 9 }, (_, index) => ({
+    const rows = Array.from({ length: 43 }, (_, index) => ({
       eid: `prefix-${index}`,
       name: "画魂",
       type: "2001",
@@ -510,7 +511,9 @@ try {
     const detail = (id) => ({
       price: 300,
       rawPrice: 300,
-      ...(id !== "prefix-new" && Number(id.split("-").at(-1)) < 6
+      ...(id !== "prefix-new" &&
+      Number(id.split("-").at(-1)) > 0 &&
+      Number(id.split("-").at(-1)) < 40
         ? { skills: [], parsedSkillIds: [] }
         : {}),
     });
@@ -532,7 +535,7 @@ try {
     };
     let saved;
     await withSource(
-      { pages: [rows.slice(0, 6), rows.slice(6)] },
+      { pages: [rows.slice(0, 40), rows.slice(40)] },
       detail,
       async ({ source, control }) => {
         saved = (await source.findCandidates([target], control.signal)).items[0];
@@ -542,8 +545,8 @@ try {
     await withSource(
       {
         pages: [
-          [{ eid: "prefix-new", name: "画魂", type: "2001" }, ...rows.slice(1, 6)],
-          rows.slice(6),
+          [{ eid: "prefix-new", name: "画魂", type: "2001" }, ...rows.slice(1, 40)],
+          rows.slice(40),
         ],
       },
       detail,
@@ -813,6 +816,41 @@ try {
         assert.equal(detailVisits.length, 0);
       });
   });
+  await check("公示期模板绑定主宝宝、公开描述与主价，推荐及费用不混入", async () => {
+    for (const detail of [
+      { prepayTemplate: true, legacyDescription: true, encodedJson: true },
+      {
+        prepayTemplate: true,
+        legacyDescription: true,
+        encodedJson: true,
+        recommendationFirst: true,
+        recommendationMainIds: true,
+      },
+    ])
+      await withSource({}, detail, async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.total, 368.6);
+        assert.equal(result.items[0].candidates[0].verified, true);
+        assert.equal(result.items[0].candidates[0].price, 368.6);
+      });
+    for (const detail of [
+      { duplicatePanel: true },
+      { wrapperClass: "unverified" },
+      { missingPetParser: true },
+      { rawEid: "other" },
+      { rawPrice: 36860 },
+      { status: "已下架", selling: 1 },
+    ])
+      await withSource(
+        {},
+        { prepayTemplate: true, legacyDescription: true, encodedJson: true, ...detail },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          assert.equal(result.total, null);
+          assert.equal(result.items[0].candidates[0].verified, false);
+        },
+      );
+  });
   await check("source→adapter等待主区域/主价/JSON，绑定新容器并排除先出现的同名推荐", async () => {
     for (const detail of [
       {},
@@ -1005,13 +1043,14 @@ try {
         const result = await searchPetPricing(record(), control.signal, source);
         assert.equal(result.total, null);
         assert.match(result.items[0].candidates[0].reason, /未来\/赐福技能描述结构/);
-        assert.equal(result.items[0].searchState, "unsupported");
-        assert.equal(result.items[0].status, "unsupported");
-        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].searchState, "read_failed");
+        assert.equal(result.items[0].status, "no_match");
+        assert.equal(result.searchComplete, false);
         assert.equal(result.items[0].referencePrice, null);
         assert.ok(!result.items[0].similarEstimate?.range);
         assert.ok(result.searchItems.some((item) => item.unsupportedDetails.length > 0));
         assert.ok(result.searchItems.every((item) => item.detailFailures.length === 0));
+        assert.ok(result.items[0].searchCursor.failed.length > 0);
       });
     await withSource({}, {}, async ({ source, control }) => {
       const input = record();
@@ -1041,10 +1080,11 @@ try {
           const result = await searchPetPricing(record(), control.signal, source);
           assert.equal(result.total, null);
           assert.equal(result.items[0].referencePrice, null);
-          assert.equal(result.items[0].searchState, "unsupported");
-          assert.equal(result.searchComplete, true);
+          assert.equal(result.items[0].searchState, "read_failed");
+          assert.equal(result.searchComplete, false);
           assert.ok(result.searchItems.some((item) => item.unsupportedDetails.length > 0));
           assert.ok(result.searchItems.every((item) => item.detailFailures.length === 0));
+          assert.ok(result.items[0].searchCursor.failed.length > 0);
         },
       );
   });
@@ -1114,7 +1154,7 @@ try {
         await withSource({}, { ...configuration, ...broken }, async ({ source, control }) => {
           const result = await searchPetPricing(record(), control.signal, source);
           assert.equal(result.total, null);
-          assert.equal(result.items[0].searchState, "unsupported");
+          assert.equal(result.items[0].searchState, "read_failed");
         });
       await withSource(
         {},
@@ -1122,7 +1162,7 @@ try {
         async ({ source, control }) => {
           const result = await searchPetPricing(record(), control.signal, source);
           assert.equal(result.total, null);
-          assert.equal(result.items[0].searchState, "unsupported");
+          assert.equal(result.items[0].searchState, "read_failed");
           assert.match(result.items[0].candidates[0].reason, /未明之赐占位尚未揭示技能/);
         },
       );
@@ -1185,8 +1225,8 @@ try {
           const unsupported = rows[0].eid === "cifu";
           assert.equal(result.total, null);
           assert.equal(result.items[0].referencePrice, null);
-          assert.equal(result.items[0].searchState, unsupported ? "unsupported" : "read_failed");
-          assert.equal(result.searchComplete, unsupported);
+          assert.equal(result.items[0].searchState, "read_failed");
+          assert.equal(result.searchComplete, false);
           assert.deepEqual(detailVisits, [rows[0].eid]);
           assert.ok(
             result.searchItems.some(
@@ -1363,7 +1403,7 @@ try {
       assert.equal(result.queries.length, 1);
     }),
   );
-  await check("分页结果不足十件时去重后用实际样本均价，所有候选都经过主详情核对", () =>
+  await check("分页结果不足五件时去重后用实际样本均价，所有候选都经过主详情核对", () =>
     withSource(
       {
         pages: [

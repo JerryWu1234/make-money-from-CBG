@@ -635,7 +635,9 @@ export function calculateValuation(
   if (level === 69 && points !== null && points > 40 && op === null)
     pending.add("确认69级机缘使用公式还是离散报价");
   const body = base !== null && op !== null ? base + op : null;
-  const server = settings.servers.find((value) => value.serverId === record.listing.serverId);
+  const server =
+    settings.servers.find((value) => value.serverId === record.listing.serverId) ||
+    profile.marketSources?.find((value) => value.serverId === record.listing.serverId);
   const summary = record.listing.summary as Record<string, unknown> | null;
   const coin = (key: string, label: string): Fact | null => {
     if (record.detail?.valuation) {

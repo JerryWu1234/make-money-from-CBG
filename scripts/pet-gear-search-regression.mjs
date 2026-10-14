@@ -115,6 +115,9 @@ try {
         contentType: "text/html; charset=utf-8",
         // Simulate the final URL/identity of a redirect without allowing redirect-chain network traffic.
         body:
+          (settings.detailLogin === id
+            ? "<script>history.replaceState(null,'','/cgi-bin/show_login.py');window.IsLogin=0</script>"
+            : "") +
           (settings.redirectFrom === id
             ? "<script>history.replaceState(null,'','/equip?s=1&eid=redirected-product')</script>"
             : "") +
@@ -342,6 +345,15 @@ try {
     );
   }
   const target = item("项圈", 25, "等级 25\n速度 +20\n耐久度 120");
+  await check("详情跳转登录时停止查询，保留失败断点，不按无样本跳过", async () => {
+    const target = item("护腕", 85, "等级 85\n装备对象 召唤兽\n防御 +45\n耐久度 100");
+    const result = await run(target, { detailLogin: "one" });
+    assert.equal(result.items[0].searchStatus, "read_failed");
+    assert.match(result.items[0].note, /登录/);
+    assert.equal(result.items[0].searchCursor.failed.length, 1);
+    assert.equal(result.items[0].candidates.filter((candidate) => candidate.verified).length, 0);
+    assert.deepEqual(detailVisits, ["one"]);
+  });
   await check("详情跳转到另一商品不能作为原链接报价", async () => {
     const result = await run(target, { pages: [["one"]], redirectFrom: "one" });
     assert.equal(result.items[0].searchStatus, "read_failed");

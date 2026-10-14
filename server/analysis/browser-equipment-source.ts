@@ -512,6 +512,7 @@ export async function equipmentPageSource(
     return await readMainEquipment(page, signal, expectedKind);
   } catch (error) {
     signal.throwIfAborted();
+    await assertAvailable(page);
     const diagnostics = await page
       .evaluate(() => {
         const globals = window as unknown as {

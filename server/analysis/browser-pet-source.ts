@@ -997,12 +997,39 @@ export function petRegionReady(excluded: string) {
     node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
     !node.closest(excluded);
   document
-    .querySelectorAll("[data-cbg-pet-main-panel]")
-    .forEach((node) => node.removeAttribute("data-cbg-pet-main-panel"));
-  const infos = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(visible);
-  const inputs = Array.from(
-    document.querySelectorAll<HTMLInputElement>("#equip_desc_value"),
+    .querySelectorAll(
+      "[data-cbg-pet-main-panel], [data-cbg-pet-main-info], [data-cbg-pet-main-description]",
+    )
+    .forEach((node) => {
+      node.removeAttribute("data-cbg-pet-main-panel");
+      node.removeAttribute("data-cbg-pet-main-info");
+      node.removeAttribute("data-cbg-pet-main-description");
+    });
+  let infos = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(visible);
+  let inputs = Array.from(
+    document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("#equip_desc_value"),
   ).filter((node) => !node.closest(excluded));
+  let legacyPanel: HTMLElement | undefined;
+  // Observed official prepay page: one direct pet panel in goodsInfo, with pet_desc textarea.
+  if (!infos.length && !inputs.length) {
+    const panels = Array.from(document.querySelectorAll<HTMLElement>("#pet_attr_panel")).filter(
+      visible,
+    );
+    const descriptions = Array.from(
+      document.querySelectorAll<HTMLTextAreaElement>("textarea#pet_desc"),
+    ).filter((node) => !node.closest(excluded));
+    const info = panels[0]?.parentElement;
+    if (
+      panels.length !== 1 ||
+      descriptions.length !== 1 ||
+      !info?.matches(".infoList.goodsInfo") ||
+      !visible(info)
+    )
+      return false;
+    legacyPanel = panels[0];
+    infos = [info];
+    inputs = descriptions;
+  }
   const g = window as unknown as Record<string, any>;
   if (
     !(g.equip || g.EquipInfo) ||
@@ -1015,7 +1042,7 @@ export function petRegionReady(excluded: string) {
     visible,
   );
   if (panels.length > 1) return false;
-  let panel = panels[0];
+  let panel = panels[0] || legacyPanel;
   if (!panel) {
     const hasStats = (node: HTMLElement) => {
       const text = node.innerText.replace(/\s/g, "");
@@ -1070,7 +1097,11 @@ export function petRegionReady(excluded: string) {
       !node.closest("#equip_price_addon_info") &&
       (node.innerText.trim() || node.getAttribute("data_price") || node.getAttribute("data-price")),
   );
-  if (priceReady) panel.setAttribute("data-cbg-pet-main-panel", "true");
+  if (priceReady) {
+    panel.setAttribute("data-cbg-pet-main-panel", "true");
+    infos[0].setAttribute("data-cbg-pet-main-info", "true");
+    inputs[0].setAttribute("data-cbg-pet-main-description", "true");
+  }
   return priceReady;
 }
 
@@ -1197,7 +1228,9 @@ async function readMainPet(page: Page, signal: AbortSignal) {
     const panels = Array.from(
       document.querySelectorAll<HTMLElement>("[data-cbg-pet-main-panel]"),
     ).filter(visible);
-    const infos = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(visible);
+    const infos = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-cbg-pet-main-info]"),
+    ).filter(visible);
     const panel = panels.length === 1 ? panels[0] : null;
     const info = infos.length === 1 ? infos[0] : null;
     let root = panel?.parentElement;
@@ -1219,7 +1252,9 @@ async function readMainPet(page: Page, signal: AbortSignal) {
     if (/加载中|正在加载|展开全部(?:技能|装备|内丹)/.test(panel.innerText))
       throw new Error("宝宝详情尚未展开完整");
     const inputs = Array.from(
-      document.querySelectorAll<HTMLInputElement>("#equip_desc_value"),
+      document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+        "[data-cbg-pet-main-description]",
+      ),
     ).filter((node) => !node.closest(excluded));
     const input = inputs.length === 1 ? inputs[0] : null;
     let pet: Record<string, any>;
@@ -1436,7 +1471,11 @@ async function readMainPet(page: Page, signal: AbortSignal) {
       productName: raw.equip_name,
       visibleName:
         info.innerText
-          .match(/(?:^|\s)ID\s*[：:]\s*(.+?)(?=\s+等级\s*[：:]|\r?\n|$)/i)?.[1]
+          .match(
+            input?.id === "pet_desc"
+              ? /(?:^|\s)名称\s*[：:]\s*(.+?)(?=\s+等级\s*[：:]|\r?\n|$)/
+              : /(?:^|\s)ID\s*[：:]\s*(.+?)(?=\s+等级\s*[：:]|\r?\n|$)/i,
+          )?.[1]
           ?.trim() || "",
       storageType: raw.storage_type,
       petStorageType: g.StorageStype?.pet,

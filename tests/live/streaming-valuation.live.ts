@@ -84,6 +84,8 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     return eventWrites;
   };
   const pause = () => new Promise<void>((resolve) => setTimeout(resolve, 2000));
+  let flowBlocked = false;
+  let repairWait: Promise<void> | undefined;
   let attentionTail = Promise.resolve();
   const attention = (stage: string, message: string) => {
     const waiting = attentionTail.then(async () => {
@@ -111,6 +113,32 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     const result = await response.json();
     if (!response.ok()) throw new Error(result.error || `${route}: ${response.status()}`);
     return result as T;
+  };
+  const stopForRepair = (stage: string, message: string) => {
+    if (repairWait) return repairWait;
+    flowBlocked = true;
+    const waiting = (async () => {
+      const stopped = await Promise.allSettled([
+        api("/api/crawl/stop", {}),
+        api("/api/analysis/pause", {}),
+      ]);
+      await event("failure_stop", {
+        stage,
+        message,
+        runId: manifest.runId,
+        stopErrors: stopped.flatMap((result) =>
+          result.status === "rejected" ? [String(result.reason)] : [],
+        ),
+      });
+      await attention(stage, message);
+      if (manifest.runId) await api("/api/analysis/retry", { runId: manifest.runId });
+      await event("repair_resume", { stage, runId: manifest.runId });
+    })().finally(() => {
+      flowBlocked = false;
+      repairWait = undefined;
+    });
+    repairWait = waiting;
+    return waiting;
   };
   const signatures = new Map<string, string>();
   const progress = async (stage: string, data: unknown) => {
@@ -218,6 +246,12 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     const startAnalysis = async () => {
       const overview = await api<AnalysisOverview>("/api/analysis/status?provider=codex");
       const run = overview.run;
+      if (run && (run.failed || run.waitingPricing)) {
+        manifest.runId = run.id;
+        await stopForRepair("repair", "发现已有失败项，先修复后再恢复原批次。");
+        await save("manifest.json", manifest);
+        return;
+      }
       let next: AnalysisRun;
       if (!run) {
         expect(overview.counts.complete).toBe(1);
@@ -238,6 +272,8 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     };
     const capture = async () => {
       for (let index = 0; index < 10 && !stopping; index++) {
+        while (flowBlocked && !stopping) await pause();
+        if (stopping) return;
         let item = selected[index];
         if (!item) {
           for (;;) {
@@ -279,6 +315,8 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
           `/api/crawl/detail?key=${encodeURIComponent(item!.key)}`,
         );
         while (!ready(record) && !stopping) {
+          while (flowBlocked && !stopping) await pause();
+          if (stopping) return;
           const before = await api<AnalysisOverview>("/api/analysis/status?provider=codex");
           await api("/api/crawl/backfill", { keys: [item!.key] });
           const collector = await server.ssrLoadModule("/server/crawler/controller.ts");
@@ -303,8 +341,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
             });
             if (!status.running) break;
             if (Date.now() > deadline) {
-              await api("/api/crawl/stop", {});
-              await attention(
+              await stopForRepair(
                 "capture",
                 `角色 ${item!.name} 采集超过20分钟，断点保留；请检查后继续。`,
               );
@@ -315,8 +352,8 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
           record = await api<SavedRoleRecord>(
             `/api/crawl/detail?key=${encodeURIComponent(item!.key)}`,
           );
-          if (!ready(record))
-            await attention(
+          if (!ready(record) && !flowBlocked)
+            await stopForRepair(
               "capture",
               `第${index + 1}个角色 ${item!.name} 资料尚未完整：${record.error || "请检查当前官网页面"}；修复后重试同一角色，不换样本。`,
             );
@@ -336,15 +373,33 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
       captureFinished = true;
       await event("capture_finished", { count: selected.length });
     };
-    producer = capture().catch((error) => {
+    producer = (async () => {
+      while (!stopping) {
+        try {
+          await capture();
+          return;
+        } catch (error) {
+          if (stopping) return;
+          await stopForRepair("capture", String(error));
+        }
+      }
+    })().catch((error) => {
       producerFailure = error;
       captureFinished = true;
     });
     let deadline = Date.now() + 180 * 60000;
     for (;;) {
       if (producerFailure) throw producerFailure;
-      const overview = await api<AnalysisOverview>("/api/analysis/status?provider=codex");
+      let overview: AnalysisOverview;
+      try {
+        overview = await api<AnalysisOverview>("/api/analysis/status?provider=codex");
+      } catch (error) {
+        await stopForRepair("api", String(error));
+        deadline = Date.now() + 180 * 60000;
+        continue;
+      }
       const run = overview.run;
+      if (run) manifest.runId = run.id;
       await progress(
         "analysis",
         run
@@ -361,34 +416,51 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
             }
           : { state: "等待第1个采齐", captured: overview.counts.complete },
       );
+      if (flowBlocked) {
+        await pause();
+        continue;
+      }
+      if (run && (run.failed || run.waitingPricing)) {
+        await save("repair-overview.json", overview);
+        await stopForRepair(
+          "repair",
+          "检测到查价或分析失败，采集和分析已立即暂停；先修复当前失败项，再续跑同一批次。",
+        );
+        deadline = Date.now() + 180 * 60000;
+        continue;
+      }
       if (run) {
         manifest.runId = run.id;
         expect(run.model).toBe("gpt-6-luna");
         if (run.status === "paused") {
           await save("repair-overview.json", overview);
-          await attention(
+          await stopForRepair(
             "analysis",
             run.error || run.pauseNotice || "分析已暂停，断点已保留；处理后继续。",
           );
-          await api("/api/analysis/retry", { runId: run.id });
           deadline = Date.now() + 180 * 60000;
         } else if (run.status === "completed") {
-          if (run.failed || run.waitingPricing) {
-            await save("repair-overview.json", overview);
-            await attention(
-              "repair",
-              "查价或分析仍有错误，服务与采集、报价断点保留；修复后继续，10份报价齐全才结束。",
+          if (captureFinished && run.completed === 10) {
+            const unpriced = overview.records.items.filter(
+              (record) =>
+                typeof (record.valuation?.model_value ?? record.valuation?.estimated_value) !==
+                  "number" || (record.valuation?.estimate_missing_count || 0) > 0,
             );
-            await api("/api/analysis/retry", { runId: run.id });
+            if (!unpriced.length) break;
+            await save("repair-overview.json", overview);
+            await stopForRepair(
+              "valuation",
+              "分析已完成但仍缺完整报价：" +
+                unpriced.map((record) => record.name).join("、") +
+                "；保留当前批次，补齐实际缺项后继续验收。",
+            );
             deadline = Date.now() + 180 * 60000;
-          } else if (captureFinished && run.completed === 10) break;
-          else if (overview.counts.complete > run.total)
+          } else if (overview.counts.complete > run.total)
             await api("/api/analysis/resume", { runId: run.id });
         }
       }
       if (Date.now() > deadline) {
-        await api("/api/analysis/pause", { runId: manifest.runId });
-        await attention("analysis", "分析超过180分钟，保留全部断点；请检查后继续。");
+        await stopForRepair("analysis", "分析超过180分钟，保留全部断点；请检查后继续。");
         deadline = Date.now() + 180 * 60000;
       }
       await pause();

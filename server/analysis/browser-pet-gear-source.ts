@@ -437,6 +437,7 @@ export async function createPetGearSource(
                 detailPage ||= await createHiddenPage(browser);
                 workSignal.throwIfAborted();
                 await detailPage.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+                await assertAvailable(detailPage);
                 if (equipmentIdentity(detailPage.url()) !== identity)
                   throw new Error("宝宝装备详情跳转到另一商品，报价未采用");
                 await pace(workSignal);
