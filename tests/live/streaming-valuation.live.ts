@@ -212,30 +212,28 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     let listings: any;
     let liveList: ListingPage | undefined;
     let rowIndex = 0;
-    if (!alreadyCaptured) {
-      await page.goto(baseURL);
-      await page.locator("#open-cbg-btn").click();
-      for (;;) {
-        const state = await api<OpenCbgResult>("/api/browser/status");
-        await progress("query", {
-          step: state.workflowStep,
-          login: state.loginStatus,
-          message: state.message,
-        });
-        if (state.workflowStep === "completed" && state.isLoggedIn) break;
-        if (state.qrCodeUrl || state.workflowStep === "error") {
-          await attention(
-            "query",
-            state.qrCodeUrl
-              ? "请在助手页面扫码并完成手机确认；有效登录将直接复用。"
-              : state.message,
-          );
-          const fresh = await api<OpenCbgResult>("/api/browser/status");
-          if (!fresh.running && fresh.workflowStep !== "completed")
-            await api("/api/browser/open", {});
-        }
-        await pause();
+    await page.goto(baseURL);
+    await page.locator("#open-cbg-btn").click();
+    for (;;) {
+      const state = await api<OpenCbgResult>("/api/browser/status");
+      await progress("query", {
+        step: state.workflowStep,
+        login: state.loginStatus,
+        message: state.message,
+      });
+      if (state.workflowStep === "completed" && state.isLoggedIn) break;
+      if (state.qrCodeUrl || state.workflowStep === "error") {
+        await attention(
+          "query",
+          state.qrCodeUrl ? "请在助手页面扫码并完成手机确认；有效登录将直接复用。" : state.message,
+        );
+        const fresh = await api<OpenCbgResult>("/api/browser/status");
+        if (!fresh.running && fresh.workflowStep !== "completed")
+          await api("/api/browser/open", {});
       }
+      await pause();
+    }
+    if (!alreadyCaptured) {
       const session = await server.ssrLoadModule("/server/session.ts");
       listPage = session.getCbgPage();
       expect(listPage).toBeTruthy();
