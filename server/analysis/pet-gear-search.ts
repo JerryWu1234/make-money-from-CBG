@@ -1,5 +1,6 @@
 import type { SavedRoleRecord } from "../crawler/types";
 import { createPetGearSource } from "./browser-pet-gear-source";
+import type { PetPricingSnapshot } from "./pet-pricing";
 import {
   PET_GEAR_ACCOUNTING,
   petGearInventory,
@@ -12,6 +13,7 @@ export async function searchPetGearPricing(
   record: SavedRoleRecord,
   signal: AbortSignal,
   previous?: PetGearPricingSnapshot,
+  pets?: PetPricingSnapshot,
 ): Promise<PetGearPricingSnapshot> {
   signal.throwIfAborted();
   const inventory = petGearInventory(record);
@@ -38,9 +40,27 @@ export async function searchPetGearPricing(
     accounting: PET_GEAR_ACCOUNTING,
     issues: inventory.issues,
     items: inventory.items.map((item) => {
+      const parent = pets?.items.find(
+        (pet) => pet.key === item.petKey && pet.searchState === "skipped",
+      );
+      if (parent) {
+        const reason = `所属宝宝“${parent.name}”已跳过（${parent.skipReason || "无样本，未计入参考合计"}）；随身装备不再核验，市场售价未知`;
+        return {
+          ...item,
+          status: "no_match" as const,
+          searchStatus: "skipped" as const,
+          searchState: "skipped" as const,
+          skippedWithPet: true,
+          skipReason: reason,
+          reason,
+          queriedAt: new Date().toISOString(),
+          issues: [...item.issues, reason],
+        };
+      }
       const saved = reusable ? previous.items.find((value) => value.key === item.key) : undefined;
       const savedAge = saved?.queriedAt ? Date.now() - Date.parse(saved.queriedAt) : Infinity;
       return saved &&
+        !saved.skippedWithPet &&
         ["completed", "skipped", "pending", "read_failed"].includes(saved.searchStatus || "") &&
         savedAge >= -60_000 &&
         savedAge < 24 * 60 * 60 * 1000 &&

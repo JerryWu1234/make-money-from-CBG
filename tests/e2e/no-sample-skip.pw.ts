@@ -11,12 +11,14 @@ import {
   type EquipmentSource,
 } from "../../server/analysis/equipment-pricing";
 import { searchPetPricing } from "../../server/analysis/pet-pricing";
+import { searchPetGearPricing } from "../../server/analysis/pet-gear-search";
 import { valuationRecord } from "../fixtures/analysis";
 
 // Isolated workflow failure cases: empty samples block AI, other assets lose their price,
 // excluded assets become zero-valued, zero-level/wild pets or their gear still query the market,
 // dedicated/bound or unsupported-level equipment blocks the quote or queries invalid samples,
 // or refresh searches/analyzes the same record again.
+// A no-sample parent must skip its carried gear, keep unknown prices/reasons, and reach AI.
 // Search responses and AI are synthetic; runner, source verification, storage and UI are real.
 for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const) {
   test(`资产查价直接分析 ${rule}：汇总、详情与刷新`, async ({ page }, testInfo) => {
@@ -84,7 +86,7 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
           skills: [],
           innerSkills: [],
           equipment:
-            rule === "no-sample" || rule === "special-type"
+            rule === "special-type"
               ? []
               : [
                   {
@@ -110,6 +112,7 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
     const sampleAverage = 120;
     let equipmentCalls = 0,
       petCalls = 0,
+      gearCalls = 0,
       aiCalls = 0;
     const source: EquipmentSource = {
       findCandidates: async (items) => {
@@ -181,6 +184,10 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
           },
           previous,
         ),
+      searchPetGear: (record, signal, previous, pets) => {
+        gearCalls++;
+        return searchPetGearPricing(record, signal, previous, pets);
+      },
       analyze: async () => {
         aiCalls++;
         return {
@@ -280,6 +287,23 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
         searchState: "skipped",
         referencePrice: null,
       });
+      if (rule === "no-sample") {
+        expect(result.pet_pricing?.gearPricing).toMatchObject({
+          searchComplete: true,
+          total: null,
+          knownTotal: 0,
+          items: [
+            {
+              skippedWithPet: true,
+              searchState: "skipped",
+              searchStatus: "skipped",
+              referencePrice: null,
+              candidates: [],
+              skipReason: expect.stringContaining("所属宝宝“泡泡”已跳过"),
+            },
+          ],
+        });
+      }
       await completed.getByRole("button", { name: /查看分析详情/ }).click();
       const dialog = page.getByRole("dialog");
       await expect(dialog.getByRole("region", { name: "整号市场参考", exact: true })).toHaveCount(
@@ -309,6 +333,7 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
         ).toContainText(skipLabel);
       }
       await expect(dialog).toContainText("市场售价未知");
+      if (rule === "no-sample") await expect(dialog).toContainText("随身装备不再核验");
       await expect(dialog.getByRole("region", { name: "装备联网查价", exact: true })).toContainText(
         "专用或绑定装备，未计入参考合计",
       );
@@ -332,6 +357,7 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
         rule === "no-sample" || rule === "special-type" ? 1 : 0,
         1,
       ]);
+      expect(gearCalls).toBe(rule === "no-sample" ? 1 : 0);
       await writeFile(
         testInfo.outputPath("no-sample-skip.json"),
         JSON.stringify(
@@ -340,7 +366,7 @@ for (const rule of ["no-sample", "zero-level", "wild", "special-type"] as const)
             skipRule: rule,
             samplePrices,
             sampleAverage,
-            calls: { equipmentCalls, petCalls, aiCalls },
+            calls: { equipmentCalls, petCalls, gearCalls, aiCalls },
             bareValue: bare.model_value,
             expectedValue: bare.model_value! + sampleAverage,
             detail: store.detail(saved.taskId, profile),

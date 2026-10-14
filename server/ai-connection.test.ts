@@ -110,8 +110,14 @@ it.each(["codex", "deepseek"] as const)(
     const record = valuationRecord();
     const signal = new AbortController().signal;
     const snapshot = { items: [], total: null, knownTotal: 0 };
-    await expect(client.searchPetGear(record, signal)).resolves.toEqual(snapshot);
-    expect(mocks.searchPetGearPricing).toHaveBeenCalledExactlyOnceWith(record, signal, undefined);
+    const pets = petPricingFixture();
+    await expect(client.searchPetGear(record, signal, undefined, pets)).resolves.toEqual(snapshot);
+    expect(mocks.searchPetGearPricing).toHaveBeenCalledExactlyOnceWith(
+      record,
+      signal,
+      undefined,
+      pets,
+    );
   },
   15_000,
 );

@@ -285,9 +285,10 @@ async function searchPetGear(
   record: SavedRoleRecord,
   signal: AbortSignal,
   previous?: PetGearPricingSnapshot,
+  pets?: PetPricingSnapshot,
 ) {
   try {
-    return await searchPetGearPricing(record, signal, previous);
+    return await searchPetGearPricing(record, signal, previous, pets);
   } catch (error) {
     throw new Error(publicError(error));
   }

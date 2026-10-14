@@ -33,6 +33,7 @@ export type PetGearPricingItem = EquipmentPricingItem & {
   rawItem?: Pick<DetailItem, "index" | "modelId" | "kindId" | "location" | "attributes">;
   reason?: string;
   queriedAt?: string;
+  skippedWithPet?: boolean;
   searchStatus?:
     | "pending"
     | "completed"

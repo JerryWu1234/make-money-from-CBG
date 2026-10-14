@@ -7,6 +7,7 @@ import { AnalysisRunner, type AnalysisClient } from "./runner";
 import { createProfile, PROMPT_FILE } from "./profile";
 import { equipmentInventory } from "./equipment-pricing";
 import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
+import { searchPetGearPricing } from "./pet-gear-search";
 import {
   PET_GEAR_ACCOUNTING,
   petGearInventory,
@@ -143,6 +144,61 @@ function setup(captureComplete = true, petCount = 1) {
   };
 }
 
+it("续跑已保存装备核验时，按宝宝跳过状态更新装备，再进入AI", async () => {
+  const c = setup();
+  c.pets.items = c.pets.items.map((pet) => ({
+    ...pet,
+    searchState: "skipped",
+    skipReason: "前5条无有效样本",
+  }));
+  c.pets.gearPricing = c.gear;
+  c.searchPetGear.mockImplementation(searchPetGearPricing);
+  try {
+    const id = c.store.createRun("codex", "test", true, c.profile);
+    const owner = "saved-parent-skip";
+    expect(c.store.acquire(owner)).toBe(true);
+    let task = c.store.next(id)!;
+    c.store.beginEquipmentSearch(task, owner);
+    task = c.store.saveEquipmentPricing(
+      task,
+      {
+        ...equipmentInventory(c.record),
+        version: 1,
+        searchedAt: new Date().toISOString(),
+        provider: "browser",
+        model: "browser",
+        searchComplete: true,
+        total: 0,
+        knownTotal: 0,
+        queries: [],
+        rawResponse: null,
+      },
+      owner,
+    );
+    c.store.beginPetSearch(task, owner);
+    c.store.savePetPricing(task, c.pets, owner);
+    c.store.setRun(id, "paused", null, owner);
+    c.store.release(owner);
+    await c.runner.resume(id);
+    await c.runner.settled();
+    expect(c.searchPets).not.toHaveBeenCalled();
+    expect(c.searchPetGear).toHaveBeenCalledOnce();
+    expect(c.searchPetGear.mock.calls[0][3]).toMatchObject(JSON.parse(JSON.stringify(c.pets)));
+    expect(
+      c.store.overview().results.items[0].result.valuation?.pet_pricing?.gearPricing?.items[0],
+    ).toMatchObject({
+      skippedWithPet: true,
+      referencePrice: null,
+      skipReason: expect.stringContaining("前5条无有效样本"),
+    });
+    expect(c.store.run(id)?.status).toBe("completed");
+    expect(c.analyze).toHaveBeenCalledOnce();
+  } finally {
+    await c.runner.shutdown();
+    c.crawl.db.close();
+  }
+});
+
 it.each(["pet", "pet-gear"] as const)(
   "%s 每轮完成一件时自动查完全部六件，保留已完成阶段且只分析一次",
   async (phase) => {
@@ -176,6 +232,7 @@ it.each(["pet", "pet-gear"] as const)(
       expect(c.store.run(id)?.status).toBe("completed");
       expect(c.searchEquipment).toHaveBeenCalledOnce();
       expect(phase === "pet" ? c.searchPetGear : c.searchPets).toHaveBeenCalledOnce();
+      expect(c.searchPetGear.mock.calls[0][3]?.items).toMatchObject(c.pets.items);
       expect(c.analyze).toHaveBeenCalledOnce();
     } finally {
       await c.runner.shutdown();

@@ -32,6 +32,7 @@ export type AnalysisClient = {
     record: SavedRoleRecord,
     signal: AbortSignal,
     previous?: PetGearPricingSnapshot,
+    pets?: PetPricingSnapshot,
   ) => Promise<PetGearPricingSnapshot>;
   analyze: (
     prompt: string,
@@ -402,7 +403,14 @@ export class AnalysisRunner {
         petGearInventory(task.record).items.length &&
         (!task.petPricing.gearPricing ||
           task.petPricing.gearPricing.searchComplete === false ||
-          !pricingTimestampFresh(task.petPricing.gearPricing.searchedAt))
+          !pricingTimestampFresh(task.petPricing.gearPricing.searchedAt) ||
+          task.petPricing.gearPricing.items.some(
+            (gear) =>
+              !!gear.skippedWithPet !==
+              task!.petPricing!.items.some(
+                (pet) => pet.key === gear.petKey && pet.searchState === "skipped",
+              ),
+          ))
       ) {
         const signal = AbortSignal.any([
           stop,
@@ -417,7 +425,7 @@ export class AnalysisRunner {
           if (!client.searchPetGear) throw new Error("宝宝装备联网查价尚未连接");
           const previousPricing = task.petPricing.gearPricing;
           const gearPricing = await pricingUntilAborted(
-            client.searchPetGear(task.record, signal, task.petPricing.gearPricing),
+            client.searchPetGear(task.record, signal, task.petPricing.gearPricing, task.petPricing),
             signal,
           );
           signal.throwIfAborted();

@@ -3,6 +3,7 @@ import { searchPetGearPricing } from "./pet-gear-search";
 import type { SavedRoleRecord } from "../crawler/types";
 import type { PetGearPricingItem } from "./pet-gear-inventory";
 import type { EquipmentSearchCursor } from "./equipment-pricing";
+import type { PetPricingItem, PetPricingSnapshot } from "./pet-pricing";
 
 const mocks = vi.hoisted(() => ({
   petGearInventory: vi.fn(),
@@ -59,6 +60,91 @@ beforeEach(() => {
 });
 
 describe("分析自动宝宝装备查价与增量复用", () => {
+  const parents = (items: Partial<PetPricingItem>[]) => ({ items }) as PetPricingSnapshot;
+
+  it("所属宝宝已跳过时保留全部装备与原因，不打开浏览器，也不保留旧报价", async () => {
+    const previous = await searchPetGearPricing(record, new AbortController().signal);
+    previous.items[0].referencePrice = 200;
+    previous.items[0].status = "priced";
+    previous.items[0].baselineEstimate = { amount: 200 } as never;
+    previous.items[0].candidates = [{ verified: true, price: 200 } as never];
+    mocks.createPetGearSource.mockClear();
+    const result = await searchPetGearPricing(
+      record,
+      new AbortController().signal,
+      previous,
+      parents([
+        { key: "pet:1", name: "画魂", searchState: "skipped", skipReason: "前5条无有效样本" },
+      ]),
+    );
+    expect(mocks.createPetGearSource).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      inputHash: previous.inputHash,
+      searchComplete: true,
+      total: null,
+      knownTotal: 0,
+      queries: previous.queries,
+      searchItems: previous.searchItems,
+    });
+    expect(result.items.map((value) => value.key)).toEqual(["first", "second"]);
+    for (const value of result.items) {
+      expect(value).toMatchObject({
+        status: "no_match",
+        searchStatus: "skipped",
+        searchState: "skipped",
+        skippedWithPet: true,
+        referencePrice: null,
+        candidates: [],
+        skipReason: expect.stringContaining("前5条无有效样本"),
+        reason: expect.stringContaining("市场售价未知"),
+      });
+      expect(value.baselineEstimate).toBeUndefined();
+    }
+  });
+
+  it.each(["pending", "read_failed", "unsupported", "completed", undefined] as const)(
+    "仅跳过明确已跳过宝宝的装备，其他宝宝状态 %s 继续核验",
+    async (state) => {
+      mocks.petGearInventory.mockReturnValue({
+        inputHash: "mixed",
+        captureComplete: true,
+        issues: [],
+        items: [item("first"), { ...item("second"), petKey: "pet:2" }],
+      });
+      const result = await searchPetGearPricing(
+        record,
+        new AbortController().signal,
+        undefined,
+        parents([
+          { key: "pet:1", name: "画魂", searchState: "skipped" },
+          { key: "pet:2", name: "鬼将", searchState: state },
+        ]),
+      );
+      expect(
+        mocks.findCandidates.mock.calls[0][0].map((value: PetGearPricingItem) => value.key),
+      ).toEqual(["second"]);
+      expect(result.items[0].skipReason).toContain("无样本，未计入参考合计");
+      expect(result.items[1].skippedWithPet).toBeUndefined();
+    },
+  );
+
+  it("宝宝重新参与计价时恢复装备核验，不复用旧的关联跳过状态", async () => {
+    const first = await searchPetGearPricing(
+      record,
+      new AbortController().signal,
+      undefined,
+      parents([{ key: "pet:1", name: "画魂", searchState: "skipped" }]),
+    );
+    const resumed = await searchPetGearPricing(
+      record,
+      new AbortController().signal,
+      first,
+      parents([{ key: "pet:1", name: "画魂", searchState: "completed" }]),
+    );
+    expect(mocks.findCandidates.mock.calls[0][0]).toHaveLength(2);
+    expect(resumed.items.every((value) => !value.skippedWithPet && !value.skipReason)).toBe(true);
+  });
+
   it("已核验各筛选第一页无样本则跳过，未知价格保持null并在续跑时复用", async () => {
     mocks.findCandidates.mockImplementationOnce(async (items: PetGearPricingItem[]) => ({
       queries: ["【模拟测试】严格与相近第一页"],
