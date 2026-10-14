@@ -65,6 +65,12 @@ export function EquipmentPricingView({
           每件资产优先收集前5件有效在售商品，按实际样本数计算算术平均价；同配与相近样本分别计价。
         </p>
       )}
+      {queried && snapshot.items.some((item) => item.priceMethod === "first-five-minimum-v4") && (
+        <p>
+          {asset === "宝宝装备" ? "最多取前5件有效在售商品" : "每个筛选条件只核验前5条不同候选"}
+          ，采用实际有效样本的最低挂牌价；无样本跳过，搜索范围有限。同配与相近样本分别计价。
+        </p>
+      )}
       {hasBaseline && <p>普通装备默认参考价来自历史资料或人工预设，未实时核实藏宝阁报价。</p>}
       {queried && <p>相近商品的网页挂牌参考价，不代表实际成交价。</p>}
       {accounting && <p>{accounting}</p>}
@@ -148,6 +154,7 @@ export function EquipmentPricingView({
                   : label(item.status);
         const pendingAverage =
           !!item.priceMethod && ["pending", "read_failed"].includes(item.searchState || "");
+        const minimumReference = item.priceMethod === "first-five-minimum-v4";
         return (
           <section key={item.key} className="analysis-evidence-card">
             <header>
@@ -168,13 +175,15 @@ export function EquipmentPricingView({
                           : "默认参考价待补"
                       : pendingAverage
                         ? searchLabel
-                        : item.similarEstimate?.average !== undefined
-                          ? valuationMoney(item.similarEstimate.average)
-                          : item.similarEstimate?.median !== undefined
-                            ? valuationMoney(item.similarEstimate.median)
-                            : item.similarEstimate?.range
-                              ? valuationRangeMoney(item.similarEstimate.range)
-                              : searchLabel}
+                        : minimumReference && item.similarEstimate?.range
+                          ? valuationMoney(item.similarEstimate.range.min)
+                          : item.similarEstimate?.average !== undefined
+                            ? valuationMoney(item.similarEstimate.average)
+                            : item.similarEstimate?.median !== undefined
+                              ? valuationMoney(item.similarEstimate.median)
+                              : item.similarEstimate?.range
+                                ? valuationRangeMoney(item.similarEstimate.range)
+                                : searchLabel}
               </span>
             </header>
             <p>
@@ -185,14 +194,18 @@ export function EquipmentPricingView({
                   : pendingAverage
                     ? searchLabel
                     : item.status === "priced" && item.priceMethod
-                      ? "同配置挂牌平均价"
-                      : item.similarEstimate?.average !== undefined
-                        ? "相近" + asset + "参考价（挂牌平均价）"
-                        : item.similarEstimate?.median !== undefined
-                          ? "相近" + asset + "参考价（挂牌中位数）"
-                          : item.similarEstimate?.range
-                            ? "相近配置参考区间"
-                            : searchLabel}
+                      ? minimumReference
+                        ? "同配置最低挂牌价"
+                        : "同配置挂牌平均价"
+                      : minimumReference && item.similarEstimate?.range
+                        ? "相近" + asset + "参考价（最低挂牌价）"
+                        : item.similarEstimate?.average !== undefined
+                          ? "相近" + asset + "参考价（挂牌平均价）"
+                          : item.similarEstimate?.median !== undefined
+                            ? "相近" + asset + "参考价（挂牌中位数）"
+                            : item.similarEstimate?.range
+                              ? "相近配置参考区间"
+                              : searchLabel}
             </p>
             {"reason" in item &&
               typeof item.reason === "string" &&

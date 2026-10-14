@@ -242,7 +242,7 @@ describe("分析自动宝宝装备查价与增量复用", () => {
       expect(second.items[0].searchCursor).toBeUndefined();
     },
   );
-  it("同配置中位数保存为查价参考，宝宝装备仍不重复加入总价", async () => {
+  it("同配置最低价保存为查价参考，宝宝装备仍不重复加入总价", async () => {
     mocks.findCandidates.mockImplementation(async (items: PetGearPricingItem[]) => ({
       queries: ["【模拟测试】同配置官网界面全服"],
       searchItems: [],
@@ -270,7 +270,7 @@ describe("分析自动宝宝装备查价与增量复用", () => {
       total: null,
       knownTotal: 0,
       accounting: expect.stringContaining("不重复相加"),
-      items: [{ referencePrice: 200 }, { referencePrice: 200 }],
+      items: [{ referencePrice: 100 }, { referencePrice: 100 }],
     });
   });
   it("未采齐不打开浏览器，并保留缺项而不生成零报价", async () => {

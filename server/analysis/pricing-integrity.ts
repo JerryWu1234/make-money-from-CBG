@@ -21,7 +21,7 @@ export function skippedPricingItem(item: PricingItem) {
 }
 const round = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
 export const EQUIPMENT_QUOTE_LIMIT = 5;
-export const EQUIPMENT_QUOTE_POLICY = "first-five-average-v3";
+export const EQUIPMENT_QUOTE_POLICY = "first-five-minimum-v4";
 export const PRICING_RESUME_POLICY = "revalidate-pages-and-completion-evidence-v3";
 
 /** Average validated yuan quotations in integer cents, rounded half up. */
@@ -31,6 +31,10 @@ export function priceAverage(prices: readonly number[]): number | null {
     Math.round(prices.reduce((sum, price) => sum + Math.round(price * 100), 0) / prices.length) /
     100
   );
+}
+
+export function priceMinimum(prices: readonly number[]): number | null {
+  return prices.length ? Math.min(...prices) : null;
 }
 
 /** Validated listing amounts have at most two decimals; average cents before half-up rounding. */
@@ -154,16 +158,23 @@ export function unfinishedPricingSearch(item: PricingItem, records: unknown[] = 
     const modes = Array.isArray(record.modes) ? record.modes : [record];
     for (const stage of modes) {
       if (!stage || typeof stage !== "object" || typeof stage.exhausted !== "boolean") continue;
-      const mode = stage.mode || stage.matchType || "*";
+      const stageMode = stage.mode || stage.matchType || "*";
+      const mode = ["same-gems", "near-gems"].includes(stageMode) ? "exact" : stageMode;
       const boundedComplete =
-        record.act === "overall_search_pet" &&
+        [
+          "overall_search_pet",
+          "overall_search_equip",
+          "overall_search_lingshi",
+          "overall_search_yuanshen",
+          "yupo_search",
+        ].includes(String(record.act)) &&
         stage.sampleLimit === EQUIPMENT_QUOTE_LIMIT &&
         stage.sampled === EQUIPMENT_QUOTE_LIMIT &&
         stage.samplingComplete === true &&
         Array.isArray(stage.detailFailures) &&
         stage.detailFailures.length === 0 &&
-        Array.isArray(stage.unsupportedDetails) &&
-        stage.unsupportedDetails.length === 0;
+        (record.act !== "overall_search_pet" ||
+          (Array.isArray(stage.unsupportedDetails) && stage.unsupportedDetails.length === 0));
       if (["exact", "similar", "*"].includes(mode))
         stages.set(mode, stage.exhausted || boundedComplete);
     }
@@ -202,8 +213,10 @@ const exactReference = (
   }
   const values = [...prices.values()];
   return priceMethod === EQUIPMENT_QUOTE_POLICY
-    ? priceAverage(values.slice(0, EQUIPMENT_QUOTE_LIMIT))
-    : priceMedian(values);
+    ? priceMinimum(values.slice(0, EQUIPMENT_QUOTE_LIMIT))
+    : priceMethod === "first-five-average-v3"
+      ? priceAverage(values.slice(0, EQUIPMENT_QUOTE_LIMIT))
+      : priceMedian(values);
 };
 
 /** Legacy verified candidates were strictly exact; explicit comparable ranges never set exact totals. */

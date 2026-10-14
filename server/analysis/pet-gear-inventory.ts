@@ -18,7 +18,7 @@ import {
 import {
   candidateQuoteMatchesPrice,
   officialSourceIdentity,
-  priceAverage,
+  priceMinimum,
   EQUIPMENT_QUOTE_LIMIT,
   EQUIPMENT_QUOTE_POLICY,
   pricingTimestampFresh,
@@ -169,14 +169,14 @@ export function petGearReference(candidates: EquipmentCandidate[]) {
       };
     distinct.set(identity, candidate.price!);
   }
-  const average = priceAverage(
+  const minimum = priceMinimum(
     selected
       .filter((candidate) => candidate.matchType === "exact")
       .map((candidate) => candidate.price!),
   );
   return {
     referencePrice:
-      average !== null ? average : estimate.status === "range" ? estimate.average! : null,
+      minimum !== null ? minimum : estimate.status === "range" ? estimate.range!.min : null,
     similarEstimate: estimate,
   };
 }

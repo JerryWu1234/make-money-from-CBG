@@ -18,14 +18,14 @@ export type SimilarEstimate = {
   average?: number;
   issues: string[];
 };
-export const SIMILAR_POLICY_VERSION = "protected-core-first-five-average-v6";
-export const EQUIPMENT_SIMILAR_POLICY_VERSION = "bounded-attributes-first-five-average-v8";
+export const SIMILAR_POLICY_VERSION = "protected-core-first-five-minimum-v7";
+export const EQUIPMENT_SIMILAR_POLICY_VERSION = "bounded-attributes-first-five-minimum-v9";
 
 export function buildEquipmentEstimate(candidates: EquipmentCandidate[]): SimilarEstimate {
   return buildSimilarEstimate(candidates, true);
 }
 
-/** Keep official listing order, deduplicate, and average up to five verified quotations. */
+/** Keep the first five verified quotations; range.min is the adopted reference. */
 export function buildSimilarEstimate(
   candidates: EquipmentCandidate[],
   equipment = false,
@@ -75,7 +75,7 @@ export function buildSimilarEstimate(
       ...base,
       status: "insufficient",
       range: null,
-      issues: ["没有已核验的独立在售商品，无法计算挂牌平均价"],
+      issues: ["没有已核验的独立在售商品，无法取得最低挂牌价"],
     };
   const min = Math.min(...prices),
     max = Math.max(...prices);
@@ -86,13 +86,11 @@ export function buildSimilarEstimate(
     median: priceMedian(prices)!,
     average: priceAverage(prices)!,
     issues: [
-      `参考价为前${prices.length}件已核实相近在售商品的算术平均价，目标为${EQUIPMENT_QUOTE_LIMIT}件；保留挂牌范围及配置差异，不代表成交价`,
+      `参考价为前${prices.length}件已核实相近在售商品的最低挂牌价，最多${EQUIPMENT_QUOTE_LIMIT}件；保留挂牌范围、审计均价和中位数及配置差异，不代表成交价`,
       ...(prices.length < EQUIPMENT_QUOTE_LIMIT
-        ? [`仅${prices.length}件样本，须确认本次检索已结束后才采用实际样本数`]
+        ? [`仅${prices.length}件样本，须确认检索已结束或每条件前5条范围核验完成后才采用实际样本数`]
         : []),
-      ...(max / min > 1.5
-        ? ["挂牌价差超过1.5倍，均价受高价样本影响，需结合范围和配置差异判断"]
-        : []),
+      ...(max / min > 1.5 ? ["挂牌价差超过1.5倍，需结合范围和配置差异判断最低价的代表性"] : []),
     ],
   };
 }

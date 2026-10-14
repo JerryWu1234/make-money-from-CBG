@@ -318,7 +318,7 @@ try {
           result.items[0].candidates.filter((candidate) => candidate.verified).length,
           3,
         );
-        assert.equal(petGearReference(result.items[0].candidates).referencePrice, 220);
+        assert.equal(petGearReference(result.items[0].candidates).referencePrice, 200);
         assert.deepEqual(
           requests.map((request) => request.page),
           ["1", "2"],
@@ -378,7 +378,7 @@ try {
       ),
     );
   });
-  await check("前五件宝宝装备跨页去重计算均价，不采用第六件低价", async () => {
+  await check("前五件宝宝装备跨页去重取最低价，不采用第六件低价", async () => {
     const prices = [100, 110, 120, 130, 140, 150, 160, 170, 180, 900, 1];
     const ids = prices.map((_, index) => `ten-${index}`);
     const result = await run(target, {
@@ -391,7 +391,7 @@ try {
       result.items[0].candidates.map(({ price }) => price),
       prices.slice(0, 5),
     );
-    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 120);
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 100);
     assert.deepEqual(
       requests.map(({ page }) => page),
       ["1"],
@@ -410,7 +410,7 @@ try {
     assert.equal(second.items[0].searchStatus, "completed", second.items[0].note);
     assert.equal(second.items[0].searchCursor, undefined);
     assert.deepEqual(detailVisits, ["one", "two", "three"]);
-    assert.equal(petGearReference(second.items[0].candidates).referencePrice, 220);
+    assert.equal(petGearReference(second.items[0].candidates).referencePrice, 200);
     assertClearedFilters();
   });
   await check("无样本第一页停止翻页，未读完页面变动后仍完整重读当前条件", async () => {
@@ -470,7 +470,7 @@ try {
           rebuilt.items[0].candidates.map((x) => new URL(x.url).searchParams.get("eid")),
           changed,
         );
-        assert.equal(petGearReference(rebuilt.items[0].candidates).referencePrice, 220);
+        assert.equal(petGearReference(rebuilt.items[0].candidates).referencePrice, 200);
       }
     }
   });
@@ -498,7 +498,7 @@ try {
     assert.equal(second.searchItems[1].page, 2);
     assertClearedFilters();
   });
-  await check("官网顺序只取前五件相近报价均价，不因距离或价差删除有效样本", async () => {
+  await check("官网顺序只取前五件相近报价最低价，不因距离或价差删除有效样本", async () => {
     const ids = ["farOne", "farTwo", "farThree", "nearOne", "nearTwo", "nearThree"];
     const result = await run(target, {
       pages: [ids],
@@ -511,7 +511,7 @@ try {
     });
     assert.equal(result.items[0].searchStatus, "completed", result.items[0].note);
     assert.deepEqual(detailVisits, ids.slice(0, 5));
-    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 270);
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 100);
     assert.equal(result.items[0].candidates.filter((candidate) => candidate.verified).length, 5);
   });
   await check("游标续查：失败详情先重试，再继续保存行之后的商品", async () => {

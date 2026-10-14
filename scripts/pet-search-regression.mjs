@@ -1419,7 +1419,7 @@ try {
       assert.equal(result.queries.length, 1);
     }),
   );
-  await check("分页结果不足五件时去重后用实际样本均价，所有候选都经过主详情核对", () =>
+  await check("分页结果不足五件时去重后用实际样本最低价，所有候选都经过主详情核对", () =>
     withSource(
       {
         pages: [
@@ -1433,13 +1433,13 @@ try {
       (eid) => ({ price: eid === "a" ? 1000 : 1400, rawPrice: eid === "a" ? "1000" : "1400" }),
       async ({ source, control }) => {
         const result = await searchPetPricing(record(), control.signal, source);
-        assert.equal(result.total, 1200);
+        assert.equal(result.total, 1000);
         assert.deepEqual(detailVisits, ["a", "b"]);
         assert.equal(result.items[0].candidates.filter((value) => value.verified).length, 2);
       },
     ),
   );
-  await check("每筛选条件只核验前五条：实际三件均价，无有效样本跳过，不读取第六条", async () => {
+  await check("每筛选条件只核验前五条：实际三件最低价，无有效样本跳过，不读取第六条", async () => {
     const rows = Array.from({ length: 6 }, (_, i) => ({ eid: `bounded-${i}`, name: "宝宝昵称" }));
     const evidence = [];
     for (const validIndexes of [[0, 2, 4], [5]]) {
@@ -1462,7 +1462,7 @@ try {
             rows.slice(0, 5).map((row) => row.eid),
           );
           if (validIndexes.length === 3) {
-            assert.equal(result.items[0].referencePrice, 300);
+            assert.equal(result.items[0].referencePrice, 100);
             assert.equal(result.items[0].candidates.filter((x) => x.verified).length, 3);
           } else {
             assert.equal(result.items[0].searchState, "skipped");
@@ -1519,7 +1519,7 @@ try {
       },
     );
   });
-  await check("前五件宝宝跨页去重和断点续查后计算均价，不采用第六件低价", async () => {
+  await check("前五件宝宝跨页去重和断点续查后取最低价，不采用第六件低价", async () => {
     const prices = [100, 110, 120, 130, 140, 150, 160, 170, 180, 900, 1];
     const rows = prices.map((_, index) => ({ eid: `ten-${index}`, name: "宝宝昵称" }));
     const pages = [rows.slice(0, 5), [rows[0], ...rows.slice(5)]];
@@ -1540,8 +1540,8 @@ try {
     }
     assert.equal(previous.searchComplete, true);
     assert.equal(previous.items[0].searchState, "completed");
-    assert.equal(previous.total, 120);
-    assert.equal(previous.items[0].priceMethod, "first-five-average-v3");
+    assert.equal(previous.total, 100);
+    assert.equal(previous.items[0].priceMethod, "first-five-minimum-v4");
     assert.deepEqual(
       previous.items[0].candidates.map(({ price }) => price),
       prices.slice(0, 5),

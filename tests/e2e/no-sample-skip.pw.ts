@@ -124,7 +124,7 @@ for (const rule of [
       true,
     );
     const samplePrices = [100, 110, 120, 130, 140];
-    const sampleAverage = 120;
+    const sampleMinimum = 100;
     let equipmentCalls = 0,
       petCalls = 0,
       gearCalls = 0,
@@ -273,7 +273,7 @@ for (const rule of [
       const saved = store.overview().results.items[0];
       const result = saved.result.valuation!;
       const bare = calculateValuation(record, profile);
-      expect(result.estimated_value).toBe(bare.model_value! + sampleAverage);
+      expect(result.estimated_value).toBe(bare.model_value! + sampleMinimum);
       expect(result.estimate_missing_count).toBe(0);
       expect(result).not.toHaveProperty("role_pricing");
       expect(result).not.toHaveProperty("special_asset_reference");
@@ -297,7 +297,7 @@ for (const rule of [
         searchState: "skipped",
         referencePrice: null,
       });
-      expect(result.equipment_pricing?.items[1].referencePrice).toBe(sampleAverage);
+      expect(result.equipment_pricing?.items[1].referencePrice).toBe(sampleMinimum);
       expect(result.pet_pricing?.items[0]).toMatchObject({
         searchState: "skipped",
         referencePrice: null,
@@ -348,6 +348,7 @@ for (const rule of [
         ).toContainText(skipLabel);
       }
       await expect(dialog).toContainText("市场售价未知");
+      await expect(dialog).toContainText("采用实际有效样本的最低挂牌价");
       if (noSample) await expect(dialog).toContainText("随身装备不再核验");
       await expect(dialog.getByRole("region", { name: "装备联网查价", exact: true })).toContainText(
         "专用或绑定装备，未计入参考合计",
@@ -381,10 +382,10 @@ for (const rule of [
             skipRule: rule,
             inputBytes,
             samplePrices,
-            sampleAverage,
+            sampleMinimum,
             calls: { equipmentCalls, petCalls, gearCalls, aiCalls },
             bareValue: bare.model_value,
-            expectedValue: bare.model_value! + sampleAverage,
+            expectedValue: bare.model_value! + sampleMinimum,
             detail: store.detail(saved.taskId, profile),
           },
           null,

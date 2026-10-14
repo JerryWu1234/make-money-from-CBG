@@ -10,7 +10,7 @@ import {
   jewelryDescriptionSections,
   observedEquipmentCategory,
 } from "../crawler/compact";
-import { equipmentInitialDefense, parseEquipmentAttributes } from "./equip-attributes";
+import { equipmentInitialAttribute, parseEquipmentAttributes } from "./equip-attributes";
 import {
   equipmentAttributeLowerBound,
   equipmentEnhancementMismatch,
@@ -321,10 +321,7 @@ export function equipmentQuery(
   } else {
     const suit = suitFilter(fields.套装 || [], config);
     if (suit) args.suit_effect = suit;
-    integer("伤害", "damage");
-    integer("灵力", "all_wakan");
-    // Descriptions retain melting separately; these bounds use the observed original values.
-    if (args.damage !== undefined || args.all_wakan !== undefined) args.attr_without_melt = 1;
+
     integer("锻炼等级", "gem_level");
     const holes =
       fields.开运孔数?.length === 1
@@ -338,31 +335,20 @@ export function equipmentQuery(
       (holes[2] === undefined || (Number(holes[2]) <= 5 && Number(holes[1]) <= Number(holes[2])))
     )
       args.hole_num = Number(holes[1]);
-    const gemLevels = fields.锻炼等级;
-    const noGems =
-      !(fields.宝石 || []).some((value) => value.trim()) &&
-      (!gemLevels ||
-        (gemLevels.length === 1 && /^\+?\d+$/.test(gemLevels[0]) && Number(gemLevels[0]) === 0));
-    if (noGems) {
-      // The official init_* inputs are lower bounds. Only ungemmed, separately observed
-      // base values are usable here; do not convert total values or add melting effects.
-      for (const [field, parameter] of [
-        ["气血", "init_hp"],
-        ["敏捷", "init_dex"],
-      ] as const) {
-        if (field === "敏捷" && kind?.[1] !== "鞋子") continue;
-        const values = fields[field];
-        if (values?.length !== 1 || !/^\+?\d+$/.test(values[0])) continue;
-        const value = Number(values[0]);
-        if (value > 10000) continue;
+    const attributes = parseEquipmentAttributes(item.description);
+    for (const [field, parameter] of [
+      ["伤害", "init_damage_raw"],
+      ["灵力", "init_wakan"],
+      ["气血", "init_hp"],
+      ["敏捷", "init_dex"],
+      ["防御", "init_defense"],
+    ] as const) {
+      if (field === "敏捷" && kind?.[1] !== "鞋子") continue;
+      const value = equipmentInitialAttribute(attributes, field);
+      if (value !== null) {
         args[parameter] = value;
         args.attr_without_melt = 1;
       }
-    }
-    const initialDefense = equipmentInitialDefense(parseEquipmentAttributes(item.description));
-    if (initialDefense !== null) {
-      args.init_defense = initialDefense;
-      args.attr_without_melt = 1;
     }
     for (const [field, key, choices] of [
       ["特效", "special_effect", config.effects],
@@ -385,6 +371,8 @@ export function equipmentQuery(
     if (!jewelry) delete args.suit_effect;
     for (const [key, field] of [
       ["init_defense", "防御"],
+      ["init_damage_raw", "伤害"],
+      ["init_wakan", "灵力"],
       ["init_hp", "气血"],
       ["init_dex", "敏捷"],
       ["all_wakan", "灵力"],
@@ -1270,6 +1258,8 @@ export async function applyEquipmentSearchForm(
       "all_wakan",
       "gem_level",
       "init_defense",
+      "init_damage_raw",
+      "init_wakan",
       "init_hp",
       "init_dex",
       "hole_num",
@@ -1767,6 +1757,13 @@ export function equipmentSourceFromPages(
                 : equipmentQuery(item, config).args),
             server_type: "3",
           };
+          if (
+            !jewelry &&
+            !jade &&
+            !yuanshen &&
+            !Object.keys(exactArgs).some((key) => key.startsWith("init_"))
+          )
+            throw new Error("装备初始属性无法可靠还原，请核对基础属性、宝石种类及段数后再查询");
           const act = yuanshen
             ? await searchPage.evaluate(() => {
                 const globals = window as unknown as {
@@ -1804,7 +1801,7 @@ export function equipmentSourceFromPages(
           marketScope = createMarketScopeAudit(searchPage, yuanshen ? [act] : []);
           const planHash = digest({
             resumePolicy: PRICING_RESUME_POLICY,
-            firstPagePolicy: "empty-first-page-next-stage-v1",
+            firstPagePolicy: "first-five-per-condition-v2",
             name: item.name,
             level: item.level,
             category: item.category,
@@ -1834,6 +1831,10 @@ export function equipmentSourceFromPages(
             args: Query;
             pages: number;
             exhausted: boolean;
+            sampleLimit: number;
+            sampled: number;
+            samplingComplete: boolean;
+            detailFailures: unknown[];
           }> = [];
           const itemQueries: string[] = [];
           const scopeEvidence: Array<{
@@ -1849,7 +1850,12 @@ export function equipmentSourceFromPages(
           const candidates: EquipmentCandidate[] = [],
             similar: EquipmentCandidate[] = [],
             rejected: EquipmentCandidate[] = [];
-          const detailFailures: Array<{ url: string; reason: string; diagnostics: unknown }> = [];
+          const detailFailures: Array<{
+            url: string;
+            modeIndex: number;
+            reason: string;
+            diagnostics: unknown;
+          }> = [];
           const seen = new Set(next.seen);
           const failed = new Map(next.failed.map((value) => [value.url, value.modeIndex]));
           const attemptedDetails = new Set<string>();
@@ -2038,6 +2044,7 @@ export function equipmentSourceFromPages(
               failed.set(url, modeIndex);
               detailFailures.push({
                 url,
+                modeIndex,
                 reason: error instanceof Error ? error.message.split("\n")[0] : "无法读取装备详情",
                 diagnostics:
                   error && typeof error === "object" && "equipmentDiagnostics" in error
@@ -2088,7 +2095,7 @@ export function equipmentSourceFromPages(
               if (attemptedDetails.has(url)) continue;
               if (details >= MAX_DETAILS || Date.now() >= deadline) break;
               if (!(await readCandidate(safeEquipmentUrl(url), modeIndex))) {
-                seen.delete(equipmentIdentity(url));
+                seen.delete(modeIndex + "|" + equipmentIdentity(url));
               }
             }
           }
@@ -2096,6 +2103,9 @@ export function equipmentSourceFromPages(
           let historyValidated = !savedCursor?.pageHistory?.length;
           queryStages: for (let modeIndex = 0; modeIndex < queryModes.length; modeIndex++) {
             const { mode, args } = queryModes[modeIndex];
+            const sampleLimit = EQUIPMENT_QUOTE_LIMIT;
+            let inspected = [...seen].filter((key) => key.startsWith(modeIndex + "|")).length;
+            let samplingComplete = false;
             if (failed.size) break;
             if (
               count >= MAX_ROWS ||
@@ -2374,6 +2384,14 @@ export function equipmentSourceFromPages(
             if (roundPages >= MAX_PAGES) break;
             // A new scan starts a fresh validation cycle for the next continuation.
             next.historyIndex = 0;
+            if (inspected >= sampleLimit && !failed.size) {
+              samplingComplete = true;
+              next.modeIndex =
+                candidates.length || similar.length ? queryModes.length : modeIndex + 1;
+              next.pageNumber = 1;
+              next.rowIndex = 0;
+              next.pageRowsHash = "";
+            }
             for (
               let pageNumber = next.pageNumber;
               next.modeIndex === modeIndex &&
@@ -2381,6 +2399,7 @@ export function equipmentSourceFromPages(
               count < MAX_ROWS &&
               details < MAX_DETAILS &&
               !enoughSamples() &&
+              inspected < sampleLimit &&
               Date.now() < deadline;
               pageNumber++
             ) {
@@ -2444,20 +2463,22 @@ export function equipmentSourceFromPages(
                 const row = rankedRows[rowIndex];
                 requestSignal.throwIfAborted();
                 const identity = equipmentIdentity(safeEquipmentUrl(row.url));
-                if (seen.has(identity)) {
+                const seenKey = modeIndex + "|" + identity;
+                if (seen.has(seenKey)) {
                   next.rowIndex = rowIndex + 1;
                   continue;
                 }
-                if (count >= MAX_ROWS || Date.now() >= deadline) {
+                if (count >= MAX_ROWS || inspected >= sampleLimit || Date.now() >= deadline) {
                   pageFullyRead = false;
                   break;
                 }
                 count++;
                 if (row.name !== item.name) {
                   skipListing(row, "装备名称不匹配");
-                  seen.add(identity);
+                  seen.add(seenKey);
+                  inspected++;
                   next.rowIndex = rowIndex + 1;
-                  if (count >= MAX_ROWS) {
+                  if (count >= MAX_ROWS || inspected >= sampleLimit) {
                     pageFullyRead = rowIndex === rankedRows.length - 1;
                     break;
                   }
@@ -2480,11 +2501,11 @@ export function equipmentSourceFromPages(
                           )
                         : null);
                 if (mismatch) {
-                  // Enhancement-stage mismatches may become valid in a later, wider stage.
-                  if (!/宝石种类|同段或相邻一段|没有完整证据/.test(mismatch)) seen.add(identity);
+                  seen.add(seenKey);
+                  inspected++;
                   next.rowIndex = rowIndex + 1;
                   skipListing(row, mismatch);
-                  if (count >= MAX_ROWS) {
+                  if (count >= MAX_ROWS || inspected >= sampleLimit) {
                     pageFullyRead = rowIndex === rankedRows.length - 1;
                     break;
                   }
@@ -2495,36 +2516,30 @@ export function equipmentSourceFromPages(
                   break;
                 }
                 stage = "candidate_read";
-                if (await readCandidate(row.url, modeIndex)) seen.add(identity);
+                await readCandidate(row.url, modeIndex);
+                seen.add(seenKey);
+                inspected++;
                 stage = "listing_read";
                 next.rowIndex = rowIndex + 1;
                 if (failed.size) {
                   pageFullyRead = false;
                   break;
                 }
-                if (count >= MAX_ROWS || enoughSamples()) {
+                if (count >= MAX_ROWS || enoughSamples() || inspected >= sampleLimit) {
                   pageFullyRead = rowIndex === rankedRows.length - 1;
                   break;
                 }
               }
-              if (!pageFullyRead || failed.size) break;
-              const verifiedFirstPage =
-                pageNumber === 1 &&
-                listing.rows.some((row) =>
-                  [...candidates, ...similar].some(
-                    (candidate) => equipmentIdentity(candidate.url) === equipmentIdentity(row.url),
-                  ),
-                );
-              if (pageNumber === 1 && listing.hasNext && !verifiedFirstPage) {
-                next.emptyFirstPageModes = [
-                  ...new Set([...(next.emptyFirstPageModes || []), modeIndex]),
-                ];
-                next.modeIndex = modeIndex + 1;
+              if (inspected >= sampleLimit && !failed.size && !detailFailures.length) {
+                samplingComplete = true;
+                next.modeIndex =
+                  candidates.length || similar.length ? queryModes.length : modeIndex + 1;
                 next.pageNumber = 1;
                 next.rowIndex = 0;
                 next.pageRowsHash = "";
                 break;
               }
+              if (!pageFullyRead || failed.size) break;
               if (!listing.hasNext) {
                 exhausted = !listing.hasNext;
                 // Exhausted same-config results use their actual count without mixing
@@ -2540,7 +2555,16 @@ export function equipmentSourceFromPages(
               next.rowIndex = 0;
               next.pageRowsHash = "";
             }
-            actualModes.push({ mode, args, pages: modePages, exhausted });
+            actualModes.push({
+              mode,
+              args,
+              pages: modePages,
+              exhausted,
+              sampleLimit,
+              sampled: inspected,
+              samplingComplete,
+              detailFailures: detailFailures.filter((failure) => failure.modeIndex === modeIndex),
+            });
             if (next.modeIndex >= queryModes.length || next.modeIndex === modeIndex) break;
           }
           const query = itemQueries.join("\n");
@@ -2548,33 +2572,25 @@ export function equipmentSourceFromPages(
           const historyPending =
             (next.historyIndex || 0) > 0 &&
             (next.historyIndex || 0) < (next.pageHistory?.length || 0);
-          const samplingStopped =
-            !!next.emptyFirstPageModes?.length &&
-            next.modeIndex >= queryModes.length &&
-            !candidates.length &&
-            !similar.length;
           const completed =
-            !samplingStopped &&
             !orderChanged &&
             historyValidated &&
             !historyPending &&
             (enoughSamples() || next.modeIndex >= queryModes.length);
           next.seen = [...seen];
           next.failed = [...failed].map(([url, modeIndex]) => ({ url, modeIndex }));
-          const note = samplingStopped
-            ? "各筛选条件仅检查第一页，均未取得有效样本；已停止翻页，后续页未查询。本件跳过，未计入参考合计；市场售价未知。"
-            : orderChanged
-              ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。"
-              : `本轮查询${roundPages}页、${count}个列表候选、${details}个详情；` +
-                (Object.keys(listingSkipCounts).length
-                  ? `列表已排除${Object.values(listingSkipCounts).reduce((sum, n) => sum + n, 0)}个不匹配商品；`
-                  : "") +
-                (completed && exhausted
-                  ? "本次筛选结果已读完"
-                  : completed
-                    ? "有限样本查询，未遍历全部在售商品"
-                    : "未遍历全部在售商品，本轮预算已用完，已保存筛选阶段、页码和行位置；继续查询剩余商品") +
-                "。";
+          const note = orderChanged
+            ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。"
+            : `本轮查询${roundPages}页、${count}个列表候选、${details}个详情；` +
+              (Object.keys(listingSkipCounts).length
+                ? `列表已排除${Object.values(listingSkipCounts).reduce((sum, n) => sum + n, 0)}个不匹配商品；`
+                : "") +
+              (completed && exhausted
+                ? "本次筛选结果已读完"
+                : completed
+                  ? "每个筛选条件仅核验前5条不同候选，搜索范围有限，未遍历全部在售商品；有样本按实际数量报价，无样本则跳过，市场售价未知"
+                  : "未遍历全部在售商品，本轮预算已用完，已保存筛选阶段、页码和行位置；继续查询剩余商品") +
+              "。";
           records.push({
             key: item.key,
             searchUrl: currentRecord.searchUrl,
@@ -2603,7 +2619,6 @@ export function equipmentSourceFromPages(
             key: item.key,
             query,
             searchState: itemSearchState,
-            ...(samplingStopped ? { samplingStopped: true } : {}),
             ...(!completed || failed.size ? { searchCursor: next } : {}),
             candidates: returnedCandidates(),
             note,

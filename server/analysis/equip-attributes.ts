@@ -20,6 +20,12 @@ const aliases: Record<string, string> = {
 };
 const labels = [
   "初始防御",
+  "初始伤害",
+  "初始命中",
+  "初始灵力",
+  "初始气血",
+  "初始敏捷",
+  "初始速度",
   "初防",
   "总防御",
   "等级",
@@ -99,9 +105,10 @@ const fieldPattern = new RegExp(
 const conditionPattern =
   /(?:^|[\s【[])(装备角色|装备对象|装备条件|使用条件|门派条件|部位条件)(?=[：:】\]]|\s)/g;
 const normalize = (value: string) => value.replace(/[\s：:，,；;【】[\]]/g, "").toLowerCase();
-/** Main description stats exclude separately rendered melting; only gem defense is removed. */
-export function equipmentInitialDefense(
+/** Main description stats already separate melting; subtract only known gem contributions. */
+export function equipmentInitialAttribute(
   attributes: EquipmentAttributes,
+  field: string,
   partial = false,
 ): number | null {
   const fields = attributes.fields;
@@ -111,9 +118,9 @@ export function equipmentInitialDefense(
     const value = Number(values[0]);
     return Number.isSafeInteger(value) && value <= 10000 ? value : null;
   };
-  const explicit = integer(fields.初始防御);
-  if (fields.初始防御 && explicit === null) return null;
-  const defense = integer(fields.防御);
+  const explicit = integer(fields["初始" + field]);
+  if (fields["初始" + field] && explicit === null) return null;
+  const displayed = integer(fields[field]);
   const gems = [
     ...new Set(
       (fields.宝石 || []).flatMap((value) => value.split(/[、，,；;\s]+/)).filter(Boolean),
@@ -121,32 +128,41 @@ export function equipmentInitialDefense(
   ];
   const grade = fields.锻炼等级 === undefined ? null : integer(fields.锻炼等级);
   let derived: number | null = null;
-  if (defense !== null) {
+  if (displayed !== null) {
     if (!gems.length && (fields.锻炼等级 === undefined || grade === 0)) {
-      if (!partial || grade === 0) derived = defense;
+      if (!partial || grade === 0) derived = displayed;
     } else if (grade !== null && grade > 0) {
-      // Official gem rules: https://xyq.163.com/introduce/dj008.html.
-      const withoutDefense = new Set([
-        "光芒石",
-        "太阳石",
-        "红宝石",
-        "黄宝石",
-        "蓝宝石",
-        "绿宝石",
-        "黑宝石",
-        "红玛瑙",
-        "舍利子",
-        "神秘石",
-        "翡翠石",
-      ]);
-      if (gems.length === 1 && gems[0] === "月亮石") derived = defense - grade * 12;
-      else if (gems.length && gems.every((gem) => withoutDefense.has(gem))) derived = defense;
+      // Official rules: https://xyq.163.com/introduce/dj008.html.
+      const effects: Record<string, Record<string, number>> = {
+        光芒石: { 气血: 40 },
+        太阳石: { 伤害: 8 },
+        月亮石: { 防御: 12 },
+        红玛瑙: { 命中: 25 },
+        黑宝石: { 速度: 8 },
+        舍利子: { 灵力: 6 },
+        神秘石: { 躲避: 20 },
+        翡翠石: { 法术防御: 12 },
+        红宝石: {},
+        黄宝石: {},
+        蓝宝石: {},
+        绿宝石: {},
+      };
+      if (gems.length && gems.every((gem) => effects[gem] !== undefined)) {
+        const contributions = [...new Set(gems.map((gem) => effects[gem][field] || 0))];
+        // Mixed stones with different effects need each stone's grade; do not infer the split.
+        if (contributions.length === 1) derived = displayed - grade * contributions[0];
+      }
     }
   }
   if (derived !== null && derived < 0) return null;
   if (explicit !== null && derived !== null && explicit !== derived) return null;
   return explicit ?? derived;
 }
+
+export function equipmentInitialDefense(attributes: EquipmentAttributes, partial = false) {
+  return equipmentInitialAttribute(attributes, "防御", partial);
+}
+
 function canonical(value: string) {
   const normalized = normalize(value).replace(/＋/g, "+").replace(/−/g, "-");
   const number = normalized.match(/^([+-]?\d+(?:\.\d+)?)(?:点|级|次|锻)?$/)?.[1];

@@ -5,7 +5,7 @@ import { cleanDescription, coreEquipmentDescription, itemFromAttributes } from "
 import { compareListingPrice } from "./valuation-calculator";
 import {
   inventoryMatchesSnapshot,
-  priceAverage,
+  priceMinimum,
   validateExactPricing,
   EQUIPMENT_QUOTE_LIMIT,
   EQUIPMENT_QUOTE_POLICY,
@@ -900,7 +900,7 @@ export async function searchPetPricing(
     if (readFailed) item.searchState = "read_failed";
     reconcilePricingCompletion(item, snapshot.searchItems);
     if (verified.length && item.searchState === "completed") {
-      item.referencePrice = priceAverage(
+      item.referencePrice = priceMinimum(
         verified.slice(0, EQUIPMENT_QUOTE_LIMIT).map((candidate) => candidate.price!),
       );
       item.status = "priced";
@@ -934,7 +934,7 @@ export async function searchPetPricing(
       if (readFailed && item.similarEstimate?.status !== "range") item.searchState = "read_failed";
       item.issues.push(
         item.similarEstimate?.status === "range"
-          ? "暂无完全同配置报价，采用相近宝宝挂牌平均价作为参考价，并保留报价范围和配置差异"
+          ? "暂无完全同配置报价，采用已核验相近宝宝样本最低挂牌价作为参考价，并保留报价范围和配置差异"
           : item.searchState === "read_failed"
             ? "宝宝独立详情读取失败，尚未完成查价；继续时重试"
             : item.searchState === "pending"
@@ -1018,7 +1018,7 @@ export function combinePetPricing(
         input: item.description,
         formula: skippedPricingItem(item)
           ? (item.skipReason || "无样本，未计入参考合计") + "；市场售价未知，不记作0元。"
-          : "同配置宝宝（含匹配随身装备）挂牌平均价（" +
+          : "同配置宝宝（含匹配随身装备）最低挂牌价（" +
             item.candidates.filter(
               (candidate) => candidate.verified && candidate.matchType !== "similar",
             ).length +

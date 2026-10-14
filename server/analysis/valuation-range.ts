@@ -148,7 +148,7 @@ export function applyValuationRange(
       ) {
         addAsset(estimate.range);
         referenceSubtotal = add(referenceSubtotal, estimate.range);
-        const reference = estimate.average;
+        const reference = estimate.range?.min;
         if ((equipmentReference || !allowBaseline) && reference !== undefined) {
           referenceValue = round(referenceValue + reference);
           medianReferences++;

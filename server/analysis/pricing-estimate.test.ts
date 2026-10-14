@@ -60,7 +60,7 @@ it("过期、伪造价格、无独立官方身份的来源不能计价", () => {
     range: null,
   });
 });
-it("宝宝平均值与审计中位数分开，不能以价格重新排序挑样本", () => {
+it("宝宝最低值与审计均价、中位数分开，不能以价格重新排序挑样本", () => {
   const estimate = buildSimilarEstimate([sample(900, 1), sample(1000, 2), sample(2100, 3)]);
   expect(estimate).toMatchObject({
     average: 1333.33,
@@ -68,7 +68,7 @@ it("宝宝平均值与审计中位数分开，不能以价格重新排序挑样�
     sampleCount: 3,
     status: "range",
   });
-  expect(estimate.issues.join("；")).toContain("算术平均价");
+  expect(estimate.issues.join("；")).toContain("最低挂牌价");
 });
 it("同商品报价冲突不能取更低价或计算均价", () => {
   expect(buildSimilarEstimate([sample(900, 1), sample(1000, 1)])).toMatchObject({

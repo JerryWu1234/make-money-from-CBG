@@ -1137,7 +1137,7 @@ describe("宝宝来源核对与挂牌比价", () => {
     ).toBe(false);
   });
 
-  it("同商品别名链接只算一条，独立当前报价取平均值", async () => {
+  it("同商品别名链接只算一条，独立当前报价取最低值", async () => {
     const candidates = [
       candidate(900),
       { ...candidate(900), url: "https://xyq-m.cbg.163.com/equip?s=367&eid=sample-a" },
@@ -1147,20 +1147,20 @@ describe("宝宝来源核对与挂牌比价", () => {
     const { snapshot, read } = await pricing(recordWithPets(), candidates);
     expect(snapshot.items[0].candidates).toHaveLength(3);
     expect(read).toHaveBeenCalledTimes(3);
-    expect(snapshot.total).toBe(1666.67);
+    expect(snapshot.total).toBe(900);
   });
 
-  it("两条独立宝宝报价相差一分，半分进位后可通过完整性校验并合入总价", async () => {
+  it("两条独立宝宝报价相差一分，最低价通过完整性校验并合入总价", async () => {
     const record = recordWithPets();
     const { snapshot } = await pricing(record, [
       candidate(1050.01, "cent-a"),
       candidate(1050.02, "cent-b"),
     ]);
-    expect(snapshot.items[0].referencePrice).toBe(1050.02);
-    expect(snapshot).toMatchObject({ knownTotal: 1050.02, total: 1050.02 });
+    expect(snapshot.items[0].referencePrice).toBe(1050.01);
+    expect(snapshot).toMatchObject({ knownTotal: 1050.01, total: 1050.01 });
     expect(combinePetPricing(upstream(), record, snapshot)).toMatchObject({
-      pet_value: 1050.02,
-      model_value: 3050.02,
+      pet_value: 1050.01,
+      model_value: 3050.01,
     });
   });
 

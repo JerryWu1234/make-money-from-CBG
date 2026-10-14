@@ -366,17 +366,14 @@ try {
       };
       const result = await searchEquipmentPrices(record, control.signal, source);
       assert.equal(result.searchComplete, true);
-      assert.equal(result.items[0].exclusion?.label, "无匹配，未计入参考合计");
+      assert.equal(result.items[0].searchState, "skipped");
       assert.equal(result.items[0].referencePrice, null);
       assert.equal(result.total, null);
-      assert.deepEqual(
-        result.items[0].exclusion.stages.map((stage) => stage.mode),
-        ["exact", "similar"],
-      );
+      assert.ok(result.searchItems[0].modes.every((stage) => stage.exhausted));
     }),
   );
 
-  await check("前五件均价完整经过表单提交、翻页、详情核验和计价，不读取第六件", () => {
+  await check("前五件最低价完整经过表单提交、翻页、详情核验和计价，不读取第六件", () => {
     const prices = [145, 100, 130, 110, 120, 101, 102, 103, 104, 105, 1];
     return withSource(
       {
@@ -415,9 +412,9 @@ try {
           },
         };
         const result = await searchEquipmentPrices(record, control.signal, source);
-        assert.equal(result.total, 121, JSON.stringify(result));
+        assert.equal(result.total, 100, JSON.stringify(result));
         assert.equal(result.searchComplete, true);
-        assert.equal(result.items[0].referencePrice, 121);
+        assert.equal(result.items[0].referencePrice, 100);
         assert.deepEqual(
           result.items[0].candidates.map((value) => value.price),
           prices.slice(0, 5),
@@ -436,6 +433,83 @@ try {
       },
     );
   });
+
+  await check("每条件前5条只有3件有效时采用最低价，不读第6条低价", () =>
+    withSource(
+      {
+        pages: [
+          Array.from({ length: 6 }, (_, i) => ({ eid: "bounded-" + i, name: equipmentName })),
+        ],
+      },
+      (id) => ({
+        description: [1, 3].includes(Number(id.split("-")[1]))
+          ? equipmentDescription.replace("防御：50", "防御：99")
+          : equipmentDescription,
+        price: [300, 1, 200, 1, 400, 1][Number(id.split("-")[1])],
+      }),
+      async ({ source, control }) => {
+        const capturedAt = new Date().toISOString();
+        const record = {
+          listing: { serverId: "1" },
+          detail: {
+            collectedAt: capturedAt,
+            equipmentCapture: { version: 1, collectedAt: capturedAt, complete: true, issues: [] },
+            tabs: [
+              {
+                name: "道具/法宝",
+                text: "",
+                fields: [],
+                tables: [],
+                elements: [],
+                tooltips: [],
+                items: [
+                  {
+                    index: 0,
+                    kind: "equipment",
+                    name: equipmentName,
+                    category: "人物装备 · 腰带",
+                    description: equipmentDescription,
+                  },
+                ],
+              },
+            ],
+          },
+        };
+        const result = await searchEquipmentPrices(record, control.signal, source);
+        assert.equal(result.searchComplete, true);
+        assert.equal(result.total, 200);
+        assert.deepEqual(
+          result.items[0].candidates.filter((c) => c.verified).map((c) => c.price),
+          [300, 200, 400],
+        );
+        assert.deepEqual(
+          detailVisits,
+          Array.from({ length: 5 }, (_, i) => "bounded-" + i),
+        );
+        assert.deepEqual(result.searchItems[0].modes[0], {
+          ...result.searchItems[0].modes[0],
+          sampleLimit: 5,
+          sampled: 5,
+          samplingComplete: true,
+          exhausted: false,
+        });
+        await mkdir("data/pr27-fix-validation", { recursive: true });
+        await writeFile(
+          "data/pr27-fix-validation/equipment-first-five-minimum.json",
+          JSON.stringify(
+            {
+              simulated: true,
+              scenario: "每条件只核验前5条候选，实际3件有效报价取最低价，禁止第6条补样本",
+              result,
+              detailVisits,
+            },
+            null,
+            2,
+          ),
+        );
+      },
+    ),
+  );
 
   await check("前五件相近报价保留官网顺序，不按属性距离重新挑样本", () => {
     const prices = [145, 100, 130, 110, 120, 101, 102, 103, 104, 105, 1];
@@ -534,8 +608,8 @@ try {
   );
 
   for (const sample of [
-    { category: "剑", field: "伤害", parameter: "damage", raw: 300, melting: -10 },
-    { category: "饰品", field: "灵力", parameter: "all_wakan", raw: 100, melting: -5 },
+    { category: "剑", field: "伤害", parameter: "init_damage_raw", raw: 300, melting: -10 },
+    { category: "饰品", field: "灵力", parameter: "init_wakan", raw: 100, melting: -5 },
   ]) {
     await check("负熔炼原值查询：带宝石" + sample.category, async () => {
       const name = "负熔炼" + sample.category;
@@ -821,25 +895,27 @@ try {
       {},
       async ({ source, control }) => {
         const result = await source.findCandidates(
-          [item({ description: "等级100" })],
+          [item({ description: "等级100\n防御50" })],
           control.signal,
         );
         const evidence = result.searchItems[0].scopeEvidence;
-        assert.equal(evidence.length, 2);
+        assert.equal(evidence.length, 4);
         assert.deepEqual(
           evidence.map((entry) => entry.request.page),
-          [1, 2],
+          [1, 2, 1, 2],
         );
         assert.deepEqual(
           evidence.map((entry) => entry.request.restrictions),
           [
             { serverid: "0", area_id: "" },
             { serverid: "0", area_id: "" },
+            { serverid: "0", area_id: "" },
+            { serverid: "0", area_id: "" },
           ],
         );
         assert.deepEqual(
           evidence.map((entry) => entry.candidateServers),
-          [{ 33: 1, 123: 1 }, { 377: 1 }],
+          [{ 33: 1, 123: 1 }, { 377: 1 }, { 33: 1, 123: 1 }, { 377: 1 }],
         );
         assert.equal(result.items[0].searchState, "completed");
         assert.deepEqual(detailVisits, []);
@@ -921,7 +997,7 @@ try {
       },
     );
   });
-  await check("初防衣服全流程：填写、提交、翻页、独立报价核验与均价", async () => {
+  await check("初防衣服全流程：填写、提交、翻页、独立报价核验与最低价", async () => {
     const name = "模拟月亮石衣服";
     const description =
       "等级100\n防御296\n耐久300\n锻炼等级8\n镶嵌宝石 月亮石\n熔炼效果：\n+10防御";
@@ -976,8 +1052,8 @@ try {
         };
         const snapshot = await searchEquipmentPrices(record, control.signal, source);
         assert.equal(snapshot.searchComplete, true);
-        assert.equal(snapshot.total, 700);
-        assert.equal(snapshot.items[0].referencePrice, 700);
+        assert.equal(snapshot.total, 600);
+        assert.equal(snapshot.items[0].referencePrice, 600);
         assert.deepEqual(
           snapshot.items[0].candidates.map((value) => new URL(value.url).searchParams.get("eid")),
           ["initial-1", "initial-2"],
@@ -1035,7 +1111,70 @@ try {
     );
   });
 
-  await check("列表先排除十个明确不同配置，后续有效报价只读取一个详情", () => {
+  for (const sample of [
+    {
+      category: "剑",
+      field: "伤害",
+      gem: "太阳石",
+      shown: 581,
+      base: 501,
+      param: "init_damage_raw",
+    },
+    { category: "饰品", field: "灵力", gem: "舍利子", shown: 232, base: 172, param: "init_wakan" },
+    { category: "腰带", field: "气血", gem: "光芒石", shown: 576, base: 176, param: "init_hp" },
+  ])
+    await check("宝石基础值实际填框：" + sample.category, () => {
+      const name = "模拟基础值" + sample.category;
+      const description = `等级100\n${sample.field}${sample.shown}\n耐久300\n锻炼等级10\n镶嵌宝石 ${sample.gem}\n熔炼效果：\n+10${sample.field}`;
+      return withSource(
+        { pages: [[{ eid: "base-gem", name, rawAttributes: { [sample.param]: sample.base } }]] },
+        { name, description },
+        async ({ source, searchPage, control }) => {
+          const result = await source.findCandidates(
+            [item({ name, category: "人物装备 · " + sample.category, description })],
+            control.signal,
+          );
+          const [query] = await searchPage.evaluate(() => window.calls);
+          assert.equal(query[sample.param], sample.base);
+          assert.equal(query.attr_without_melt, 1);
+          assert.equal(result.items[0].candidates[0].verified, true);
+          assert.ok(
+            result.searchItems[0].uiQueries[0].actions.some(
+              (a) => a.control === "txt_" + sample.param && a.value === String(sample.base),
+            ),
+          );
+          await mkdir("data/pr27-fix-validation", { recursive: true });
+          await writeFile(
+            "data/pr27-fix-validation/base-gem-" + sample.param + ".json",
+            JSON.stringify(
+              { simulated: true, description, expectedBase: sample.base, query, result },
+              null,
+              2,
+            ),
+          );
+        },
+      );
+    });
+
+  await check("混合宝石无法还原初始属性时不提交搜索、不伪造无样本", () =>
+    withSource({}, {}, async ({ source, control }) => {
+      const result = await source.findCandidates(
+        [
+          item({
+            category: "人物装备 · 剑",
+            description: "等级100\n伤害581\n耐久300\n锻炼等级10\n镶嵌宝石 太阳石、红玛瑙",
+          }),
+        ],
+        control.signal,
+      );
+      assert.equal(result.items[0].searchState, "read_failed");
+      assert.match(result.items[0].note, /初始属性无法可靠还原/);
+      assert.deepEqual(marketRequests, []);
+      assert.deepEqual(detailVisits, []);
+    }),
+  );
+
+  await check("前5条列表均不匹配时不补查第6条及后排有效商品", () => {
     const description = "等级 100\n气血 +176 防御 +50\n耐久度 435";
     const wrong = Array.from({ length: 10 }, (_, i) => ({
       eid: "wrong-list-" + i,
@@ -1057,12 +1196,17 @@ try {
       { renderedPanel: true, selling: 1, description },
       async ({ source, control }) => {
         const result = await source.findCandidates([item({ description })], control.signal);
-        assert.equal(result.items[0].candidates[0].verified, true);
-        assert.deepEqual(detailVisits, ["matching"]);
-        assert.equal(result.searchItems[0].details, 1);
-        assert.equal(result.searchItems[0].listingRejected.length, 10);
-        assert.match(result.items[0].note, /列表已排除10/);
-        assert.equal(result.searchItems[0].exhausted, true);
+        assert.equal(
+          result.items[0].candidates.some((candidate) => candidate.verified),
+          false,
+        );
+        assert.deepEqual(detailVisits, []);
+        assert.ok(
+          result.searchItems[0].modes.every(
+            (stage) => stage.sampled === 5 && stage.samplingComplete && !stage.exhausted,
+          ),
+        );
+        assert.match(result.items[0].note, /搜索范围有限/);
       },
     );
   });
@@ -1259,8 +1403,8 @@ try {
         assert.equal(query.suit_effect_level, 2);
         assert.equal(query.server_type, "3");
         assert.equal(result.items[0].searchState, "completed");
-        assert.equal(result.items[0].candidates.length, 5);
-        assert.deepEqual(detailVisits, ["ear-0", "ear-1", "ear-2", "ear-3", "ear-4"]);
+        assert.equal(result.items[0].candidates.length, 4);
+        assert.deepEqual(detailVisits, ["ear-0", "ear-1", "ear-2", "ear-3"]);
         for (const candidate of result.items[0].candidates) {
           assert.equal(candidate.verified, true);
           assert.equal(candidate.matchType, "similar");
@@ -1290,7 +1434,7 @@ try {
           false,
         );
         const rejected = result.searchItems.flatMap((record) => record.rejectedCandidates || []);
-        assert.equal(rejected.length, 1);
+        assert.equal(rejected.length, 4);
         assert.equal(rejected[0].verified, false);
         assert.match(rejected[0].reason, /主属性.*法术伤害.*20%/);
         assert.deepEqual(detailVisits, ["swapped-ear"]);
@@ -1927,7 +2071,7 @@ try {
     withSource(
       {
         pages: [
-          [{ eid: "wrong", name: "其他装备" }],
+          Array.from({ length: 5 }, (_, i) => ({ eid: "wrong-" + i, name: "其他装备" })),
           [{ eid: "later-match", name: equipmentName }],
         ],
       },
@@ -1954,9 +2098,9 @@ try {
         assert.ok(calls.length >= 1);
         assert.ok(calls.every((call) => call.page === 1));
         assert.deepEqual(detailVisits, []);
-        assert.equal(result.items[0].samplingStopped, true);
-        assert.equal(result.items[0].searchState, "pending");
-        assert.match(result.items[0].note, /后续页未查询/);
+        assert.notEqual(result.items[0].samplingStopped, true);
+        assert.equal(result.items[0].searchState, "completed");
+        assert.match(result.items[0].note, /搜索范围有限/);
         assert.ok(result.searchItems[0].modes.every((mode) => mode.exhausted === false));
       },
     ),
@@ -1965,21 +2109,23 @@ try {
     withSource(
       {
         pages: [
-          [{ eid: "rejected", name: equipmentName }],
+          Array.from({ length: 5 }, (_, i) => ({ eid: "rejected-" + i, name: equipmentName })),
           [{ eid: "later-match", name: equipmentName }],
         ],
       },
       (id) => ({
-        description:
-          id === "rejected"
-            ? equipmentDescription.replace("防御：50", "防御：99")
-            : equipmentDescription,
+        description: id.startsWith("rejected-")
+          ? equipmentDescription.replace("防御：50", "防御：99")
+          : equipmentDescription,
       }),
       async ({ source, searchPage, control }) => {
         const result = await source.findCandidates([item()], control.signal);
         assert.ok((await searchPage.evaluate(() => window.calls)).every((call) => call.page === 1));
-        assert.deepEqual(detailVisits, ["rejected"]);
-        assert.equal(result.items[0].samplingStopped, true);
+        assert.deepEqual(
+          detailVisits,
+          Array.from({ length: 5 }, (_, i) => "rejected-" + i),
+        );
+        assert.notEqual(result.items[0].samplingStopped, true);
         assert.equal(
           result.items[0].candidates.some((candidate) => candidate.verified),
           false,
@@ -2116,23 +2262,48 @@ try {
     ),
   );
 
+  await check("第5条装备详情失败先保留待查，恢复后不读取第6条", () =>
+    withSource(
+      {
+        pages: [Array.from({ length: 6 }, (_, i) => ({ eid: "fifth-" + i, name: equipmentName }))],
+      },
+      (id) => ({ tooltipMissing: id === "fifth-4" }),
+      async ({ source, control }) => {
+        const first = (await source.findCandidates([item()], control.signal)).items[0];
+        assert.equal(first.searchState, "read_failed");
+        assert.equal(first.candidates.filter((c) => c.verified).length, 4);
+        assert.ok(first.searchCursor.failed.length);
+        detailOptions = {};
+        const second = (await source.findCandidates([{ ...item(), ...first }], control.signal))
+          .items[0];
+        assert.equal(second.searchState, "completed", second.note);
+        assert.deepEqual(
+          second.candidates
+            .filter((c) => c.verified)
+            .map((c) => new URL(c.url).searchParams.get("eid")),
+          Array.from({ length: 5 }, (_, i) => "fifth-" + i),
+        );
+        assert.ok(!detailVisits.includes("fifth-5"));
+      },
+    ),
+  );
+
   await check("续查页面重排或清空时丢弃旧候选，从第一页重建官网取样顺序", async () => {
-    const rows = Array.from({ length: 21 }, (_, index) => ({
+    const rows = Array.from({ length: 6 }, (_, index) => ({
       eid: `order-${index}`,
       name: equipmentName,
     }));
     const detail = (id) => ({
-      description:
-        Number(id.split("-").at(-1)) < 19
-          ? equipmentDescription.replace("防御：50", "防御：99")
-          : equipmentDescription,
+      description: ["order-2", "order-5"].includes(id)
+        ? equipmentDescription
+        : equipmentDescription.replace("防御：50", "防御：99"),
     });
     let saved;
     await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
       const originalNow = Date.now,
         baseline = originalNow();
       onDetailVisit = () => {
-        if (detailVisits.length === 20) Date.now = () => baseline + 180_001;
+        if (detailVisits.length === 3) Date.now = () => baseline + 180_001;
       };
       try {
         saved = (await source.findCandidates([item()], control.signal)).items[0];
@@ -2143,7 +2314,7 @@ try {
       assert.equal(saved.searchState, "pending");
       assert.equal(saved.candidates.filter((x) => x.verified).length, 1);
     });
-    for (const changed of [[rows[20], ...rows.slice(0, 20)], []]) {
+    for (const changed of [[rows[5], ...rows.slice(0, 5)], []]) {
       await withSource({ pages: [changed] }, detail, async ({ source, control }) => {
         const result = await source.findCandidates([{ ...item(), ...saved }], control.signal);
         const reset = result.items[0];
@@ -2164,7 +2335,7 @@ try {
             rebuilt.candidates
               .filter((x) => x.verified)
               .map((x) => new URL(x.url).searchParams.get("eid")),
-            ["order-20", "order-19"],
+            ["order-5", "order-2"],
           );
         }
       });
@@ -2172,25 +2343,25 @@ try {
   });
 
   await check("续查当前页未变也复核已读前页，新增前排商品使旧取样失效", async () => {
-    const rows = Array.from({ length: 22 }, (_, index) => ({
+    const rows = Array.from({ length: 6 }, (_, index) => ({
       eid: `prefix-${index}`,
       name: equipmentName,
     }));
     const detail = (id) => ({
       description:
-        id === "prefix-new" || Number(id.split("-").at(-1)) >= 18
+        id === "prefix-new" || Number(id.split("-").at(-1)) >= 2
           ? equipmentDescription
           : equipmentDescription.replace("防御：50", "防御：99"),
     });
     let saved;
     await withSource(
-      { pages: [rows.slice(0, 20), rows.slice(20)] },
+      { pages: [rows.slice(0, 3), rows.slice(3)] },
       detail,
       async ({ source, control }) => {
         const originalNow = Date.now,
           baseline = originalNow();
         onDetailVisit = () => {
-          if (detailVisits.length === 20) Date.now = () => baseline + 180_001;
+          if (detailVisits.length === 3) Date.now = () => baseline + 180_001;
         };
         try {
           saved = (await source.findCandidates([item()], control.signal)).items[0];
@@ -2204,7 +2375,7 @@ try {
     );
     await withSource(
       {
-        pages: [[{ eid: "prefix-new", name: equipmentName }, ...rows.slice(1, 20)], rows.slice(20)],
+        pages: [[{ eid: "prefix-new", name: equipmentName }, ...rows.slice(1, 3)], rows.slice(3)],
       },
       detail,
       async ({ source, control }) => {
@@ -2220,7 +2391,7 @@ try {
         assert.equal(rebuilt.searchState, "completed");
         assert.deepEqual(
           rebuilt.candidates.map((value) => new URL(value.url).searchParams.get("eid")),
-          ["prefix-new", "prefix-18", "prefix-19", "prefix-20", "prefix-21"],
+          ["prefix-new", "prefix-2", "prefix-3", "prefix-4"],
         );
       },
     );
@@ -2264,58 +2435,41 @@ try {
       {},
       async ({ source, searchPage, control }) => {
         const result = await source.findCandidates(
-          [item({ description: "等级100" })],
+          [item({ description: "等级100\n防御50" })],
           control.signal,
         );
         assert.ok((await searchPage.evaluate(() => window.calls)).every((call) => call.page === 1));
-        assert.equal(result.items[0].samplingStopped, true);
+        assert.notEqual(result.items[0].samplingStopped, true);
         assert.deepEqual(detailVisits, []);
       },
     ),
   );
-  await check("最多读取一百个详情，达到五件有效同配报价立即停", async () => {
+  await check("每个条件只查前5条，无有效样本不读取第6条补齐", async () => {
     await withSource(
-      {
-        pages: Array.from({ length: 1 }, (_, page) =>
-          Array.from({ length: 105 }, (_, row) => ({
-            eid: `${page}-${row}`,
-            name: equipmentName,
-          })),
-        ),
-      },
-      { description: equipmentDescription.replace("防御：50", "防御：99") },
-      async ({ source, searchPage, control }) => {
-        const input = item({ description: "等级100" });
-        const result = await source.findCandidates([input], control.signal);
-        assert.equal(detailVisits.length, 100);
-        assert.match(result.items[0].note, /100个详情/);
-        assert.equal(result.items[0].searchState, "pending");
-        assert.equal(result.items[0].searchCursor.rowIndex, 100);
-        const resumed = await source.findCandidates(
-          [{ ...input, ...result.items[0] }],
-          control.signal,
-        );
-        assert.equal(resumed.searchItems[0].details, 5);
-        assert.equal(resumed.items[0].searchState, "completed");
-        assert.equal(detailVisits.length, 105);
-        assert.equal(new Set(detailVisits).size, 105);
-        assert.deepEqual(
-          (await searchPage.evaluate(() => window.calls)).map((x) => x.page),
-          [1],
-        );
-      },
-    );
-    await withSource(
-      {
-        pages: [
-          Array.from({ length: 8 }, (_, row) => ({ eid: "match-" + row, name: equipmentName })),
-        ],
-      },
-      {},
+      { pages: [Array.from({ length: 6 }, (_, i) => ({ eid: "cap-" + i, name: equipmentName }))] },
+      (id) => ({
+        description:
+          id === "cap-5"
+            ? equipmentDescription
+            : equipmentDescription.replace("防御：50", "防御：99"),
+      }),
       async ({ source, control }) => {
         const result = await source.findCandidates([item()], control.signal);
-        assert.equal(detailVisits.length, 5);
-        assert.equal(result.items[0].candidates.length, 5);
+        assert.equal(result.items[0].searchState, "completed");
+        assert.equal(
+          result.items[0].candidates.some((candidate) => candidate.verified),
+          false,
+        );
+        assert.deepEqual(
+          detailVisits,
+          Array.from({ length: 5 }, (_, i) => "cap-" + i),
+        );
+        assert.ok(
+          result.searchItems[0].modes.every(
+            (stage) => stage.sampled === 5 && stage.samplingComplete && !stage.exhausted,
+          ),
+        );
+        assert.match(result.items[0].note, /搜索范围有限/);
       },
     );
   });

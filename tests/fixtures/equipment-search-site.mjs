@@ -61,7 +61,7 @@ window.ajax_with_recommend=async function(options){
    if(settings.mode==='stalled'){options.onComplete();return;}
    if(settings.mode==='error'){options.onSuccess({status:1,msg:'装备查询请求失败'});options.onComplete();return;}
    const page=options.data.page, activePages=settings.broadenedPages && options.data.init_hp<176 ? settings.broadenedPages : settings.pages;
-   const rows=(activePages[page-1]||[]).filter(row=>['damage','all_wakan'].every(key=>row.rawAttributes?.[key]===undefined || options.data[key]===undefined || row.rawAttributes[key]+(options.data.attr_with_melt?(row.meltAttributes?.[key]||0):0)>=options.data[key]));
+   const rows=(activePages[page-1]||[]).filter(row=>['damage','all_wakan','init_damage_raw','init_wakan','init_defense','init_hp','init_dex'].every(key=>row.rawAttributes?.[key]===undefined || options.data[key]===undefined || row.rawAttributes[key]+(options.data.attr_with_melt?(row.meltAttributes?.[key]||0):0)>=options.data[key]));
    options.onSuccess({status:0,msg:rows,paging:{cur_page:page,num_begin:1,num_end:activePages.length}});
    options.onComplete();
  },settings.delay);
@@ -139,7 +139,7 @@ if(settings.yuanshen){
  for(let i=1;i<=3;i++)field('sel_add_attr'+i,'select',attrs);
 }else{
  buildSlider('level_slider',10,20);menu('kind_check_panel',EquipKinds);menu('special_effect_panel',SpecialEffects);menu('special_skill_panel',SpecialSkills);menu('gem_panel',Gems);
- for(const key of ['repair_fail','damage','all_wakan','gem_level','init_defense','init_hp','init_dex','hole_num'])field('txt_'+key,'text');
+ for(const key of ['repair_fail','damage','all_wakan','gem_level','init_defense','init_damage_raw','init_wakan','init_hp','init_dex','hole_num'])field('txt_'+key,'text');
  field('chk_attr_with_melt','checkbox');
  add('<div id="check_mode_panel"><input type="radio" name="special_mode" value="and" checked><input type="radio" name="special_mode" value="or"></div>');
  field('radio_short_cut','radio');field('sel_short_cut','select',window.SuitEffects||[]);

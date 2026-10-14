@@ -34,9 +34,7 @@ it.each(["equipment", "pet"] as const)("无样本%s跳过后只汇总其余资�
   const result = value.combine();
   expect(skipped.searchState).toBe("skipped");
   expect(result.estimate_missing_count).toBe(0);
-  expect(result.estimated_value).toBe(
-    value.bare.model_value! + (kind === "equipment" ? 1000 : 100),
-  );
+  expect(result.estimated_value).toBe(value.bare.model_value! + (kind === "equipment" ? 900 : 100));
   expect(result.excluded_assets).toContainEqual({
     key: skipped.key,
     name: skipped.name,
@@ -371,7 +369,7 @@ describe("已知小计保留完整裸号的区服调整", () => {
           min: value.bare.model_value! + 100,
           max: value.bare.model_value! + 140,
         });
-        expect(result.estimated_subtotal_value).toBe(value.bare.model_value! + 120);
+        expect(result.estimated_subtotal_value).toBe(value.bare.model_value! + 100);
       }
       if (mode !== "similar") expect(result.estimated_value_range).toBeUndefined();
     },
@@ -689,14 +687,14 @@ describe("旧报告默认装备参考价与挂牌比较", () => {
 });
 
 describe("相近配置报价与完整区间", () => {
-  it("相近装备的五件平均价进入完整参考金额，不能取中位数或采纳中断样本", () => {
+  it("相近装备的五件最低价进入完整参考金额，不能取均价或采纳中断样本", () => {
     const value = fixture();
     const item = value.equipment.items[0];
     item.candidates = candidates([100, 110, 120, 130, 145]);
     item.similarEstimate = buildEquipmentEstimate(item.candidates);
     item.searchState = "completed";
     const result = value.combine();
-    expect(result.estimated_value).toBe(value.bare.model_value! + 121);
+    expect(result.estimated_value).toBe(value.bare.model_value! + 100);
     expect(result.estimated_value_range).toEqual({
       min: value.bare.model_value! + 100,
       max: value.bare.model_value! + 145,
@@ -712,7 +710,7 @@ describe("相近配置报价与完整区间", () => {
     expect(value.combine().estimated_value).toBeUndefined();
   });
   it.each([false, true])(
-    "宝宝中位数与装备参考汇总一次，穿戴装备交叉价不另加（装备相近：%s）",
+    "宝宝最低价与装备参考汇总一次，穿戴装备交叉价不另加（装备相近：%s）",
     (similarEquipment) => {
       const value = petMedianFixture();
       if (similarEquipment) {
@@ -725,9 +723,7 @@ describe("相近配置报价与完整区间", () => {
         value.equipment.knownTotal = 0;
       }
       const result = value.combine();
-      expect(result.estimated_value).toBe(
-        value.bare.model_value! + (similarEquipment ? 120 : 100) + 1000,
-      );
+      expect(result.estimated_value).toBe(value.bare.model_value! + 100 + 900);
       expect(result.estimated_pet_range).toEqual({ min: 900, max: 1100 });
       expect(result.estimated_value_range).toEqual({
         min: value.bare.model_value! + 1000,
@@ -745,7 +741,7 @@ describe("相近配置报价与完整区间", () => {
   );
 
   it.each(["pending-pet", "bare"])(
-    "宝宝参考中位数可进部分小计，但 %s 不补齐完整整号价格",
+    "宝宝参考最低价可进部分小计，但 %s 不补齐完整整号价格",
     (change) => {
       const value = petMedianFixture();
       if (change === "pending-pet") {
@@ -758,7 +754,7 @@ describe("相近配置报价与完整区间", () => {
       } else value.bare.model_value = null;
       const result = value.combine();
       const knownBare = value.bare.model_value ?? value.bare.known_subtotal;
-      expect(result.estimated_subtotal_value).toBe(knownBare + 1100);
+      expect(result.estimated_subtotal_value).toBe(knownBare + 1000);
       expect(result.estimated_subtotal_range).toEqual({
         min: knownBare + 1000,
         max: knownBare + 1200,
@@ -817,11 +813,11 @@ describe("相近配置报价与完整区间", () => {
     ).toBeUndefined();
   });
 
-  it("新装备参考中位数进入参考总值，保持精确金额和挂牌范围分开", () => {
+  it("新装备参考最低价进入参考总值，保持精确金额和挂牌范围分开", () => {
     const { equipment, combine, bare } = fixture();
     equipment.items[0].similarEstimate = buildEquipmentEstimate(equipment.items[0].candidates);
     const result = combine();
-    expect(result.estimated_value).toBe(bare.model_value! + 120);
+    expect(result.estimated_value).toBe(bare.model_value! + 100);
     expect(result.estimated_value_range).toEqual({
       min: bare.model_value! + 100,
       max: bare.model_value! + 140,
@@ -836,7 +832,7 @@ describe("相近配置报价与完整区间", () => {
     equipment.items[0].similarEstimate = buildEquipmentEstimate(equipment.items[0].candidates);
     pet.captureComplete = false;
     const result = combine();
-    expect(result.estimated_subtotal_value).toBe(bare.model_value! + 120);
+    expect(result.estimated_subtotal_value).toBe(bare.model_value! + 100);
     expect(result.estimated_value).toBeUndefined();
     expect(result.estimated_value_range).toBeUndefined();
     expect(result.estimate_missing_count).toBeGreaterThan(0);

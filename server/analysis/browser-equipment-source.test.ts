@@ -367,8 +367,8 @@ describe("官方装备搜索条件", () => {
         "similar",
       ).args,
     ).toMatchObject({
-      damage: 284,
-      all_wakan: 72,
+      init_damage_raw: 284,
+      init_wakan: 72,
       special_effect: "3",
     });
     const args = equipmentQuery(target, config, "similar").args;
@@ -396,12 +396,13 @@ describe("官方装备搜索条件", () => {
   });
 
   it.each([
-    ["剑", "伤害", "damage", 300, "-10伤害"],
-    ["饰品", "灵力", "all_wakan", 100, "-5灵力"],
+    ["剑", "伤害", "init_damage_raw", 300, "-10伤害"],
+    ["饰品", "灵力", "init_wakan", 100, "-5灵力"],
   ] as const)("带宝石%s的原始%s筛选不计入负熔炼", (category, field, parameter, value, melting) => {
     const target = item({
       category: "人物装备 · " + category,
-      description: "等级100\n" + field + value + "\n锻炼等级8\n宝石黑宝石\n熔炼效果：\n" + melting,
+      description:
+        "等级100\n" + field + value + "\n锻炼等级8\n镶嵌宝石 黑宝石\n熔炼效果：\n" + melting,
     });
     for (const { mode, args } of equipmentQueryPlan(target, config)) {
       expect(args[parameter]).toBe(mode === "exact" ? value : Math.ceil(value * 0.8));
@@ -1153,12 +1154,12 @@ describe("实际装备的分阶段相近检索", () => {
     const plan = equipmentQueryPlan(target, actualConfig);
     expect(plan.map(({ mode }) => mode)).toEqual(["exact", "same-gems", "near-gems", "similar"]);
     expect(plan[0].args).toMatchObject({
-      damage: 32,
+      init_damage_raw: 0,
       gem_level: 4,
       gem_value: "2",
       repair_fail: 1,
     });
-    expect(plan[1].args).toMatchObject({ damage: 26, gem_level: 4, gem_value: "2" });
+    expect(plan[1].args).toMatchObject({ init_damage_raw: 0, gem_level: 4, gem_value: "2" });
     expect(plan[1].args).not.toHaveProperty("repair_fail");
     expect(plan[2].args).toMatchObject({ gem_level: 3, gem_value: "2" });
   });
@@ -1208,8 +1209,10 @@ describe("实际装备的分阶段相近检索", () => {
         ).args.kindid,
       ).toBe(expected);
     expect(
-      equipmentQuery(item({ category: "人物装备 · 头盔", description: "等级100" }), actualConfig)
-        .args,
+      equipmentQuery(
+        item({ category: "人物装备 · 头盔", description: "等级100\n防御50" }),
+        actualConfig,
+      ).args,
     ).not.toHaveProperty("kindid");
   });
   it("游标必须与完整参数计划一致且位置有效，失配或旧版从头重新核验", () => {
@@ -1335,7 +1338,9 @@ describe("装备最终市场请求范围审计", () => {
       },
       selectOption: async () => {},
       check: async () => {},
-      setChecked: async () => {},
+      setChecked: async (value: boolean) => {
+        if (selector === "#chk_attr_with_melt") fields.attr_without_melt = Number(!value);
+      },
       nth: (index: number) => locate(selector, index),
       click: vi.fn(async () => {
         if (selector === "#reset_all") {
@@ -1437,6 +1442,7 @@ describe("装备最终市场请求范围审计", () => {
     search.waitForFunction
       .mockResolvedValueOnce(undefined)
       .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
       .mockRejectedValueOnce(new Error("page.waitForFunction: Timeout 15000ms exceeded."));
     const laterCursor = {
       version: 1 as const,
@@ -1451,13 +1457,13 @@ describe("装备最终市场请求范围审计", () => {
     try {
       const result = await source.findCandidates(
         [
-          item({ key: "first", description: "等级100" }),
-          item({ key: "failed", description: "等级100" }),
+          item({ key: "first", description: "等级100\n防御50" }),
+          item({ key: "failed", description: "等级100\n防御50" }),
           item({ key: "later", searchCursor: laterCursor }),
         ],
         control.signal,
       );
-      expect(result.queries).toHaveLength(1);
+      expect(result.queries).toHaveLength(2);
       expect(result.items).toMatchObject([
         { key: "first", searchState: "completed" },
         { key: "failed", searchState: "read_failed", query: "" },
@@ -1465,7 +1471,7 @@ describe("装备最终市场请求范围审计", () => {
       ]);
       expect(result.items[1]).not.toHaveProperty("skipped");
       expect(result.searchItems).toMatchObject([
-        { key: "first", scopeEvidence: [{ rowCount: 3 }] },
+        { key: "first", scopeEvidence: [{ rowCount: 3 }, { rowCount: 3 }] },
         {
           key: "failed",
           failure: {
@@ -1493,7 +1499,7 @@ describe("装备最终市场请求范围审计", () => {
       .mockRejectedValueOnce(new Error("page.waitForFunction: Timeout 20000ms exceeded."));
     try {
       const result = await source.findCandidates(
-        [item({ description: "等级100" })],
+        [item({ description: "等级100\n防御50" })],
         control.signal,
       );
       expect(result.queries).toHaveLength(1);
@@ -1543,26 +1549,24 @@ describe("装备最终市场请求范围审计", () => {
     const { source, search, detail, control, listeners } = pages({ serverid: "0" });
     try {
       const result = await source.findCandidates(
-        [item({ description: "等级100" })],
+        [item({ description: "等级100\n防御50" })],
         control.signal,
       );
       expect(result.searchItems).toEqual([
         expect.objectContaining({
-          scopeEvidence: [
-            {
-              mode: "exact",
-              request: {
-                endpoint: "https://xyq.cbg.163.com/cgi-bin/recommend.py",
-                act: "recommd_by_role",
-                searchType: "overall_search_equip",
-                serverType: "3",
-                page: 1,
-                restrictions: { serverid: "0" },
-              },
-              rowCount: 3,
-              candidateServers: { "33": 1, "123": 2 },
+          scopeEvidence: ["exact", "similar"].map((mode) => ({
+            mode,
+            request: {
+              endpoint: "https://xyq.cbg.163.com/cgi-bin/recommend.py",
+              act: "recommd_by_role",
+              searchType: "overall_search_equip",
+              serverType: "3",
+              page: 1,
+              restrictions: { serverid: "0" },
             },
-          ],
+            rowCount: 3,
+            candidateServers: { "33": 1, "123": 2 },
+          })),
         }),
       ]);
       expect(search.on).toHaveBeenCalledOnce();
@@ -1584,7 +1588,7 @@ describe("装备最终市场请求范围审计", () => {
     const { source, detail, control } = pages(overrides);
     try {
       await expect(
-        source.findCandidates([item({ description: "等级100" })], control.signal),
+        source.findCandidates([item({ description: "等级100\n防御50" })], control.signal),
       ).rejects.toThrow(/全服|三年以上服|请求|限制/);
       expect(detail.goto).not.toHaveBeenCalled();
     } finally {
@@ -1595,7 +1599,7 @@ describe("装备最终市场请求范围审计", () => {
     const { source, detail, control } = pages({}, false);
     try {
       await expect(
-        source.findCandidates([item({ description: "等级100" })], control.signal),
+        source.findCandidates([item({ description: "等级100\n防御50" })], control.signal),
       ).rejects.toThrow("实际网络请求");
       expect(detail.goto).not.toHaveBeenCalled();
     } finally {

@@ -4,7 +4,7 @@ import type { ValuationResult } from "./valuation-types";
 import { compareListingPrice } from "./valuation-calculator";
 import {
   inventoryMatchesSnapshot,
-  priceAverage,
+  priceMinimum,
   validateExactPricing,
   EQUIPMENT_QUOTE_LIMIT,
   EQUIPMENT_QUOTE_POLICY,
@@ -74,7 +74,7 @@ export type EquipmentPricingItem = {
   query: string;
   status: "priced" | "no_match" | "incomplete" | "untradable" | "unsupported";
   referencePrice: number | null;
-  priceMethod?: typeof EQUIPMENT_QUOTE_POLICY;
+  priceMethod?: typeof EQUIPMENT_QUOTE_POLICY | "first-five-average-v3";
   candidates: EquipmentCandidate[];
   issues: string[];
   similarEstimate?: SimilarEstimate;
@@ -760,7 +760,7 @@ export async function searchEquipmentPrices(
     );
     reconcilePricingCompletion(item, snapshot.searchItems);
     if (verified.length >= 1 && item.searchState === "completed") {
-      item.referencePrice = priceAverage(
+      item.referencePrice = priceMinimum(
         verified.slice(0, EQUIPMENT_QUOTE_LIMIT).map((candidate) => candidate.price!),
       );
       item.status = "priced";
@@ -778,7 +778,7 @@ export async function searchEquipmentPrices(
         );
       item.issues.push(
         item.similarEstimate.status === "range"
-          ? "暂无完全同配置报价，采用相近装备挂牌平均价作为参考价，并保留报价范围和配置差异"
+          ? "暂无完全同配置报价，采用已核验相近装备样本最低挂牌价作为参考价，并保留报价范围和配置差异"
           : "可靠的同配或相近样本不足，暂不自动定价",
       );
     }
@@ -950,7 +950,7 @@ export function combineEquipmentPricing(
                 : item.baselineInvalidReason
                   ? "默认参考价已失效：" + item.baselineInvalidReason
                   : (item.priceMethod === EQUIPMENT_QUOTE_POLICY
-                      ? "已核对同配置装备前五件有效挂牌价的算术平均值（"
+                      ? "已核对同配置装备前五件有效挂牌价的最低值（"
                       : "已核对同配置装备挂牌价的中位数（") +
                     item.candidates.filter(
                       (candidate) => candidate.verified && candidate.matchType !== "similar",

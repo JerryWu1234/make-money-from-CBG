@@ -10,6 +10,7 @@ import {
   validateExactPricing,
   EQUIPMENT_QUOTE_POLICY,
   priceAverage,
+  priceMinimum,
   unfinishedPricingSearch,
 } from "./pricing-integrity";
 
@@ -111,10 +112,15 @@ describe("精确查价快照完整性", () => {
       unsupportedDetails: [],
     };
     expect(unfinishedPricingSearch(row, [bounded])).toBe(false);
+    expect(
+      unfinishedPricingSearch(row, [
+        { ...bounded, act: "overall_search_equip", modes: [{ ...bounded, mode: "exact" }] },
+      ]),
+    ).toBe(false);
     for (const change of [
       { sampled: 4 },
       { sampleLimit: 10 },
-      { act: "overall_search_equip" },
+      { act: "overall_search_pet_equip" },
       { samplingComplete: false },
       { detailFailures: [{ reason: "登录失效" }] },
       { unsupportedDetails: [{ reason: "描述未识别" }] },
@@ -142,13 +148,34 @@ describe("精确查价快照完整性", () => {
     ];
     expect(unfinishedPricingSearch(row, records)).toBe(true);
   });
+  it("同宝石阶段不足5条且未结束时，不能借之前空的严格条件冒充完成", () => {
+    const row = { ...item(), candidates: [candidate(100, "one"), candidate(200, "two")] };
+    const record = {
+      key: row.key,
+      act: "overall_search_equip",
+      modes: [
+        { mode: "exact", exhausted: true },
+        {
+          mode: "same-gems",
+          exhausted: false,
+          sampleLimit: 5,
+          sampled: 4,
+          samplingComplete: false,
+          detailFailures: [],
+        },
+      ],
+    };
+    expect(unfinishedPricingSearch(row, [record])).toBe(true);
+    Object.assign(record.modes[1], { sampled: 5, samplingComplete: true });
+    expect(unfinishedPricingSearch(row, [record])).toBe(false);
+  });
 
-  it("五件均价快照不能复用旧十件价格，第六件及以后不参与", () => {
+  it("五件最低价快照不能复用旧十件价格，第六件及以后不参与", () => {
     const inventory: EquipmentPricingItem[] = [{ ...item(), priceMethod: EQUIPMENT_QUOTE_POLICY }];
     const row: EquipmentPricingItem = {
       ...inventory[0],
       status: "priced" as const,
-      referencePrice: 120,
+      referencePrice: 100,
       candidates: [100, 110, 120, 130, 140, 150, 160, 170, 180, 1000, 1].map((price, index) =>
         candidate(price, `mean-${index}`),
       ),
@@ -157,7 +184,7 @@ describe("精确查价快照完整性", () => {
       ...candidate(100, "mean-0"),
       url: "https://xyq.cbg.163.com/equip/1/mean-0",
     });
-    const source = { ...snapshot([row]), total: 120, knownTotal: 120 };
+    const source = { ...snapshot([row]), total: 100, knownTotal: 100 };
     expect(validateExactPricing(source, inventory, now)).toBe(true);
     row.referencePrice = source.total = source.knownTotal = 226;
     expect(validateExactPricing(source, inventory, now)).toBe(false);
@@ -165,6 +192,8 @@ describe("精确查价快照完整性", () => {
     expect(inventoryMatchesSnapshot(source, inventory)).toBe(false);
     expect(priceAverage([100.01, 100.02])).toBe(100.02);
     expect(priceAverage([])).toBeNull();
+    expect(priceMinimum([300, 100.01, 200])).toBe(100.01);
+    expect(priceMinimum([])).toBeNull();
   });
   it("路径与查询身份冲突、非商品路径或带端口/凭据的链接不能支撑精确中位数", () => {
     for (const url of [
