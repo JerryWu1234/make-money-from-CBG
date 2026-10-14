@@ -908,7 +908,7 @@ export async function searchPetPricing(
       item.issues = verified.length === 1 ? ["仅1条挂牌样本，参考范围有限"] : [];
       if (verified.length < EQUIPMENT_QUOTE_LIMIT)
         item.issues.push(
-          `本次结果已读完，已核实${verified.length}件同配置宝宝；目标为${EQUIPMENT_QUOTE_LIMIT}件，均价使用实际样本数`,
+          `在各筛选条件前${EQUIPMENT_QUOTE_LIMIT}条候选或更少的实际结果中，已核实${verified.length}件同配置宝宝，均价使用实际样本数，搜索范围有限`,
         );
     }
     if (

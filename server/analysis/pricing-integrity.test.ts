@@ -97,6 +97,30 @@ describe("精确查价快照完整性", () => {
     expect(unfinishedPricingSearch(row, records)).toBe(false);
   });
 
+  it("核验前五条范围完成后采用实际两条报价，缺少范围证明或有读取错误仍待查", () => {
+    const row = { ...item(), candidates: [candidate(100, "one"), candidate(200, "two")] };
+    const bounded = {
+      key: row.key,
+      act: "overall_search_pet",
+      matchType: "exact",
+      exhausted: false,
+      sampleLimit: 5,
+      sampled: 5,
+      samplingComplete: true,
+      detailFailures: [],
+      unsupportedDetails: [],
+    };
+    expect(unfinishedPricingSearch(row, [bounded])).toBe(false);
+    for (const change of [
+      { sampled: 4 },
+      { sampleLimit: 10 },
+      { act: "overall_search_equip" },
+      { samplingComplete: false },
+      { detailFailures: [{ reason: "登录失效" }] },
+      { unsupportedDetails: [{ reason: "描述未识别" }] },
+    ])
+      expect(unfinishedPricingSearch(row, [{ ...bounded, ...change }])).toBe(true);
+  });
   it("结果顺序变化后丢弃前次已穷尽证据", () => {
     const row = item();
     const records = [

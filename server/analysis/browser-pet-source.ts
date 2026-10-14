@@ -1675,7 +1675,7 @@ export function petSourceFromPages(
         const planHash = petDigest({
           resumePolicy: PRICING_RESUME_POLICY,
           policy: PET_COMPARISON_POLICY_VERSION,
-          method: "official-ui-first-page-empty-stop-v2",
+          method: "official-ui-first-five-per-condition-v3",
           priceMethod: EQUIPMENT_QUOTE_POLICY,
           description: item.description,
           fields: item.fields,
@@ -1944,15 +1944,9 @@ export function petSourceFromPages(
             lastPage = 0,
             stagePages = 0,
             exhausted = false;
-          const acceptedCount = () =>
-            matchType === "diagnostic"
-              ? diagnosticSources.length
-              : candidates.filter((candidate) =>
-                  matchType === "exact"
-                    ? candidate.matchType !== "similar"
-                    : candidate.matchType === "similar",
-                ).length;
-          const sampleLimit = matchType === "diagnostic" ? 3 : Infinity;
+          const sampleLimit = matchType === "diagnostic" ? 3 : EQUIPMENT_QUOTE_LIMIT;
+          let inspected = [...seenRows].filter((key) => key.startsWith(modeIndex + ":")).length;
+          let samplingComplete = false;
           const stageEnough = () => enoughSamples();
           const loadPage = async (pageNumber: number, replay = false) => {
             await pace(requestSignal);
@@ -2101,6 +2095,7 @@ export function petSourceFromPages(
               if (/^\d+$/.test(server))
                 candidateServers[server] = (candidateServers[server] || 0) + 1;
             }
+            lastPage = Math.max(lastPage, pageNumber);
             scopeEvidence.push({
               mode: matchType,
               request,
@@ -2168,13 +2163,20 @@ export function petSourceFromPages(
             }
           }
           next.historyIndex = 0;
+          if (inspected >= sampleLimit && !failed.size) {
+            samplingComplete = true;
+            next.modeIndex = candidates.length ? plans.length : modeIndex + 1;
+            next.pageNumber = 1;
+            next.rowIndex = 0;
+            next.pageRowsHash = "";
+          }
           for (
             let pageNumber = next.pageNumber;
             stagePages < MAX_PAGES &&
             count < MAX_ROWS &&
             details < MAX_DETAILS &&
             !stageEnough() &&
-            acceptedCount() < sampleLimit &&
+            inspected < sampleLimit &&
             Date.now() < deadline;
             pageNumber++
           ) {
@@ -2222,7 +2224,7 @@ export function petSourceFromPages(
                 next.rowIndex = rowIndex + 1;
                 continue;
               }
-              if (count >= MAX_ROWS || Date.now() >= deadline) {
+              if (count >= MAX_ROWS || inspected >= sampleLimit || Date.now() >= deadline) {
                 pageFullyRead = false;
                 break;
               }
@@ -2239,6 +2241,7 @@ export function petSourceFromPages(
               }
               if (row.type && !String(args.type).split(",").includes(row.type)) {
                 seenRows.add(seenKey);
+                inspected++;
                 next.rowIndex = rowIndex + 1;
                 if (count >= MAX_ROWS) {
                   pageFullyRead = rowIndex === listing.rows.length - 1;
@@ -2247,19 +2250,7 @@ export function petSourceFromPages(
                 continue;
               }
               const sourceCached = cache.has(safeEquipmentUrl(row.url));
-              if (
-                (!sourceCached &&
-                  (details >= MAX_DETAILS ||
-                    readDetails >=
-                      (pageNumber === 1
-                        ? listing.rows.length
-                        : matchType === "exact"
-                          ? 6
-                          : matchType === "similar"
-                            ? 5
-                            : 3))) ||
-                Date.now() >= deadline
-              ) {
+              if ((!sourceCached && details >= MAX_DETAILS) || Date.now() >= deadline) {
                 pageFullyRead = false;
                 break;
               }
@@ -2270,36 +2261,25 @@ export function petSourceFromPages(
                   result.failure,
                 );
               seenRows.add(seenKey);
+              inspected++;
               next.rowIndex = rowIndex + 1;
               if (result.failure) {
                 pageFullyRead = false;
                 break;
               }
-              if (count >= MAX_ROWS || stageEnough() || acceptedCount() >= sampleLimit) {
+              if (count >= MAX_ROWS || stageEnough() || inspected >= sampleLimit) {
                 pageFullyRead = rowIndex === listing.rows.length - 1;
                 break;
               }
             }
             if (
-              pageNumber === 1 &&
-              !candidates.length &&
+              inspected >= sampleLimit &&
               !failed.size &&
               !detailFailures.length &&
-              !unsupportedDescriptions.length &&
-              pageFullyRead &&
-              listing.hasNext
+              !unsupportedDescriptions.length
             ) {
-              next.emptyFirstPageModes = [
-                ...new Set([...(next.emptyFirstPageModes || []), modeIndex]),
-              ];
-              next.modeIndex = modeIndex + 1;
-              next.pageNumber = 1;
-              next.rowIndex = 0;
-              next.pageRowsHash = "";
-              break;
-            }
-            if (matchType === "diagnostic" && acceptedCount() >= sampleLimit) {
-              next.modeIndex = modeIndex + 1;
+              samplingComplete = true;
+              next.modeIndex = candidates.length ? plans.length : modeIndex + 1;
               next.pageNumber = 1;
               next.rowIndex = 0;
               next.pageRowsHash = "";
@@ -2321,7 +2301,11 @@ export function petSourceFromPages(
           }
           const note =
             `${matchType === "exact" ? "严格" : matchType === "similar" ? "相似" : "诊断"}筛选已查询${lastPage}页、${rows}个列表候选、${readDetails}个新详情；` +
-            (exhausted ? "本次筛选结果已读完" : "有限样本查询，未遍历全部在售商品") +
+            (exhausted
+              ? "本次筛选结果已读完"
+              : samplingComplete
+                ? `仅核验该条件前${sampleLimit}条候选，搜索范围有限，未遍历全部在售商品`
+                : "有限样本查询，未遍历全部在售商品") +
             "。";
           notes.push(note);
           records.push({
@@ -2336,6 +2320,9 @@ export function petSourceFromPages(
             rows,
             details: readDetails,
             exhausted,
+            sampleLimit,
+            sampled: inspected,
+            samplingComplete,
             detailFailures,
             unsupportedDetails: unsupportedDescriptions,
             candidates: [...candidates, ...rejected],
@@ -2352,18 +2339,8 @@ export function petSourceFromPages(
           const identity = equipmentIdentity(candidate.url);
           if (!distinct.has(identity)) distinct.set(identity, candidate);
         }
-        const samplingStopped =
-          !!next.emptyFirstPageModes?.length &&
-          next.modeIndex >= plans.length &&
-          !candidates.length &&
-          !failed.size &&
-          !orderChanged &&
-          historyValidated;
         const completed =
-          !samplingStopped &&
-          !orderChanged &&
-          historyValidated &&
-          (enoughSamples() || next.modeIndex >= plans.length);
+          !orderChanged && historyValidated && (enoughSamples() || next.modeIndex >= plans.length);
         next.seen = [...seenRows];
         next.failed = [...failed].map(([url, modeIndex]) => ({ url, modeIndex }));
         results.push({
@@ -2371,19 +2348,16 @@ export function petSourceFromPages(
           query: item.query,
           searchState: failed.size ? "read_failed" : completed ? "completed" : "pending",
           ...(!completed || failed.size ? { searchCursor: next } : {}),
-          ...(samplingStopped ? { samplingStopped: true } : {}),
           candidates: [...distinct.values()].slice(0, EQUIPMENT_QUOTE_LIMIT),
           similarAttempted,
           diagnosticSources,
           note:
-            (samplingStopped
-              ? "各筛选条件仅检查第一页，均未取得有效样本；按规则跳过，不继续翻页，不计入参考合计；市场售价未知。 "
-              : "") +
+            "每个计价筛选条件只核验前5条候选或更少的实际结果，搜索范围有限；" +
             (orderChanged
               ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。 "
               : "") +
             notes.join(" ") +
-            (!completed && !samplingStopped
+            (!completed
               ? " 已保存筛选阶段、页码和行位置，下轮继续剩余候选；当前样本不足或配置最近的报价分散，尚未结束查价。"
               : "") +
             (unsupportedDetails

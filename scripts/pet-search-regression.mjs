@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ts from "typescript";
@@ -220,7 +220,8 @@ try {
   const context = browser.contexts()[0];
   let searchOptions = {},
     detailOptions = {},
-    detailVisits = [];
+    detailVisits = [],
+    clockOffset = 0;
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.origin !== "https://xyq.cbg.163.com") return route.abort();
@@ -233,6 +234,7 @@ try {
     if (url.pathname === "/sentinel-role-list") body = roleSentinelDocument;
     else if (url.pathname === "/equip") {
       detailVisits.push(url.searchParams.get("eid"));
+      if (searchOptions.expireAfterDetails === detailVisits.length) clockOffset = 240001;
       body = petDetailDocument(
         typeof detailOptions === "function"
           ? detailOptions(url.searchParams.get("eid"))
@@ -261,10 +263,14 @@ try {
     const searchPage = await createHiddenPage(browser),
       detailPage = await createHiddenPage(browser),
       control = new AbortController();
+    const originalNow = Date.now;
+    clockOffset = 0;
+    if (search.expireAfterDetails) Date.now = () => originalNow() + clockOffset;
     const source = petSourceFromPages(bounded(searchPage), bounded(detailPage), control.signal);
     try {
       await run({ source, searchPage, detailPage, control });
     } finally {
+      Date.now = originalNow;
       await source.close();
     }
     assert.equal(searchPage.isClosed(), true);
@@ -386,7 +392,7 @@ try {
     });
   });
   await check("详情预算耗尽自动保存官方表单游标，恢复后读取后面的有效宝宝报价", async () => {
-    const rows = Array.from({ length: 43 }, (_, index) => ({
+    const rows = Array.from({ length: 6 }, (_, index) => ({
       eid: `sample-${index}`,
       name: "画魂",
       type: "2001",
@@ -396,7 +402,7 @@ try {
       return {
         price: 300 + index * 10,
         rawPrice: 300 + index * 10,
-        ...(index > 0 && index < 40 ? { skills: [], parsedSkillIds: [] } : {}),
+        ...(index > 0 && index < 4 ? { skills: [], parsedSkillIds: [] } : {}),
       };
     };
     const target = {
@@ -416,30 +422,36 @@ try {
       query: "",
     };
     let cursor, savedCandidates;
-    await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
-      const result = await source.findCandidates([target], control.signal);
-      assert.equal(result.items[0].searchState, "pending");
-      cursor = result.items[0].searchCursor;
-      savedCandidates = result.items[0].candidates;
-      assert.equal(cursor.rowIndex, 40);
-      assert.equal(detailVisits.length, 40);
-    });
+    await withSource(
+      { pages: [rows], expireAfterDetails: 3 },
+      detail,
+      async ({ source, control }) => {
+        const result = await source.findCandidates([target], control.signal);
+        assert.equal(result.items[0].searchState, "pending");
+        cursor = result.items[0].searchCursor;
+        savedCandidates = result.items[0].candidates;
+        assert.equal(cursor.rowIndex, 3);
+        assert.equal(detailVisits.length, 3);
+      },
+    );
     await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
       const result = await source.findCandidates(
         [{ ...target, searchCursor: cursor, candidates: savedCandidates }],
         control.signal,
       );
       assert.equal(result.items[0].searchState, "completed");
-      assert.deepEqual(detailVisits, ["sample-0", "sample-40", "sample-41", "sample-42"]);
+      assert.deepEqual(detailVisits, ["sample-0", "sample-3", "sample-4"]);
       assert.deepEqual(
-        result.items[0].candidates.map(({ price }) => price),
-        [300, 700, 710, 720],
+        result.items[0].candidates
+          .filter((candidate) => candidate.verified)
+          .map(({ price }) => price),
+        [300, 340],
       );
-      assert.ok(result.items[0].candidates.every(({ verified }) => verified));
+      assert.equal(result.items[0].candidates.filter((candidate) => candidate.verified).length, 2);
     });
   });
   await check("续查宝宝页面重排或清空时清除旧候选，重新按官网顺序收集", async () => {
-    const rows = Array.from({ length: 43 }, (_, index) => ({
+    const rows = Array.from({ length: 6 }, (_, index) => ({
       eid: `order-${index}`,
       name: "画魂",
       type: "2001",
@@ -449,7 +461,7 @@ try {
       return {
         price: 300 + index,
         rawPrice: 300 + index,
-        ...(index > 0 && index < 40 ? { skills: [], parsedSkillIds: [] } : {}),
+        ...(index > 0 && index < 4 ? { skills: [], parsedSkillIds: [] } : {}),
       };
     };
     const target = {
@@ -469,12 +481,16 @@ try {
       query: "",
     };
     let saved;
-    await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
-      saved = (await source.findCandidates([target], control.signal)).items[0];
-      assert.equal(saved.searchState, "pending");
-      assert.equal(saved.candidates.filter((x) => x.verified).length, 1);
-    });
-    for (const changed of [[rows[42], ...rows.slice(0, 42)], []]) {
+    await withSource(
+      { pages: [rows], expireAfterDetails: 3 },
+      detail,
+      async ({ source, control }) => {
+        saved = (await source.findCandidates([target], control.signal)).items[0];
+        assert.equal(saved.searchState, "pending");
+        assert.equal(saved.candidates.filter((x) => x.verified).length, 1);
+      },
+    );
+    for (const changed of [[rows[5], ...rows.slice(0, 5)], []]) {
       await withSource({ pages: [changed] }, detail, async ({ source, control }) => {
         const result = await source.findCandidates([{ ...target, ...saved }], control.signal);
         const reset = result.items[0];
@@ -495,7 +511,7 @@ try {
             rebuilt.candidates
               .filter((x) => x.verified)
               .map((x) => new URL(x.url).searchParams.get("eid")),
-            ["order-42", "order-0", "order-40", "order-41"],
+            ["order-5", "order-0"],
           );
         }
       });
@@ -503,7 +519,7 @@ try {
   });
 
   await check("续查宝宝当前页未变也核验已读完前页", async () => {
-    const rows = Array.from({ length: 43 }, (_, index) => ({
+    const rows = Array.from({ length: 6 }, (_, index) => ({
       eid: `prefix-${index}`,
       name: "画魂",
       type: "2001",
@@ -513,7 +529,7 @@ try {
       rawPrice: 300,
       ...(id !== "prefix-new" &&
       Number(id.split("-").at(-1)) > 0 &&
-      Number(id.split("-").at(-1)) < 40
+      Number(id.split("-").at(-1)) < 5
         ? { skills: [], parsedSkillIds: [] }
         : {}),
     });
@@ -535,7 +551,7 @@ try {
     };
     let saved;
     await withSource(
-      { pages: [rows.slice(0, 40), rows.slice(40)] },
+      { pages: [rows.slice(0, 2), rows.slice(2)], expireAfterDetails: 3 },
       detail,
       async ({ source, control }) => {
         saved = (await source.findCandidates([target], control.signal)).items[0];
@@ -545,8 +561,8 @@ try {
     await withSource(
       {
         pages: [
-          [{ eid: "prefix-new", name: "画魂", type: "2001" }, ...rows.slice(1, 40)],
-          rows.slice(40),
+          [{ eid: "prefix-new", name: "画魂", type: "2001" }, ...rows.slice(1, 2)],
+          rows.slice(2),
         ],
       },
       detail,
@@ -1423,6 +1439,86 @@ try {
       },
     ),
   );
+  await check("每筛选条件只核验前五条：实际三件均价，无有效样本跳过，不读取第六条", async () => {
+    const rows = Array.from({ length: 6 }, (_, i) => ({ eid: `bounded-${i}`, name: "宝宝昵称" }));
+    const evidence = [];
+    for (const validIndexes of [[0, 2, 4], [5]]) {
+      await withSource(
+        { pages: [rows] },
+        (eid) => {
+          const index = Number(eid.split("-").at(-1));
+          return {
+            price: 100 + index * 100,
+            rawPrice: 100 + index * 100,
+            ...(!validIndexes.includes(index) ? { skills: [], parsedSkillIds: [] } : {}),
+          };
+        },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          assert.equal(result.searchComplete, true);
+          assert.ok(!detailVisits.includes("bounded-5"));
+          assert.deepEqual(
+            [...new Set(detailVisits)],
+            rows.slice(0, 5).map((row) => row.eid),
+          );
+          if (validIndexes.length === 3) {
+            assert.equal(result.items[0].referencePrice, 300);
+            assert.equal(result.items[0].candidates.filter((x) => x.verified).length, 3);
+          } else {
+            assert.equal(result.items[0].searchState, "skipped");
+            assert.equal(result.items[0].referencePrice, null);
+          }
+          assert.ok(result.items[0].issues.some((x) => /范围有限/.test(x)));
+          evidence.push({ simulated: true, validIndexes, detailVisits: [...detailVisits], result });
+        },
+      );
+    }
+    await mkdir("data/pr27-fix-validation", { recursive: true });
+    await writeFile(
+      "data/pr27-fix-validation/pet-first-five-condition.json",
+      JSON.stringify(evidence, null, 2),
+    );
+  });
+  await check("第五条读取失败不按无样本跳过，修复后完成前五条范围而不读取第六条", async () => {
+    const rows = Array.from({ length: 6 }, (_, i) => ({ eid: `failure-${i}`, name: "宝宝昵称" }));
+    let previous;
+    await withSource(
+      { pages: [rows] },
+      (eid) => {
+        const index = Number(eid.split("-").at(-1));
+        return {
+          price: 100,
+          rawPrice: 100,
+          ...(index === 4
+            ? { duplicatePanel: true }
+            : index > 0
+              ? { skills: [], parsedSkillIds: [] }
+              : {}),
+        };
+      },
+      async ({ source, control }) => {
+        previous = await searchPetPricing(record(), control.signal, source);
+        assert.equal(previous.searchComplete, false);
+        assert.equal(previous.items[0].searchState, "read_failed");
+        assert.equal(previous.items[0].searchCursor.rowIndex, 5);
+      },
+    );
+    await withSource(
+      { pages: [rows] },
+      (eid) => ({
+        price: 100,
+        rawPrice: 100,
+        ...(eid !== "failure-0" ? { skills: [], parsedSkillIds: [] } : {}),
+      }),
+      async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source, previous);
+        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].referencePrice, 100);
+        assert.equal(result.items[0].searchState, "completed");
+        assert.ok(!detailVisits.includes("failure-5"));
+      },
+    );
+  });
   await check("前五件宝宝跨页去重和断点续查后计算均价，不采用第六件低价", async () => {
     const prices = [100, 110, 120, 130, 140, 150, 160, 170, 180, 900, 1];
     const rows = prices.map((_, index) => ({ eid: `ten-${index}`, name: "宝宝昵称" }));

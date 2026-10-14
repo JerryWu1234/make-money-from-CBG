@@ -155,7 +155,17 @@ export function unfinishedPricingSearch(item: PricingItem, records: unknown[] = 
     for (const stage of modes) {
       if (!stage || typeof stage !== "object" || typeof stage.exhausted !== "boolean") continue;
       const mode = stage.mode || stage.matchType || "*";
-      if (["exact", "similar", "*"].includes(mode)) stages.set(mode, stage.exhausted);
+      const boundedComplete =
+        record.act === "overall_search_pet" &&
+        stage.sampleLimit === EQUIPMENT_QUOTE_LIMIT &&
+        stage.sampled === EQUIPMENT_QUOTE_LIMIT &&
+        stage.samplingComplete === true &&
+        Array.isArray(stage.detailFailures) &&
+        stage.detailFailures.length === 0 &&
+        Array.isArray(stage.unsupportedDetails) &&
+        stage.unsupportedDetails.length === 0;
+      if (["exact", "similar", "*"].includes(mode))
+        stages.set(mode, stage.exhausted || boundedComplete);
     }
   }
   if (!stages.size) return false;
