@@ -12,6 +12,7 @@ it.each([
   [2, false],
   [6, false],
   [6, true],
+  [16, false],
 ] as const)(
   "游标持续前进时查完%s轮，重启恢复%s；在查价预算内持续推进",
   async (finishAfter, restart) => {
@@ -120,23 +121,31 @@ it.each([
           })),
         };
       });
+    const searchPets = vi.fn(async () => ({
+      ...snapshot,
+      inputHash: pets.inputHash,
+      items: [],
+      total: 0,
+      searchComplete: true,
+    }));
     const connect = async () => ({
       model: "test",
       analyze,
       searchEquipment,
-      searchPets: async () => ({
-        ...snapshot,
-        inputHash: pets.inputHash,
-        items: [],
-        total: 0,
-        searchComplete: true,
-      }),
+      searchPets,
     });
     const runner = new AnalysisRunner(store, connect);
     let reopened: AnalysisRunner | undefined;
     try {
       const id = await runner.start("codex", true, profile);
       await runner.settled();
+      if (finishAfter === 16) {
+        expect(store.run(id)).toMatchObject({ status: "paused", waitingPricing: 1, completed: 0 });
+        expect(searches).toBe(16);
+        expect(searchPets).not.toHaveBeenCalled();
+        await runner.resume(id, true);
+        await runner.settled();
+      }
       if (restart) {
         expect(store.run(id)).toMatchObject({
           status: "paused",

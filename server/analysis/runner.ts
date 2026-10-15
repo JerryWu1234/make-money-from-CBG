@@ -257,7 +257,14 @@ export class AnalysisRunner {
           petGearInventory(task.record).items.length &&
           (!task.petPricing?.gearPricing ||
             task.petPricing.gearPricing.searchComplete === false ||
-            !pricingTimestampFresh(task.petPricing.gearPricing.searchedAt)));
+            !pricingTimestampFresh(task.petPricing.gearPricing.searchedAt) ||
+            task.petPricing.gearPricing.items.some(
+              (gear) =>
+                !!gear.skippedWithPet !==
+                task!.petPricing!.items.some(
+                  (pet) => pet.key === gear.petKey && pet.searchState === "skipped",
+                ),
+            )));
       if (
         pendingPricing &&
         (budget.rounds >= MAX_PRICING_ROUNDS || Date.now() - budget.started >= MAX_ROLE_PRICING_MS)
@@ -350,6 +357,7 @@ export class AnalysisRunner {
           this.store.setRun(id, "paused", message, owner);
           return;
         }
+        continue;
       }
       if (
         task.profile?.petSearch &&
@@ -408,6 +416,7 @@ export class AnalysisRunner {
           this.store.setRun(id, "paused", message, owner);
           return;
         }
+        continue;
       }
       if (
         task.profile?.petGearSearch &&

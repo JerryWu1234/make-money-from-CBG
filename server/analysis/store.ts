@@ -1011,7 +1011,18 @@ export class AnalysisStore {
           AND candidate.source_detail_json=l.detail_json
           AND coalesce((${expiredPricingSql.replaceAll("t.", "candidate.")}),0)=0 THEN 0 ELSE 1 END,
         r.created_at DESC,candidate.ordinal DESC,candidate.id DESC LIMIT 1)`;
-    const source = `SELECT l.key,l.listing_json,l.collected_at,l.status collection_status,t.id task_id,t.result_json,t.error task_error,selected_run.profile_json,${stateSql} state FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN analysis_runs selected_run ON selected_run.id=t.run_id`;
+    // Omit evidence before transferring/parsing a summary; detail reads retain the full result.
+    const resultColumn = options.summary
+      ? `json_remove(t.result_json,${["equipment_pricing", "pet_pricing"]
+          .flatMap((key) =>
+            ["items", "queries", "rawResponse", "searchItems", "searchAttempts", "requestText"].map(
+              (field) => `'$.valuation.${key}.${field}'`,
+            ),
+          )
+          .concat("'$.valuation.pet_pricing.gearPricing'")
+          .join(",")})`
+      : "t.result_json";
+    const source = `SELECT l.key,l.listing_json,l.collected_at,l.status collection_status,t.id task_id,${resultColumn} result_json,t.error task_error,selected_run.profile_json,${stateSql} state FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN analysis_runs selected_run ON selected_run.id=t.run_id`;
     const conditions: string[] = [],
       values: string[] = [...sourceValues];
     if (options.search?.trim()) {
@@ -1070,7 +1081,7 @@ export class AnalysisStore {
       Math.min(resultTotalPages, Math.trunc(options.resultsPage || 1)),
     );
     const results = this.db
-      .prepare(`SELECT t.id task_id,t.source_listing_json,t.result_json,t.completed_at,
+      .prepare(`SELECT t.id task_id,t.source_listing_json,${resultColumn} result_json,t.completed_at,
       r.provider,r.model,r.profile_json,${stateSql} state ${resultsSource}
       ORDER BY t.completed_at DESC,t.id DESC LIMIT 20 OFFSET ?`)
       .all(...sourceValues, (resultPage - 1) * 20)

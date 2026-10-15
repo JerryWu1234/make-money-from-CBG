@@ -3,7 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { valuationRecord } from "../../tests/fixtures/analysis";
 import { CrawlStore } from "../crawler/store";
 import { AnalysisStore } from "./store";
-import { AnalysisRunner, type AnalysisClient } from "./runner";
+import { AnalysisRunner, MAX_PRICING_ROUNDS, type AnalysisClient } from "./runner";
 import { createProfile, PROMPT_FILE } from "./profile";
 import { equipmentInventory } from "./equipment-pricing";
 import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
@@ -240,6 +240,83 @@ it.each(["pet", "pet-gear"] as const)(
     }
   },
 );
+
+// Failure cases: a fresh completed gear snapshot can still need reconciliation;
+// the 16th pet round must preserve it and pause, then explicit retry must finish gear only.
+it("第16轮宝宝完成后，父宝宝跳过状态变化的宠装等待显式重试，不执行第17轮", async () => {
+  const c = setup();
+  const previousGear: PetGearPricingSnapshot = {
+    ...c.gear,
+    items: c.gear.items.map((item) => ({
+      ...item,
+      searchState: "skipped",
+      searchStatus: "skipped",
+      skippedWithPet: true,
+      skipReason: "此前所属宝宝已跳过",
+    })),
+  };
+  let rounds = 0;
+  c.searchPets.mockImplementation(async () => ({
+    ...c.pets,
+    searchComplete: ++rounds === MAX_PRICING_ROUNDS,
+    items: c.pets.items.map((item) => ({
+      ...item,
+      searchState: rounds === MAX_PRICING_ROUNDS ? "completed" : "pending",
+      searchCursor: {
+        version: 1,
+        planHash: "parent-refresh",
+        modeIndex: 0,
+        pageNumber: 1,
+        rowIndex: rounds,
+        pageRowsHash: "same-market-page",
+        seen: [],
+        failed: [],
+      },
+    })),
+  }));
+  try {
+    const id = c.store.createRun("codex", "test", true, c.profile);
+    const owner = "saved-gear-before-pet-budget";
+    expect(c.store.acquire(owner)).toBe(true);
+    let task = c.store.next(id)!;
+    c.store.beginEquipmentSearch(task, owner);
+    task = c.store.saveEquipmentPricing(
+      task,
+      { ...c.pets, ...equipmentInventory(c.record), total: 0 },
+      owner,
+    );
+    c.store.beginPetSearch(task, owner);
+    c.store.savePetPricing(
+      task,
+      { ...c.pets, searchComplete: false, gearPricing: previousGear },
+      owner,
+    );
+    c.store.setRun(id, "paused", null, owner);
+    c.store.release(owner);
+
+    await c.runner.resume(id);
+    await c.runner.settled();
+    expect(c.searchPets).toHaveBeenCalledTimes(MAX_PRICING_ROUNDS);
+    expect(c.store.run(id)).toMatchObject({ status: "paused", waitingPricing: 1, completed: 0 });
+    expect(c.searchPetGear).not.toHaveBeenCalled();
+    expect(c.analyze).not.toHaveBeenCalled();
+    const saved = c.store.detail(c.store.overview({ runId: id }).records.items[0].taskId!)!;
+    expect(saved.petPricing?.gearPricing).toEqual(previousGear);
+    expect(saved.petPricing?.items[0].searchState).toBe("completed");
+
+    await c.runner.resume(id, true);
+    await c.runner.settled();
+    expect(c.store.run(id)).toMatchObject({ status: "completed", completed: 1, waitingPricing: 0 });
+    expect(c.searchPets).toHaveBeenCalledTimes(MAX_PRICING_ROUNDS);
+    expect(c.searchEquipment).not.toHaveBeenCalled();
+    expect(c.searchPetGear).toHaveBeenCalledOnce();
+    expect(c.searchPetGear.mock.calls[0][2]).toEqual(previousGear);
+    expect(c.analyze).toHaveBeenCalledOnce();
+  } finally {
+    await c.runner.shutdown();
+    c.crawl.db.close();
+  }
+});
 
 it.each([
   ["pet", "pending"],
