@@ -108,7 +108,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
   const api = async <T>(route: string, body?: unknown): Promise<T> => {
     const response =
       body === undefined
-        ? await request.get(baseURL + route, { timeout: 30000 })
+        ? await request.get(baseURL + route, { timeout: 30000, maxRetries: 1 })
         : await request.post(baseURL + route, { data: body, timeout: 300000 });
     const result = await response.json();
     if (!response.ok()) throw new Error(result.error || `${route}: ${response.status()}`);
