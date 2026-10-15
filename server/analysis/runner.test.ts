@@ -540,6 +540,27 @@ describe("持久化的商品分析队列", () => {
     for (const attempt of detail.attempts) expect(attempt.requestText).toContain(pricing.inputHash);
   });
 
+  it("恢复时重查旧比较规则的装备快照，保留宝宝快照", async () => {
+    const { store, runner, analyze, profile, pricing, searchEquipment, searchPets } =
+      await valuationSetup();
+    analyze.mockResolvedValueOnce({ text: "invalid-json" });
+    const id = await runner.start("codex", true, profile);
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({ status: "paused", failed: 1 });
+    const taskId = store.overview({ runId: id }).records.items[0].taskId!;
+    store.db
+      .prepare(
+        "UPDATE analysis_tasks SET equipment_pricing_json=json_set(equipment_pricing_json,'$.inputHash',?) WHERE id=?",
+      )
+      .run("previous-comparison-policy", taskId);
+    await runner.resume(id, true);
+    await runner.settled();
+    expect(searchEquipment).toHaveBeenCalledTimes(2);
+    expect(searchPets).toHaveBeenCalledOnce();
+    expect(store.run(id)).toMatchObject({ completed: 1, failed: 0 });
+    expect(store.detail(taskId)?.result?.valuation?.equipment_pricing).toEqual(pricing);
+  });
+
   it("查价中暂停保留当前队列，恢复后重新查价，不创建半成品分析尝试", async () => {
     const { crawl, store, runner, analyze, profile, pricing, searchEquipment } =
       await valuationSetup();

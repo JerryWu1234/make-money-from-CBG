@@ -723,7 +723,7 @@ async function readMainEquipment(
   return {
     text,
     price,
-    html: `<main${metadata}><p>${escape(observed.name)}</p><pre data-cbg-equipment-description>${escape([description, ...restrictions].join("\n"))}</pre><p>${selling ? "在售" : "商品已下架"}\n挂牌价：¥${price}</p></main>`,
+    html: `<main${metadata}><h1>${escape(observed.name)}</h1><pre data-cbg-equipment-description>${escape([description, ...restrictions].join("\n"))}</pre><p>${selling ? "在售" : "商品已下架"}\n挂牌价：¥${price}</p></main>`,
   };
 }
 
@@ -1434,6 +1434,7 @@ export function equipmentSourceFromPages(
         let currentCandidates = () => item.candidates.filter((candidate) => candidate.verified);
         let currentCounts = () => ({ pages: 0, rows: 0, details: 0 });
         let currentRecord: Record<string, unknown> = { key: item.key };
+        let resolvedTargetKind: string | undefined;
         try {
           const jewelry = isJewelry(item),
             jade = item.category === "上古玉魄",
@@ -1621,6 +1622,12 @@ export function equipmentSourceFromPages(
           }
           if (!jade && !yuanshen && exactArgs.kindid === undefined)
             throw new Error("装备类型无法对应官网筛选，未猜测基础属性或查询类型");
+          if (!jade && !yuanshen) {
+            const kind = String(exactArgs.kindid);
+            if (!/^[1-9]\d*$/.test(kind))
+              throw new Error("装备类型缺少明确官网编号，未猜测查询类型");
+            resolvedTargetKind = kind;
+          }
           const act = yuanshen
             ? await searchPage.evaluate(() => {
                 const globals = window as unknown as {
@@ -1847,16 +1854,17 @@ export function equipmentSourceFromPages(
             try {
               const html = await readSource(url, requestSignal);
               const text = html
-                .replace(/<\/(?:p|pre|main|div)>|<br\s*\/?\s*>/gi, "\n")
+                .replace(/<\/(?:h1|p|pre|main|div)>|<br\s*\/?\s*>/gi, "\n")
                 .replace(/<[^>]+>/g, "")
                 .replace(/&amp;/g, "&")
                 .replace(/&lt;/g, "<")
                 .replace(/&gt;/g, ">");
               const price = text.match(/挂牌价：¥(\d+(?:\.\d+)?)/)?.[1];
               candidate = verifyEquipmentCandidate(
-                item,
+                resolvedTargetKind ? { ...item, kindId: resolvedTargetKind } : item,
                 {
                   ...candidate,
+                  title: text.split(/\r?\n/)[0].trim(),
                   price: price ? Number(price) : null,
                   priceType: "listing",
                   quote: text,
@@ -1920,6 +1928,7 @@ export function equipmentSourceFromPages(
               });
               results.push({
                 key: item.key,
+                ...(resolvedTargetKind ? { kindId: resolvedTargetKind } : {}),
                 candidates: savedCandidates,
                 searchState: "pending",
                 ...(item.searchCursor ? { searchCursor: item.searchCursor } : {}),
@@ -2317,7 +2326,7 @@ export function equipmentSourceFromPages(
                   break;
                 }
                 count++;
-                if (row.name !== item.name) {
+                if (!resolvedTargetKind && row.name !== item.name) {
                   skipListing(row, "装备名称不匹配");
                   seen.add(seenKey);
                   inspected++;
@@ -2332,7 +2341,10 @@ export function equipmentSourceFromPages(
                   serverId + ":",
                 )
                   ? "候选商品不属于目标服务器"
-                  : item.modelId && row.modelId && Number(item.modelId) !== Number(row.modelId)
+                  : !resolvedTargetKind &&
+                      item.modelId &&
+                      row.modelId &&
+                      Number(item.modelId) !== Number(row.modelId)
                     ? "装备型号不匹配"
                     : equipmentListingMismatch(item, row, args);
                 if (mismatch) {
@@ -2452,6 +2464,7 @@ export function equipmentSourceFromPages(
           const itemSearchState = failed.size ? "read_failed" : completed ? "completed" : "pending";
           results.push({
             key: item.key,
+            ...(resolvedTargetKind ? { kindId: resolvedTargetKind } : {}),
             query,
             searchState: itemSearchState,
             ...(!completed || failed.size ? { searchCursor: next } : {}),
@@ -2485,6 +2498,7 @@ export function equipmentSourceFromPages(
           });
           results.push({
             key: item.key,
+            ...(resolvedTargetKind ? { kindId: resolvedTargetKind } : {}),
             query: currentQueries.join("\n"),
             searchState: "read_failed",
             candidates: currentCandidates(),

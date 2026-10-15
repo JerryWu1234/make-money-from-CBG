@@ -107,6 +107,151 @@ async function matchedPricing(record = recordWithEquipment()) {
 }
 
 describe("装备联网查价的来源核对", () => {
+  it.each(
+    ["人物装备", "灵饰"].flatMap((category) => [
+      [category, equipmentName + "·另一型号", description],
+      [category, "另一型号腰带", description + "\n说明：" + equipmentName],
+    ]),
+  )("%s主标题%s不同时，名称子串或描述中的目标名不能替代同种类证据", (category, name, desc) => {
+    const item = { ...equipmentInventory(recordWithEquipment()).items[0], category, kindId: "24" };
+    const text = quote(90, desc).replace(equipmentName, name);
+    const html = "<main>" + sourcePage(90, desc).replace(equipmentName, name) + "</main>";
+    const verified = verifyEquipmentCandidate(
+      item,
+      { ...candidate(90), quote: text },
+      html,
+      new Date().toISOString(),
+    );
+    expect(verified).toMatchObject({ verified: false, reason: expect.stringContaining("名称") });
+  });
+
+  it.each(["人物装备", "灵饰"])(
+    "%s有相同官方种类时允许不同名称和型号，保留实际商品标题",
+    (category) => {
+      const kindId = category === "灵饰" ? "61" : "24";
+      const item = {
+        ...equipmentInventory(recordWithEquipment()).items[0],
+        category,
+        kindId,
+        modelId: "2912",
+      };
+      const name = "另一型号腰带";
+      const text = quote(90).replace(equipmentName, name);
+      const verified = verifyEquipmentCandidate(
+        item,
+        { ...candidate(90), quote: text },
+        `<main data-cbg-kind-id="${kindId}" data-cbg-model-id="2913">` +
+          sourcePage(90).replace(equipmentName, name) +
+          "</main>",
+        new Date().toISOString(),
+      );
+      expect(verified).toMatchObject({ verified: true, title: name, price: 90 });
+    },
+  );
+
+  it.each([
+    [undefined, undefined],
+    ["24", undefined],
+    [undefined, "24"],
+    ["24", "25"],
+    ["0", "0"],
+  ])("缺少可靠同种类证据时不放宽不同名称和型号：%s/%s", (kindId, sourceKind) => {
+    const item = { ...equipmentInventory(recordWithEquipment()).items[0], kindId, modelId: "2912" };
+    const text = quote(90).replace(equipmentName, "另一型号腰带");
+    const html =
+      `<main data-cbg-model-id="2913"${sourceKind ? ` data-cbg-kind-id="${sourceKind}"` : ""}>` +
+      sourcePage(90).replace(equipmentName, "另一型号腰带") +
+      "</main>";
+    expect(
+      verifyEquipmentCandidate(
+        item,
+        { ...candidate(90), quote: text },
+        html,
+        new Date().toISOString(),
+      ).verified,
+    ).toBe(false);
+  });
+
+  it.each([
+    description.replace("等级：100", "等级：110"),
+    description.replace("防御：50", "防御：51"),
+    description.replace("特效：愤怒", "特效：神农"),
+    description + "\n特技：晶清诀",
+  ])("同种类跨名样本仍拒绝等级、上限、特效或特技不符：%s", (desc) => {
+    const item = {
+      ...equipmentInventory(recordWithEquipment()).items[0],
+      kindId: "24",
+      modelId: "2912",
+    };
+    const text = quote(90, desc).replace(equipmentName, "另一型号腰带");
+    expect(
+      verifyEquipmentCandidate(
+        item,
+        { ...candidate(90), quote: text },
+        '<main data-cbg-kind-id="24" data-cbg-model-id="2913">' +
+          sourcePage(90, desc).replace(equipmentName, "另一型号腰带") +
+          "</main>",
+        new Date().toISOString(),
+      ).verified,
+    ).toBe(false);
+  });
+
+  it("官网本项查询种类只用于临时二次核验，不写入库存身份", async () => {
+    const record = recordWithEquipment();
+    record.detail!.tabs.at(-1)!.items![0].modelId = "2912";
+    const before = equipmentInventory(record);
+    const text = quote(90).replace(equipmentName, "另一型号腰带");
+    const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+      findCandidates: async () => ({
+        ...searchResponse([]),
+        items: [
+          {
+            key: before.items[0].key,
+            kindId: "24",
+            candidates: [{ ...candidate(90), quote: text }],
+          },
+        ],
+      }),
+      readSource: async () =>
+        '<main data-cbg-kind-id="24" data-cbg-model-id="2913">' +
+        sourcePage(90).replace(equipmentName, "另一型号腰带") +
+        "</main>",
+    });
+    expect(pricing.total).toBe(90);
+    expect(pricing.items[0].kindId).toBeUndefined();
+    expect(equipmentInventory(record)).toEqual(before);
+    expect(pricing.inputHash).toBe(before.inputHash);
+  });
+
+  it.each(["25", "0", "-1", "1.2", "unknown"])(
+    "本项查询种类%s冲突或无效时拒绝且不读候选，不累计失败",
+    async (kindId) => {
+      const record = recordWithEquipment();
+      record.detail!.tabs.at(-1)!.items![0].kindId = "24";
+      const readSource = vi.fn().mockResolvedValue(sourcePage(100));
+      const checkpoint = vi.fn();
+      await expect(
+        searchEquipmentPrices(
+          record,
+          new AbortController().signal,
+          {
+            findCandidates: async () => ({
+              ...searchResponse([]),
+              items: [{ key: "道具/法宝:0", kindId, candidates: [candidate()] }],
+            }),
+            readSource,
+          },
+          undefined,
+          undefined,
+          checkpoint,
+        ),
+      ).rejects.toThrow("未采用报价");
+      expect(readSource).not.toHaveBeenCalled();
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(equipmentInventory(record).items[0].kindId).toBe("24");
+    },
+  );
+
   it.each(["人物装备", "灵饰"])(
     "%s统一采用基础值不高于目标的前五条合格样本最低价，保持官方顺序",
     async (category) => {

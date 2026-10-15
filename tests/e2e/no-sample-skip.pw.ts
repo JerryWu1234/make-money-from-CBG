@@ -208,7 +208,7 @@ for (const rule of [
         const price = Number(url.match(/fixture-skip-(\d+)/)![1]);
         const attributes =
           price === 900 ? description : description.replace("防御：50", "防御：40");
-        return `<main data-cbg-kind-id="20"><p>在售</p><h1>有报价腰带</h1><pre>${attributes}</pre><div>挂牌价：¥${price}</div></main>`;
+        return `<main data-cbg-kind-id="20"><p>在售</p><h1>${price === 100 ? "另一款腰带" : "有报价腰带"}</h1><pre>${attributes}</pre><div>挂牌价：¥${price}</div></main>`;
       },
     };
     const runner = new AnalysisRunner(store, async () => ({
@@ -447,7 +447,7 @@ for (const rule of [
       await expect(pricedCard).not.toContainText("仅1条挂牌样本");
       await pricedCard.getByText("有报价腰带 · 同配置，已核实来源", { exact: true }).click();
       await pricedCard
-        .getByText("有报价腰带 · 相近配置，已核实来源", { exact: true })
+        .getByText("另一款腰带 · 相近配置，已核实来源", { exact: true })
         .first()
         .click();
       await pricedCard.screenshot({ path: testInfo.outputPath("base-upper-bound-price.png") });

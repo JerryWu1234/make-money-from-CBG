@@ -119,6 +119,7 @@ export type EquipmentSource = {
     queries: string[];
     items: Array<{
       key: string;
+      kindId?: string;
       candidates: EquipmentCandidate[];
       note?: string;
       query?: string;
@@ -348,7 +349,7 @@ export function equipmentInventory(record: SavedRoleRecord) {
     JSON.stringify({
       scopeVersion: GLOBAL_MARKET_SCOPE_VERSION,
       searchUI: MARKET_SEARCH_UI_VERSION,
-      comparisonVersion: "per-attribute-initial-defense-v3",
+      comparisonVersion: "same-kind-base-upper-bound-v4",
       coreInitialPolicy: EQUIPMENT_CORE_INITIAL_POLICY,
       specialAssetPolicy: SPECIAL_ASSET_MATCH_POLICY,
       exclusionPolicy: EQUIPMENT_EXCLUSION_POLICY,
@@ -487,7 +488,8 @@ export function verifyEquipmentCandidate(
   html: string,
   fetchedAt: string,
 ): EquipmentCandidate {
-  const text = pageText(productSource(html)),
+  const primary = productSource(html);
+  const text = pageText(primary),
     normalized = normalize(text);
   const reject = (reason: string) => ({
     ...candidate,
@@ -514,15 +516,30 @@ export function verifyEquipmentCandidate(
   const sourceKind = html.match(/data-cbg-kind-id=["'](\d+)["']/)?.[1];
   const jade = item.category === "上古玉魄";
   const yuanshen = item.category === "元身";
+  const sameOrdinaryKind =
+    failureBudgetApplies(item) &&
+    /^[1-9]\d*$/.test(item.kindId || "") &&
+    item.kindId === sourceKind;
+  const sourceName = pageText(primary.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1] || "").trim();
+  if (
+    failureBudgetApplies(item) &&
+    sourceName &&
+    normalize(sourceName) !== normalize(item.name) &&
+    !sameOrdinaryKind
+  )
+    return reject("主商品名称不同且缺少相同官方种类证据");
   const targetModel =
     item.modelId || (jade ? { 上古玉魄·阴: "61717", 上古玉魄·阳: "61718" }[item.name] : undefined);
   if (
-    (targetModel && sourceModel && Number(targetModel) !== Number(sourceModel)) ||
+    (!sameOrdinaryKind &&
+      targetModel &&
+      sourceModel &&
+      Number(targetModel) !== Number(sourceModel)) ||
     (item.kindId && sourceKind && Number(item.kindId) !== Number(sourceKind))
   )
     return reject("官方装备类型或型号不匹配");
   if (
-    !normalized.includes(normalize(item.name)) ||
+    (!sameOrdinaryKind && !normalized.includes(normalize(item.name))) ||
     (!jade && !yuanshen && (item.level === null || sourceAttributes.level !== item.level)) ||
     (jade && (!targetModel || sourceModel !== targetModel))
   )
@@ -574,6 +591,7 @@ export function verifyEquipmentCandidate(
   if (!/上架中|在售|公示中|公示期/.test(text)) return reject("无法确认当前在售状态");
   return {
     ...candidate,
+    ...(sourceName ? { title: sourceName.slice(0, 300) } : {}),
     verified: true,
     matchType: match.matchType || "exact",
     similarityScore: match.similarityScore,
@@ -860,6 +878,15 @@ async function applyEquipmentSearchResponse(
     }
     // Untouched items keep their earlier cursor/quotations; they were not re-read this round.
     if (result.skipped === true || item.searchState === "skipped") continue;
+    if (
+      result.kindId !== undefined &&
+      (typeof result.kindId !== "string" || !/^[1-9]\d*$/.test(result.kindId))
+    )
+      throw new Error("官网查询装备种类无效，未采用报价");
+    if (item.kindId && result.kindId && Number(item.kindId) !== Number(result.kindId))
+      throw new Error("官网查询装备种类与库存不一致，未采用报价");
+    const target =
+      !item.kindId && result.kindId ? { ...item, kindId: result.kindId as string } : item;
     item.query = typeof result.query === "string" ? result.query : "";
     item.searchCursor = result.searchCursor as EquipmentSearchCursor | undefined;
     item.samplingStopped = result.samplingStopped === true;
@@ -914,7 +941,7 @@ async function applyEquipmentSearchResponse(
         readingSource = true;
         if (!pages.has(identity)) pages.set(identity, source.readSource(url, signal));
         candidate = verifyEquipmentCandidate(
-          item,
+          target,
           candidate,
           await pages.get(identity)!,
           new Date().toISOString(),

@@ -26,7 +26,7 @@ export function equipmentSearchDocument(options = {}) {
 <div id="search_result"></div><div id="pager"></div><div class="searchForm" id="fixture_form"></div>
 <script>
 window.IsLogin=1;
-window.EquipKinds=[[6,'剑'],[7,'双剑'],[18,'男衣'],[20,'腰带'],[19,'鞋子'],[21,'饰品']];
+window.EquipKinds=[[6,'剑'],[7,'双剑'],[11,'魔棒'],[18,'男衣'],[20,'腰带'],[19,'鞋子'],[21,'饰品']];
 window.Kinds=[[61,'戒指'],[62,'耳饰'],[63,'手镯'],[64,'佩饰']];
 window.SpecialEffects=[[3,'愤怒'],[5,'永不磨损']];
 window.SpecialSkills=[[1036,'破血狂攻']];window.Gems=[[2,'太阳石'],[3,'舍利子'],[4,'光芒石'],[5,'月亮石'],[6,'黑宝石']];

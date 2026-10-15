@@ -1102,6 +1102,22 @@ describe("装备最终市场请求范围审计", () => {
       await source.close();
     }
   });
+  it("响应携带本项官网筛选解析的目标kind，不改原库存或采用列表候选kind", async () => {
+    const { source, control } = pages();
+    const target = item({ description: "等级100\n防御50\n气血250\n锻炼等级0" });
+    try {
+      const result = await source.findCandidates([target], control.signal);
+      expect(result.items[0]).toMatchObject({ kindId: "20" });
+      expect(target.kindId).toBeUndefined();
+      expect(result.searchItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ args: expect.objectContaining({ kindid: "20" }) }),
+        ]),
+      );
+    } finally {
+      await source.close();
+    }
+  });
   it("后件启动组件超时仍保留前件结果与实际查询，后续件保留游标", async () => {
     const { source, search, control } = pages();
     search.waitForFunction

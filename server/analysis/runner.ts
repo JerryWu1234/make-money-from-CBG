@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AiProvider } from "../ai/types";
 import type { SavedRoleRecord } from "../crawler/types";
-import type { EquipmentPricingSnapshot } from "./equipment-pricing";
+import { equipmentInventory, type EquipmentPricingSnapshot } from "./equipment-pricing";
 import type { PetPricingSnapshot } from "./pet-pricing";
 import { petGearInventory, type PetGearPricingSnapshot } from "./pet-gear-inventory";
 import { ANALYSIS_SCHEMA, validateAnalysis } from "./contract";
@@ -244,11 +244,15 @@ export class AnalysisRunner {
         return;
       }
       if (budget.taskId !== task.id) budget = { taskId: task.id, started: Date.now(), rounds: 0 };
+      const equipmentPricingCurrent =
+        !!task.equipmentPricing &&
+        task.equipmentPricing.inputHash === equipmentInventory(task.record).inputHash &&
+        pricingSnapshotFresh(task.equipmentPricing);
       const pendingPricing =
         (task.profile?.equipmentSearch &&
           (!task.equipmentPricing ||
             task.equipmentPricing.searchComplete === false ||
-            !pricingSnapshotFresh(task.equipmentPricing))) ||
+            !equipmentPricingCurrent)) ||
         (task.profile?.petSearch &&
           (!task.petPricing ||
             task.petPricing.searchComplete === false ||
@@ -284,7 +288,7 @@ export class AnalysisRunner {
         task.profile?.equipmentSearch &&
         (!task.equipmentPricing ||
           task.equipmentPricing.searchComplete === false ||
-          !pricingSnapshotFresh(task.equipmentPricing))
+          !equipmentPricingCurrent)
       ) {
         const signal = AbortSignal.any([
           stop,

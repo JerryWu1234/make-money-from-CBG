@@ -1524,6 +1524,75 @@ try {
     );
   });
 
+  for (const sample of [
+    { label: "同种类不同名称型号", rowKind: "11", detailKind: "11", valid: true },
+    { label: "列表明确不同种类", rowKind: "6", detailKind: "11", valid: false },
+    { label: "列表缺种类但详情不同种类", detailKind: "6", valid: false },
+    { label: "详情缺官方种类", detailKind: null, valid: false },
+  ])
+    await check("官网目录补目标种类后核验：" + sample.label, () => {
+      const name = "目标魔棒",
+        candidateName = "另一把魔棒",
+        description = "等级130\n伤害500\n锻炼等级0\n耐久300";
+      return withSource(
+        {
+          namedModels: { "130_11": [{ label: name, value: 1101 }] },
+          pages: [
+            [
+              {
+                eid: "same-kind-other-model",
+                name: candidateName,
+                modelId: "1102",
+                kindId: sample.rowKind,
+              },
+            ],
+          ],
+        },
+        {
+          name: candidateName,
+          modelId: "1102",
+          kindId: sample.detailKind,
+          description,
+          renderedPanel: true,
+          selling: 1,
+        },
+        async ({ source, searchPage, control }) => {
+          const target = item({
+            name,
+            category: "人物装备",
+            level: 130,
+            modelId: "1101",
+            description,
+          });
+          const result = await source.findCandidates([target], control.signal);
+          const [query] = await searchPage.evaluate(() => window.calls);
+          assert.equal(query.kindid, "11");
+          assert.equal(target.kindId, undefined);
+          assert.equal(result.items[0].kindId, "11");
+          assert.equal(
+            result.items[0].candidates.some((candidate) => candidate.verified),
+            sample.valid,
+          );
+          if (sample.valid) {
+            const candidate = result.items[0].candidates[0];
+            assert.equal(candidate.title, candidateName);
+            assert.match(candidate.quote, new RegExp(candidateName));
+            assert.deepEqual(detailVisits, ["same-kind-other-model"]);
+          } else if (sample.rowKind === "6") assert.deepEqual(detailVisits, []);
+          else assert.deepEqual(detailVisits, ["same-kind-other-model"]);
+          await mkdir("data/pr27-fix-validation", { recursive: true });
+          await writeFile(
+            "data/pr27-fix-validation/same-kind-" +
+              (sample.rowKind || "missing") +
+              "-" +
+              sample.detailKind +
+              ".json",
+            JSON.stringify({ simulated: true, sample, query, result }, null, 2),
+          );
+        },
+      );
+    });
+
   await check("官网名称同时对应多个武器分类时不取第一个猜kind", () => {
     const name = "月光",
       description = "等级 90\n伤害 +300";
@@ -1988,7 +2057,12 @@ try {
 
   await check("第二页末尾只有上一页时终止，不再请求第三页", () =>
     withSource(
-      { pages: [[{ eid: "first", name: "其他装备" }], [{ eid: "last", name: equipmentName }]] },
+      {
+        pages: [
+          [{ eid: "first", name: "其他装备", kindId: "6" }],
+          [{ eid: "last", name: equipmentName }],
+        ],
+      },
       {},
       async ({ source, searchPage, control }) => {
         const input = item();
@@ -2182,11 +2256,15 @@ try {
     );
   }
 
-  await check("第一页前5条无同名装备直接停止，不查询后续页", () =>
+  await check("第一页前5条类型均不匹配直接停止，不查询后续页", () =>
     withSource(
       {
         pages: [
-          Array.from({ length: 5 }, (_, i) => ({ eid: "wrong-" + i, name: "其他装备" })),
+          Array.from({ length: 5 }, (_, i) => ({
+            eid: "wrong-" + i,
+            name: "其他装备",
+            kindId: "6",
+          })),
           [{ eid: "later-match", name: equipmentName }],
         ],
       },
@@ -2322,10 +2400,14 @@ try {
         Date.now = () => baseline + 180_001;
       };
       try {
-        const untouched = item({ key: "later-item", ...saved });
+        const untouched = item({
+          key: "later-item",
+          candidates: saved.candidates,
+          searchCursor: saved.searchCursor,
+        });
         const result = await source.findCandidates(
           [
-            { ...item({ kindId: "20" }), ...saved },
+            item({ kindId: "20", candidates: saved.candidates, searchCursor: saved.searchCursor }),
             { ...untouched, key: "later-item" },
           ],
           control.signal,
@@ -2363,8 +2445,12 @@ try {
         assert.deepEqual(detailVisits, ["failure-0", "failure-1", "failure-1", "failure-1"]);
         assert.equal(first.candidates.filter((x) => x.verified).length, 1);
         detailOptions = {};
-        const second = (await source.findCandidates([{ ...item(), ...first }], control.signal))
-          .items[0];
+        const second = (
+          await source.findCandidates(
+            [item({ candidates: first.candidates, searchCursor: first.searchCursor })],
+            control.signal,
+          )
+        ).items[0];
         assert.equal(second.searchState, "completed", second.note);
         assert.deepEqual(
           second.candidates
@@ -2399,8 +2485,12 @@ try {
                   ? equipmentDescription.replace("黑宝石", "月亮石")
                   : equipmentDescription,
             });
-            const second = (await source.findCandidates([{ ...item(), ...first }], control.signal))
-              .items[0];
+            const second = (
+              await source.findCandidates(
+                [item({ candidates: first.candidates, searchCursor: first.searchCursor })],
+                control.signal,
+              )
+            ).items[0];
             assert.equal(second.searchState, "completed", second.note);
             assert.deepEqual(
               second.candidates
@@ -2441,7 +2531,9 @@ try {
     });
     for (const changed of [[rows[5], ...rows.slice(0, 5)], []]) {
       await withSource({ pages: [changed] }, detail, async ({ source, control }) => {
-        const result = await source.findCandidates([{ ...item(), ...saved }], control.signal);
+        const input = item({ candidates: saved.candidates, searchCursor: saved.searchCursor });
+        assert.equal(input.kindId, undefined);
+        const result = await source.findCandidates([input], control.signal);
         const reset = result.items[0];
         assert.equal(reset.searchState, "pending", reset.note);
         assert.deepEqual(reset.candidates, []);
@@ -2453,8 +2545,12 @@ try {
         if (changed.length) {
           let rebuilt = reset;
           for (let round = 0; round < 2 && rebuilt.searchState === "pending"; round++)
-            rebuilt = (await source.findCandidates([{ ...item(), ...rebuilt }], control.signal))
-              .items[0];
+            rebuilt = (
+              await source.findCandidates(
+                [item({ candidates: rebuilt.candidates, searchCursor: rebuilt.searchCursor })],
+                control.signal,
+              )
+            ).items[0];
           assert.equal(rebuilt.searchState, "completed", rebuilt.note);
           assert.deepEqual(
             rebuilt.candidates
@@ -2504,15 +2600,20 @@ try {
       },
       detail,
       async ({ source, control }) => {
-        const reset = (await source.findCandidates([{ ...item(), ...saved }], control.signal))
-          .items[0];
+        const input = item({ candidates: saved.candidates, searchCursor: saved.searchCursor });
+        assert.equal(input.kindId, undefined);
+        const reset = (await source.findCandidates([input], control.signal)).items[0];
         assert.equal(reset.searchState, "pending");
         assert.deepEqual(reset.candidates, []);
         assert.equal(reset.searchCursor.restartCount, 1);
         let rebuilt = reset;
         for (let round = 0; round < 4 && rebuilt.searchState === "pending"; round++)
-          rebuilt = (await source.findCandidates([{ ...item(), ...rebuilt }], control.signal))
-            .items[0];
+          rebuilt = (
+            await source.findCandidates(
+              [item({ candidates: rebuilt.candidates, searchCursor: rebuilt.searchCursor })],
+              control.signal,
+            )
+          ).items[0];
         assert.equal(rebuilt.searchState, "completed");
         assert.deepEqual(
           rebuilt.candidates.map((value) => new URL(value.url).searchParams.get("eid")),
@@ -2561,7 +2662,11 @@ try {
     withSource(
       {
         pages: Array.from({ length: 6 }, (_, page) =>
-          Array.from({ length: 30 }, (_, row) => ({ eid: `${page}-${row}`, name: "其他装备" })),
+          Array.from({ length: 30 }, (_, row) => ({
+            eid: `${page}-${row}`,
+            name: "其他装备",
+            kindId: "6",
+          })),
         ),
       },
       {},
