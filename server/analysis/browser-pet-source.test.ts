@@ -1236,12 +1236,22 @@ describe("宝宝查询使用独立后台页", () => {
       await source.close();
     }
   });
-  it("各筛选第一页无有效样本时停止翻页，避免零样本游标反复重建", async () => {
+  it("各筛选前5条无有效样本时完成搜索，不翻页读取后排商品", async () => {
     const { source, search } = queryPages(true);
     const evaluate = search.evaluate.getMockImplementation()!;
     search.evaluate.mockImplementation(async (fn: Function, arg: unknown) => {
       const result = await evaluate(fn, arg);
-      return typeof arg === "number" ? { ...(result as object), hasNext: true } : result;
+      return typeof arg === "number"
+        ? {
+            rows: Array.from({ length: 5 }, (_, index) => ({
+              url: `https://xyq.cbg.163.com/equip?s=1&eid=sample-${index}`,
+              name: "模拟宝宝",
+              type: "2001",
+            })),
+            empty: false,
+            hasNext: true,
+          }
+        : result;
     });
     const target = item();
     target.fields = target.fields.map((field) =>
@@ -1249,17 +1259,17 @@ describe("宝宝查询使用独立后台页", () => {
     );
     try {
       const result = await source.findCandidates([target], new AbortController().signal);
-      expect(result.items[0]).toMatchObject({ searchState: "pending", samplingStopped: true });
+      expect(result.items[0]).toMatchObject({ searchState: "completed" });
       expect(result.items[0].candidates.some((candidate) => candidate.verified)).toBe(false);
       expect(search.evaluate.mock.calls.some(([, arg]) => typeof arg === "number" && arg > 1)).toBe(
         false,
       );
-      expect(result.items[0].note).toContain("第一页");
+      expect(result.items[0].note).toContain("前5条");
     } finally {
       await source.close();
     }
   });
-  it("无报价的已完成筛选页变动时，续跑只校验尚未完成的条件", async () => {
+  it("无报价的未完成筛选页变动时，从该条件前5条重新取样", async () => {
     const first = queryPages(true);
     const target = item();
     target.fields = target.fields.map((field) =>
@@ -1269,7 +1279,17 @@ describe("宝宝查询使用独立后台页", () => {
     const originalEvaluate = first.search.evaluate.getMockImplementation()!;
     first.search.evaluate.mockImplementation(async (fn: Function, arg: unknown) => {
       const value = await originalEvaluate(fn, arg);
-      return typeof arg === "number" ? { ...(value as object), hasNext: true } : value;
+      return typeof arg === "number"
+        ? {
+            rows: Array.from({ length: 5 }, (_, index) => ({
+              url: `https://xyq.cbg.163.com/equip?s=1&eid=sample-${index}`,
+              name: "模拟宝宝",
+              type: "2001",
+            })),
+            empty: false,
+            hasNext: true,
+          }
+        : value;
     });
     const originalDetail = first.detail.evaluate.getMockImplementation()!;
     let reads = 0;
@@ -1283,18 +1303,14 @@ describe("宝宝查询使用独立后台页", () => {
       const result = await first.source.findCandidates([target], new AbortController().signal);
       expect(result.items[0]).toMatchObject({
         searchState: "pending",
-        searchCursor: { modeIndex: 1 },
+        searchCursor: { modeIndex: 0 },
       });
       expect(result.items[0].candidates.some((candidate) => candidate.verified)).toBe(false);
       saved = { ...target, ...result.items[0] };
       // An unfinished active page can change on the next official recommendation request.
       saved.searchCursor!.rowIndex = 2;
       saved.searchCursor!.pageRowsHash = "changed-active-page";
-      saved.searchCursor!.pageHistory!.push({
-        modeIndex: 1,
-        pageNumber: 1,
-        rowsHash: "changed-active-page",
-      });
+      saved.searchCursor!.pageHistory![0].rowsHash = "changed-active-page";
     } finally {
       vi.restoreAllMocks();
       await first.source.close();
@@ -1303,13 +1319,23 @@ describe("宝宝查询使用独立后台页", () => {
     const secondEvaluate = second.search.evaluate.getMockImplementation()!;
     second.search.evaluate.mockImplementation(async (fn: Function, arg: unknown) => {
       const value = await secondEvaluate(fn, arg);
-      return typeof arg === "number" ? { ...(value as object), hasNext: true } : value;
+      return typeof arg === "number"
+        ? {
+            rows: Array.from({ length: 5 }, (_, index) => ({
+              url: `https://xyq.cbg.163.com/equip?s=1&eid=sample-${index}`,
+              name: "模拟宝宝",
+              type: "2001",
+            })),
+            empty: false,
+            hasNext: true,
+          }
+        : value;
     });
     try {
       const result = await second.source.findCandidates([saved!], new AbortController().signal);
-      expect(second.calls[0]).toMatchObject(petQueries(target, config)[1].args);
+      expect(second.calls[0]).toMatchObject(petQueries(target, config)[0].args);
       expect(result.items[0].note).not.toContain("顺序已变化");
-      expect(result.items[0]).toMatchObject({ samplingStopped: true });
+      expect(result.items[0]).toMatchObject({ searchState: "completed" });
       expect(result.searchItems).not.toContainEqual(
         expect.objectContaining({ reason: "result_order_changed" }),
       );
@@ -1558,7 +1584,7 @@ describe("宝宝查询使用独立后台页", () => {
       await source.close();
     }
   });
-  it("第一页前六条无效时仍读取后面的有效商品，不提前误跳过", async () => {
+  it("第一页前5条无效时不读取第6条后的有效商品", async () => {
     const first = queryPages(true);
     const prepare = (value: ReturnType<typeof queryPages>) => {
       const evaluateSearch = value.search.evaluate.getMockImplementation()!;
@@ -1581,15 +1607,15 @@ describe("宝宝查询使用独立后台页", () => {
     prepare(first);
     try {
       const result = await first.source.findCandidates([item()], new AbortController().signal);
-      expect(first.detail.goto).toHaveBeenCalledTimes(9);
+      expect(first.detail.goto).toHaveBeenCalledTimes(5);
       expect(result.items[0].searchState).toBe("completed");
-      expect(result.items[0].candidates.filter((candidate) => candidate.verified)).toHaveLength(3);
+      expect(result.items[0].candidates.filter((candidate) => candidate.verified)).toHaveLength(0);
       expect(result.items[0]).not.toHaveProperty("searchCursor");
     } finally {
       await first.source.close();
     }
   });
-  it("第一页前五个相近候选无效时继续核验整页，采用后续三条有效价格", async () => {
+  it("第一页前5个相近候选无效时不扩大取样范围", async () => {
     const prepare = (value: ReturnType<typeof queryPages>) => {
       const evaluate = value.search.evaluate.getMockImplementation()!;
       value.search.evaluate.mockImplementation(async (fn: Function, arg: unknown) => {
@@ -1615,9 +1641,9 @@ describe("宝宝查询使用独立后台页", () => {
     prepare(first);
     try {
       const result = await first.source.findCandidates([item()], new AbortController().signal);
-      expect(first.detail.goto).toHaveBeenCalledTimes(8);
+      expect(first.detail.goto).toHaveBeenCalledTimes(5);
       expect(result.items[0].searchState).toBe("completed");
-      expect(result.items[0].candidates.filter((candidate) => candidate.verified)).toHaveLength(3);
+      expect(result.items[0].candidates.filter((candidate) => candidate.verified)).toHaveLength(0);
       expect(
         result.items[0].candidates
           .filter((candidate) => candidate.verified)
@@ -1671,7 +1697,8 @@ describe("宝宝查询使用独立后台页", () => {
         new AbortController().signal,
       );
       expect(second.calls).toHaveLength(5);
-      expect(second.detail.goto).toHaveBeenCalledTimes(4);
+      expect(second.detail.goto).toHaveBeenCalledTimes(3);
+      expect(second.detail.goto.mock.calls.some(([url]) => url.endsWith("sample-6"))).toBe(false);
       expect(result.items[0].searchState).toBe("completed");
       expect(result.queries).toHaveLength(1);
       expect(result.searchItems).toEqual(

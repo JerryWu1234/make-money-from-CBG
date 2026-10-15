@@ -276,6 +276,7 @@ export type PetSearchConfig = {
   officialTypeIds?: string[];
 };
 class NonSaleablePetTypeError extends Error {}
+class UnverifiablePetAccessoryError extends Error {}
 
 class UnsupportedPetDescriptionError extends Error {
   override name = "UnsupportedPetDescriptionError";
@@ -1188,6 +1189,14 @@ async function inspectMainPetEquipment(page: Page, signal: AbortSignal, excluded
           .split(/\r?\n/)
           .map((line) => line.trim())
           .filter(Boolean);
+        if (
+          /\/pet_shipin\//.test(icon.getAttribute("src") || "") &&
+          !name &&
+          !attrs.data_store_name?.trim() &&
+          lines.length === 1 &&
+          /^玄天灵力\s*\d+$/.test(lines[0])
+        )
+          return { skipCandidate: true as const };
         const visibleName = name || lines[0];
         if (!visibleName || !texts[0].includes(visibleName)) return false;
         const description = (lines[0] === visibleName ? lines.slice(1) : lines).join("\n");
@@ -1199,6 +1208,10 @@ async function inspectMainPetEquipment(page: Page, signal: AbortSignal, excluded
     try {
       const value = await handle.jsonValue();
       if (!value) throw new Error("宝宝装备提示框未完整显示");
+      if ("skipCandidate" in value)
+        throw new UnverifiablePetAccessoryError(
+          "官网未命名饰品仅显示玄天灵力，无法核验宝宝包价，已排除此候选",
+        );
       signal.throwIfAborted();
       await icon.evaluate((node, value) => {
         node.setAttribute("data_cbg_pet_gear_name", value.name);
@@ -1778,6 +1791,10 @@ export function petSourceFromPages(
               reason: error instanceof Error ? error.message : "无法读取宝宝详情",
             };
             (matchType === "diagnostic" ? diagnosticSources : rejected).push(candidate);
+            if (error instanceof UnverifiablePetAccessoryError) {
+              failed.delete(url);
+              return { candidate };
+            }
             const failure = {
               url,
               reason: error instanceof Error ? error.message.split("\n")[0] : "无法读取宝宝详情",

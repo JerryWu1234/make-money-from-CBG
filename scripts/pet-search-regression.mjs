@@ -276,6 +276,104 @@ try {
     assert.equal(searchPage.isClosed(), true);
     assert.equal(detailPage.isClosed(), true);
   };
+  await check("未命名饰品候选排除后仍只核验前5条，取其余4条最低价", () =>
+    withSource(
+      { pages: [Array.from({ length: 6 }, (_, i) => ({ eid: "unnamed-" + i, name: "画魂" }))] },
+      (id) =>
+        Number(id.split("-").at(-1)) === 0
+          ? {
+              equipment: [{ name: "", description: "玄天灵力 0", shipin: true }],
+              lazyGear: true,
+              price: 1,
+            }
+          : {
+              price: [1, 500, 300, 400, 600, 1][Number(id.split("-").at(-1))],
+              rawPrice: [1, 500, 300, 400, 600, 1][Number(id.split("-").at(-1))],
+            },
+      async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.searchComplete, true, JSON.stringify(result.searchItems));
+        assert.equal(result.items[0].referencePrice, 300);
+        assert.equal(result.items[0].candidates.filter((c) => c.verified).length, 4);
+        assert.match(
+          result.items[0].candidates.find((c) => c.url.includes("unnamed-0")).reason,
+          /未命名饰品/,
+        );
+        assert.deepEqual(detailVisits, [
+          "unnamed-0",
+          "unnamed-1",
+          "unnamed-2",
+          "unnamed-3",
+          "unnamed-4",
+        ]);
+        assert.ok(result.searchItems.every((r) => !r.detailFailures?.length));
+        if (process.env.CBG_UNNAMED_PROOF)
+          await writeFile(
+            process.env.CBG_UNNAMED_PROOF,
+            JSON.stringify(
+              { state: "passed", scenario: "first-five-minimum", snapshot: result, detailVisits },
+              null,
+              2,
+            ),
+          );
+      },
+    ),
+  );
+  await check("未命名饰品候选全部排除时宝宝跳过，保留未知价格", () =>
+    withSource(
+      { pages: [[{ eid: "unnamed-only", name: "画魂" }]] },
+      { equipment: [{ name: "", description: "玄天灵力 0", shipin: true }], lazyGear: true },
+      async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].searchState, "skipped");
+        assert.equal(result.items[0].referencePrice, null);
+        assert.equal(result.knownTotal, 0);
+        assert.ok(
+          result.items[0].candidates.every((c) => !c.verified && /未命名饰品/.test(c.reason)),
+        );
+      },
+    ),
+  );
+  await check("未命名饰品的旧失败游标恢复后排除候选，不读取第6条", async () => {
+    let loaded = false;
+    await withSource(
+      {
+        pages: [Array.from({ length: 6 }, (_, i) => ({ eid: "retry-unnamed-" + i, name: "画魂" }))],
+      },
+      (id) =>
+        Number(id.split("-").at(-1)) === 0
+          ? {
+              equipment: [
+                { name: "", description: loaded ? "玄天灵力 0" : "未加载", shipin: true },
+              ],
+              lazyGear: true,
+            }
+          : {
+              price: [1, 500, 300, 400, 600, 1][Number(id.split("-").at(-1))],
+              rawPrice: [1, 500, 300, 400, 600, 1][Number(id.split("-").at(-1))],
+            },
+      async ({ source, control }) => {
+        const first = await searchPetPricing(record(), control.signal, source);
+        assert.equal(first.items[0].searchState, "read_failed");
+        assert.equal(first.items[0].searchCursor.failed.length, 1);
+        loaded = true;
+        const result = await searchPetPricing(record(), control.signal, source, first);
+        assert.equal(result.searchComplete, true, JSON.stringify(result.searchItems));
+        assert.equal(result.items[0].referencePrice, 300);
+        assert.equal(result.items[0].searchCursor?.failed.length || 0, 0);
+        assert.ok(!detailVisits.includes("retry-unnamed-5"));
+        assert.ok(
+          result.searchItems.some(
+            (r) =>
+              r.kind === "saved_detail_refresh" &&
+              r.candidates.some((c) => /未命名饰品/.test(c.reason)),
+          ),
+        );
+      },
+    );
+  });
+
   await check("宝宝结果等待超时能区分回调缺失与加载图标不消失", async () => {
     for (const settings of [{ mode: "stalled" }, { keepLoading: true }]) {
       await withSource(settings, {}, async ({ source, control }) => {
