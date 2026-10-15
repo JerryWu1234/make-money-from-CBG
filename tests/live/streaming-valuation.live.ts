@@ -371,6 +371,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
       captureFinished = true;
       await event("capture_finished", { count: selected.length });
     };
+    if (resume && manifest.runId) await startAnalysis();
     producer = (async () => {
       while (!stopping) {
         try {

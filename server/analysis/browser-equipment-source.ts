@@ -2094,9 +2094,7 @@ export function equipmentSourceFromPages(
             for (const [url, modeIndex] of failed) {
               if (attemptedDetails.has(url)) continue;
               if (details >= MAX_DETAILS || Date.now() >= deadline) break;
-              if (!(await readCandidate(safeEquipmentUrl(url), modeIndex))) {
-                seen.delete(modeIndex + "|" + equipmentIdentity(url));
-              }
+              await readCandidate(safeEquipmentUrl(url), modeIndex);
             }
           }
           let orderChanged = false;

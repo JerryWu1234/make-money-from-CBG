@@ -2262,31 +2262,41 @@ try {
     ),
   );
 
-  await check("第5条装备详情失败先保留待查，恢复后不读取第6条", () =>
-    withSource(
-      {
-        pages: [Array.from({ length: 6 }, (_, i) => ({ eid: "fifth-" + i, name: equipmentName }))],
-      },
-      (id) => ({ tooltipMissing: id === "fifth-4" }),
-      async ({ source, control }) => {
-        const first = (await source.findCandidates([item()], control.signal)).items[0];
-        assert.equal(first.searchState, "read_failed");
-        assert.equal(first.candidates.filter((c) => c.verified).length, 4);
-        assert.ok(first.searchCursor.failed.length);
-        detailOptions = {};
-        const second = (await source.findCandidates([{ ...item(), ...first }], control.signal))
-          .items[0];
-        assert.equal(second.searchState, "completed", second.note);
-        assert.deepEqual(
-          second.candidates
-            .filter((c) => c.verified)
-            .map((c) => new URL(c.url).searchParams.get("eid")),
-          Array.from({ length: 5 }, (_, i) => "fifth-" + i),
-        );
-        assert.ok(!detailVisits.includes("fifth-5"));
-      },
-    ),
-  );
+  for (const matchesAfterRetry of [true, false])
+    await check(
+      `第5条装备详情失败先保留待查，恢复后${matchesAfterRetry ? "匹配" : "不匹配"}均不读取第6条`,
+      () =>
+        withSource(
+          {
+            pages: [
+              Array.from({ length: 6 }, (_, i) => ({ eid: "fifth-" + i, name: equipmentName })),
+            ],
+          },
+          (id) => ({ tooltipMissing: id === "fifth-4" }),
+          async ({ source, control }) => {
+            const first = (await source.findCandidates([item()], control.signal)).items[0];
+            assert.equal(first.searchState, "read_failed");
+            assert.equal(first.candidates.filter((c) => c.verified).length, 4);
+            assert.ok(first.searchCursor.failed.length);
+            detailOptions = (id) => ({
+              description:
+                id === "fifth-4" && !matchesAfterRetry
+                  ? equipmentDescription.replace("黑宝石", "月亮石")
+                  : equipmentDescription,
+            });
+            const second = (await source.findCandidates([{ ...item(), ...first }], control.signal))
+              .items[0];
+            assert.equal(second.searchState, "completed", second.note);
+            assert.deepEqual(
+              second.candidates
+                .filter((c) => c.verified)
+                .map((c) => new URL(c.url).searchParams.get("eid")),
+              Array.from({ length: matchesAfterRetry ? 5 : 4 }, (_, i) => "fifth-" + i),
+            );
+            assert.ok(!detailVisits.includes("fifth-5"));
+          },
+        ),
+    );
 
   await check("续查页面重排或清空时丢弃旧候选，从第一页重建官网取样顺序", async () => {
     const rows = Array.from({ length: 6 }, (_, index) => ({
