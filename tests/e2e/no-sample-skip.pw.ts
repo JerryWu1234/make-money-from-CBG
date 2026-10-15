@@ -67,6 +67,13 @@ for (const rule of [
           name: "不支持等级腰带",
           description: description.replace("等级：100", "等级：50"),
         },
+        {
+          index: 4,
+          kind: "equipment",
+          category: "腰带",
+          name: "初始气血未知腰带",
+          description: "等级100\n气血348\n防御34\n锻炼等级8\n宝石：光芒石 黑宝石",
+        },
       ],
     });
     record.detail!.tabs.push({
@@ -133,9 +140,11 @@ for (const rule of [
     const source: EquipmentSource = {
       findCandidates: async (items) => {
         equipmentCalls++;
-        expect(items.some((item) => ["专用腰带", "不支持等级腰带"].includes(item.name))).toBe(
-          false,
-        );
+        expect(
+          items.some((item) =>
+            ["专用腰带", "不支持等级腰带", "初始气血未知腰带"].includes(item.name),
+          ),
+        ).toBe(false);
         return {
           queries: ["模拟条件，非真实行情"],
           searchItems: items.map((item) => ({
@@ -289,7 +298,12 @@ for (const rule of [
       expect(result).not.toHaveProperty("role_pricing");
       expect(result).not.toHaveProperty("special_asset_reference");
       expect(result.equipment_pricing?.items[1].candidates).toHaveLength(5);
-      expect(result.excluded_assets).toHaveLength(4);
+      expect(result.excluded_assets).toHaveLength(5);
+      expect(result.equipment_pricing?.items[4]).toMatchObject({
+        searchState: "skipped",
+        referencePrice: null,
+        skipReason: expect.stringContaining("初始气血"),
+      });
       expect(result.equipment_pricing?.items[3]).toMatchObject({
         status: "unsupported",
         searchState: "skipped",
@@ -358,6 +372,9 @@ for (const rule of [
           }),
         ).toContainText(skipLabel);
       }
+      await expect(dialog.getByRole("region", { name: "装备联网查价", exact: true })).toContainText(
+        "核心初始气血无法可靠还原",
+      );
       await expect(dialog).toContainText("市场售价未知");
       await expect(dialog).toContainText("采用实际有效样本的最低挂牌价");
       if (noSample) await expect(dialog).toContainText("随身装备不再核验");

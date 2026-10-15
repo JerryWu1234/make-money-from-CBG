@@ -38,6 +38,7 @@ import {
   type EquipmentCandidate,
   type EquipmentPricingItem,
   type EquipmentSearchCursor,
+  equipmentCoreSkipReason,
   type EquipmentSource,
   type PricingSearchProgress,
 } from "./equipment-pricing";
@@ -343,7 +344,7 @@ export function equipmentQuery(
       ["敏捷", "init_dex"],
       ["防御", "init_defense"],
     ] as const) {
-      if (field === "敏捷" && kind?.[1] !== "鞋子") continue;
+      if (field === "敏捷" && !/鞋|靴/.test(kind?.[1] || "")) continue;
       const value = equipmentInitialAttribute(attributes, field);
       if (value !== null) {
         args[parameter] = value;
@@ -391,7 +392,11 @@ export function equipmentQuery(
       }
     }
   }
-  return { jewelry, args };
+  return {
+    jewelry,
+    args,
+    coreSkipReason: jewelry ? null : equipmentCoreSkipReason(item, kind?.[1] || item.category),
+  };
 }
 
 export type EquipmentQueryMode = "exact" | "same-gems" | "near-gems" | "similar";
@@ -1757,6 +1762,24 @@ export function equipmentSourceFromPages(
                 : equipmentQuery(item, config).args),
             server_type: "3",
           };
+          const coreSkipReason =
+            !jewelry && !jade && !yuanshen ? equipmentQuery(item, config).coreSkipReason : null;
+          if (coreSkipReason) {
+            records.push({
+              key: item.key,
+              reason: "unknown_core_initial_attribute",
+              note: coreSkipReason,
+              kind: config.kinds.find(([id]) => String(id) === String(exactArgs.kindid)),
+            });
+            results.push({
+              key: item.key,
+              candidates: [],
+              searchState: "skipped",
+              skipReason: coreSkipReason,
+              note: coreSkipReason,
+            });
+            continue;
+          }
           if (
             !jewelry &&
             !jade &&

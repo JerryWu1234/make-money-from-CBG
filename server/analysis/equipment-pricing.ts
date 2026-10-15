@@ -11,7 +11,7 @@ import {
   PRICING_RESUME_POLICY,
   skippedPricingItem,
 } from "./pricing-integrity";
-import { parseEquipmentAttributes } from "./equip-attributes";
+import { equipmentInitialAttribute, parseEquipmentAttributes } from "./equip-attributes";
 import { hasUnconfirmedEmptyEquipment, observedEquipmentCategory } from "../crawler/compact";
 import { matchComparableEquipmentAttributes } from "./equipment-match";
 import { matchSpecialAsset, SPECIAL_ASSET_MATCH_POLICY } from "./special-asset-match";
@@ -23,7 +23,11 @@ import {
 } from "./equipment-exclusion";
 import { buildEquipmentEstimate, type SimilarEstimate } from "./pricing-estimate";
 import { GLOBAL_MARKET_SCOPE_VERSION, MARKET_SEARCH_UI_VERSION } from "./market-scope";
-import { validateEquipmentBaseline, type BaselineEstimate } from "./equipment-baseline";
+import {
+  slotFromCategory,
+  validateEquipmentBaseline,
+  type BaselineEstimate,
+} from "./equipment-baseline";
 import type { ValuationSettings } from "./valuation-types";
 import {
   finishPricingSearch,
@@ -120,6 +124,7 @@ export type EquipmentSource = {
       searchCursor?: EquipmentSearchCursor;
       skipped?: boolean;
       samplingStopped?: boolean;
+      skipReason?: string;
     }>;
     searchItems?: unknown[];
   }>;
@@ -140,6 +145,29 @@ export const isJewelryEquipment = (
   /灵饰|戒指|耳饰|手镯|佩饰|配饰/.test(item.category) ||
   /精炼等级/.test(item.description) ||
   [61, 62, 63, 64].includes(Number(item.kindId));
+
+export const EQUIPMENT_CORE_INITIAL_POLICY = "required-slot-initial-attribute-v1";
+
+/** Unknown inventory categories defer to the observed official search kind. */
+export function equipmentCoreSkipReason(
+  item: Pick<EquipmentPricingItem, "category" | "description" | "kindId">,
+  category = item.category,
+): string | null {
+  if (isJewelryEquipment(item) || /元身|上古玉魄/.test(category)) return null;
+  const slot = slotFromCategory(category) || (/双环|魔棒|伞|棍/.test(category) ? "weapon" : null);
+  if (!slot) return null;
+  const field = {
+    weapon: "伤害",
+    body: "防御",
+    head: "防御",
+    shoe: "敏捷",
+    neck: "灵力",
+    belt: "气血",
+  }[slot];
+  return equipmentInitialAttribute(parseEquipmentAttributes(item.description), field) === null
+    ? "核心初始" + field + "无法可靠还原，未计入参考合计；市场售价未知"
+    : null;
+}
 
 /** The two observed public sliders have independent steps; jade has no equipment level. */
 export function equipmentLevelUnsupportedReason(
@@ -253,7 +281,14 @@ export function equipmentInventory(record: SavedRoleRecord) {
         level,
         kindId: item.kindId,
       });
-      const unsupported = !!levelUnsupported;
+      const coreSkipReason = issues.length
+        ? null
+        : equipmentCoreSkipReason({
+            category: inferred,
+            description,
+            kindId: item.kindId,
+          });
+      const unsupported = !!levelUnsupported || !!coreSkipReason;
       if (levelUnsupported) issues.push(levelUnsupported);
       const query =
         "梦幻西游 藏宝阁 " +
@@ -286,7 +321,9 @@ export function equipmentInventory(record: SavedRoleRecord) {
               searchState: "skipped" as const,
               skipReason: dedicated
                 ? "专用或绑定装备，未计入参考合计"
-                : "官网检索不支持的等级装备，未计入参考合计",
+                : levelUnsupported
+                  ? "官网检索不支持的等级装备，未计入参考合计"
+                  : coreSkipReason!,
             }
           : {}),
         candidates: [],
@@ -307,6 +344,7 @@ export function equipmentInventory(record: SavedRoleRecord) {
       scopeVersion: GLOBAL_MARKET_SCOPE_VERSION,
       searchUI: MARKET_SEARCH_UI_VERSION,
       comparisonVersion: "per-attribute-initial-defense-v3",
+      coreInitialPolicy: EQUIPMENT_CORE_INITIAL_POLICY,
       specialAssetPolicy: SPECIAL_ASSET_MATCH_POLICY,
       exclusionPolicy: EQUIPMENT_EXCLUSION_POLICY,
       queryPolicy: EQUIPMENT_QUOTE_POLICY,
@@ -644,6 +682,36 @@ async function applyEquipmentSearchResponse(
 ) {
   snapshot.rawResponse = JSON.stringify(response);
   saveSearchAttempt(snapshot, response);
+  // A local exclusion needs no market request and must never adopt returned candidates.
+  for (const item of searchable) {
+    const result = Array.isArray(response.items)
+      ? response.items.find((entry) => entry?.key === item.key)
+      : undefined;
+    if (
+      result?.searchState !== "skipped" ||
+      typeof result.skipReason !== "string" ||
+      !result.skipReason.trim()
+    )
+      continue;
+    Object.assign(item, {
+      searchState: "skipped",
+      status: "unsupported",
+      skipReason: result.skipReason,
+      referencePrice: null,
+      candidates: [],
+    });
+    for (const key of [
+      "similarEstimate",
+      "baselineEstimate",
+      "baselineInvalidReason",
+      "exclusion",
+      "searchCursor",
+      "samplingStopped",
+    ] as const)
+      delete item[key];
+  }
+  if (searchable.every((item) => item.searchState === "skipped"))
+    return finishPricingSearch(snapshot);
   if (!response.queries.some((query) => query.trim())) {
     if (
       Array.isArray(response.items) &&
@@ -699,7 +767,7 @@ async function applyEquipmentSearchResponse(
       continue;
     }
     // Untouched items keep their earlier cursor/quotations; they were not re-read this round.
-    if (result.skipped === true) continue;
+    if (result.skipped === true || item.searchState === "skipped") continue;
     item.query = typeof result.query === "string" ? result.query : "";
     item.searchCursor = result.searchCursor as EquipmentSearchCursor | undefined;
     item.samplingStopped = result.samplingStopped === true;

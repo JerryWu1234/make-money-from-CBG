@@ -261,6 +261,80 @@ try {
     }
   };
 
+  await check("核心初始值无法还原的泛称装备按官网类型跳过，后件继续取得最低价", () =>
+    withSource(
+      {
+        namedModels: { "100_6": [{ value: 1234, label: "混合宝石剑" }] },
+        pages: [[{ eid: "core-good", name: equipmentName }]],
+      },
+      { price: 123 },
+      async ({ source, searchPage, control }) => {
+        const collectedAt = new Date().toISOString();
+        const record = {
+          listing: { serverId: "1" },
+          detail: {
+            collectedAt,
+            equipmentCapture: { version: 1, collectedAt, complete: true, issues: [] },
+            tabs: [
+              {
+                name: "道具/法宝",
+                text: "",
+                fields: [],
+                tables: [],
+                elements: [],
+                tooltips: [],
+                items: [
+                  {
+                    index: 0,
+                    kind: "equipment",
+                    name: "混合宝石剑",
+                    category: "人物装备",
+                    description:
+                      "等级100\n伤害581\n命中750\n气血0\n锻炼等级10\n宝石：太阳石 红玛瑙",
+                  },
+                  {
+                    index: 1,
+                    kind: "equipment",
+                    name: equipmentName,
+                    category: "人物装备 · 腰带",
+                    description: equipmentDescription,
+                  },
+                ],
+              },
+            ],
+          },
+        };
+        const result = await searchEquipmentPrices(record, control.signal, source);
+        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].searchState, "skipped");
+        assert.match(result.items[0].skipReason, /初始伤害/);
+        assert.equal(result.items[0].referencePrice, null);
+        assert.deepEqual(result.items[0].candidates, []);
+        assert.equal(result.items[1].referencePrice, 123);
+        assert.equal(result.knownTotal, 123);
+        assert.deepEqual(detailVisits, ["core-good"]);
+        const calls = await searchPage.evaluate(() => window.calls);
+        assert.ok(calls.every((call) => call.kindid === "20" && call.init_hp === 250));
+        assert.ok(!result.queries.some((query) => query.includes("混合宝石剑")));
+        if (process.env.CBG_CORE_PROOF)
+          await writeFile(
+            process.env.CBG_CORE_PROOF,
+            JSON.stringify(
+              {
+                state: "passed",
+                at: new Date().toISOString(),
+                snapshot: result,
+                calls,
+                detailVisits,
+              },
+              null,
+              2,
+            ),
+          );
+      },
+    ),
+  );
+
   await check("元身由真实控件填表、读取运行时动作并检索，不猜接口字段", () => {
     const name = "巨剑·元身",
       description = "伤害：500\n命中：600\n附加属性：力量+20\n附加特技概率：12%";
@@ -895,7 +969,7 @@ try {
       {},
       async ({ source, control }) => {
         const result = await source.findCandidates(
-          [item({ description: "等级100\n防御50" })],
+          [item({ description: "等级100\n防御50\n气血250" })],
           control.signal,
         );
         const evidence = result.searchItems[0].scopeEvidence;
@@ -1156,7 +1230,7 @@ try {
       );
     });
 
-  await check("混合宝石无法还原初始属性时不提交搜索、不伪造无样本", () =>
+  await check("混合宝石无法还原核心初始值时明确跳过、不提交搜索", () =>
     withSource({}, {}, async ({ source, control }) => {
       const result = await source.findCandidates(
         [
@@ -1167,8 +1241,8 @@ try {
         ],
         control.signal,
       );
-      assert.equal(result.items[0].searchState, "read_failed");
-      assert.match(result.items[0].note, /初始属性无法可靠还原/);
+      assert.equal(result.items[0].searchState, "skipped");
+      assert.match(result.items[0].skipReason, /初始伤害无法可靠还原/);
       assert.deepEqual(marketRequests, []);
       assert.deepEqual(detailVisits, []);
     }),
@@ -2445,7 +2519,7 @@ try {
       {},
       async ({ source, searchPage, control }) => {
         const result = await source.findCandidates(
-          [item({ description: "等级100\n防御50" })],
+          [item({ description: "等级100\n防御50\n气血250" })],
           control.signal,
         );
         assert.ok((await searchPage.evaluate(() => window.calls)).every((call) => call.page === 1));

@@ -6,6 +6,7 @@ import type { SavedRoleRecord } from "../crawler/types";
 import {
   combineEquipmentPricing,
   equipmentInventory,
+  equipmentCoreSkipReason,
   safeEquipmentUrl,
   searchEquipmentPrices,
   verifyEquipmentCandidate,
@@ -969,6 +970,7 @@ describe("装备联网查价的来源核对", () => {
     async (slot) => {
       const record = recordWithEquipment();
       const tab = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!;
+      tab.items![0].description = "等级100\n防御50\n气血250\n灵力100\n敏捷30\n伤害300";
       tab.items![0].location = "role_using_equip_" + slot;
       record.detail!.tabs.push({
         ...tab,
@@ -1897,4 +1899,85 @@ it("前件耗尽预算时后件已有游标和两条样本原样保留，不重�
   expect(second.items[1].candidates).toHaveLength(2);
   expect(read).not.toHaveBeenCalled();
   expect(second.searchComplete).toBe(false);
+});
+
+describe("核心初始值缺失的装备排除", () => {
+  it.each([
+    ["武器", "伤害581\n命中750\n锻炼等级10\n宝石：太阳石 红玛瑙\n气血0", "伤害"],
+    ["腰带", "气血348\n防御34\n锻炼等级8\n宝石：光芒石 黑宝石", "气血"],
+    ["鞋子", "防御40", "敏捷"],
+    ["项链", "灵力180\n宝石：舍利子", "灵力"],
+    ["头盔", "防御100\n宝石：月亮石", "防御"],
+    ["衣服", "防御100\n宝石：月亮石", "防御"],
+  ])("%s 的核心%s无法还原时跳过", (category, description, field) => {
+    expect(equipmentCoreSkipReason({ category, description, kindId: undefined })).toContain(
+      "初始" + field,
+    );
+  });
+  it.each(["双环", "魔棒", "伞", "棍"])("官网武器类型%s同样要求初伤", (category) => {
+    expect(equipmentCoreSkipReason({ category, description: "防御0" })).toContain("初始伤害");
+  });
+  it("衣服只要求核心初防，非核心气血未知不阻止查询", () => {
+    expect(
+      equipmentCoreSkipReason({
+        category: "衣服",
+        description: "防御168\n气血348\n锻炼等级8\n宝石：光芒石 黑宝石",
+      }),
+    ).toBeNull();
+    expect(equipmentCoreSkipReason({ category: "人物装备", description: "防御50" })).toBeNull();
+    expect(equipmentCoreSkipReason({ category: "灵饰 戒指", description: "防御50" })).toBeNull();
+  });
+  it("已知腰带核心值缺失时不调用来源且不按默认价补价", async () => {
+    const record = recordWithEquipment();
+    const target = record.detail!.tabs.find((t) => t.name === "道具/法宝")!.items![0];
+    target.category = "人物装备 · 腰带";
+    target.description = "等级100\n气血348\n防御34\n锻炼等级8\n宝石：光芒石 黑宝石";
+    const findCandidates = vi.fn();
+    const pricing = await searchEquipmentPrices(
+      record,
+      new AbortController().signal,
+      { findCandidates, readSource: vi.fn() },
+      DEFAULT_SETTINGS,
+    );
+    expect(findCandidates).not.toHaveBeenCalled();
+    expect(pricing.searchComplete).toBe(true);
+    expect(pricing.items[0]).toMatchObject({
+      searchState: "skipped",
+      referencePrice: null,
+      candidates: [],
+      skipReason: expect.stringContaining("初始气血"),
+    });
+    expect(pricing.items[0].baselineEstimate).toBeUndefined();
+    expect(pricing.knownTotal).toBe(0);
+  });
+  it.each([{ queries: [] }, { queries: ["另一件的真实查询"] }])(
+    "官网确定部位后返回规则跳过，空查询也能完成 %j",
+    async ({ queries }) => {
+      const findCandidates = vi.fn().mockResolvedValue({
+        queries,
+        items: [
+          {
+            key: "道具/法宝:0",
+            candidates: [candidate(999)],
+            searchState: "skipped",
+            skipReason: "核心初始伤害无法可靠还原，未计入参考合计；市场售价未知",
+          },
+        ],
+      });
+      const readSource = vi.fn();
+      const pricing = await searchEquipmentPrices(
+        recordWithEquipment(),
+        new AbortController().signal,
+        { findCandidates, readSource },
+      );
+      expect(pricing.searchComplete).toBe(true);
+      expect(pricing.items[0]).toMatchObject({
+        searchState: "skipped",
+        referencePrice: null,
+        candidates: [],
+        skipReason: expect.stringContaining("初始伤害"),
+      });
+      expect(readSource).not.toHaveBeenCalled();
+    },
+  );
 });

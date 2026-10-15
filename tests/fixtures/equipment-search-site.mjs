@@ -3,7 +3,7 @@
 // The isolated regression routes intercept every simulated market request locally.
 export const equipmentName = "测试腰带";
 export const equipmentDescription =
-  "等级：100\n防御：50\n特效：愤怒\n宝石：黑宝石\n锻炼等级：8\n耐久：300\n修理失败：0";
+  "等级：100\n防御：50\n气血：250\n特效：愤怒\n宝石：黑宝石\n锻炼等级：8\n耐久：300\n修理失败：0";
 const pixel = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 const escape = (value) =>
   String(value)

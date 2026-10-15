@@ -66,7 +66,7 @@ const item = (overrides: Partial<EquipmentPricingItem> = {}): EquipmentPricingIt
   name: "测试腰带",
   level: 100,
   category: "人物装备 · 腰带",
-  description: "等级：100\n防御：50\n特效：愤怒\n宝石：黑宝石\n锻炼等级：8\n修理失败：0",
+  description: "等级：100\n防御：50\n气血：250\n特效：愤怒\n宝石：黑宝石\n锻炼等级：8\n修理失败：0",
   query: "",
   status: "no_match",
   referencePrice: null,
@@ -1210,7 +1210,7 @@ describe("实际装备的分阶段相近检索", () => {
       ).toBe(expected);
     expect(
       equipmentQuery(
-        item({ category: "人物装备 · 头盔", description: "等级100\n防御50" }),
+        item({ category: "人物装备 · 头盔", description: "等级100\n防御50\n气血250" }),
         actualConfig,
       ).args,
     ).not.toHaveProperty("kindid");
@@ -1457,8 +1457,8 @@ describe("装备最终市场请求范围审计", () => {
     try {
       const result = await source.findCandidates(
         [
-          item({ key: "first", description: "等级100\n防御50" }),
-          item({ key: "failed", description: "等级100\n防御50" }),
+          item({ key: "first", description: "等级100\n防御50\n气血250" }),
+          item({ key: "failed", description: "等级100\n防御50\n气血250" }),
           item({ key: "later", searchCursor: laterCursor }),
         ],
         control.signal,
@@ -1499,7 +1499,7 @@ describe("装备最终市场请求范围审计", () => {
       .mockRejectedValueOnce(new Error("page.waitForFunction: Timeout 20000ms exceeded."));
     try {
       const result = await source.findCandidates(
-        [item({ description: "等级100\n防御50" })],
+        [item({ description: "等级100\n防御50\n气血250" })],
         control.signal,
       );
       expect(result.queries).toHaveLength(1);
@@ -1549,7 +1549,7 @@ describe("装备最终市场请求范围审计", () => {
     const { source, search, detail, control, listeners } = pages({ serverid: "0" });
     try {
       const result = await source.findCandidates(
-        [item({ description: "等级100\n防御50" })],
+        [item({ description: "等级100\n防御50\n气血250" })],
         control.signal,
       );
       expect(result.searchItems).toEqual([
@@ -1588,7 +1588,7 @@ describe("装备最终市场请求范围审计", () => {
     const { source, detail, control } = pages(overrides);
     try {
       await expect(
-        source.findCandidates([item({ description: "等级100\n防御50" })], control.signal),
+        source.findCandidates([item({ description: "等级100\n防御50\n气血250" })], control.signal),
       ).rejects.toThrow(/全服|三年以上服|请求|限制/);
       expect(detail.goto).not.toHaveBeenCalled();
     } finally {
@@ -1599,7 +1599,7 @@ describe("装备最终市场请求范围审计", () => {
     const { source, detail, control } = pages({}, false);
     try {
       await expect(
-        source.findCandidates([item({ description: "等级100\n防御50" })], control.signal),
+        source.findCandidates([item({ description: "等级100\n防御50\n气血250" })], control.signal),
       ).rejects.toThrow("实际网络请求");
       expect(detail.goto).not.toHaveBeenCalled();
     } finally {
@@ -1727,4 +1727,27 @@ describe("公开装备字段发现", () => {
     await expect(readEquipmentSearchForm(setup(true))).rejects.toThrow("登录面板");
     await expect(readEquipmentSearchForm(setup(false, true))).rejects.toThrow("安全验证");
   });
+});
+
+it("官网类型确定为武器后，辅助气血0不能替代无法还原的初伤", () => {
+  const query = equipmentQuery(
+    item({
+      category: "人物装备",
+      description: "等级100\n伤害581\n命中750\n气血0\n锻炼等级10\n宝石：太阳石 红玛瑙",
+    }),
+    { ...config, namedKinds: [[6, "剑"]] },
+  );
+  expect(query.args).toMatchObject({ kindid: "6", init_hp: 0 });
+  expect(query.coreSkipReason).toContain("初始伤害");
+});
+it("官网类型已确认的衣服使用可还原初防，不因非核心气血未知而跳过", () => {
+  const query = equipmentQuery(
+    item({
+      category: "人物装备",
+      description: "等级100\n防御168\n气血348\n锻炼等级8\n宝石：光芒石 黑宝石",
+    }),
+    { ...config, namedKinds: [[18, "男衣"]] },
+  );
+  expect(query.args.init_defense).toBe(168);
+  expect(query.coreSkipReason).toBeNull();
 });
