@@ -319,6 +319,18 @@ try {
       },
     ),
   );
+  await check("同次查询重复读取未命名饰品候选只打开一次详情", () =>
+    withSource(
+      { pages: [[{ eid: "unnamed-cached", name: "画魂" }]] },
+      { equipment: [{ name: "", description: "玄天灵力 0", shipin: true }], lazyGear: true },
+      async ({ source, control }) => {
+        const url = "https://xyq.cbg.163.com/equip?s=1&eid=unnamed-cached";
+        await assert.rejects(source.readSource(url, control.signal), /未命名饰品/);
+        await assert.rejects(source.readSource(url, control.signal), /未命名饰品/);
+        assert.deepEqual(detailVisits, ["unnamed-cached"]);
+      },
+    ),
+  );
   await check("未命名饰品候选全部排除时宝宝跳过，保留未知价格", () =>
     withSource(
       { pages: [[{ eid: "unnamed-only", name: "画魂" }]] },
@@ -358,6 +370,10 @@ try {
         assert.equal(first.items[0].searchState, "read_failed");
         assert.equal(first.items[0].searchCursor.failed.length, 1);
         loaded = true;
+        await assert.rejects(
+          source.readSource(first.items[0].searchCursor.failed[0].url, control.signal),
+          /未命名饰品/,
+        );
         const result = await searchPetPricing(record(), control.signal, source, first);
         assert.equal(result.searchComplete, true, JSON.stringify(result.searchItems));
         assert.equal(result.items[0].referencePrice, 300);

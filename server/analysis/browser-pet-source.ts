@@ -1546,7 +1546,7 @@ export function petSourceFromPages(
   detailPage: Page,
   signal: AbortSignal,
 ): PetSource & { close(): Promise<void>; discover(): Promise<PetSearchForm> } {
-  const cache = new Map<string, string>();
+  const cache = new Map<string, string | UnverifiablePetAccessoryError>();
   const marketScope = createMarketScopeAudit(searchPage);
   const deadline = Date.now() + 240_000;
   let closing: Promise<void> | undefined;
@@ -1568,13 +1568,21 @@ export function petSourceFromPages(
     requestSignal.throwIfAborted();
     if (closing) throw new Error("宝宝查询页面已关闭");
     const safe = safeEquipmentUrl(url);
-    if (cache.has(safe)) return cache.get(safe)!;
+    const cached = cache.get(safe);
+    if (cached instanceof UnverifiablePetAccessoryError) throw cached;
+    if (cached !== undefined) return cached;
     await pace(requestSignal, 600, 400);
     await detailPage.goto(safe, { waitUntil: "domcontentloaded", timeout: 15000 });
     requestSignal.throwIfAborted();
     if (equipmentIdentity(detailPage.url()) !== equipmentIdentity(safe))
       throw new Error("宝宝详情跳转到另一商品，报价未采用");
-    const value = await petPageSource(detailPage, requestSignal);
+    let value: Awaited<ReturnType<typeof petPageSource>>;
+    try {
+      value = await petPageSource(detailPage, requestSignal);
+    } catch (error) {
+      if (error instanceof UnverifiablePetAccessoryError) cache.set(safe, error);
+      throw error;
+    }
     cache.set(safe, value.html);
     return value.html;
   };
@@ -1841,7 +1849,7 @@ export function petSourceFromPages(
           }
           for (const [url, modeIndex] of Array.from(failed)) {
             if (details >= MAX_DETAILS || Date.now() >= deadline) break;
-            if (cache.has(safeEquipmentUrl(url))) continue;
+            if (typeof cache.get(safeEquipmentUrl(url)) === "string") continue;
             await readCandidate(url, item.name, plans[modeIndex].matchType, modeIndex);
             refreshedDetails.push({
               url: safeEquipmentUrl(url),
