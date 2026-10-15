@@ -1,6 +1,7 @@
 import {
   compareEquipmentAttributes,
   equipmentInitialAttribute,
+  equipmentGemOnlySpeedMatchesAbsent,
   separateJewelryAttributes,
   type EquipmentAttributes,
 } from "./equip-attributes";
@@ -180,7 +181,6 @@ export function matchEquipmentAttributes(
 
 const comparableDifferences = new Set([
   "五行",
-  "套装",
   "宝石",
   "锻炼等级",
   "精炼等级",
@@ -247,6 +247,12 @@ export function matchComparableEquipmentAttributes(
     const normalizedSource = normalizeInitial(source, partial);
     if (normalizedTarget.reason) return reject("目标" + normalizedTarget.reason);
     if (normalizedSource.reason) return reject("报价" + normalizedSource.reason);
+    if (!partial) {
+      if (equipmentGemOnlySpeedMatchesAbsent(target, source))
+        delete normalizedTarget.attributes!.fields.初始速度;
+      if (equipmentGemOnlySpeedMatchesAbsent(source, target))
+        delete normalizedSource.attributes!.fields.初始速度;
+    }
     target = normalizedTarget.attributes!;
     source = normalizedSource.attributes!;
   }

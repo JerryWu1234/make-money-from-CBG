@@ -32,11 +32,11 @@ window.SpecialEffects=[[3,'愤怒'],[5,'永不磨损']];
 window.SpecialSkills=[[1036,'破血狂攻']];window.Gems=[[2,'太阳石'],[3,'舍利子'],[4,'光芒石'],[5,'月亮石'],[6,'黑宝石']];
 window.settings=${JSON.stringify(settings).replaceAll("<", "\\u003c")};
 if(!settings.suitConfigMissing){
-window.SuitEffects=settings.jewelry?(settings.jewelrySuitEffects||['血气方刚','通真达灵','心无旁骛','健步如飞']):[[4013,'炼气化神'],[4005,'逆鳞']];
-window.SuitAddedStatus={'炼气化神':4013,'逆鳞':4005};
-window.SuitAppendSkills={'龙卷雨击':3018};
-window.SuitTransformSkills={'噬天虎':1060};
-window.SuitTransformCharms={'蛟龙':2035};
+window.SuitEffects=settings.jewelry?(settings.jewelrySuitEffects||['血气方刚','通真达灵','心无旁骛','健步如飞']):(settings.suitEffects||[[4013,'炼气化神'],[4005,'逆鳞']]);
+window.SuitAddedStatus=settings.suitAddedStatus||{'炼气化神':4013,'逆鳞':4005,'变身':4011};
+window.SuitAppendSkills=settings.suitAppendSkills||{'龙卷雨击':3018};
+window.SuitTransformSkills=settings.suitTransformSkills||{'噬天虎':1060,'鬼将':1061};
+window.SuitTransformCharms=settings.suitTransformCharms||{'蛟龙':2035};
 }
 window.AUTO_SEARCH_CONFIG={wjd_equip_equip_type:settings.namedModels||{}};
 window.CBG_GAME_CONFIG={minghun_attr:{102:'防御',106:'抗封印',101:'气血'}};
@@ -148,7 +148,7 @@ if(settings.yuanshen){
  for(const key of ['repair_fail','damage','all_wakan','gem_level','init_defense','init_damage_raw','init_wakan','init_hp','init_dex','hole_num'])field('txt_'+key,'text');
  field('chk_attr_with_melt','checkbox');
  add('<div id="check_mode_panel"><input type="radio" name="special_mode" value="and" checked><input type="radio" name="special_mode" value="or"></div>');
- field('radio_short_cut','radio');field('sel_short_cut','select',window.SuitEffects||[]);
+ field('radio_short_cut','radio');field('sel_short_cut','select',settings.suitShortcutOptions||window.SuitEffects||[]);
  for(const type of ['added_status','append_skill','transform_skill','transform_charm']){field('radio_'+type,'radio');field('txt_'+type,'text');}
 }
 const searchButton=settings.yuanshen?'btn_yuanshen_search':settings.jade?'btn_yupo_search':settings.jewelry?'btn_lingshi_search':'btn_equip_search';
@@ -171,7 +171,7 @@ document.querySelector('#'+searchButton).addEventListener('click',()=>{
  if(settings.jewelry){if(document.querySelector('#chk_has_eazy_effect').checked)arg.special_effect=1;const primary=document.querySelector('#sel_basic_attr_type').value;if(primary)arg[primary]=Number(document.querySelector('#txt_basic_attr_value').value);const suit=document.querySelector('#sel_suit_effect').value;if(suit)arg.suit_effect=suit;for(let i=1;i<=3;i++){const value=document.querySelector('#sel_add_attr'+i).value;if(value){arg.added_attr_logic='detail';arg['added_attr.'+value]=(arg['added_attr.'+value]||0)+1;}}}
  else{if(arg.special_effect)arg.special_mode=document.querySelector('#check_mode_panel input:checked')?.value||'and';if(document.querySelector('#chk_attr_with_melt').checked){if(['init_damage','init_damage_raw','all_damage','damage','init_defense','init_hp','init_dex','init_wakan','all_wakan'].some(key=>arg[key]))arg.attr_with_melt=1;}else{arg.attr_without_melt=1;arg.sum_attr_without_melt=1;}
  const shortcut=document.querySelector('#sel_short_cut').value;if(document.querySelector('#radio_short_cut').checked&&shortcut)arg.suit_effect=shortcut;
- for(const [type,values] of [['added_status',window.SuitAddedStatus],['append_skill',window.SuitAppendSkills],['transform_skill',window.SuitTransformSkills],['transform_charm',window.SuitTransformCharms]]){if(document.querySelector('#radio_'+type).checked){const name=document.querySelector('#txt_'+type).value;if(values?.[name])arg.suit_effect=String(values[name]);}}
+ for(const [type,values] of [['added_status',window.SuitAddedStatus],['append_skill',window.SuitAppendSkills],['transform_skill',window.SuitTransformSkills],['transform_charm',window.SuitTransformCharms]]){if(document.querySelector('#radio_'+type).checked){const name=document.querySelector('#txt_'+type).value;if(name.trim()){const ids=Object.entries(values||{}).filter(([label])=>label.indexOf(name)!==-1).map(([,id])=>id);if(ids.length)arg.suit_effect=ids.join(',');}}}
  }}
  const server=document.querySelector('#ovarall_sel_server').value;if(server)arg.serverid=server;
  const buy=document.querySelector('#user_serverid').value;if(buy)arg.cross_buy_serverid=buy;

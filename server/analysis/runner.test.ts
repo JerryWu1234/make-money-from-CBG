@@ -295,6 +295,9 @@ describe("持久化的商品分析队列", () => {
     const { store, runner, analyze } = setup();
     const first = await runner.start("codex", true, undefined, true, undefined, 1);
     await runner.settled();
+    store.db
+      .prepare("UPDATE analysis_runs SET created_at=? WHERE id=?")
+      .run(new Date(Date.now() - 1000).toISOString(), first);
     const second = await runner.start("codex");
     await runner.settled();
     expect(first).not.toBe(second);

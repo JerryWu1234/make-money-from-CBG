@@ -68,6 +68,26 @@ export type EquipmentSearchConfig = {
 };
 type Query = Record<string, string | number>;
 
+function equipmentSuitControl(value: string, config: EquipmentSearchConfig) {
+  const matches = Object.entries(config.suitTypes || {}).flatMap(([type, choices]) =>
+    choices
+      .filter(([id]) => String(id) === value)
+      .map(([, name]) => ({ type: type as SuitType, name })),
+  );
+  if (matches.length === 1) {
+    const match = matches[0];
+    // The official text getter includes every name containing the input, not just an exact name.
+    const submitted = (config.suitTypes?.[match.type] || [])
+      .filter(([, name]) => name.includes(match.name))
+      .map(([id]) => String(id))
+      .join(",");
+    if (submitted === value) return match;
+  }
+  if (config.suits?.some(([id]) => String(id) === value))
+    return { type: "short_cut" as const, name: "" };
+  throw new Error("官网套装文本控件会匹配其他效果且无同ID快捷选项，无法精确搜索实际套装");
+}
+
 /** Verify every submitted public filter, including filters restored by the website. */
 export function assertEquipmentUIArguments(expected: Query, actual: Query) {
   const normalized = (value: string | number | undefined) => {
@@ -230,13 +250,43 @@ export function equipmentQuery(
       ["特效", "special_effect", config.effects],
       ["特技", "special_skill", config.skills],
     ] as const) {
-      const values = (fields[field] || []).flatMap((value) =>
-        value.split(/[、，,；;\s]+/).map((part) => part.trim()),
-      );
+      const values = (fields[field] || [])
+        .flatMap((value) => value.split(/[、，,；;\s]+/).map((part) => part.trim()))
+        .filter(Boolean);
+      if (
+        field === "特技" &&
+        values.some((value) => choices.filter(([, label]) => value === label).length !== 1)
+      )
+        throw new Error("装备实际特技名称没有唯一可核对的官网映射，未提交不完整条件");
       const matched = values.flatMap((value) => choices.filter(([, label]) => value === label));
       if (matched.length) args[key] = matched.map(([id]) => String(id)).join(",");
     }
     if (args.special_effect) args.special_mode = "and";
+    const suit = fields.套装 || [];
+    if (suit.length) {
+      const compact = (value: string) => value.replace(/[\s：:]/g, "");
+      const prefixes: Record<SuitType, string> = {
+        added_status: "附加状态",
+        append_skill: "追加法术",
+        transform_skill: "变身术之",
+        transform_charm: "变化咒之",
+      };
+      const fullName = suit.length === 1 ? compact(suit[0]) : "";
+      const complete = Object.values(prefixes).some(
+        (prefix) => fullName.startsWith(prefix) && fullName.length > prefix.length,
+      );
+      const matching = [
+        ...Object.entries(config.suitTypes || {}).flatMap(([type, choices]) =>
+          choices.filter(([, name]) => compact(prefixes[type as SuitType] + name) === fullName),
+        ),
+        ...(config.suits || []).filter(([, name]) => compact(name) === fullName),
+      ];
+      const ids = [...new Set(matching.map(([id]) => String(id)))];
+      if (!complete || ids.length !== 1 || !/^[1-9]\d*$/.test(ids[0]))
+        throw new Error("装备实际套装完整名称没有唯一可核对的官网映射，未提交不完整条件");
+      equipmentSuitControl(ids[0], config);
+      args.suit_effect = ids[0];
+    }
   }
   return {
     jewelry,
@@ -1108,17 +1158,11 @@ export async function applyEquipmentSearchForm(
     }
     if (args.suit_effect !== undefined) {
       const value = String(use("suit_effect"));
-      if (config.suits?.some(([id]) => String(id) === value)) {
-        await (await control("radio_short_cut")).check({ timeout: 5000 });
-        await select("sel_short_cut", value);
-      } else {
-        const matches = Object.entries(config.suitTypes || {}).flatMap(([type, choices]) =>
-          choices.filter(([id]) => String(id) === value).map(([, name]) => ({ type, name })),
-        );
-        if (matches.length !== 1) throw new Error("官网套装控件无法唯一表达当前效果");
-        await (await control("radio_" + matches[0].type)).check({ timeout: 5000 });
-        await fill("txt_" + matches[0].type, matches[0].name);
-      }
+      const selected = equipmentSuitControl(value, config);
+      await (await control("radio_" + selected.type)).check({ timeout: 5000 });
+      actions.push({ control: "radio_" + selected.type, value: "true", method: "check" });
+      if (selected.type === "short_cut") await select("sel_short_cut", value);
+      else await fill("txt_" + selected.type, selected.name);
     }
   } else if (type === "jewelry") {
     await slider(
@@ -1535,10 +1579,16 @@ export function equipmentSourceFromPages(
                     ? (g.EquipKinds || []).filter(([id]) => namedIds.has(String(id)))
                     : [],
                 addedAttrs: [...(g.AddedAttr1 || []), ...(g.AddedAttr2 || [])],
-                suits:
-                  !jewelry && Array.isArray(g.SuitEffects) && g.SuitEffects.every(Array.isArray)
-                    ? (g.SuitEffects as Choices)
-                    : [],
+                suits: !jewelry
+                  ? Array.from(
+                      document.querySelectorAll<HTMLOptionElement>("#sel_short_cut option"),
+                    )
+                      .map((option): [string, string] => [
+                        option.value,
+                        option.textContent?.trim() || "",
+                      ])
+                      .filter(([value]) => /^[1-9]\d*$/.test(value))
+                  : [],
                 jewelrySuitEffects:
                   jewelry && Array.isArray(g.SuitEffects)
                     ? g.SuitEffects.map((name) => (typeof name === "string" ? name : ""))

@@ -107,6 +107,26 @@ const fieldPattern = new RegExp(
 const conditionPattern =
   /(?:^|[\s【[])(装备角色|装备对象|装备条件|使用条件|门派条件|部位条件)(?=[：:】\]]|\s)/g;
 const normalize = (value: string) => value.replace(/[\s：:，,；;【】[\]]/g, "").toLowerCase();
+// Official rules: https://xyq.163.com/introduce/dj008.html.
+const gemEffects: Record<string, Record<string, number>> = {
+  光芒石: { 气血: 40 },
+  太阳石: { 伤害: 8 },
+  月亮石: { 防御: 12 },
+  红玛瑙: { 命中: 25 },
+  黑宝石: { 速度: 8 },
+  舍利子: { 灵力: 6 },
+  神秘石: { 躲避: 20 },
+  翡翠石: { 法术防御: 12 },
+  红宝石: {},
+  黄宝石: {},
+  蓝宝石: {},
+  绿宝石: {},
+};
+const equipmentGems = (attributes: EquipmentAttributes) => [
+  ...new Set(
+    (attributes.fields.宝石 || []).flatMap((value) => value.split(/[、，,；;\s]+/)).filter(Boolean),
+  ),
+];
 /** Main description stats already separate melting; subtract only known gem contributions. */
 export function equipmentInitialAttribute(
   attributes: EquipmentAttributes,
@@ -123,34 +143,15 @@ export function equipmentInitialAttribute(
   const explicit = integer(fields["初始" + field]);
   if (fields["初始" + field] && explicit === null) return null;
   const displayed = integer(fields[field]);
-  const gems = [
-    ...new Set(
-      (fields.宝石 || []).flatMap((value) => value.split(/[、，,；;\s]+/)).filter(Boolean),
-    ),
-  ];
+  const gems = equipmentGems(attributes);
   const grade = fields.锻炼等级 === undefined ? null : integer(fields.锻炼等级);
   let derived: number | null = null;
   if (displayed !== null) {
     if (!gems.length && (fields.锻炼等级 === undefined || grade === 0)) {
       if (!partial || grade === 0) derived = displayed;
     } else if (grade !== null && grade > 0) {
-      // Official rules: https://xyq.163.com/introduce/dj008.html.
-      const effects: Record<string, Record<string, number>> = {
-        光芒石: { 气血: 40 },
-        太阳石: { 伤害: 8 },
-        月亮石: { 防御: 12 },
-        红玛瑙: { 命中: 25 },
-        黑宝石: { 速度: 8 },
-        舍利子: { 灵力: 6 },
-        神秘石: { 躲避: 20 },
-        翡翠石: { 法术防御: 12 },
-        红宝石: {},
-        黄宝石: {},
-        蓝宝石: {},
-        绿宝石: {},
-      };
-      if (gems.length && gems.every((gem) => effects[gem] !== undefined)) {
-        const contributions = [...new Set(gems.map((gem) => effects[gem][field] || 0))];
+      if (gems.length && gems.every((gem) => gemEffects[gem] !== undefined)) {
+        const contributions = [...new Set(gems.map((gem) => gemEffects[gem][field] || 0))];
         // Mixed stones with different effects need each stone's grade; do not infer the split.
         if (contributions.length === 1) derived = displayed - grade * contributions[0];
       }
@@ -163,6 +164,35 @@ export function equipmentInitialAttribute(
 
 export function equipmentInitialDefense(attributes: EquipmentAttributes, partial = false) {
   return equipmentInitialAttribute(attributes, "防御", partial);
+}
+
+/** A displayed black-gem-only speed bonus is not a missing native stat on the other item. */
+export function equipmentGemOnlySpeedMatchesAbsent(
+  present: EquipmentAttributes,
+  absent: EquipmentAttributes,
+) {
+  if (absent.fields.速度 || absent.fields.初始速度) return false;
+  const presentGems = equipmentGems(present);
+  const displayedFields = { ...present.fields };
+  delete displayedFields.初始速度;
+  if (
+    presentGems.length !== 1 ||
+    presentGems[0] !== "黑宝石" ||
+    equipmentInitialAttribute({ ...present, fields: displayedFields }, "速度") !== 0 ||
+    equipmentInitialAttribute(present, "速度") !== 0
+  )
+    return false;
+  const absentGems = equipmentGems(absent);
+  if (!absentGems.length)
+    return (
+      absent.fields.锻炼等级 === undefined ||
+      (absent.fields.锻炼等级.length === 1 && /^\+?0$/.test(absent.fields.锻炼等级[0]))
+    );
+  return (
+    absentGems.length === 1 &&
+    gemEffects[absentGems[0]] !== undefined &&
+    !gemEffects[absentGems[0]].速度
+  );
 }
 
 function canonical(value: string) {

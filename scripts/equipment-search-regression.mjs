@@ -992,7 +992,7 @@ try {
 
   for (const missingConfig of [false, true])
     await check(
-      `普通套装映射${missingConfig ? "缺失仍核验详情" : "存在也不增加套装搜索条件"}`,
+      `普通套装映射${missingConfig ? "缺失阻止提交不完整条件" : "存在时提交实际套装条件"}`,
       () => {
         const name = "风月宝链",
           description =
@@ -1018,15 +1018,191 @@ try {
               control.signal,
             );
             const calls = await searchPage.evaluate(() => window.calls);
-            assert.equal(calls[0].suit_effect, undefined);
-            assert.equal(result.searchItems[0].args.suit_effect, undefined);
-            assert.equal(result.searchItems[0].modes[0].args.suit_effect, undefined);
-            assert.doesNotMatch(result.queries[0], /"suit_effect"/);
-            assert.equal(result.items[0].candidates[0].verified, true);
+            if (missingConfig) {
+              assert.deepEqual(calls, []);
+              assert.deepEqual(marketRequests, []);
+              assert.deepEqual(detailVisits, []);
+              assert.equal(result.items[0].searchState, "read_failed");
+              assert.match(result.items[0].note, /套装.*唯一.*官网/);
+              assert.equal(result.searchItems[0].failure.stage, "configuration");
+            } else {
+              assert.equal(calls[0].suit_effect, "4013");
+              assert.equal(result.searchItems[0].args.suit_effect, "4013");
+              assert.equal(result.searchItems[0].modes[0].args.suit_effect, "4013");
+              assert.equal(result.items[0].candidates[0].verified, true);
+              const actions = result.searchItems[0].uiQueries[0].actions;
+              assert.ok(
+                actions.some(
+                  (action) => action.control === "radio_added_status" && action.method === "check",
+                ),
+              );
+              assert.ok(
+                actions.some(
+                  (action) => action.control === "txt_added_status" && action.value === "炼气化神",
+                ),
+              );
+            }
           },
         );
       },
     );
+
+  for (const sample of [
+    {
+      label: "附加状态变身",
+      suit: "附加状态变身",
+      actual: "附加状态变身",
+      id: "4011",
+      control: "added_status",
+      value: "变身",
+      valid: true,
+    },
+    {
+      label: "变身术之鬼将",
+      suit: "变身术之鬼将",
+      actual: "变身术之鬼将",
+      id: "1061",
+      control: "transform_skill",
+      value: "鬼将",
+      valid: true,
+    },
+    {
+      label: "变身术之鬼将不能替代附加状态变身",
+      suit: "附加状态变身",
+      actual: "变身术之鬼将",
+      id: "4011",
+      control: "added_status",
+      value: "变身",
+      valid: false,
+    },
+    { label: "无套装目标不能采用多出套装", actual: "附加状态变身", valid: false },
+  ])
+    await check("实际完整套装及特技控件核验：" + sample.label, () => {
+      const description = equipmentDescription + "\n特技：破血狂攻";
+      return withSource(
+        { pages: [[{ eid: "actual-suit", name: equipmentName }]] },
+        { description: description + "\n套装效果：" + sample.actual, kindId: "20" },
+        async ({ source, searchPage, control }) => {
+          const result = await source.findCandidates(
+            [
+              item({
+                description: description + (sample.suit ? "\n套装效果：" + sample.suit : ""),
+              }),
+            ],
+            control.signal,
+          );
+          const [query] = await searchPage.evaluate(() => window.calls);
+          assert.equal(query.special_skill, "1036");
+          assert.equal(query.suit_effect, sample.id);
+          assert.equal(marketRequests[0].special_skill, "1036");
+          assert.equal(marketRequests[0].suit_effect, sample.id);
+          const actions = result.searchItems[0].uiQueries[0].actions;
+          if (sample.control) {
+            assert.ok(
+              actions.some(
+                (action) =>
+                  action.control === "radio_" + sample.control && action.method === "check",
+              ),
+            );
+            assert.ok(
+              actions.some(
+                (action) =>
+                  action.control === "txt_" + sample.control && action.value === sample.value,
+              ),
+            );
+            assert.ok(!actions.some((action) => action.control === "radio_short_cut"));
+          }
+          assert.equal(
+            result.items[0].candidates.some((candidate) => candidate.verified),
+            sample.valid,
+          );
+          await mkdir("data/pr27-fix-validation", { recursive: true });
+          await writeFile(
+            "data/pr27-fix-validation/actual-suit-" +
+              (sample.id || "none") +
+              "-" +
+              sample.valid +
+              ".json",
+            JSON.stringify({ simulated: true, sample, query, marketRequests, result }, null, 2),
+          );
+        },
+      );
+    });
+
+  for (const sample of [
+    {
+      suit: "变身术之黑熊",
+      type: "transform_skill",
+      setting: "suitTransformSkills",
+      id: "1016",
+      values: { 黑熊: 1016, 黑熊精: 1027 },
+    },
+    {
+      suit: "变化咒之黑熊",
+      type: "transform_charm",
+      setting: "suitTransformCharms",
+      id: "2010",
+      values: { 黑熊: 2010, 黑熊精: 2021 },
+    },
+    {
+      suit: "追加法术烈火",
+      type: "append_skill",
+      setting: "suitAppendSkills",
+      id: "3039",
+      values: { 烈火: 3039, 地狱烈火: 3043 },
+    },
+  ])
+    for (const shortcut of [true, false])
+      await check("套装子串冲突使用同ID实际快捷选项：" + sample.suit + " / " + shortcut, () => {
+        const description = equipmentDescription + "\n套装效果：" + sample.suit;
+        return withSource(
+          {
+            [sample.setting]: sample.values,
+            // A global ID is insufficient: the selected option must really exist in the DOM.
+            suitEffects: [[Number(sample.id), sample.suit]],
+            suitShortcutOptions: shortcut ? [[Number(sample.id), sample.suit]] : [[4005, "逆鳞"]],
+            pages: [[{ eid: "substring-suit", name: equipmentName }]],
+          },
+          { description, kindId: "20" },
+          async ({ source, searchPage, control }) => {
+            const result = await source.findCandidates([item({ description })], control.signal);
+            const calls = await searchPage.evaluate(() => window.calls);
+            if (shortcut) {
+              assert.equal(calls[0].suit_effect, sample.id);
+              assert.equal(marketRequests[0].suit_effect, sample.id);
+              assert.equal(result.items[0].candidates[0].verified, true);
+              const actions = result.searchItems[0].uiQueries[0].actions;
+              assert.ok(
+                actions.some(
+                  (action) => action.control === "radio_short_cut" && action.method === "check",
+                ),
+              );
+              assert.ok(
+                actions.some(
+                  (action) => action.control === "sel_short_cut" && action.value === sample.id,
+                ),
+              );
+              assert.ok(!actions.some((action) => action.control === "txt_" + sample.type));
+            } else {
+              assert.deepEqual(calls, []);
+              assert.deepEqual(marketRequests, []);
+              assert.deepEqual(detailVisits, []);
+              assert.equal(result.items[0].searchState, "read_failed");
+              assert.match(result.items[0].note, /文本控件.*无法精确/);
+              assert.equal(result.searchItems[0].failure.stage, "configuration");
+            }
+            await mkdir("data/pr27-fix-validation", { recursive: true });
+            await writeFile(
+              "data/pr27-fix-validation/suit-substring-" + sample.id + "-" + shortcut + ".json",
+              JSON.stringify(
+                { simulated: true, sample, shortcut, calls, marketRequests, result },
+                null,
+                2,
+              ),
+            );
+          },
+        );
+      });
 
   await check("同名推荐在主商品前也只悬浮主图标", () =>
     withSource(

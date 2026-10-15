@@ -119,16 +119,78 @@ describe("同核心装备粗略参考价匹配", () => {
       parseEquipmentAttributes(target),
       parseEquipmentAttributes(source),
     );
-  it("套装、宝石、熔炼和双加差异保留为相近配置，不能冒充同配置", () => {
+  it.each(["变身术之鬼将", "附加状态杀气诀", "附加状态变身术", ""])(
+    "完整套装附加状态变身不能用%s替代或缺失",
+    (suit) => {
+      for (const base of ["等级100\n防御50", "等级100\n精炼等级6\n防御50"]) {
+        const target = base + "\n套装效果：附加状态变身\n特技：晶清诀";
+        const source = base + (suit ? "\n套装效果：" + suit : "") + "\n特技：晶清诀";
+        expect(comparable(source, target).matchType).toBeNull();
+        expect(comparable(target, source).matchType).toBeNull();
+      }
+    },
+  );
+  it("完整类型与名称相同的套装可比较，列表缺省留完整详情核验", () => {
+    const target = parseEquipmentAttributes(
+      "等级100\n防御50\n套装效果：附加状态变身\n特技：晶清诀",
+    );
+    expect(matchComparableEquipmentAttributes(target, target).matchType).toBe("exact");
+    expect(
+      matchComparableEquipmentAttributes(target, parseEquipmentAttributes("等级100\n防御49"), true)
+        .reason,
+    ).toBeNull();
+    expect(
+      matchComparableEquipmentAttributes(
+        target,
+        parseEquipmentAttributes("等级100\n防御49\n套装效果：变身术之鬼将"),
+        true,
+      ).matchType,
+    ).toBeNull();
+  });
+  it.each(["晶清", "晶清诀·另一技", "四海升平", ""])(
+    "特技实际名字不一致或缺失仍拒绝：%s",
+    (skill) => {
+      const target = "等级100\n防御50\n特技：晶清诀";
+      expect(
+        comparable("等级100\n防御49" + (skill ? "\n特技：" + skill : ""), target).matchType,
+      ).toBeNull();
+    },
+  );
+  it.each(["", "\n锻炼等级4\n宝石：月亮石"])(
+    "纯黑宝石可靠扣到速度0可与完整候选缺速度比较：%s",
+    (gems) => {
+      const target = "等级100\n敏捷40\n速度32\n锻炼等级4\n宝石：黑宝石";
+      const source = "等级100\n敏捷40" + gems;
+      expect(comparable(source, target).reason).toBeNull();
+      expect(comparable(target, source).reason).toBeNull();
+    },
+  );
+  it.each([
+    "速度33\n锻炼等级4\n宝石：黑宝石",
+    "速度32\n宝石：黑宝石",
+    "速度32\n锻炼等级4\n宝石：黑宝石 月亮石",
+    "速度32\n锻炼等级4\n宝石：未知宝石",
+    "速度100001\n初始速度0\n锻炼等级4\n宝石：黑宝石",
+    "初始速度0",
+    "灵力0",
+  ])("正值、未知、混合和其他缺失字段不能当作宝石速度0：%s", (stats) => {
+    expect(comparable("等级100\n敏捷40", "等级100\n敏捷40\n" + stats).matchType).toBeNull();
+  });
+  it.each(["黑宝石", "黑宝石 月亮石", "未知宝石"])(
+    "候选缺速度但宝石%s不能证明无速度加成时不补0",
+    (gem) => {
+      const target = "等级100\n敏捷40\n速度32\n锻炼等级4\n宝石：黑宝石";
+      expect(comparable("等级100\n敏捷40\n锻炼等级4\n宝石：" + gem, target).matchType).toBeNull();
+    },
+  );
+  it("宝石、熔炼和双加差异保留为相近配置，不能冒充同配置", () => {
     const result = comparable(
-      gear
-        .replace("防御 +100", "防御 +90")
-        .replace("锻炼等级 8", "锻炼等级 7")
-        .replace("葫芦宝贝", "净瓶女娲") + "\n熔炼效果：+3防御\n力量 +10\n符石: 防御 +3",
+      gear.replace("防御 +100", "防御 +90").replace("锻炼等级 8", "锻炼等级 7") +
+        "\n熔炼效果：+3防御\n力量 +10\n符石: 防御 +3",
       gear + "\n力量 +20",
     );
     expect(result.matchType).toBe("similar");
-    for (const field of ["初始防御", "锻炼等级", "套装", "熔炼", "力量", "符石"])
+    for (const field of ["初始防御", "锻炼等级", "熔炼", "力量", "符石"])
       expect(result.differences.some((difference) => difference.startsWith(field))).toBe(true);
   });
   it.each([

@@ -269,11 +269,18 @@ describe("官方装备搜索条件", () => {
     expect(query.args.kindid).toBe("64");
     expect(query.args).not.toHaveProperty("speed");
   });
-  it("人物装备只提交身份范围和特效特技，不带数值下限或附加配置", () => {
+  it("人物装备提交身份范围和实际特效特技套装，不带数值下限或孔数", () => {
     const target = item({
       description: item().description + "\n开运孔数3\n套装：变身术之噬天虎\n特技：破血狂攻",
     });
-    const plan = equipmentQueryPlan(target, config, "1");
+    const plan = equipmentQueryPlan(
+      target,
+      {
+        ...config,
+        suitTypes: { transform_skill: [[1060, "噬天虎"]] },
+      },
+      "1",
+    );
     expect(plan).toHaveLength(1);
     expect(plan[0].args).toEqual({
       level_min: 100,
@@ -285,6 +292,7 @@ describe("官方装备搜索条件", () => {
       special_effect: "3",
       special_skill: "1036",
       special_mode: "and",
+      suit_effect: "1060",
     });
   });
   it.each([
@@ -308,6 +316,110 @@ describe("官方装备搜索条件", () => {
     expect(result.args.special_effect).toBe("3,5");
     expect(result.args.special_skill).toBe("1041,2041");
     expect(result.args.special_mode).toBe("and");
+  });
+
+  it.each([
+    ["附加状态变身", "4001"],
+    ["变身术之鬼将", "1060"],
+    ["追加法术龙卷雨击", "3018"],
+    ["变化咒之蛟龙", "2060"],
+  ])("普通装备按完整套装%s使用唯一官网映射", (suit, expected) => {
+    const result = equipmentQuery(
+      item({ description: item().description + "\n套装效果：" + suit }),
+      {
+        ...config,
+        suits: [[4001, "变身"]],
+        suitTypes: {
+          added_status: [[4001, "变身"]],
+          transform_skill: [[1060, "鬼将"]],
+          append_skill: [[3018, "龙卷雨击"]],
+          transform_charm: [[2060, "蛟龙"]],
+        },
+      },
+      "1",
+    );
+    expect(result.args.suit_effect).toBe(expected);
+  });
+
+  it.each([
+    { suits: [[1060, "鬼将"]] },
+    { suitTypes: { transform_skill: [[1060, "鬼将"]] } },
+    {
+      suitTypes: {
+        added_status: [
+          [4001, "变身"],
+          [4002, "变身"],
+        ],
+      },
+    },
+  ] satisfies Array<Partial<EquipmentSearchConfig>>)(
+    "套装完整名称映射缺失或不唯一时阻止提交替代条件：%j",
+    (mapping) => {
+      expect(() =>
+        equipmentQuery(
+          item({ description: item().description + "\n套装效果：附加状态变身" }),
+          { ...config, ...mapping },
+          "1",
+        ),
+      ).toThrow(/套装.*唯一.*官网/);
+    },
+  );
+
+  it("目标无套装不增加套装条件，特技只按实际完整名称匹配", () => {
+    const observed = {
+      ...config,
+      suitTypes: { added_status: [[4001, "变身"]] } as EquipmentSearchConfig["suitTypes"],
+      skills: [
+        [1036, "破血狂攻"],
+        [2036, "高级破血狂攻"],
+      ] as EquipmentSearchConfig["skills"],
+    };
+    const query = equipmentQuery(
+      item({ description: item().description + "\n特技：破血狂攻" }),
+      observed,
+      "1",
+    );
+    expect(query.args).not.toHaveProperty("suit_effect");
+    expect(query.args.special_skill).toBe("1036");
+    expect(() =>
+      equipmentQuery(item({ description: item().description + "\n特技：破血" }), observed, "1"),
+    ).toThrow(/特技.*唯一.*官网/);
+  });
+
+  it.each([
+    [
+      "变身术之黑熊",
+      "transform_skill",
+      [
+        [1016, "黑熊"],
+        [1027, "黑熊精"],
+      ],
+    ],
+    [
+      "变化咒之黑熊",
+      "transform_charm",
+      [
+        [2010, "黑熊"],
+        [2021, "黑熊精"],
+      ],
+    ],
+    [
+      "追加法术烈火",
+      "append_skill",
+      [
+        [3039, "烈火"],
+        [3043, "地狱烈火"],
+      ],
+    ],
+  ] as const)("官网文本输入%s会产生额外ID且无同ID快捷选项时不提交", (suit, type, choices) => {
+    const observed = {
+      ...config,
+      suitTypes: { [type]: choices.map(([id, name]) => [id, name]) },
+    } as EquipmentSearchConfig;
+    const target = item({ description: item().description + "\n套装效果：" + suit });
+    expect(() => equipmentQuery(target, observed, "1")).toThrow(/文本控件.*无法精确/);
+    observed.suits = [[choices[0][0], suit]];
+    expect(equipmentQuery(target, observed, "1").args.suit_effect).toBe(String(choices[0][0]));
   });
 
   it("灵饰使用灵饰等级和类型范围，配饰对应官方佩饰", () => {

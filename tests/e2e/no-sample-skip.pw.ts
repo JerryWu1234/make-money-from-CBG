@@ -44,7 +44,8 @@ for (const rule of [
     };
     record.detail!.equipmentCapture = captured;
     record.detail!.petCapture = captured;
-    const description = "等级：100\n防御：50\n气血：250\n耐久：100\n修理失败：0";
+    const description =
+      "等级：100\n防御：50\n气血：250\n耐久：100\n修理失败：0\n锻炼等级4\n宝石：黑宝石\n速度32\n套装效果：附加状态变身";
     record.detail!.tabs.push({
       name: "道具/法宝",
       text: "",
@@ -139,7 +140,17 @@ for (const rule of [
       true,
       true,
     );
-    const samplePrices = [900, 100, 120, 130, 140];
+    const samplePrices = [900, 100, 120, 130, 10];
+    const sampleAttributes = (price: number) => {
+      let attributes =
+        price === 900
+          ? description
+          : description
+              .replace("防御：50", "防御：40")
+              .replace("\n锻炼等级4\n宝石：黑宝石\n速度32", "");
+      if (price === 10) attributes = attributes.replace("附加状态变身", "变身术之鬼将");
+      return attributes;
+    };
     const sampleMinimum = 100;
     let equipmentCalls = 0,
       equipmentCheckpoints = 0,
@@ -174,7 +185,20 @@ for (const rule of [
           queries: ["模拟条件，非真实行情"],
           searchItems: items.map((item) => ({
             key: item.key,
-            modes: [{ mode: "exact", exhausted: false }],
+            act: "overall_search_equip",
+            modes:
+              item.name === "有报价腰带"
+                ? [
+                    {
+                      mode: "base-attributes",
+                      exhausted: false,
+                      sampleLimit: 5,
+                      sampled: 5,
+                      samplingComplete: true,
+                      detailFailures: [],
+                    },
+                  ]
+                : [{ mode: "base-attributes", exhausted: false }],
           })),
           items: items.map((item) =>
             item.name === "无样本腰带"
@@ -194,7 +218,7 @@ for (const rule of [
                     title: "有报价腰带",
                     price,
                     priceType: "listing" as const,
-                    quote: "挂牌价：¥" + price,
+                    quote: sampleAttributes(price) + "\n挂牌价：¥" + price,
                     verified: false,
                     reason: "",
                     fetchedAt: null,
@@ -206,8 +230,7 @@ for (const rule of [
       },
       readSource: async (url) => {
         const price = Number(url.match(/fixture-skip-(\d+)/)![1]);
-        const attributes =
-          price === 900 ? description : description.replace("防御：50", "防御：40");
+        const attributes = sampleAttributes(price);
         return `<main data-cbg-kind-id="20"><p>在售</p><h1>${price === 100 ? "另一款腰带" : "有报价腰带"}</h1><pre>${attributes}</pre><div>挂牌价：¥${price}</div></main>`;
       },
     };
@@ -329,6 +352,14 @@ for (const rule of [
       expect(result).not.toHaveProperty("role_pricing");
       expect(result).not.toHaveProperty("special_asset_reference");
       expect(result.equipment_pricing?.items[1].candidates).toHaveLength(5);
+      expect(
+        result.equipment_pricing?.items[1].candidates.filter((candidate) => candidate.verified),
+      ).toHaveLength(4);
+      expect(result.equipment_pricing?.items[1].candidates[4]).toMatchObject({
+        price: 10,
+        verified: false,
+        reason: expect.stringContaining("套装"),
+      });
       expect(result.excluded_assets).toHaveLength(5);
       expect(result.equipment_pricing?.items[4]).toMatchObject({
         searchState: "skipped",
@@ -450,6 +481,7 @@ for (const rule of [
         .getByText("另一款腰带 · 相近配置，已核实来源", { exact: true })
         .first()
         .click();
+      await page.setViewportSize({ width: 1100, height: 1800 });
       await pricedCard.screenshot({ path: testInfo.outputPath("base-upper-bound-price.png") });
       if (rule === "two-failures")
         await dialog
@@ -457,6 +489,7 @@ for (const rule of [
           .locator(".analysis-evidence-card")
           .filter({ has: page.locator("header strong", { hasText: "无样本腰带" }) })
           .screenshot({ path: testInfo.outputPath("two-failures-skip.png") });
+      await page.setViewportSize({ width: 1100, height: 1000 });
       await page.reload();
       await expect(completed.getByRole("article")).toHaveCount(1);
       expect([equipmentCalls, petCalls, aiCalls]).toEqual([
