@@ -142,7 +142,7 @@ export function valuationPrompt(
     "下方是初步计算，尚未识别的原文资料可通过 extracted_facts 补提后重新计算；不要仅复述待确认。补提仅支持神器套数、坐骑总数、进阶状态、主属性百分比，以及神器1至3的满槽/类型/总分、坐骑1至9的成长/进阶状态/主属性百分比。",
     "exclusion表示已核验穷尽证据后的核算排除；excluded_assets也包含按规则或无样本而跳过的项目。须按reason披露跳过原因及未计入合计，价格仍未知，不能写0元或称全部资产都有实价，也不能把skipped要求补价。专用或绑定装备、官网检索不支持的等级装备、官网确认但无独立交易筛选定义的特殊宝宝按用户规则跳过，不发起查价、不计入参考合计，须披露排除原因；其市场售价仍未知。",
     "每条补提必须给出原文 JSON Pointer path 和逐字 quote。quote 须包含对应名称及冒号标记的值，或明确“共有N套神器/共有N只坐骑”；分项可引用“第N套神器/第N只坐骑”下的满槽、五行类型、总分、成长、进阶及主属性比例。进阶可引用“坐骑·已进阶”，明确“没有/未开启/未解锁神器”可提为神器套数0。标题空白、未看到、祥瑞数量不能作为不存在或坐骑总数的证据。没有可补提的事实时 extracted_facts 返回空数组。",
-    "decision必须符合程序价格关系：BUY表示挂牌低于精确参考估值，WATCH表示相等，PASS表示挂牌高于精确参考估值，NEED_INFO表示没有完整精确估值。采用未合并为referencePrice的相近配置区间或默认参考价时保留NEED_INFO，按estimated_value_range与estimated_comparison解释完整参考估值和挂牌差额；只有estimated_subtotal_range时仍是部分金额。estimated_sources含baseline时说明历史/预设参考价或低值排除政策，不能称实时报价。这里不做购买建议。reason解释价差与范围；200字以内。缺资料或报价时明确缺什么，不猜完整价格。",
+    "decision必须符合程序价格关系：BUY表示挂牌低于精确参考估值，WATCH表示相等，PASS表示挂牌高于精确参考估值，NEED_INFO表示没有完整精确估值。extracted_facts为空数组时，decision必须采用下方初步计算JSON最外层的decision；estimated_comparison只解释参考价与挂牌的关系，不能替代decision。reason可说明已计价部分、参考区间及缺项。补提有效事实时依据复算后的最外层decision。采用未合并为referencePrice的相近配置区间或默认参考价时保留NEED_INFO，按estimated_value_range与estimated_comparison解释完整参考估值和挂牌差额；只有estimated_subtotal_range时仍是部分金额。estimated_sources含baseline时说明历史/预设参考价或低值排除政策，不能称实时报价。这里不做购买建议。reason解释价差与范围；200字以内。缺资料或报价时明确缺什么，不猜完整价格。",
     JSON.stringify({
       ...report,
       ...(report.equipment_pricing

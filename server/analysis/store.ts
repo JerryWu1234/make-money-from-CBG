@@ -890,7 +890,7 @@ export class AnalysisStore {
   retry(runId: string) {
     this.db
       .prepare(
-        "UPDATE analysis_tasks SET status='queued',error=NULL,attempt_count=0,pricing_progress_json=NULL WHERE run_id=? AND status IN ('failed','waiting_pricing')",
+        "UPDATE analysis_tasks SET status='queued',error=CASE WHEN status='failed' THEN error ELSE NULL END,attempt_count=CASE WHEN status='failed' THEN attempt_count ELSE 0 END,pricing_progress_json=NULL WHERE run_id=? AND status IN ('failed','waiting_pricing')",
       )
       .run(runId);
   }

@@ -519,8 +519,9 @@ describe("裸号估值的复算与可追溯输入", () => {
       expect(detail.profile?.settings.b).toBe(0.8);
       expect(detail.profile?.template).toBe(template);
       expect(detail.attempts).toHaveLength(2);
+      expect(detail.attempts[1].requestText).toContain(detail.attempts[0].error!);
       expect(detail.attempts[1].requestText).toBe(analyze.mock.calls[1][0]);
-      expect(detail.attempts[1].requestHash).toBe(detail.promptHash);
+      expect(detail.attempts[1].requestHash).not.toBe(detail.promptHash);
       expect(detail.result?.valuation?.decision).toBe("BUY");
     } finally {
       await runner.shutdown();
