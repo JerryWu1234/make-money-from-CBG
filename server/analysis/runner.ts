@@ -165,6 +165,8 @@ export class AnalysisRunner {
     }
     const run = this.store.run(id);
     if (!run) throw new Error("分析任务不存在");
+    if (!retryFailed && (run.failed || run.waitingPricing))
+      throw new Error("请先重试失败或待补齐的商品，再继续分析");
     if (
       !run.queued &&
       !(retryFailed && (run.failed || run.waitingPricing)) &&
@@ -261,7 +263,7 @@ export class AnalysisRunner {
         (budget.rounds >= MAX_PRICING_ROUNDS || Date.now() - budget.started >= MAX_ROLE_PRICING_MS)
       ) {
         this.store.deferPricing(task, owner, "达到本角色自动查价上限，报价仍未补齐");
-        continue;
+        return;
       }
       const reportProgress = (progress: Partial<PricingSearchProgress> = {}) => {
         this.store.pricingProgress(task!, owner, {
@@ -329,7 +331,7 @@ export class AnalysisRunner {
                   : "装备查价游标未推进") +
                 "，已保存逐件进度；等待新的可核验数据或修复读取后继续查价",
             );
-            continue;
+            return;
           }
         } catch (error) {
           if (!this.store.owns(owner)) return;
@@ -343,7 +345,7 @@ export class AnalysisRunner {
                 : "装备联网查价失败，请重试";
           if (!stop.aborted && (signal.aborted || itemPricingError(error))) {
             this.store.deferPricing(task, owner, message);
-            continue;
+            return;
           }
           this.store.setRun(id, "paused", message, owner);
           return;
@@ -387,7 +389,7 @@ export class AnalysisRunner {
                 : "宝宝查价游标未推进") +
                 "，已保存逐件进度；等待新的可核验数据或修复读取后继续查价",
             );
-            continue;
+            return;
           }
         } catch (error) {
           if (!this.store.owns(owner)) return;
@@ -401,7 +403,7 @@ export class AnalysisRunner {
                 : "宝宝联网查价失败，请重试";
           if (!stop.aborted && (signal.aborted || itemPricingError(error))) {
             this.store.deferPricing(task, owner, message);
-            continue;
+            return;
           }
           this.store.setRun(id, "paused", message, owner);
           return;
@@ -442,19 +444,20 @@ export class AnalysisRunner {
           if (!this.store.owns(owner)) return;
           task = this.store.savePetPricing(task, { ...task.petPricing, gearPricing }, owner);
           if (gearPricing.searchComplete === false) {
-            if (pricingSearchAdvanced(previousPricing, gearPricing)) continue;
+            const readFailed = gearPricing.items.some(
+              (item) => item.searchState === "read_failed" || item.searchStatus === "read_failed",
+            );
+            if (!readFailed && pricingSearchAdvanced(previousPricing, gearPricing)) continue;
             this.store.deferPricing(
               task,
               owner,
-              (gearPricing.items.some((item) => item.searchState === "read_failed")
-                ? "宝宝装备详情读取失败"
-                : "宝宝装备查价游标未推进") +
+              (readFailed ? "宝宝装备详情读取失败" : "宝宝装备查价游标未推进") +
                 "，已保存角色和宝宝查价进度；等待新的可核验数据或修复读取后继续查价" +
                 (gearPricing.issues.length
                   ? "。" + gearPricing.issues.join("；").slice(0, 600)
                   : ""),
             );
-            continue;
+            return;
           }
         } catch (error) {
           if (!this.store.owns(owner)) return;
@@ -468,7 +471,7 @@ export class AnalysisRunner {
                 : "宝宝装备联网查价失败，请重试";
           if (!stop.aborted && (signal.aborted || itemPricingError(error))) {
             this.store.deferPricing(task, owner, message);
-            continue;
+            return;
           }
           this.store.setRun(id, "paused", message, owner);
           return;
@@ -520,18 +523,15 @@ export class AnalysisRunner {
           /401|403|429|unauth|authentication|api.?key|登录|quota|rate.?limit|额度|余额|insufficient|账号已变化|model.*(?:not available|not found|unsupported)/i.test(
             message,
           );
-        const retry = !stop.aborted && !fatal && task.attempts < 1 && !message.includes("256 KiB");
         this.store.finish(task, attempt, owner, {
           state: stop.aborted ? "interrupted" : "failed",
           error: message,
           raw,
           usage,
-          requeue: stop.aborted || fatal || retry,
+          requeue: stop.aborted || fatal,
         });
-        if (stop.aborted || fatal) {
-          this.store.setRun(id, "paused", message, owner);
-          return;
-        }
+        this.store.setRun(id, "paused", message, owner);
+        return;
       }
     }
     this.store.setRun(id, "paused", null, owner);

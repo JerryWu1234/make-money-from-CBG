@@ -248,6 +248,10 @@ it.each([
   ["pet-gear", "read_failed"],
 ] as const)("%s 没有新进展或详情读取失败时保存待补齐：%s", async (phase, state) => {
   const c = setup();
+  const next = structuredClone(c.record);
+  next.listing.key += "-next";
+  c.crawl.observe(next.listing);
+  c.crawl.save(next.listing, next.detail!);
   if (phase === "pet")
     c.searchPets.mockResolvedValue({
       ...c.pets,
@@ -264,10 +268,10 @@ it.each([
     const id = await c.runner.start("codex", true, c.profile);
     await c.runner.settled();
     expect(c.store.run(id)).toMatchObject({
-      status: "completed",
+      status: "paused",
       waitingPricing: 1,
       completed: 0,
-      queued: 0,
+      queued: 1,
     });
     expect(phase === "pet" ? c.searchPets : c.searchPetGear).toHaveBeenCalledOnce();
     expect(c.analyze).not.toHaveBeenCalled();
@@ -275,6 +279,29 @@ it.each([
       c.store.overview({ runId: id }).records.items[0].taskId!,
     )!.petPricing!;
     expect((phase === "pet" ? saved : saved.gearPricing!).items[0].searchState).toBe(state);
+  } finally {
+    await c.runner.shutdown();
+    c.crawl.db.close();
+  }
+});
+
+it("宝宝装备部分完成仍优先处理仅searchStatus标记的读取失败", async () => {
+  const c = setup(true, 2);
+  c.searchPetGear.mockResolvedValueOnce({
+    ...c.gear,
+    searchComplete: false,
+    items: c.gear.items.map((item, index) => ({
+      ...item,
+      searchState: index ? "pending" : "completed",
+      searchStatus: index ? "read_failed" : "completed",
+    })),
+  });
+  try {
+    const id = await c.runner.start("codex", true, c.profile);
+    await c.runner.settled();
+    expect(c.store.run(id)).toMatchObject({ status: "paused", waitingPricing: 1, completed: 0 });
+    expect(c.searchPetGear).toHaveBeenCalledOnce();
+    expect(c.analyze).not.toHaveBeenCalled();
   } finally {
     await c.runner.shutdown();
     c.crawl.db.close();
@@ -292,7 +319,7 @@ it("宝宝装备自动查价，暂停和刷新后复用父宝宝进度，完成�
     const id = await c.runner.start("codex", false, c.profile);
     await c.runner.settled();
     expect(c.store.run(id)).toMatchObject({
-      status: "completed",
+      status: "paused",
       waitingPricing: 1,
       completed: 0,
       queued: 0,
@@ -336,7 +363,7 @@ it("宠装暂停恢复后直接AI，已完成父宝宝不重复查", async () =>
     const id = await c.runner.start("codex", false, c.profile);
     await c.runner.settled();
     expect(c.store.run(id)).toMatchObject({
-      status: "completed",
+      status: "paused",
       waitingPricing: 1,
       completed: 0,
       queued: 0,

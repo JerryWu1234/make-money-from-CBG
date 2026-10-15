@@ -521,10 +521,14 @@ describe("持久化的商品分析队列", () => {
     });
   });
 
-  it("分析校验重试复用查价快照，不重复联网搜索", async () => {
+  it("分析校验失败暂停，显式重试复用查价快照，不重复联网搜索", async () => {
     const { store, runner, analyze, profile, pricing, searchEquipment } = await valuationSetup();
     analyze.mockResolvedValueOnce({ text: "invalid-json" });
     const id = await runner.start("codex", true, profile);
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({ status: "paused", completed: 0, failed: 1 });
+    expect(analyze).toHaveBeenCalledOnce();
+    await runner.resume(id, true);
     await runner.settled();
     expect(store.run(id)).toMatchObject({ completed: 1, failed: 0 });
     expect(analyze).toHaveBeenCalledTimes(2);
@@ -587,7 +591,7 @@ describe("持久化的商品分析队列", () => {
       const id = await runner.start("codex", true, profile);
       await runner.settled();
       expect(store.run(id)).toMatchObject({
-        status: "completed",
+        status: "paused",
         completed: 0,
         queued: 0,
         waitingPricing: 1,
@@ -816,18 +820,26 @@ describe("持久化的商品分析队列", () => {
     await runner.settled();
     expect(analyze).toHaveBeenCalledTimes(4);
   });
-  it("格式或依据错误仅自动重试一次，失败保留原始回复并继续下一件；可单独重试失败", async () => {
+  it("格式或依据错误每次立即暂停，保留原始回复，显式重试后按顺序完成", async () => {
     const { store, runner, analyze } = setup();
     analyze
       .mockResolvedValueOnce({ text: "not-json" })
       .mockResolvedValueOnce({ text: "still-invalid" });
     const id = await runner.start("codex");
     await runner.settled();
-    expect(store.run(id)).toMatchObject({ failed: 1, completed: 1 });
-    expect(analyze).toHaveBeenCalledTimes(3);
+    expect(store.run(id)).toMatchObject({ status: "paused", failed: 1, completed: 0, queued: 1 });
+    expect(analyze).toHaveBeenCalledOnce();
+    await expect(runner.resume(id)).rejects.toThrow("先重试");
     const failed = store
       .overview({ runId: id })
       .records.items.find((item) => item.state === "failed")!;
+    expect(store.detail(failed.taskId!)?.attempts.map((attempt) => attempt.rawResponse)).toEqual([
+      "not-json",
+    ]);
+    await runner.resume(id, true);
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({ status: "paused", failed: 1, completed: 0, queued: 1 });
+    expect(analyze).toHaveBeenCalledTimes(2);
     expect(store.detail(failed.taskId!)?.attempts.map((attempt) => attempt.rawResponse)).toEqual([
       "not-json",
       "still-invalid",

@@ -139,7 +139,7 @@ it.each([
       await runner.settled();
       if (restart) {
         expect(store.run(id)).toMatchObject({
-          status: "completed",
+          status: "paused",
           queued: 0,
           completed: 0,
           waitingPricing: 1,

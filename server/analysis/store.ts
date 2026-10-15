@@ -677,7 +677,7 @@ export class AnalysisStore {
         .run(error + "；已保留查价进度，可单独重试待补齐项", task.id, task.id).changes !== 1
     )
       throw new Error("查价任务状态已变化");
-    this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
+    this.setRun(task.runId, "paused", error, owner);
   }
   pricingProgress(
     task: AnalysisTask,

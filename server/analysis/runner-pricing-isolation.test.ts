@@ -131,7 +131,7 @@ it("逐件检查点保持运行，连续保存不污染CAS基线，暂停后保�
   expect(() => lateCheckpoint?.(equipmentPricingPlan(valuationRecord()))).toThrow();
   expect(c.analyze).not.toHaveBeenCalled();
 });
-it("宝宝成长表单误差隔离当前角色，后续角色继续且不生成错误报价", async () => {
+it("宝宝成长表单误差暂停批次，保留首件并不启动后续角色", async () => {
   const c = setup(true);
   c.searchPets.mockImplementationOnce(async () => {
     assertPetUIArguments({ growth: 1009 }, { growth: 1008 });
@@ -140,14 +140,14 @@ it("宝宝成长表单误差隔离当前角色，后续角色继续且不生成�
   const id = await c.runner.start("codex", true, c.profile);
   await c.runner.settled();
   expect(c.store.run(id)).toMatchObject({
-    status: "completed",
-    completed: 1,
+    status: "paused",
+    completed: 0,
     waitingPricing: 1,
     failed: 0,
-    queued: 0,
+    queued: 1,
   });
-  expect(c.searchPets).toHaveBeenCalledTimes(2);
-  expect(c.analyze).toHaveBeenCalledOnce();
+  expect(c.searchPets).toHaveBeenCalledOnce();
+  expect(c.analyze).not.toHaveBeenCalled();
   const task = c.store
     .overview({ runId: id })
     .records.items.find((x) => x.state === "waiting_pricing")!;
@@ -166,7 +166,7 @@ it.each(["宝宝官网表单实际条件与计划不一致：level_min", "藏宝
     expect(c.analyze).not.toHaveBeenCalled();
   },
 );
-it.each([false, true])("宝宝页面等待20秒超时隔离当前角色，错误保留名称%s", async (keepName) => {
+it.each([false, true])("宝宝页面等待20秒超时暂停批次，错误保留名称%s", async (keepName) => {
   const c = setup(true);
   const error = new Error("page.waitForFunction: Timeout 20000ms exceeded.");
   if (keepName) error.name = "TimeoutError";
@@ -174,16 +174,25 @@ it.each([false, true])("宝宝页面等待20秒超时隔离当前角色，错误
   const id = await c.runner.start("codex", true, c.profile);
   await c.runner.settled();
   expect(c.store.run(id)).toMatchObject({
-    status: "completed",
-    completed: 1,
+    status: "paused",
+    completed: 0,
     waitingPricing: 1,
-    queued: 0,
+    queued: 1,
   });
-  expect(c.searchPets).toHaveBeenCalledTimes(2);
-  expect(c.analyze).toHaveBeenCalledOnce();
+  expect(c.searchPets).toHaveBeenCalledOnce();
+  expect(c.analyze).not.toHaveBeenCalled();
 });
-it("单角色读取失败保留待补齐，下一角色完成；继续不重试，显式重试不重复成功角色", async () => {
+it("单角色读取失败立即暂停，普通继续不越过，显式重试按原顺序完成", async () => {
   const c = setup();
+  const record = c.crawl.detail("a") as SavedRoleRecord;
+  record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items = [0, 1].map((index) => ({
+    index,
+    kind: "equipment",
+    category: "腰带",
+    name: "测试腰带" + index,
+    description: "等级100\n气血200\n防御50",
+  }));
+  c.crawl.save(record.listing, record.detail!);
   c.search.mockImplementationOnce(async (record, _signal, _settings, _previous, report) => {
     report?.({ assetName: "兽王腰带", page: 2, validSamples: 0, retryCount: 2 });
     expect(c.store.activeRun()?.pricingProgress).toMatchObject({
@@ -191,18 +200,26 @@ it("单角色读取失败保留待补齐，下一角色完成；继续不重试�
       page: 2,
       retryCount: 2,
     });
-    return { ...equipmentPricingPlan(record), searchComplete: false };
+    const plan = equipmentPricingPlan(record);
+    return {
+      ...plan,
+      searchComplete: false,
+      items: plan.items.map((item, index) => ({
+        ...item,
+        searchState: index ? "read_failed" : "completed",
+      })),
+    };
   });
   const id = await c.runner.start("codex", true, c.profile);
   await c.runner.settled();
   expect(c.store.run(id)).toMatchObject({
-    status: "completed",
-    completed: 1,
+    status: "paused",
+    completed: 0,
     waitingPricing: 1,
-    queued: 0,
+    queued: 1,
     failed: 0,
   });
-  expect(c.analyze).toHaveBeenCalledOnce();
+  expect(c.analyze).not.toHaveBeenCalled();
   const item = c.store
     .overview({ runId: id })
     .records.items.find((item) => item.state === "waiting_pricing")!;
@@ -216,14 +233,14 @@ it("单角色读取失败保留待补齐，下一角色完成；继续不重试�
     analyze: c.analyze,
     searchEquipment: c.search,
   }));
-  await reloaded.resume(id);
+  await expect(reloaded.resume(id)).rejects.toThrow("先重试");
   await reloaded.settled();
-  expect(c.search).toHaveBeenCalledTimes(2);
+  expect(c.search).toHaveBeenCalledOnce();
   await reloaded.resume(id, true);
   await reloaded.settled();
   expect(c.store.run(id)).toMatchObject({ completed: 2, waitingPricing: 0 });
   expect(c.search).toHaveBeenCalledTimes(3);
-  expect(c.search.mock.calls[2][3]?.searchComplete).toBe(false);
+  expect(c.search.mock.calls[1][3]?.searchComplete).toBe(false);
   expect(c.analyze).toHaveBeenCalledTimes(2);
   await reloaded.shutdown();
 });
@@ -236,15 +253,20 @@ it("登录失效暂停整个批次，不越过访问限制处理下一角色", a
   expect(c.search).toHaveBeenCalledOnce();
   expect(c.analyze).not.toHaveBeenCalled();
 });
-it("未知页面结构只隔离当前角色，不生成半成品AI结果", async () => {
+it("未知页面结构暂停批次，不生成半成品AI结果", async () => {
   const c = setup();
   c.search.mockRejectedValueOnce(new Error("商品页结构不支持：无法定位主商品容器"));
   const id = await c.runner.start("codex", true, c.profile);
   await c.runner.settled();
-  expect(c.store.run(id)).toMatchObject({ completed: 1, waitingPricing: 1, queued: 0 });
-  expect(c.analyze).toHaveBeenCalledOnce();
+  expect(c.store.run(id)).toMatchObject({
+    status: "paused",
+    completed: 0,
+    waitingPricing: 1,
+    queued: 1,
+  });
+  expect(c.analyze).not.toHaveBeenCalled();
 });
-it("即使游标持续变化也在自动轮数上限停止，后续角色继续", async () => {
+it("即使游标持续变化也在自动轮数上限暂停，不启动后续角色", async () => {
   const c = setup();
   c.search.mockImplementation(async (record) =>
     record.listing.key === "a"
@@ -281,8 +303,13 @@ it("即使游标持续变化也在自动轮数上限停止，后续角色继续"
   );
   const id = await c.runner.start("codex", true, c.profile);
   await c.runner.settled();
-  expect(c.search).toHaveBeenCalledTimes(MAX_PRICING_ROUNDS + 1);
-  expect(c.store.run(id)).toMatchObject({ completed: 1, waitingPricing: 1 });
+  expect(c.search).toHaveBeenCalledTimes(MAX_PRICING_ROUNDS);
+  expect(c.store.run(id)).toMatchObject({
+    status: "paused",
+    completed: 0,
+    waitingPricing: 1,
+    queued: 1,
+  });
   const item = c.store
     .overview({ runId: id })
     .records.items.find((item) => item.state === "waiting_pricing")!;
@@ -314,7 +341,7 @@ it("超时取消不依赖提供方结束promise，迟到结果不会改变已结
   finish(42);
 });
 
-it("查价累计时间到上限时隔离当前角色，即使仍有翻页进展", async () => {
+it("查价累计时间到上限时暂停批次，即使仍有翻页进展", async () => {
   const c = setup();
   const start = Date.now();
   const clock = vi.spyOn(Date, "now").mockReturnValue(start);
@@ -359,11 +386,16 @@ it("查价累计时间到上限时隔离当前角色，即使仍有翻页进展"
   const id = await c.runner.start("codex", true, c.profile);
   await c.runner.settled();
   expect(firstRoleRounds).toBe(6);
-  expect(c.store.run(id)).toMatchObject({ completed: 1, waitingPricing: 1 });
+  expect(c.store.run(id)).toMatchObject({
+    status: "paused",
+    completed: 0,
+    waitingPricing: 1,
+    queued: 1,
+  });
   clock.mockRestore();
 });
 
-it("单次查价超时推进下一角色，忽略迟到的快照", async () => {
+it("单次查价超时暂停批次，忽略迟到的快照", async () => {
   const c = setup();
   const timeout = new AbortController();
   vi.spyOn(AbortSignal, "timeout").mockImplementationOnce(() => timeout.signal);
@@ -380,7 +412,12 @@ it("单次查价超时推进下一角色，忽略迟到的快照", async () => {
   await vi.waitFor(() => expect(c.search).toHaveBeenCalledOnce());
   timeout.abort(new DOMException("查价超时", "TimeoutError"));
   await c.runner.settled();
-  expect(c.store.run(id)).toMatchObject({ completed: 1, waitingPricing: 1, queued: 0 });
+  expect(c.store.run(id)).toMatchObject({
+    status: "paused",
+    completed: 0,
+    waitingPricing: 1,
+    queued: 1,
+  });
   const item = c.store
     .overview({ runId: id })
     .records.items.find((item) => item.state === "waiting_pricing")!;
@@ -389,7 +426,7 @@ it("单次查价超时推进下一角色，忽略迟到的快照", async () => {
   await Promise.resolve();
   expect(c.store.detail(item.taskId!)?.equipmentPricing).toBeNull();
   expect(c.store.detail(item.taskId!)?.result).toBeNull();
-  expect(c.analyze).toHaveBeenCalledOnce();
+  expect(c.analyze).not.toHaveBeenCalled();
 });
 
 it("首屏无样本跳过单件后继续AI分析和下一角色", async () => {
