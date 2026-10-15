@@ -195,7 +195,10 @@ describe("AI 连接验证", () => {
       });
       const signal = new AbortController().signal;
       await client.searchPets(record, signal);
-      expect(mocks.createPetSource).toHaveBeenCalledExactlyOnceWith(signal);
+      expect(mocks.createPetSource).toHaveBeenCalledExactlyOnceWith(
+        signal,
+        record.listing.serverId,
+      );
       expect(mocks.searchPetPricing).toHaveBeenCalledWith(
         record,
         signal,
@@ -216,7 +219,7 @@ describe("AI 连接验证", () => {
     const snapshot = await client.searchPets(record, signal);
     expect(snapshot.provider).toBe("browser");
     expect(mocks.petInventory).toHaveBeenCalledWith(record);
-    expect(mocks.createPetSource).toHaveBeenCalledWith(signal);
+    expect(mocks.createPetSource).toHaveBeenCalledWith(signal, record.listing.serverId);
     expect(mocks.searchPetPricing).toHaveBeenCalledWith(
       record,
       signal,
@@ -359,7 +362,11 @@ describe("AI 连接验证", () => {
       onCheckpoint,
     );
     expect(snapshot.provider).toBe("browser");
-    expect(mocks.createEquipmentSource).toHaveBeenCalledWith(signal, onProgress);
+    expect(mocks.createEquipmentSource).toHaveBeenCalledWith(
+      signal,
+      record.listing.serverId,
+      onProgress,
+    );
     expect(mocks.searchEquipmentPrices).toHaveBeenCalledWith(
       record,
       signal,

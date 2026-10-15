@@ -63,6 +63,55 @@ const priced = (key = "gear:0") => ({
 const complete = () => ({ ...snapshot([priced()]), knownTotal: 120, total: 120 });
 
 describe("精确查价快照完整性", () => {
+  it("基础上限策略从同值及较低值统一池复算最低价，旧快照身份不复用", () => {
+    const inventory: EquipmentPricingItem[] = [
+      {
+        ...item(),
+        priceMethod: EQUIPMENT_QUOTE_POLICY,
+        comparisonPolicy: "base-upper-bound-v1" as const,
+      },
+    ];
+    const row = {
+      ...inventory[0],
+      status: "priced" as const,
+      referencePrice: 100,
+      candidates: [
+        candidate(900, "equal"),
+        { ...candidate(100, "lower"), matchType: "similar" as const },
+      ],
+    };
+    const source = { ...snapshot([row]), total: 100, knownTotal: 100 };
+    expect(validateExactPricing(source, inventory, now)).toBe(true);
+    expect(
+      validateExactPricing(
+        { ...source, items: [{ ...row, referencePrice: 900 }], total: 900, knownTotal: 900 },
+        inventory,
+        now,
+      ),
+    ).toBe(false);
+    const { comparisonPolicy: _policy, ...legacy } = row;
+    expect(inventoryMatchesSnapshot(snapshot([legacy]), inventory)).toBe(false);
+    expect(inventoryMatchesSnapshot(source, [item()])).toBe(false);
+  });
+
+  it("统一池五件可完成，但未标志旧策略仍只按采用的同配组计数", () => {
+    const row = {
+      ...item(),
+      comparisonPolicy: "base-upper-bound-v1" as const,
+      candidates: Array.from({ length: 5 }, (_, index) => ({
+        ...candidate(100 + index, `pool-${index}`),
+        matchType: index < 2 ? ("exact" as const) : ("similar" as const),
+      })),
+    };
+    const records = [{ key: row.key, modes: [{ mode: "base-attributes", exhausted: false }] }];
+    expect(unfinishedPricingSearch(row, records)).toBe(false);
+    expect(
+      unfinishedPricingSearch({ ...row, candidates: row.candidates.slice(0, 4) }, records),
+    ).toBe(true);
+    const { comparisonPolicy: _policy, ...legacy } = row;
+    expect(unfinishedPricingSearch(legacy, records)).toBe(true);
+  });
+
   it("完成标记不能覆盖尚未穷尽的查询证据", () => {
     const source = complete();
     source.items[0].searchState = "completed";
@@ -411,3 +460,25 @@ it("跳过只允许无有效样本且金额未知的单件", () => {
     expect(validateExactPricing(invalid, [item()], now)).toBe(false);
   }
 });
+
+it.each(["exact", "similar"] as const)(
+  "基础上限宽搜的完成证据可用于%s报价，不足5条未完成仍续查",
+  (matchType) => {
+    const row = { ...item(), candidates: [{ ...candidate(100, "bounded"), matchType }] };
+    const mode = {
+      mode: "base-attributes",
+      exhausted: false,
+      sampleLimit: 5,
+      sampled: 5,
+      samplingComplete: true,
+      detailFailures: [],
+    };
+    const record = { key: row.key, act: "overall_search_equip", modes: [mode] };
+    expect(unfinishedPricingSearch(row, [record])).toBe(false);
+    expect(
+      unfinishedPricingSearch(row, [
+        { ...record, modes: [{ ...mode, sampled: 4, samplingComplete: false }] },
+      ]),
+    ).toBe(true);
+  },
+);

@@ -160,7 +160,7 @@ try {
     formStates = [];
     detailVisits = [];
     navigationCount = 0;
-    const source = await createPetGearSource(new AbortController().signal, budgets);
+    const source = await createPetGearSource(new AbortController().signal, "1", budgets);
     try {
       return await source.findCandidates([target], new AbortController().signal);
     } finally {
@@ -234,9 +234,10 @@ try {
   };
   const assertClearedFilters = () => {
     for (const request of requests) {
+      assert.equal(request.serverid, "1");
+      assert.equal(request.server_type, undefined);
       for (const key of [
         "cross_buy_serverid",
-        "serverid",
         "areaid",
         "addon_sum_include_damage",
         "include_no_skill",
@@ -249,8 +250,8 @@ try {
     assert.equal(formStates.length, requests.length);
     for (const state of formStates)
       assert.deepEqual(state, {
-        area: "",
-        server: "",
+        area: "33",
+        server: "1",
         noSuit: false,
         coverSuit: false,
         includeDamage: false,
@@ -324,7 +325,8 @@ try {
           ["1", "2"],
         );
         for (const request of requests) {
-          assert.equal(request.server_type, "3");
+          assert.equal(request.server_type, undefined);
+          assert.equal(request.serverid, "1");
           assert.equal(request.level_min, String(target.level));
           assert.equal(request.level_max, String(target.level));
           assert.equal(
@@ -575,15 +577,52 @@ try {
       },
     );
   }
-  for (const scopeOverrides of [{ server_type: "2" }, { serverid: "33" }, { areaid: "33" }]) {
-    await check("拒绝实际请求的服龄/单服限制：" + JSON.stringify(scopeOverrides), async () => {
+  for (const scopeOverrides of [
+    { server_type: "2" },
+    { serverid: "33" },
+    { serverid: "" },
+    { serverid: "1,33" },
+    { areaid: "33" },
+  ]) {
+    await check("拒绝实际请求的额外服龄/错服/空服：" + JSON.stringify(scopeOverrides), async () => {
       const result = await run(target, { scopeOverrides });
       assert.equal(result.items[0].searchStatus, "read_failed");
-      assert.match(result.items[0].note, /三年以上|单服或地区/);
+      assert.match(result.items[0].note, /单服|额外/);
       assert.equal(result.items[0].candidates.length, 0);
       assert.equal(detailVisits.length, 0);
     });
   }
+  await check("目标单服真实选区与翻页请求，漏服和外服行停止", async () => {
+    const evidence = [];
+    const result = await run(target);
+    assert.equal(result.items[0].searchStatus, "completed", result.items[0].note);
+    assertClearedFilters();
+    assert.ok(requests.some((request) => request.page === "2"));
+    evidence.push({
+      scenario: "target-server-pagination",
+      requests: [...requests],
+      formStates: [...formStates],
+      result,
+    });
+    for (const settings of [{ dropServerId: true }, { dropServerPage: 2 }, { rowServerId: 33 }]) {
+      const stopped = await run(target, settings);
+      assert.equal(stopped.items[0].searchStatus, "read_failed", stopped.items[0].note);
+      assert.match(stopped.items[0].note, /单服/);
+      if (settings.rowServerId) assert.deepEqual(detailVisits, []);
+      evidence.push({
+        scenario: settings,
+        requests: [...requests],
+        formStates: [...formStates],
+        detailVisits: [...detailVisits],
+        result: stopped,
+      });
+    }
+    await mkdir("data/pr27-fix-validation", { recursive: true });
+    await writeFile(
+      "data/pr27-fix-validation/pet-gear-single-server-scope.json",
+      JSON.stringify({ simulated: true, targetServerId: "1", evidence }, null, 2),
+    );
+  });
   await check("后续登录失效保留已完成gear，并停止未查询gear", async () => {
     settings = {
       name: target.name,
@@ -595,7 +634,7 @@ try {
     detailSettings = {};
     navigationCount = 0;
     requests = [];
-    const source = await createPetGearSource(new AbortController().signal);
+    const source = await createPetGearSource(new AbortController().signal, "1");
     try {
       const result = await source.findCandidates(
         [target, { ...target, key: "second" }, { ...target, key: "third" }],

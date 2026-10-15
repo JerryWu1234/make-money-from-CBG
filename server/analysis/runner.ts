@@ -12,7 +12,7 @@ import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { CALCULATION_VERSION } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
 import { pricingSearchAdvanced } from "./pricing-progress";
-import { pricingTimestampFresh } from "./pricing-integrity";
+import { pricingSnapshotFresh } from "./pricing-integrity";
 
 export type AnalysisClient = {
   model: string;
@@ -248,16 +248,16 @@ export class AnalysisRunner {
         (task.profile?.equipmentSearch &&
           (!task.equipmentPricing ||
             task.equipmentPricing.searchComplete === false ||
-            !pricingTimestampFresh(task.equipmentPricing.searchedAt))) ||
+            !pricingSnapshotFresh(task.equipmentPricing))) ||
         (task.profile?.petSearch &&
           (!task.petPricing ||
             task.petPricing.searchComplete === false ||
-            !pricingTimestampFresh(task.petPricing.searchedAt))) ||
+            !pricingSnapshotFresh(task.petPricing))) ||
         (task.profile?.petGearSearch &&
           petGearInventory(task.record).items.length &&
           (!task.petPricing?.gearPricing ||
             task.petPricing.gearPricing.searchComplete === false ||
-            !pricingTimestampFresh(task.petPricing.gearPricing.searchedAt) ||
+            !pricingSnapshotFresh(task.petPricing.gearPricing) ||
             task.petPricing.gearPricing.items.some(
               (gear) =>
                 !!gear.skippedWithPet !==
@@ -284,7 +284,7 @@ export class AnalysisRunner {
         task.profile?.equipmentSearch &&
         (!task.equipmentPricing ||
           task.equipmentPricing.searchComplete === false ||
-          !pricingTimestampFresh(task.equipmentPricing.searchedAt))
+          !pricingSnapshotFresh(task.equipmentPricing))
       ) {
         const signal = AbortSignal.any([
           stop,
@@ -363,7 +363,7 @@ export class AnalysisRunner {
         task.profile?.petSearch &&
         (!task.petPricing ||
           task.petPricing.searchComplete === false ||
-          !pricingTimestampFresh(task.petPricing.searchedAt))
+          !pricingSnapshotFresh(task.petPricing))
       ) {
         const signal = AbortSignal.any([
           stop,
@@ -424,7 +424,7 @@ export class AnalysisRunner {
         petGearInventory(task.record).items.length &&
         (!task.petPricing.gearPricing ||
           task.petPricing.gearPricing.searchComplete === false ||
-          !pricingTimestampFresh(task.petPricing.gearPricing.searchedAt) ||
+          !pricingSnapshotFresh(task.petPricing.gearPricing) ||
           task.petPricing.gearPricing.items.some(
             (gear) =>
               !!gear.skippedWithPet !==
@@ -485,6 +485,7 @@ export class AnalysisRunner {
           this.store.setRun(id, "paused", message, owner);
           return;
         }
+        continue;
       }
       const prompt =
         task.profile && task.lastError && !task.lastError.startsWith("已暂停") && task.attempts > 0

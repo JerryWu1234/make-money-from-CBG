@@ -79,6 +79,7 @@ export type EquipmentPricingItem = {
   status: "priced" | "no_match" | "incomplete" | "untradable" | "unsupported";
   referencePrice: number | null;
   priceMethod?: typeof EQUIPMENT_QUOTE_POLICY | "first-five-average-v3";
+  comparisonPolicy?: "base-upper-bound-v1";
   candidates: EquipmentCandidate[];
   issues: string[];
   similarEstimate?: SimilarEstimate;
@@ -86,6 +87,7 @@ export type EquipmentPricingItem = {
   baselineInvalidReason?: string;
   searchState?: PricingSearchState;
   searchCursor?: EquipmentSearchCursor;
+  searchFailureCount?: number;
   samplingStopped?: boolean;
   skipReason?: string;
 };
@@ -186,7 +188,7 @@ export function equipmentLevelUnsupportedReason(
   )
     return null;
   return (
-    "官网全服" +
+    "官网" +
     (jewelry ? "灵饰" : "装备") +
     "检索范围为" +
     minimum +
@@ -304,6 +306,9 @@ export function equipmentInventory(record: SavedRoleRecord) {
         name: item.name,
         level,
         category: inferred,
+        ...(failureBudgetApplies({ category: inferred })
+          ? { comparisonPolicy: "base-upper-bound-v1" as const }
+          : {}),
         ...(item.kindId ? { kindId: item.kindId } : {}),
         ...(item.modelId ? { modelId: item.modelId } : {}),
         description,
@@ -353,15 +358,18 @@ export function equipmentInventory(record: SavedRoleRecord) {
       collectedAt: capture?.collectedAt,
       captureComplete,
       issues,
-      items: items.map(({ key, name, level, category, kindId, modelId, description }) => ({
-        key,
-        name,
-        level,
-        category,
-        ...(kindId ? { kindId } : {}),
-        ...(modelId ? { modelId } : {}),
-        description,
-      })),
+      items: items.map(
+        ({ key, name, level, category, kindId, modelId, description, comparisonPolicy }) => ({
+          key,
+          name,
+          level,
+          category,
+          ...(kindId ? { kindId } : {}),
+          ...(modelId ? { modelId } : {}),
+          description,
+          ...(comparisonPolicy ? { comparisonPolicy } : {}),
+        }),
+      ),
     }),
   );
   return { items, issues, captureComplete, inputHash };
@@ -631,6 +639,39 @@ export type PricingSearchProgress = {
   retryCount: number;
 };
 
+const accessFailure = (message: string) =>
+  /登录|验证码|安全验证|人机验证|权限|禁止|频繁|网站繁忙|系统繁忙|未采用报价|报价未采用|三年以上服|unauthorized|unauthenticated|forbidden|permission denied|security|policy|captcha\b/i.test(
+    message,
+  );
+const failureBudgetApplies = (item: Pick<EquipmentPricingItem, "category">) =>
+  !/上古玉魄|元身|精魄/.test(item.category);
+
+const quoteCandidates = (item: EquipmentPricingItem) =>
+  item.candidates.filter(
+    (candidate) =>
+      candidate.verified &&
+      (item.comparisonPolicy === "base-upper-bound-v1" || candidate.matchType !== "similar"),
+  );
+
+function skipFailedEquipment(item: EquipmentPricingItem, reason: string) {
+  Object.assign(item, {
+    searchState: "skipped",
+    status: "no_match",
+    referencePrice: null,
+    candidates: [],
+    skipReason: reason,
+  });
+  for (const key of [
+    "similarEstimate",
+    "baselineEstimate",
+    "baselineInvalidReason",
+    "exclusion",
+    "searchCursor",
+    "samplingStopped",
+  ] as const)
+    delete item[key];
+}
+
 export async function searchEquipmentPrices(
   record: SavedRoleRecord,
   signal: AbortSignal,
@@ -641,6 +682,20 @@ export async function searchEquipmentPrices(
 ): Promise<EquipmentPricingSnapshot> {
   const snapshot = resumePricingItems(equipmentPricingPlan(record, settings), previous, true);
   signal.throwIfAborted();
+  if (previous?.inputHash === snapshot.inputHash) {
+    for (const item of snapshot.items) {
+      const saved = previous.items.find((value) => value.key === item.key);
+      if (!saved?.searchFailureCount || !failureBudgetApplies(item)) continue;
+      item.searchFailureCount = saved.searchFailureCount;
+      if (saved.searchFailureCount >= 2 && item.searchState !== "skipped")
+        skipFailedEquipment(
+          item,
+          saved.skipReason || "装备查价累计失败2次，已跳过，未计入参考合计；市场售价未知",
+        );
+      snapshot.searchItems ||= structuredClone(previous.searchItems || []);
+      snapshot.searchAttempts ||= structuredClone(previous.searchAttempts || []);
+    }
+  }
   if (!equipmentCaptureSearchable(record, snapshot)) {
     for (const item of snapshot.items) {
       item.searchState = undefined;
@@ -666,9 +721,45 @@ export async function searchEquipmentPrices(
       signal,
     );
     signal.throwIfAborted();
-    await applyEquipmentSearchResponse(snapshot, batch, response, source, signal);
+    await applyEquipmentSearchResponse(
+      snapshot,
+      batch,
+      response,
+      source,
+      signal,
+      record.listing.serverId,
+    );
+    let retryAfterFailure = false;
+    for (const item of batch) {
+      const result = response.items?.find((value) => value.key === item.key);
+      if (result?.skipped || item.searchState !== "read_failed") continue;
+      const reason =
+        [
+          result?.note?.split("；")[0],
+          ...item.candidates
+            .filter((candidate) => !candidate.verified)
+            .map((candidate) => candidate.reason),
+        ]
+          .filter(Boolean)
+          .join("；") || "装备查询或详情读取失败";
+      if (accessFailure(reason)) throw new Error(reason);
+      if (!failureBudgetApplies(item)) continue;
+      item.searchFailureCount = (item.searchFailureCount || 0) + 1;
+      item.referencePrice = null;
+      item.status = "no_match";
+      if (item.searchFailureCount >= 2)
+        skipFailedEquipment(
+          item,
+          "装备查价累计失败2次，已跳过，未计入参考合计；市场售价未知：" + reason,
+        );
+      else {
+        item.searchState = "pending";
+        retryAfterFailure = true;
+      }
+    }
+    finishPricingSearch(snapshot);
     onCheckpoint?.(snapshot);
-    if (batch.some((item) => item.searchState === "read_failed")) break;
+    if (retryAfterFailure || batch.some((item) => item.searchState === "read_failed")) break;
   }
   return finishPricingSearch(snapshot);
 }
@@ -679,6 +770,7 @@ async function applyEquipmentSearchResponse(
   response: Awaited<ReturnType<EquipmentSource["findCandidates"]>>,
   source: EquipmentSource,
   signal: AbortSignal,
+  serverId: string,
 ) {
   snapshot.rawResponse = JSON.stringify(response);
   saveSearchAttempt(snapshot, response);
@@ -808,6 +900,8 @@ async function applyEquipmentSearchResponse(
       try {
         const url = safeEquipmentUrl(candidate.url);
         const identity = equipmentIdentity(url);
+        if (identity.split(":")[0] !== String(serverId))
+          throw new Error("候选所属服务器与角色服务器不一致，未采用报价");
         if (urls.has(identity)) {
           if (urls.get(identity) !== candidate.price) {
             readFailed = true;
@@ -828,24 +922,26 @@ async function applyEquipmentSearchResponse(
       } catch (error) {
         signal.throwIfAborted();
         candidate.reason = error instanceof Error ? error.message : "无法核对来源";
+        if (accessFailure(candidate.reason)) throw error;
         readFailed ||= readingSource;
       }
       item.candidates.push(candidate);
     }
     if (readFailed) item.searchState = "read_failed";
-    const closest = item.candidates
-      .filter((candidate) => candidate.verified && candidate.matchType === "similar")
-      .slice(0, EQUIPMENT_QUOTE_LIMIT);
-    // Final valuation recomputes from this cohort; the full response remains in rawResponse.
-    item.candidates = [
-      ...closest,
-      ...item.candidates.filter(
-        (candidate) => !candidate.verified || candidate.matchType !== "similar",
-      ),
-    ];
-    const verified = item.candidates.filter(
-      (candidate) => candidate.verified && candidate.matchType !== "similar",
-    );
+    const unified = item.comparisonPolicy === "base-upper-bound-v1";
+    if (!unified) {
+      const closest = item.candidates
+        .filter((candidate) => candidate.verified && candidate.matchType === "similar")
+        .slice(0, EQUIPMENT_QUOTE_LIMIT);
+      // Legacy comparable estimates retain their separate cohort.
+      item.candidates = [
+        ...closest,
+        ...item.candidates.filter(
+          (candidate) => !candidate.verified || candidate.matchType !== "similar",
+        ),
+      ];
+    } else delete item.similarEstimate;
+    const verified = quoteCandidates(item);
     reconcilePricingCompletion(item, snapshot.searchItems);
     if (verified.length >= 1 && item.searchState === "completed") {
       item.referencePrice = priceMinimum(
@@ -856,18 +952,20 @@ async function applyEquipmentSearchResponse(
       if (verified.length === 1) item.issues.push("仅1条挂牌样本，参考范围有限");
       if (verified.length < EQUIPMENT_QUOTE_LIMIT)
         item.issues.push(
-          `已核实${verified.length}件同配置在售商品，最多${EQUIPMENT_QUOTE_LIMIT}件，参考价取有效样本最低挂牌价`,
+          `已核实${verified.length}件${unified ? "基础属性≤目标的合格" : "同配置"}在售商品，最多${EQUIPMENT_QUOTE_LIMIT}件，参考价取有效样本最低挂牌价`,
         );
     } else {
-      item.similarEstimate = buildEquipmentEstimate(item.candidates);
+      if (!unified) item.similarEstimate = buildEquipmentEstimate(item.candidates);
       if (verified.length)
         item.issues.push(
-          `已核实${verified.length}件同配置商品，继续收集至${EQUIPMENT_QUOTE_LIMIT}件或确认结果已读完`,
+          `已核实${verified.length}件${unified ? "基础属性≤目标的合格" : "同配置"}商品，继续收集至${EQUIPMENT_QUOTE_LIMIT}件或确认结果已读完`,
         );
       item.issues.push(
-        item.similarEstimate.status === "range"
+        item.similarEstimate?.status === "range"
           ? "暂无完全同配置报价，采用已核验相近装备样本最低挂牌价作为参考价，并保留报价范围和配置差异"
-          : "可靠的同配或相近样本不足，暂不自动定价",
+          : unified
+            ? "可靠的基础属性≤目标样本不足，暂不自动定价"
+            : "可靠的同配或相近样本不足，暂不自动定价",
       );
     }
   }
@@ -879,7 +977,7 @@ async function applyEquipmentSearchResponse(
       item.exclusion = equipmentExclusion(item, snapshot.searchItems || []);
       if (item.exclusion)
         item.issues.push(
-          item.exclusion.label + "；基础普通装备已完成同配与相近全服检索，市场售价仍未知。",
+          item.exclusion.label + "；基础普通装备已完成当前查询范围核验，市场售价仍未知。",
         );
     }
   snapshot.total = snapshot.items.every((item) => item.status === "priced")
@@ -1017,7 +1115,7 @@ export function combineEquipmentPricing(
           formula: excluded(item)
             ? skippedPricingItem(item)
               ? (item.skipReason || "无样本，未计入参考合计") + "；市场售价未知，不记作0元。"
-              : "无匹配，未计入参考合计；同配与相近全服结果已读完。市场售价未知，不记作0元。"
+              : "无匹配，未计入参考合计；当前查询范围已读完。市场售价未知，不记作0元。"
             : item.status === "untradable"
               ? "专用或绑定装备无法独立挂牌查价，分项金额未知。"
               : baseline
@@ -1037,12 +1135,12 @@ export function combineEquipmentPricing(
                     baseline.source.label
                 : item.baselineInvalidReason
                   ? "默认参考价已失效：" + item.baselineInvalidReason
-                  : (item.priceMethod === EQUIPMENT_QUOTE_POLICY
-                      ? "已核对同配置装备前五件有效挂牌价的最低值（"
-                      : "已核对同配置装备挂牌价的中位数（") +
-                    item.candidates.filter(
-                      (candidate) => candidate.verified && candidate.matchType !== "similar",
-                    ).length +
+                  : (item.comparisonPolicy === "base-upper-bound-v1"
+                      ? "已核对基础属性≤目标的装备前五条合格挂牌价的最低值（"
+                      : item.priceMethod === EQUIPMENT_QUOTE_POLICY
+                        ? "已核对同配置装备前五件有效挂牌价的最低值（"
+                        : "已核对同配置装备挂牌价的中位数（") +
+                    quoteCandidates(item).length +
                     "条样本）",
           amount: baseline ? baseline.amount : fresh && verified ? item.referencePrice : null,
           confirmed: fresh && verified && item.status === "priced",
@@ -1056,13 +1154,11 @@ export function combineEquipmentPricing(
                     (baseline.source.publishedAt ? " · " + baseline.source.publishedAt : ""),
                 },
               ]
-            : item.candidates
-                .filter((candidate) => candidate.verified && candidate.matchType !== "similar")
-                .map((candidate) => ({
-                  path: "/equipment_pricing/items/" + index + "/candidates",
-                  value: candidate.quote,
-                  reason: candidate.url + " · " + candidate.fetchedAt,
-                })),
+            : quoteCandidates(item).map((candidate) => ({
+                path: "/equipment_pricing/items/" + index + "/candidates",
+                value: candidate.quote,
+                reason: candidate.url + " · " + candidate.fetchedAt,
+              })),
         };
       }),
     ],

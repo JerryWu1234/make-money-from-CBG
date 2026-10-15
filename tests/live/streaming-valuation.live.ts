@@ -13,6 +13,10 @@ import type {
 } from "../../server/crawler/types";
 import type { OpenCbgResult } from "../../server/types";
 import type { AnalysisDetail, AnalysisOverview, AnalysisRun } from "../../server/analysis/types";
+import {
+  officialSourceIdentity,
+  pricingTimestampFresh,
+} from "../../server/analysis/pricing-integrity";
 
 // Isolated workflow failures are listed in docs/live-valuation-e2e.md.
 // No website, quote, capture detail, or AI response is mocked in this test.
@@ -45,6 +49,14 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     : null;
   if (prior && (prior.kind !== kind || prior.roleCount !== 10 || prior.analysisStartsAfter !== 1))
     throw new Error("不能将其他测试的数据当作本轮10角色续跑");
+  const excludedKeys: string[] =
+    prior?.excludedProductKeys ||
+    (process.env.CBG_LIVE_EXCLUDE_KEYS_FILE
+      ? JSON.parse(await readFile(process.env.CBG_LIVE_EXCLUDE_KEYS_FILE, "utf8"))
+      : []);
+  if (!Array.isArray(excludedKeys) || excludedKeys.some((key) => typeof key !== "string"))
+    throw new Error("已分析角色排除清单格式错误");
+  const excluded = new Set(excludedKeys);
   const manifest = {
     version: 1,
     kind,
@@ -62,6 +74,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     baseURL,
     runId: prior?.runId || "",
     productKeys: prior?.productKeys || ([] as string[]),
+    excludedProductKeys: [...excluded],
     error: "",
     files: [] as { name: string; sha256: string }[],
   };
@@ -277,7 +290,8 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
           for (;;) {
             if (rowIndex < liveList!.items.length) {
               const row = liveList!.items[rowIndex++];
-              if (selected.some((known) => known.key === row.key)) continue;
+              if (excluded.has(row.key) || selected.some((known) => known.key === row.key))
+                continue;
               item = await listings.hoverListing(listPage, row, new AbortController().signal);
               expect(item!.key).toBe(row.key);
               expect(item!.serverAge).toBe("older");
@@ -467,6 +481,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     await producer;
     expect(selected).toHaveLength(10);
     expect(new Set(selected.map((item) => item.key)).size).toBe(10);
+    expect(selected.every((item) => !excluded.has(item.key))).toBe(true);
     const start = timeline.find((item) => item.event === "analysis_started")!;
     const first = timeline.find(
       (item) =>
@@ -490,6 +505,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
       reused: 0,
     });
     const quotes = [];
+    const pricingProof = [];
     for (const [index, item] of selected.entries()) {
       const row = overview.records.items.find((record) => record.key === item.key)!;
       expect(row.taskId).toBeTruthy();
@@ -502,6 +518,84 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
       expect(detail.model).toBe("gpt-6-luna");
       expect(detail.equipmentPricing?.searchComplete).toBe(true);
       expect(detail.petPricing?.searchComplete).toBe(true);
+      const serverId = String(item.serverId);
+      for (const [asset, snapshot] of [
+        ["装备", detail.equipmentPricing],
+        ["宝宝", detail.petPricing],
+        ["宝宝装备", detail.petPricing?.gearPricing],
+      ] as const) {
+        if (!snapshot) continue;
+        expect(pricingTimestampFresh(snapshot.searchedAt)).toBe(true);
+        const scopes = [];
+        for (const entry of snapshot.searchItems || []) {
+          if (!entry || typeof entry !== "object") continue;
+          const record = entry as Record<string, unknown>;
+          if (Array.isArray(record.scopeEvidence))
+            for (const scope of record.scopeEvidence) {
+              const request = (scope.request || scope) as {
+                restrictions: Record<string, string>;
+                serverType: string;
+              };
+              expect(request.restrictions).toEqual({ serverid: serverId });
+              expect(["", "0"]).toContain(request.serverType);
+              scopes.push(scope);
+            }
+          if (asset !== "宝宝装备" && Array.isArray(record.modes))
+            for (const mode of record.modes) {
+              if (typeof mode.sampled === "number") expect(mode.sampled).toBeLessThanOrEqual(5);
+            }
+        }
+        for (const assetItem of snapshot.items) {
+          if ("scopeEvidence" in assetItem && Array.isArray(assetItem.scopeEvidence))
+            for (const request of assetItem.scopeEvidence) {
+              expect(request.restrictions).toEqual({ serverid: serverId });
+              expect(["", "0"]).toContain(request.serverType);
+              scopes.push({ key: assetItem.key, request });
+            }
+          const verified = assetItem.candidates.filter((candidate) => candidate.verified);
+          for (const candidate of verified) {
+            expect(officialSourceIdentity(candidate.url)?.split(":")[0]).toBe(serverId);
+            expect(pricingTimestampFresh(candidate.fetchedAt)).toBe(true);
+          }
+          if (
+            assetItem.comparisonPolicy === "base-upper-bound-v1" &&
+            assetItem.status === "priced"
+          ) {
+            expect(assetItem.referencePrice).toBe(
+              Math.min(...verified.slice(0, 5).map((candidate) => candidate.price!)),
+            );
+          }
+          if (assetItem.searchState === "skipped") expect(assetItem.referencePrice).toBeNull();
+        }
+        if (
+          snapshot.items.some((assetItem) =>
+            assetItem.candidates.some((candidate) => candidate.verified),
+          )
+        )
+          expect(scopes.length).toBeGreaterThan(0);
+        pricingProof.push({
+          role: item.key,
+          serverId,
+          asset,
+          scopes,
+          items: snapshot.items.map((assetItem) => ({
+            key: assetItem.key,
+            comparisonPolicy: assetItem.comparisonPolicy,
+            status: assetItem.status,
+            searchState: assetItem.searchState,
+            searchFailureCount: assetItem.searchFailureCount,
+            referencePrice: assetItem.referencePrice,
+            samples: assetItem.candidates
+              .filter((candidate) => candidate.verified)
+              .map(({ url, price, matchType, fetchedAt }) => ({
+                url,
+                price,
+                matchType,
+                fetchedAt,
+              })),
+          })),
+        });
+      }
       expect(
         detail.attempts.some(
           (attempt) => attempt.state === "completed" && attempt.rawResponse && attempt.requestHash,
@@ -523,6 +617,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
       });
     }
     await save("quotations.json", quotes);
+    await save("pricing-policy-proof.json", pricingProof);
     await page.reload();
     await page.getByRole("tab", { name: /^分析记录/ }).click();
     await expect(page.getByLabel("分析页面概览")).toContainText("10 件已有结果");

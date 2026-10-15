@@ -52,6 +52,23 @@ export function pricingTimestampFresh(value: string | null | undefined, now = Da
   return Number.isFinite(age) && age >= -60_000 && age < 24 * 60 * 60 * 1000;
 }
 
+export function pricingCandidatesFresh(
+  candidates: readonly EquipmentCandidate[],
+  now = Date.now(),
+) {
+  return candidates.every(
+    (candidate) => !candidate.verified || pricingTimestampFresh(candidate.fetchedAt, now),
+  );
+}
+
+export function pricingSnapshotFresh(snapshot: PricingSnapshot | undefined, now = Date.now()) {
+  return (
+    !!snapshot &&
+    pricingTimestampFresh(snapshot.searchedAt, now) &&
+    snapshot.items.every((item) => pricingCandidatesFresh(item.candidates, now))
+  );
+}
+
 const assetIdentity = (item: PricingItem) =>
   JSON.stringify({
     key: item.key,
@@ -62,6 +79,7 @@ const assetIdentity = (item: PricingItem) =>
     modelId: item.modelId,
     description: item.description,
     ...(item.priceMethod ? { priceMethod: item.priceMethod } : {}),
+    ...(item.comparisonPolicy ? { comparisonPolicy: item.comparisonPolicy } : {}),
     ...("fields" in item
       ? {
           fields: item.fields,
@@ -136,16 +154,23 @@ export function unfinishedPricingSearch(item: PricingItem, records: unknown[] = 
     const identity = officialSourceIdentity(candidate.url);
     if (!candidate.verified || !identity || candidate.price === null || candidate.price <= 0)
       continue;
-    const mode = candidate.matchType === "similar" ? "similar" : "exact";
+    const mode =
+      item.comparisonPolicy === "base-upper-bound-v1"
+        ? "*"
+        : candidate.matchType === "similar"
+          ? "similar"
+          : "exact";
     const cohort = cohorts.get(mode) || new Set<string>();
     cohort.add(identity);
     cohorts.set(mode, cohort);
   }
-  const selected = cohorts.get("exact")?.size
-    ? "exact"
-    : cohorts.get("similar")?.size
-      ? "similar"
-      : undefined;
+  const selected = cohorts.get("*")?.size
+    ? "*"
+    : cohorts.get("exact")?.size
+      ? "exact"
+      : cohorts.get("similar")?.size
+        ? "similar"
+        : undefined;
   // Reaching the requested sample count does not require scanning the entire market.
   if (selected && cohorts.get(selected)!.size >= EQUIPMENT_QUOTE_LIMIT) return false;
   const stages = new Map<string, boolean>();
@@ -159,7 +184,12 @@ export function unfinishedPricingSearch(item: PricingItem, records: unknown[] = 
     for (const stage of modes) {
       if (!stage || typeof stage !== "object" || typeof stage.exhausted !== "boolean") continue;
       const stageMode = stage.mode || stage.matchType || "*";
-      const mode = ["same-gems", "near-gems"].includes(stageMode) ? "exact" : stageMode;
+      const mode =
+        stageMode === "base-attributes"
+          ? "*"
+          : ["same-gems", "near-gems"].includes(stageMode)
+            ? "exact"
+            : stageMode;
       const boundedComplete =
         [
           "overall_search_pet",
@@ -188,12 +218,15 @@ const exactReference = (
   candidates: EquipmentCandidate[],
   now: number,
   priceMethod?: EquipmentPricingItem["priceMethod"],
+  comparisonPolicy?: EquipmentPricingItem["comparisonPolicy"],
 ): number | null => {
   const prices = new Map<string, number>();
   for (const candidate of candidates) {
     if (
       candidate.verified !== true ||
-      (candidate.matchType !== undefined && candidate.matchType !== "exact") ||
+      (candidate.matchType !== undefined &&
+        candidate.matchType !== "exact" &&
+        !(comparisonPolicy === "base-upper-bound-v1" && candidate.matchType === "similar")) ||
       candidate.priceType !== "listing" ||
       candidate.price === null ||
       !Number.isFinite(candidate.price) ||
@@ -219,7 +252,7 @@ const exactReference = (
       : priceMedian(values);
 };
 
-/** Legacy verified candidates were strictly exact; explicit comparable ranges never set exact totals. */
+/** Legacy totals use exact candidates; flagged equipment uses the unified qualified pool. */
 export function validateExactPricing(
   snapshot: PricingSnapshot | undefined,
   inventoryItems: readonly PricingItem[],
@@ -267,7 +300,12 @@ export function validateExactPricing(
       ["pending", "read_failed"].includes(item.searchState || "")
     )
       return false;
-    const reference = exactReference(item.candidates, now, inventoryItem.priceMethod);
+    const reference = exactReference(
+      item.candidates,
+      now,
+      inventoryItem.priceMethod,
+      inventoryItem.comparisonPolicy,
+    );
     if (reference === null || item.referencePrice !== reference) return false;
     knownTotal += reference;
   }

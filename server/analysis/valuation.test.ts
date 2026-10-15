@@ -485,7 +485,7 @@ describe("裸号估值的复算与可追溯输入", () => {
       false,
     );
   });
-  it("执行中参数修改不影响已冻结批次，校验重试保存实际请求", async () => {
+  it("执行中参数修改不影响已冻结批次，失败停止后人工重试保存实际请求", async () => {
     const crawl = new CrawlStore(":memory:"),
       record = completeRecord(),
       configured = profile();
@@ -511,14 +511,16 @@ describe("裸号估值的复算与可追溯输入", () => {
       configured.template = "下一批的新规则";
       release();
       await runner.settled();
+      expect(store.run(id)).toMatchObject({ status: "paused", failed: 1, completed: 0 });
+      await runner.resume(id, true);
+      await runner.settled();
       expect(store.run(id)?.completed).toBe(1);
       const detail = store.detail(store.overview({ runId: id }).records.items[0].taskId!)!;
       expect(detail.profile?.settings.b).toBe(0.8);
       expect(detail.profile?.template).toBe(template);
       expect(detail.attempts).toHaveLength(2);
-      expect(detail.attempts[1].requestText).toContain("上次输出校验未通过");
       expect(detail.attempts[1].requestText).toBe(analyze.mock.calls[1][0]);
-      expect(detail.attempts[1].requestHash).not.toBe(detail.promptHash);
+      expect(detail.attempts[1].requestHash).toBe(detail.promptHash);
       expect(detail.result?.valuation?.decision).toBe("BUY");
     } finally {
       await runner.shutdown();

@@ -339,7 +339,6 @@ describe("官网宝宝查询参数", () => {
           super_sum_star: expected,
           level_min: level,
           level_max: level,
-          server_type: "3",
         });
         expect(petQuery({ ...target, fields }, directory, mode)).not.toHaveProperty(
           "super_sum_star",
@@ -444,7 +443,7 @@ describe("官网宝宝查询参数", () => {
     }
   });
   it("实际界面提交允许技能顺序差异，但不允许遗漏条件或额外恢复筛选", () => {
-    const expected = { type: "2001,2002", server_type: "3", level_min: 99, skill: "1,2" };
+    const expected = { type: "2001,2002", level_min: 99, skill: "1,2" };
     expect(() =>
       assertPetUIArguments(expected, {
         ...expected,
@@ -481,10 +480,10 @@ describe("官网宝宝查询参数", () => {
       expect(error).toMatchObject({ code: "PET_GROWTH_ARGUMENT_MISMATCH" });
     }
   });
-  it("使用官方类型/技能/内丹ID，完整等级和成长单位，全服查询只取资质明确base", () => {
+  it("使用官方类型/技能/内丹ID，完整等级和成长单位，官网查询只取资质明确base", () => {
     expect(petQuery(item(), config)).toMatchObject({
       type: "2001,2002",
-      server_type: "3",
+
       level_min: 119,
       level_max: 119,
       growth: 1280,
@@ -510,7 +509,7 @@ describe("官网宝宝查询参数", () => {
     ])
       expect(args).not.toHaveProperty(key);
   });
-  it("严格、相近技能子集、邻近等级和诊断均限定三年以上全服", () => {
+  it("严格、相近技能子集、邻近等级和诊断均不预设服龄或服务器", () => {
     const skills = ["须弥真言", "高级法术暴击", "高级魔之心", "高级法术连击", "地狱烈火", "慧根"];
     const queries = petQueries(
       { ...item(), skills },
@@ -524,7 +523,7 @@ describe("官网宝宝查询参数", () => {
     );
     expect(queries.length).toBeGreaterThan(4);
     for (const { args } of queries) {
-      expect(args.server_type).toBe("3");
+      expect(args.server_type).toBeUndefined();
       for (const key of [
         "serverid",
         "server_id",
@@ -676,7 +675,7 @@ describe("官网宝宝查询参数", () => {
     const target = { ...item(), fields: [...fields, { name: "是否宝宝", value: "是" }] };
     expect(petQuery(target, config, "diagnostic")).toEqual({
       type: "2001,2002",
-      server_type: "3",
+
       level_min: 119,
       level_max: 119,
       is_baobao: 1,
@@ -987,7 +986,7 @@ describe("宝宝查询使用独立后台页", () => {
     const { search, detail } = pages();
     runtime.getBrowser.mockResolvedValue({});
     runtime.createHiddenPage.mockResolvedValueOnce(search).mockResolvedValueOnce(detail);
-    return { source: await createPetSource(control.signal), search, detail, control };
+    return { source: await createPetSource(control.signal, "1"), search, detail, control };
   };
   const queryPages = (
     exactRows: boolean,
@@ -1014,7 +1013,7 @@ describe("宝宝查询使用独立后台页", () => {
           .filter(([, name]) => name === inputValues.pet_select_box)
           .map(([id]) => id)
           .join(","),
-        server_type: [...(selected.get("server_type_panel") || [])].join(","),
+        serverid: inputValues.ovarall_sel_server,
       };
       for (const [id, value] of Object.entries(inputValues)) {
         if (id.startsWith("txt_") && value)
@@ -1050,7 +1049,9 @@ describe("宝宝查询使用独立后台页", () => {
         fill: async (value: string) => {
           inputValues[selector.slice(1)] = value;
         },
-        selectOption: async () => {},
+        selectOption: async (value: string) => {
+          inputValues[selector.slice(1)] = value;
+        },
         setChecked: async (value: boolean) => {
           baby = value;
         },
@@ -1115,6 +1116,9 @@ describe("宝宝查询使用独立后台页", () => {
             hasDialog: false,
             serverName: "",
           };
+        if (fn.name === "marketServerArea") return "1";
+        if (fn.name === "selectedMarketServer")
+          return { areaId: inputValues.overall_sel_area, serverid: inputValues.ovarall_sel_server };
         if (typeof arg === "string") return config;
         if (fn.toString().includes("官网宝宝表单未保存实际查询条件")) return currentArgs;
         if (typeof arg === "number") {
@@ -1162,6 +1166,7 @@ describe("宝宝查询使用独立后台页", () => {
         search as unknown as Page,
         detail as unknown as Page,
         control.signal,
+        "1",
       ),
     };
   };
@@ -1386,9 +1391,9 @@ describe("宝宝查询使用独立后台页", () => {
               request: expect.objectContaining({
                 act: "recommd_by_role",
                 searchType: "overall_search_pet",
-                serverType: "3",
+                serverType: "",
                 page: 1,
-                restrictions: {},
+                restrictions: { serverid: "1" },
               }),
             }),
           ],
@@ -1399,7 +1404,11 @@ describe("宝宝查询使用独立后台页", () => {
               mode: "similar",
               rowCount: 3,
               candidateServers: { "1": 3 },
-              request: expect.objectContaining({ serverType: "3", page: 1, restrictions: {} }),
+              request: expect.objectContaining({
+                serverType: "",
+                page: 1,
+                restrictions: { serverid: "1" },
+              }),
             }),
           ],
         }),
@@ -1409,7 +1418,7 @@ describe("宝宝查询使用独立后台页", () => {
       expect(search.off).toHaveBeenCalledWith("request", expect.any(Function));
     }
   });
-  it("翻页分别确认实际请求并保存每页不同服务器的候选数量", async () => {
+  it("翻页分别确认目标单服请求并保存每页候选数量", async () => {
     const { source, search, detail } = queryPages(true);
     const evaluateSearch = search.evaluate.getMockImplementation()!;
     search.evaluate.mockImplementation(async (fn: Function, arg: unknown) => {
@@ -1418,8 +1427,8 @@ describe("宝宝查询使用独立后台页", () => {
         arg === 1
           ? [[0, 1]]
           : [
-              [1, 33],
-              [2, 367],
+              [1, 1],
+              [2, 1],
             ]
       ).map(([index, server]) => ({
         url: `https://xyq.cbg.163.com/equip?s=${server}&eid=sample-${index}`,
@@ -1442,12 +1451,12 @@ describe("宝宝查询使用独立后台页", () => {
             expect.objectContaining({
               rowCount: 1,
               candidateServers: { "1": 1 },
-              request: expect.objectContaining({ page: 1, serverType: "3" }),
+              request: expect.objectContaining({ page: 1, serverType: "" }),
             }),
             expect.objectContaining({
               rowCount: 2,
-              candidateServers: { "33": 1, "367": 1 },
-              request: expect.objectContaining({ page: 2, serverType: "3" }),
+              candidateServers: { "1": 2 },
+              request: expect.objectContaining({ page: 2, serverType: "" }),
             }),
           ],
         }),
@@ -1457,8 +1466,8 @@ describe("宝宝查询使用独立后台页", () => {
     }
   });
   it.each([
-    ["缺少三年以上服", { server_type: undefined }],
-    ["混入新服", { server_type: "2" }],
+    ["缺少目标服务器", { serverid: undefined }],
+    ["额外服龄限制", { server_type: "2" }],
     ["限定单服", { serverid: 33 }],
     ["限定单服别名", { server_id: 33 }],
     ["限定地区", { area: 1 }],
@@ -1468,6 +1477,33 @@ describe("宝宝查询使用独立后台页", () => {
     const { source, detail } = queryPages(true, new AbortController(), false, overrides);
     try {
       await expect(source.findCandidates([item()], new AbortController().signal)).rejects.toThrow();
+      expect(detail.goto).not.toHaveBeenCalled();
+    } finally {
+      await source.close();
+    }
+  });
+  it("单服请求返回外服行时停止，不能过滤后补样本", async () => {
+    const { source, search, detail } = queryPages(true);
+    const evaluate = search.evaluate.getMockImplementation()!;
+    search.evaluate.mockImplementation(async (fn: Function, arg: unknown) =>
+      typeof arg === "number"
+        ? {
+            rows: [
+              {
+                url: "https://xyq.cbg.163.com/equip?s=33&eid=foreign",
+                name: "模拟宝宝",
+                type: "2001",
+              },
+            ],
+            empty: false,
+            hasNext: false,
+          }
+        : evaluate(fn, arg),
+    );
+    try {
+      await expect(source.findCandidates([item()], new AbortController().signal)).rejects.toThrow(
+        "目标单服",
+      );
       expect(detail.goto).not.toHaveBeenCalled();
     } finally {
       await source.close();
@@ -1753,6 +1789,7 @@ describe("宝宝查询使用独立后台页", () => {
   });
   it("前排宝宝详情失败时不跳过它采用后排报价，恢复重试后按顺序完成", async () => {
     const record = valuationRecord();
+    record.listing.serverId = "1";
     record.detail!.petCapture = {
       version: 1,
       collectedAt: record.detail!.collectedAt,
@@ -1816,7 +1853,7 @@ describe("宝宝查询使用独立后台页", () => {
       expect(result.searchAttempts!.at(-1)!.queries).toEqual(
         expect.arrayContaining([
           expect.stringMatching(/仅重读.*独立宝宝详情/),
-          expect.stringMatching(/全服.*similar/),
+          expect.stringMatching(/目标单服.*similar/),
         ]),
       );
       expect(result.searchAttempts!.at(-1)!.searchItems).toEqual(
@@ -1895,7 +1932,7 @@ describe("宝宝查询使用独立后台页", () => {
       expect(calls[2]).toMatchObject({ level_min: 114, level_max: 124 });
       expect(calls[3]).toEqual({
         type: "2001,2002",
-        server_type: "3",
+        serverid: "1",
         level_min: 119,
         level_max: 119,
       });
@@ -1929,7 +1966,7 @@ describe("宝宝查询使用独立后台页", () => {
   it("预先取消时不连接或创建页面", async () => {
     const control = new AbortController();
     control.abort(new Error("停止"));
-    await expect(createPetSource(control.signal)).rejects.toThrow("停止");
+    await expect(createPetSource(control.signal, "1")).rejects.toThrow("停止");
     expect(runtime.getBrowser).not.toHaveBeenCalled();
     expect(runtime.createHiddenPage).not.toHaveBeenCalled();
   });
@@ -1939,7 +1976,7 @@ describe("宝宝查询使用独立后台页", () => {
     runtime.createHiddenPage
       .mockResolvedValueOnce(search)
       .mockRejectedValueOnce(new Error("详情页失败"));
-    await expect(createPetSource(new AbortController().signal)).rejects.toThrow("详情页失败");
+    await expect(createPetSource(new AbortController().signal, "1")).rejects.toThrow("详情页失败");
     expect(search.close).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -1951,7 +1988,7 @@ describe("宝宝查询使用独立后台页", () => {
       control.abort(new Error("停止"));
       return detail;
     });
-    await expect(createPetSource(control.signal)).rejects.toThrow("停止");
+    await expect(createPetSource(control.signal, "1")).rejects.toThrow("停止");
     expect(search.close).toHaveBeenCalledOnce();
     expect(detail.close).toHaveBeenCalledOnce();
   });
@@ -1980,6 +2017,7 @@ describe("宝宝查询使用独立后台页", () => {
       search as unknown as Page,
       detail as unknown as Page,
       control.signal,
+      "1",
     );
     control.abort();
     let done = false;
@@ -2001,11 +2039,19 @@ describe("宝宝查询使用独立后台页", () => {
       search as unknown as Page,
       target as unknown as Page,
       new AbortController().signal,
+      "1",
     );
     try {
       await expect(
         source.readSource("https://example.com/equip?s=1&eid=a", new AbortController().signal),
       ).rejects.toThrow();
+      expect(detail.goto).not.toHaveBeenCalled();
+      await expect(
+        source.readSource(
+          "https://xyq.cbg.163.com/equip?s=33&eid=foreign",
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow("目标单服");
       expect(detail.goto).not.toHaveBeenCalled();
       await expect(source.readSource(url, new AbortController().signal)).rejects.toThrow(
         /另一商品/,
@@ -2097,4 +2143,13 @@ it("明确未来预览独立核对并保留，不能伪装成当前技能或丢�
       new Date().toISOString(),
     ).verified,
   ).toBe(true);
+});
+
+// Scope failures must stop before another server's details can be read.
+it("未提供目标服时宝宝source不创建页面", async () => {
+  runtime.getBrowser.mockClear();
+  await expect(
+    createPetSource(new AbortController().signal, undefined as unknown as string),
+  ).rejects.toThrow("目标服务器");
+  expect(runtime.getBrowser).not.toHaveBeenCalled();
 });

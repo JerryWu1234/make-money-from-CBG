@@ -67,6 +67,7 @@ const matcher = await moduleUrl("server/analysis/equipment-match.ts", {
   "./equip-attributes": attributes,
 });
 const marketScope = await moduleUrl("server/analysis/market-scope.ts");
+const { marketRequestEvidence } = await import(marketScope);
 const specialMatcher = await moduleUrl("server/analysis/special-asset-match.ts", {
   "../crawler/compact": compact,
   "./equipment-match": matcher,
@@ -221,7 +222,8 @@ try {
   let searchOptions = {},
     detailOptions = {},
     detailVisits = [],
-    clockOffset = 0;
+    clockOffset = 0,
+    marketRequests = [];
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.origin !== "https://xyq.cbg.163.com") return route.abort();
@@ -230,6 +232,11 @@ try {
         contentType: "image/gif",
         body: Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64"),
       });
+    if (url.pathname === "/cgi-bin/recommend.py") {
+      const evidence = marketRequestEvidence(url.href, route.request().postData());
+      if (evidence) marketRequests.push(evidence);
+      return route.fulfill({ contentType: "application/json", body: "{}" });
+    }
     let body;
     if (url.pathname === "/sentinel-role-list") body = roleSentinelDocument;
     else if (url.pathname === "/equip") {
@@ -260,13 +267,19 @@ try {
     searchOptions = search;
     detailOptions = detail;
     detailVisits = [];
+    marketRequests = [];
     const searchPage = await createHiddenPage(browser),
       detailPage = await createHiddenPage(browser),
       control = new AbortController();
     const originalNow = Date.now;
     clockOffset = 0;
     if (search.expireAfterDetails) Date.now = () => originalNow() + clockOffset;
-    const source = petSourceFromPages(bounded(searchPage), bounded(detailPage), control.signal);
+    const source = petSourceFromPages(
+      bounded(searchPage),
+      bounded(detailPage),
+      control.signal,
+      "1",
+    );
     try {
       await run({ source, searchPage, detailPage, control });
     } finally {
@@ -434,6 +447,7 @@ try {
           }),
           growth,
         };
+        args.serverid = "1";
         const evidence = await fillPetSearchForm(searchPage, target, args, control.signal);
         await searchPage.locator("#btn_pet_search").click();
         const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
@@ -500,6 +514,7 @@ try {
       const plan = similar.find(
         ({ args }) => args.level_min === 94 && String(args.skill).split(",").length === 4,
       );
+      plan.args.serverid = "1";
       await fillPetSearchForm(searchPage, target, plan.args, control.signal);
       await searchPage.locator("#btn_pet_search").click();
       assertPetUIArguments(plan.args, await searchPage.evaluate(() => window.CurSearchValue.arg));
@@ -734,6 +749,7 @@ try {
             highNeidans: [],
             lowNeidans: [],
           });
+          args.serverid = "1";
           const evidence = await fillPetSearchForm(searchPage, target, args, control.signal);
           await searchPage.locator("#btn_pet_search").click();
           const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
@@ -742,8 +758,8 @@ try {
           assert.equal(await searchPage.locator("#txt_level_min").inputValue(), String(level));
           assert.equal(actual.level_min, level);
           assert.equal(actual.level_max, level);
-          assert.equal(actual.server_type, "3");
-          assert.equal(actual.serverid, undefined);
+          assert.equal(actual.server_type, undefined);
+          assert.equal(actual.serverid, "1");
           assert.equal(actual.cross_buy_serverid, undefined);
           assert.equal(evidence.inputs.pet_select_box, name);
           assert.equal(
@@ -792,6 +808,7 @@ try {
               { names, skills: [], highNeidans: [], lowNeidans: [], traits },
               mode,
             );
+            args.serverid = "1";
             const evidence = await fillPetSearchForm(searchPage, target, args, control.signal);
             await searchPage.locator("#btn_pet_search").click();
             const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
@@ -799,7 +816,7 @@ try {
             assert.equal(actual.super_sum_star, expectedStar);
             assert.equal(actual.texing, expectedTrait);
             assert.equal(actual.level_min, level);
-            assert.equal(actual.server_type, "3");
+            assert.equal(actual.server_type, undefined);
             assert.equal(actual.positive_effect, undefined);
             assert.equal(actual.negative_effect, undefined);
             assert.deepEqual(evidence.selections.super_sum_star, [expectedStar]);
@@ -829,6 +846,7 @@ try {
           lowNeidans: [],
           traits,
         });
+        args.serverid = "1";
         await fillPetSearchForm(searchPage, target, args, control.signal);
         await searchPage.locator("#btn_pet_search").click();
         const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
@@ -1009,8 +1027,8 @@ try {
         assert.equal(query.growth, 1280);
         assert.equal(query.attack_aptitude, 1550);
         assert.equal(query.skill, "1,2");
-        assert.equal(query.serverid, undefined);
-        assert.equal(query.server_type, "3");
+        assert.equal(query.serverid, "1");
+        assert.equal(query.server_type, undefined);
         assert.equal(await searchPage.evaluate(() => window.historyWrites), 1);
         assert.equal(
           await role.evaluate(() => localStorage.getItem("saved_overall_search_pet_query")),
@@ -1027,15 +1045,17 @@ try {
           result.queries.length,
         );
         const [scope] = result.searchItems[0].scopeEvidence;
-        assert.equal(scope.request.serverType, "3");
+        assert.equal(scope.request.serverType, "");
         assert.equal(scope.request.searchType, "overall_search_pet");
-        assert.deepEqual(scope.request.restrictions, {});
+        assert.deepEqual(scope.request.restrictions, { serverid: "1" });
         assert.deepEqual(scope.candidateServers, { 1: 1 });
       });
   });
-  await check("最终市场请求仍为三年以上全服，helper污染、漏请求或错误页码拒绝计价", async () => {
+  await check("最终请求必须目标单服，helper漏服、错服、漏请求或错误页码拒绝计价", async () => {
     for (const search of [
-      { dropServerType: true },
+      { dropServerId: true },
+      { marketOverrides: { serverid: "" } },
+      { marketOverrides: { serverid: "1,33" } },
       { marketOverrides: { server_type: "2" } },
       { marketOverrides: { serverid: "33" } },
       { marketOverrides: { area_id: "1" } },
@@ -1046,6 +1066,76 @@ try {
         await assert.rejects(() => searchPetPricing(record(), control.signal, source));
         assert.deepEqual(detailVisits, []);
       });
+  });
+  await check("当前角色单服选区、网络请求、翻页及错服停止证据", async () => {
+    const evidence = [];
+    await withSource(
+      { pages: [[{ eid: "one", name: "宝宝昵称" }], [{ eid: "two", name: "宝宝昵称" }]] },
+      {},
+      async ({ source, searchPage, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.searchComplete, true);
+        assert.ok(marketRequests.some((request) => request.page === 2));
+        assert.ok(
+          marketRequests.every(
+            (request) => request.restrictions.serverid === "1" && request.serverType === "",
+          ),
+        );
+        const actions = await searchPage.evaluate(() => window.uiActions);
+        assert.ok(
+          actions.some(
+            (action) =>
+              action.action === "area-change" &&
+              action.area === "1" &&
+              action.servers.includes("1"),
+          ),
+        );
+        assert.ok(
+          actions.some((action) => action.action === "server-change" && action.server === "1"),
+        );
+        evidence.push({
+          scenario: "target-server-pagination",
+          requests: [...marketRequests],
+          actions,
+          result,
+        });
+      },
+    );
+    for (const settings of [
+      { dropServerPage: 2 },
+      { pages: [[{ eid: "foreign", name: "宝宝昵称", serverId: "33" }]] },
+    ]) {
+      await withSource(
+        {
+          pages: [[{ eid: "one", name: "宝宝昵称" }], [{ eid: "two", name: "宝宝昵称" }]],
+          ...settings,
+        },
+        {},
+        async ({ source, control }) => {
+          let error;
+          await assert.rejects(async () => {
+            try {
+              await searchPetPricing(record(), control.signal, source);
+            } catch (failure) {
+              error = failure.message;
+              throw failure;
+            }
+          }, /单服/);
+          if (settings.pages) assert.deepEqual(detailVisits, []);
+          evidence.push({
+            scenario: settings.dropServerPage ? "pagination-drops-server" : "foreign-row",
+            requests: [...marketRequests],
+            detailVisits: [...detailVisits],
+            error,
+          });
+        },
+      );
+    }
+    await mkdir("data/pr27-fix-validation", { recursive: true });
+    await writeFile(
+      "data/pr27-fix-validation/pet-single-server-scope.json",
+      JSON.stringify({ simulated: true, targetServerId: "1", evidence }, null, 2),
+    );
   });
   await check("官网编码描述经页面解码器再解析，仍绑定可见主属性与价格", async () => {
     for (const detail of [

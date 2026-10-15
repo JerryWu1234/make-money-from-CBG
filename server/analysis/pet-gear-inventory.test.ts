@@ -70,7 +70,7 @@ describe("通用宝宝装备属性与估值证据", () => {
     "pet-gear-trimmed-suit-median-v3",
     "pet-gear-trimmed-suit-cent-median-v4",
   ])("五件均价策略不复用旧算法 %s 的输入hash", (comparisonVersion) => {
-    const record = { detail: null } as SavedRoleRecord;
+    const record = { listing: { serverId: "33" }, detail: null } as SavedRoleRecord;
     const pets = petInventory(record);
     const gear = petGearInventory(record);
     const previousHash = createHash("sha256")

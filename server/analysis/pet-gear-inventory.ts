@@ -100,6 +100,7 @@ export function petGearInventory(record: SavedRoleRecord) {
     .update(
       JSON.stringify({
         marketScope: GLOBAL_MARKET_SCOPE_VERSION,
+        serverId: record.listing.serverId,
         searchUI: MARKET_SEARCH_UI_VERSION,
         comparisonVersion: "pet-gear-identity-checked-average-v7",
         priceMethod: EQUIPMENT_QUOTE_POLICY,

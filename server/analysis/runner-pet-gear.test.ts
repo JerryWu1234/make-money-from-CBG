@@ -549,3 +549,116 @@ it.each(["equipment", "pet", "pet-gear", "pet-and-gear", "fresh"] as const)(
     }
   },
 );
+
+// Failure cases: a new snapshot timestamp must not renew old verified evidence;
+// rejected evidence must not force a new lookup, and fresh stages must stay reusable.
+it("宠装返回已完成但内部候选仍过期时先重新查价，再进入AI", async () => {
+  const c = setup();
+  c.searchPetGear.mockResolvedValueOnce({
+    ...c.gear,
+    items: c.gear.items.map((item) => ({
+      ...item,
+      candidates: [
+        {
+          url: "https://xyq.cbg.163.com/equip?s=1&eid=expired-during-gear-query",
+          title: "查询期间过期的已核验样本",
+          price: 100,
+          priceType: "listing",
+          quote: "挂牌价：¥100",
+          verified: true,
+          reason: "已核验的相近样本",
+          fetchedAt: new Date(Date.now() - 24 * 60 * 60 * 1000 - 1000).toISOString(),
+          sourceHash: "saved-gear-evidence",
+          matchType: "similar",
+        },
+      ],
+    })),
+  });
+  c.analyze.mockImplementation(async () => {
+    expect(c.searchPetGear).toHaveBeenCalledTimes(2);
+    return {
+      text: JSON.stringify({
+        decision: "NEED_INFO",
+        reason: "重新查价没有可采用的匹配样本，保留未定价。",
+        extracted_facts: [],
+      }),
+    };
+  });
+  try {
+    const id = await c.runner.start("codex", true, c.profile);
+    await c.runner.settled();
+    expect(c.searchPetGear).toHaveBeenCalledTimes(2);
+    expect(c.searchPetGear.mock.calls[1][2]?.items[0].candidates[0].verified).toBe(true);
+    expect(c.searchEquipment).toHaveBeenCalledOnce();
+    expect(c.searchPets).toHaveBeenCalledOnce();
+    expect(c.analyze).toHaveBeenCalledOnce();
+    expect(c.store.run(id)?.status).toBe("completed");
+  } finally {
+    await c.runner.shutdown();
+    c.crawl.db.close();
+  }
+});
+
+it.each([
+  ["pet", true],
+  ["pet-gear", true],
+  ["pet", false],
+  ["pet-gear", false],
+] as const)("快照时间新但%s内部候选过期时按核验状态%s决定是否先重查", async (phase, verified) => {
+  const c = setup();
+  const staleCandidate = {
+    url: "https://xyq.cbg.163.com/equip?s=1&eid=old-internal-evidence",
+    title: "已保存的独立挂牌",
+    price: 100,
+    priceType: "listing" as const,
+    quote: "挂牌价：¥100",
+    verified,
+    reason: verified ? "已核验的相近样本" : "配置不匹配",
+    fetchedAt: new Date(Date.now() - 24 * 60 * 60 * 1000 - 1000).toISOString(),
+    sourceHash: "saved-market-evidence",
+    matchType: "similar" as const,
+  };
+  const pets = { ...structuredClone(c.pets), gearPricing: structuredClone(c.gear) };
+  const snapshot = phase === "pet" ? pets : pets.gearPricing;
+  snapshot.items[0].searchState = "completed";
+  snapshot.items[0].candidates = [staleCandidate];
+  const search = phase === "pet" ? c.searchPets : c.searchPetGear;
+  c.analyze.mockImplementation(async () => {
+    expect(search).toHaveBeenCalledTimes(Number(verified));
+    return {
+      text: JSON.stringify({
+        decision: "NEED_INFO",
+        reason: "没有可采用的匹配样本，保留未定价。",
+        extracted_facts: [],
+      }),
+    };
+  });
+  try {
+    const id = c.store.createRun("codex", "test", true, c.profile);
+    const owner = "fresh-snapshot-old-candidate";
+    expect(c.store.acquire(owner)).toBe(true);
+    let task = c.store.next(id)!;
+    c.store.beginEquipmentSearch(task, owner);
+    task = c.store.saveEquipmentPricing(
+      task,
+      { ...c.pets, ...equipmentInventory(c.record), total: 0 },
+      owner,
+    );
+    c.store.beginPetSearch(task, owner);
+    c.store.savePetPricing(task, pets, owner);
+    c.store.setRun(id, "paused", null, owner);
+    c.store.release(owner);
+
+    await c.runner.resume(id);
+    await c.runner.settled();
+    expect(search).toHaveBeenCalledTimes(Number(verified));
+    expect(c.searchEquipment).not.toHaveBeenCalled();
+    expect(phase === "pet" ? c.searchPetGear : c.searchPets).not.toHaveBeenCalled();
+    expect(c.analyze).toHaveBeenCalledOnce();
+    expect(c.store.run(id)?.status).toBe("completed");
+    if (verified) expect(search.mock.calls[0][2]?.items[0].candidates).toEqual([staleCandidate]);
+  } finally {
+    await c.runner.shutdown();
+    c.crawl.db.close();
+  }
+});

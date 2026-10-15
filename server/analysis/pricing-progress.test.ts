@@ -291,3 +291,59 @@ it("无样本跳过规则不隐藏读取失败、未查完、有样本或未采�
   unfinished.searchItems = [{ key: "a", modes: [{ mode: "exact", exhausted: false }] }];
   expect(finishPricingSearch(unfinished).items[0].searchState).toBe("pending");
 });
+
+it("新汇总时间不能让过期相近样本在续查中复用，其余已完成项保留", () => {
+  const inventory: EquipmentPricingSnapshot = {
+    version: 1,
+    inputHash: "candidate-expiry",
+    searchedAt: new Date().toISOString(),
+    provider: "browser",
+    model: "browser",
+    queries: [],
+    rawResponse: null,
+    captureComplete: true,
+    total: null,
+    knownTotal: 0,
+    issues: [],
+    items: ["old", "fresh"].map((key) => ({
+      key,
+      name: key,
+      level: 100,
+      category: "耳饰",
+      description: "等级100",
+      query: "",
+      status: "no_match",
+      referencePrice: null,
+      candidates: [],
+      issues: [],
+    })),
+  };
+  const previous = structuredClone(inventory);
+  previous.items = previous.items.map((item, index) => ({
+    ...item,
+    searchState: "completed",
+    candidates: [
+      {
+        url: `https://xyq.cbg.163.com/equip/1/${item.key}`,
+        title: item.name,
+        price: 100,
+        priceType: "listing",
+        quote: "挂牌价100",
+        verified: true,
+        reason: "已核验相近商品",
+        matchType: "similar",
+        sourceHash: item.key,
+        fetchedAt: new Date(Date.now() - (index ? 1000 : 24 * 3600_000)).toISOString(),
+      },
+    ],
+  }));
+  previous.searchItems = previous.items.map((item) => ({
+    key: item.key,
+    matchType: "similar",
+    exhausted: true,
+  }));
+  const resumed = resumePricingItems(inventory, previous);
+  expect(resumed.items[0]).toMatchObject({ searchState: "pending", candidates: [] });
+  expect(resumed.items[1]).toEqual(previous.items[1]);
+  expect(resumed.searchItems).toEqual(previous.searchItems);
+});

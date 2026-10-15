@@ -237,7 +237,7 @@ export function AnalysisSettings({
         <>
           <h3>计价方式</h3>
           <p className="analysis-pending-note">
-            普通环装采用默认参考价，其他装备和宝宝查找全服同类挂牌样本。强壮神速按当前等级计价，参考依据和采用的价格会保存在结果里。
+            装备、灵饰和宝宝查角色本服同类挂牌，每个条件核验前5条候选，采用合格样本最低价。强壮神速按当前等级计价，参考依据和采用的价格会保存在结果里。
           </p>
           <button
             type="button"

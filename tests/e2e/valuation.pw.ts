@@ -377,6 +377,8 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await expect(result).not.toBeVisible();
     await expect(settings).toBeVisible();
     await settings.getByRole("button", { name: "关闭分析设置" }).click();
+    await expect(page.getByLabel("分析模型")).toHaveValue("");
+    await page.getByLabel("分析模型").selectOption("other-model");
     await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
     await expect(
       page.getByRole("button", { name: "分析新增或已更新商品", exact: true }),

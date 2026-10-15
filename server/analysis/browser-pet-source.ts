@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import type { Page } from "playwright-core";
-import { createMarketScopeAudit, type GlobalMarketRequest } from "./market-scope";
+import {
+  assertMarketServerId,
+  createMarketScopeAudit,
+  selectMarketServer,
+  type GlobalMarketRequest,
+} from "./market-scope";
 import { hoverForInspection } from "../viewport";
 import { createHiddenPage, getBrowser } from "../session";
 import { assertAvailable, pace } from "../crawler/page";
@@ -302,7 +307,7 @@ export function petQuery(
       );
     throw new Error("官网召唤兽类型目录未识别“" + item.name + "”，未发起宽泛查询");
   }
-  const args: Record<string, string | number> = { type: ids.join(","), server_type: "3" };
+  const args: Record<string, string | number> = { type: ids.join(",") };
   if (item.level !== null && item.level >= 0 && item.level <= 180)
     args.level_min = args.level_max = item.level;
   const fields = new Map(item.fields.map((field) => [field.name, field.value]));
@@ -561,8 +566,7 @@ export async function fillPetSearchForm(
   signal.throwIfAborted();
   await page.locator("#reset_all").click({ timeout: 10000 });
   await page.locator("#btn_reset_user_server").click({ timeout: 10000 });
-  await page.locator("#overall_sel_area").selectOption("");
-  await page.locator("#ovarall_sel_server").selectOption("");
+  const scope = await selectMarketServer(page, String(args.serverid || ""), signal);
   const inputs: PetUIEvidence["inputs"] = { pet_select_box: item.name };
   await page.locator("#pet_select_box").fill(item.name);
   for (const key of PET_UI_NUMBER_FIELDS) {
@@ -626,7 +630,8 @@ export async function fillPetSearchForm(
   };
   for (const key of ["high_neidan", "low_neidan", "texing"] as const)
     if (args[key] !== undefined) await selectChoices(key + "_panel", String(args[key]).split(","));
-  await selectChoices("server_type_panel", ["3"]);
+  selections.overall_sel_area = [scope.areaId];
+  selections.ovarall_sel_server = [scope.serverid];
   signal.throwIfAborted();
   return { method: "official-ui", inputs, selections, searchButton: "btn_pet_search" };
 }
@@ -1545,9 +1550,11 @@ export function petSourceFromPages(
   searchPage: Page,
   detailPage: Page,
   signal: AbortSignal,
+  serverId: string,
 ): PetSource & { close(): Promise<void>; discover(): Promise<PetSearchForm> } {
+  assertMarketServerId(serverId);
   const cache = new Map<string, string | UnverifiablePetAccessoryError>();
-  const marketScope = createMarketScopeAudit(searchPage);
+  const marketScope = createMarketScopeAudit(searchPage, serverId);
   const deadline = Date.now() + 240_000;
   let closing: Promise<void> | undefined;
   const close = () => {
@@ -1568,6 +1575,8 @@ export function petSourceFromPages(
     requestSignal.throwIfAborted();
     if (closing) throw new Error("宝宝查询页面已关闭");
     const safe = safeEquipmentUrl(url);
+    if (equipmentIdentity(safe).split(":")[0] !== serverId)
+      throw new Error("宝宝候选不属于目标单服，未采用报价");
     const cached = cache.get(safe);
     if (cached instanceof UnverifiablePetAccessoryError) throw cached;
     if (cached !== undefined) return cached;
@@ -1692,8 +1701,12 @@ export function petSourceFromPages(
         const candidates: EquipmentCandidate[] = [],
           rejected: EquipmentCandidate[] = [],
           diagnosticSources: EquipmentCandidate[] = [];
-        const plans = petQueries(item, config);
+        const plans = petQueries(item, config).map((plan) => ({
+          ...plan,
+          args: { ...plan.args, serverid: serverId },
+        }));
         const planHash = petDigest({
+          serverId,
           resumePolicy: PRICING_RESUME_POLICY,
           policy: PET_COMPARISON_POLICY_VERSION,
           method: "official-ui-first-five-per-condition-v3",
@@ -1792,7 +1805,10 @@ export function petSourceFromPages(
             return { candidate };
           } catch (error) {
             requestSignal.throwIfAborted();
-            if (error instanceof Error && /登录|安全验证|频繁|网站繁忙/.test(error.message))
+            if (
+              error instanceof Error &&
+              /登录|安全验证|频繁|网站繁忙|目标单服/.test(error.message)
+            )
               throw error;
             candidate = {
               ...candidate,
@@ -1859,7 +1875,7 @@ export function petSourceFromPages(
           }
           if (refreshedDetails.length) {
             const refreshQuery =
-              "仅重读已保存的独立宝宝详情 / 沿用历史全服、3年以上服查询证据 / " + item.name;
+              "仅重读已保存的独立宝宝详情 / 目标单服 " + serverId + " / " + item.name;
             queries.push(refreshQuery);
             item.query = [item.query, refreshQuery].filter(Boolean).join("\n");
             records.push({
@@ -1937,7 +1953,9 @@ export function petSourceFromPages(
           }
           args = queryArgs;
           query =
-            "全服 / 3年以上服 / 综合排序 / " +
+            "目标单服 " +
+            serverId +
+            " / 综合排序 / " +
             item.name +
             " / " +
             matchType +
@@ -2117,6 +2135,8 @@ export function petSourceFromPages(
             const candidateServers: Record<string, number> = {};
             for (const row of listing.rows) {
               const server = equipmentIdentity(safeEquipmentUrl(row.url)).split(":")[0];
+              if (server !== serverId)
+                throw new Error("宝宝列表包含目标单服以外的商品，未采用报价");
               if (/^\d+$/.test(server))
                 candidateServers[server] = (candidateServers[server] || 0) + 1;
             }
@@ -2395,7 +2415,8 @@ export function petSourceFromPages(
   };
 }
 
-export async function createPetSource(signal: AbortSignal) {
+export async function createPetSource(signal: AbortSignal, serverId: string) {
+  assertMarketServerId(serverId);
   signal.throwIfAborted();
   let searchPage: Page | undefined, detailPage: Page | undefined;
   try {
@@ -2405,7 +2426,7 @@ export async function createPetSource(signal: AbortSignal) {
     signal.throwIfAborted();
     detailPage = await createHiddenPage(browser);
     signal.throwIfAborted();
-    return petSourceFromPages(searchPage, detailPage, signal);
+    return petSourceFromPages(searchPage, detailPage, signal, serverId);
   } catch (error) {
     await Promise.allSettled([searchPage?.close(), detailPage?.close()]);
     throw error;

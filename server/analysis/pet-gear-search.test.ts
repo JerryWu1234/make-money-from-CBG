@@ -31,7 +31,7 @@ const item = (key: string): PetGearPricingItem => ({
   issues: [],
   query: "",
 });
-const record = {} as SavedRoleRecord;
+const record = { listing: { serverId: "1" } } as SavedRoleRecord;
 
 beforeEach(() => {
   vi.resetAllMocks();
@@ -61,6 +61,28 @@ beforeEach(() => {
 
 describe("分析自动宝宝装备查价与增量复用", () => {
   const parents = (items: Partial<PetPricingItem>[]) => ({ items }) as PetPricingSnapshot;
+
+  it("汇总和单件时间新但相近候选过期时，只重查该件并保留查询历史", async () => {
+    const previous = await searchPetGearPricing(record, new AbortController().signal);
+    previous.items[0].candidates = [
+      {
+        verified: true,
+        matchType: "similar",
+        fetchedAt: new Date(Date.now() - 24 * 3600_000).toISOString(),
+      } as never,
+    ];
+    mocks.findCandidates.mockClear();
+    const result = await searchPetGearPricing(record, new AbortController().signal, previous);
+    expect(mocks.findCandidates).toHaveBeenCalledOnce();
+    expect(
+      mocks.findCandidates.mock.calls[0][0].map((item: PetGearPricingItem) => item.key),
+    ).toEqual(["first"]);
+    expect(result.items[0].candidates).toEqual([]);
+    expect(result.items[1]).toEqual(previous.items[1]);
+    expect(result.searchItems?.slice(0, previous.searchItems!.length)).toEqual(
+      previous.searchItems,
+    );
+  });
 
   it("所属宝宝已跳过时保留全部装备与原因，不打开浏览器，也不保留旧报价", async () => {
     const previous = await searchPetGearPricing(record, new AbortController().signal);

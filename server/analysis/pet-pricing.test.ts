@@ -1556,3 +1556,23 @@ it("宝宝总数未知、不一致、重复序号或未识别的捕获问题仍�
     expect(combinePetPricing(upstream(), record, snapshot).model_value).toBeNull();
   }
 });
+
+it("相同宝宝跨服务器时查价身份不同，不复用另一服快照", async () => {
+  const first = recordWithPets();
+  const other = structuredClone(first);
+  other.listing.serverId = "999";
+  expect(petInventory(other).inputHash).not.toBe(petInventory(first).inputHash);
+  expect(petGearInventory(other).inputHash).not.toBe(petGearInventory(first).inputHash);
+});
+
+it("外服宝宝候选是查价失败，不读取详情也不当作无样本", async () => {
+  const foreign = { ...candidate(), url: "https://xyq.cbg.163.com/equip?s=999&eid=foreign" };
+  const { snapshot, read } = await pricing(recordWithPets(), [foreign]);
+  expect(read).not.toHaveBeenCalled();
+  expect(snapshot).toMatchObject({ searchComplete: false, total: null });
+  expect(snapshot.items[0].searchState).toBe("read_failed");
+  expect(snapshot.items[0].candidates[0]).toMatchObject({
+    verified: false,
+    reason: expect.stringContaining("目标单服"),
+  });
+});

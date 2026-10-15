@@ -31,7 +31,7 @@ export async function checkEquipment(input: Record<string, unknown>, requestSign
     throw new Error("该装备暂不能查价：" + item.issues.join("；"));
   const signal = AbortSignal.any([requestSignal, AbortSignal.timeout(300_000)]);
   signal.throwIfAborted();
-  const source = await createEquipmentSource(signal);
+  const source = await createEquipmentSource(signal, record.listing.serverId);
   try {
     signal.throwIfAborted();
     if (mode === "discover") {

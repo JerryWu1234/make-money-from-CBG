@@ -3,6 +3,7 @@ import {
   createPetGearSource,
   PET_GEAR_SEARCH_URL,
   petGearUIQuery,
+  petGearSearchPlanHash,
 } from "./browser-pet-gear-source";
 import type { PetGearPricingItem } from "./pet-gear-inventory";
 
@@ -40,6 +41,14 @@ beforeEach(() => {
 });
 
 describe("宝宝装备同会话公开入口", () => {
+  it("同一宝宝装备的查询游标不能跨目标服复用", () => {
+    const item = {
+      name: "金腕",
+      description: "等级95\n速度+20\n耐久100",
+      accessory: false,
+    } as PetGearPricingItem;
+    expect(petGearSearchPlanHash(item, "1")).not.toBe(petGearSearchPlanHash(item, "33"));
+  });
   it("从任意保存装备生成真实控件输入；百分比/灵石/双加/套装全部保留", () => {
     const item = {
       name: "金腕",
@@ -97,7 +106,7 @@ describe("宝宝装备同会话公开入口", () => {
     expect(() => petGearUIQuery(item)).toThrow("宝宝装备附加状态名称缺失");
   });
   it("通过共享浏览器会话连接，在自有工作页读取已观察入口", async () => {
-    const source = await createPetGearSource(new AbortController().signal);
+    const source = await createPetGearSource(new AbortController().signal, "1");
     await source.discover();
     expect(mocks.getBrowser).toHaveBeenCalledExactlyOnceWith(true);
     expect(mocks.goto).toHaveBeenCalledWith(
@@ -114,7 +123,7 @@ describe("宝宝装备同会话公开入口", () => {
 
   it("创建后取消或在创建过程中取消均关闭自有页", async () => {
     const controller = new AbortController();
-    await createPetGearSource(controller.signal);
+    await createPetGearSource(controller.signal, "1");
     controller.abort(new Error("取消"));
     await vi.waitFor(() => expect(mocks.close).toHaveBeenCalledOnce());
     const duringCreate = new AbortController();
@@ -123,14 +132,21 @@ describe("宝宝装备同会话公开入口", () => {
       duringCreate.abort(new Error("创建时取消"));
       return { goto: mocks.goto, close: mocks.close, isClosed: () => false };
     });
-    await expect(createPetGearSource(duringCreate.signal)).rejects.toThrow("创建时取消");
+    await expect(createPetGearSource(duringCreate.signal, "1")).rejects.toThrow("创建时取消");
     expect(mocks.close).toHaveBeenCalledOnce();
   });
 
   it("连接失败时不创建工作页或重复发起连接", async () => {
     mocks.getBrowser.mockRejectedValue(new Error("浏览器未连接"));
-    await expect(createPetGearSource(new AbortController().signal)).rejects.toThrow("未连接");
+    await expect(createPetGearSource(new AbortController().signal, "1")).rejects.toThrow("未连接");
     expect(mocks.getBrowser).toHaveBeenCalledExactlyOnceWith(true);
     expect(mocks.createHiddenPage).not.toHaveBeenCalled();
   });
+});
+
+it("缺失目标服时宝宝装备source不创建页面", async () => {
+  await expect(
+    createPetGearSource(new AbortController().signal, undefined as unknown as string),
+  ).rejects.toThrow("目标服务器");
+  expect(mocks.getBrowser).not.toHaveBeenCalled();
 });

@@ -244,7 +244,7 @@ async function searchEquipment(
         previous,
         onCheckpoint,
       );
-    const source = await createEquipmentSource(signal, onProgress);
+    const source = await createEquipmentSource(signal, record.listing.serverId, onProgress);
     try {
       signal.throwIfAborted();
       return await searchEquipmentPrices(record, signal, source, settings, previous, onCheckpoint);
@@ -276,7 +276,7 @@ async function searchPets(
       !inventory.items.some((item) => item.status === "no_match")
     )
       return await searchPetPricing(record, signal, unusedPetSource, previous);
-    const source = await createPetSource(signal);
+    const source = await createPetSource(signal, record.listing.serverId);
     try {
       signal.throwIfAborted();
       return await searchPetPricing(record, signal, source, previous);

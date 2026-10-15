@@ -17,7 +17,12 @@ import {
   moveObservedLevelSlider,
   selectObservedMenu,
 } from "./browser-equipment-source";
-import { createMarketScopeAudit, type GlobalMarketRequest } from "./market-scope";
+import {
+  assertMarketServerId,
+  createMarketScopeAudit,
+  selectMarketServer,
+  type GlobalMarketRequest,
+} from "./market-scope";
 import {
   equipmentIdentity,
   pageText,
@@ -116,11 +121,13 @@ export type PetGearSearchResult = {
   searchItems: unknown[];
 };
 
-export function petGearSearchPlanHash(item: PetGearPricingItem) {
+export function petGearSearchPlanHash(item: PetGearPricingItem, serverId: string) {
+  assertMarketServerId(serverId);
   return createHash("sha256")
     .update(
       JSON.stringify({
         version: "official-pet-gear-first-page-empty-stop-v2",
+        serverId,
         resumePolicy: PRICING_RESUME_POLICY,
         priceMethod: EQUIPMENT_QUOTE_POLICY,
         name: item.name,
@@ -198,12 +205,18 @@ export async function readPetGearSearchForm(page: Page) {
   return { ...form, ...metadata };
 }
 
-async function applyPetGearUI(page: Page, item: PetGearPricingItem, similar: boolean) {
+async function applyPetGearUI(
+  page: Page,
+  item: PetGearPricingItem,
+  similar: boolean,
+  serverId: string,
+  signal: AbortSignal,
+) {
   const query = petGearUIQuery(item, similar);
   const args: Record<string, string | number> = {
     level_min: query.level,
     level_max: query.level,
-    server_type: "3",
+    serverid: serverId,
     ...query.inputs,
   };
   for (const addon of query.addons) args[addon] = "1";
@@ -232,7 +245,8 @@ async function applyPetGearUI(page: Page, item: PetGearPricingItem, similar: boo
       await locator.selectOption(neutral.value);
     }
   }
-  actions.push(await selectObservedMenu(page, "server_type_panel", "3"));
+  const scope = await selectMarketServer(page, serverId, signal);
+  actions.push(...scope.actions);
   actions.push(await moveObservedLevelSlider(page, "level_slider", query.level, query.level));
   for (const [id, value] of Object.entries(query.inputs)) {
     if (
@@ -310,8 +324,10 @@ async function readPetGearRows(page: Page, pageNumber: number) {
 
 export async function createPetGearSource(
   signal: AbortSignal,
+  serverId: string,
   budgets: { maxPages?: number; maxDetails?: number } = {},
 ) {
+  assertMarketServerId(serverId);
   signal.throwIfAborted();
   let page: Page | undefined, detailPage: Page | undefined;
   let scopeAudit: ReturnType<typeof createMarketScopeAudit> | undefined;
@@ -352,7 +368,7 @@ export async function createPetGearSource(
         const workSignal = AbortSignal.any([signal, requestSignal]);
         workSignal.throwIfAborted();
         const result: PetGearSearchResult = { queries: [], items: [], searchItems: [] };
-        scopeAudit ||= createMarketScopeAudit(searchPage);
+        scopeAudit ||= createMarketScopeAudit(searchPage, serverId);
         const deadline = Date.now() + 120_000;
         let halted = "";
         for (const item of items) {
@@ -409,7 +425,7 @@ export async function createPetGearSource(
             return next;
           };
           try {
-            const planHash = petGearSearchPlanHash(item);
+            const planHash = petGearSearchPlanHash(item, serverId);
             const reusable = equipmentCursorMatches(item.searchCursor, planHash, 2);
             next = reusable
               ? structuredClone(item.searchCursor!)
@@ -431,6 +447,8 @@ export async function createPetGearSource(
             const readCandidate = async (rawUrl: string, modeIndex: number) => {
               const url = safeEquipmentUrl(rawUrl),
                 identity = equipmentIdentity(url);
+              if (identity.split(":")[0] !== serverId)
+                throw new Error("宝宝装备候选不属于目标单服，未采用报价");
               attempted.add(identity);
               details++;
               try {
@@ -525,9 +543,14 @@ export async function createPetGearSource(
                 timeout: 45_000,
               });
               await pace(workSignal);
-              const applied = await applyPetGearUI(searchPage, item, similar);
+              const applied = await applyPetGearUI(searchPage, item, similar, serverId, workSignal);
               queryText =
-                "全服三年以上 / 宝宝装备 / " + item.name + " / " + JSON.stringify(applied.query);
+                "目标单服 " +
+                serverId +
+                " / 宝宝装备 / " +
+                item.name +
+                " / " +
+                JSON.stringify(applied.query);
               result.queries.push(queryText);
               const loadPage = async (pageNumber: number, first: boolean, replay = false) => {
                 scopeAudit!.begin(PET_GEAR_SEARCH_ACTION, pageNumber);
@@ -540,6 +563,13 @@ export async function createPetGearSource(
                 await pace(workSignal);
                 const listing = await readPetGearRows(searchPage, pageNumber);
                 const request = scopeAudit!.confirm();
+                if (
+                  listing.rows.some(
+                    (row) =>
+                      equipmentIdentity(safeEquipmentUrl(row.url)).split(":")[0] !== serverId,
+                  )
+                )
+                  throw new Error("宝宝装备列表包含目标单服以外的商品，未采用报价");
                 scopeEvidence.push(request);
                 const submittedArgs = await searchPage.evaluate(() => {
                   const values = (window as unknown as { QueryArgs?: Record<string, unknown> })

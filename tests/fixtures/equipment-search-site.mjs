@@ -68,7 +68,7 @@ window.ajax_with_recommend=async function(options){
 };
 window.overall_search=function(args,page,order){
  const data={act:OverallSearchAct,page:page||1,...args};if(order.key)data.order_by=order.key+' '+order.sort;
- if(settings.dropServerType)delete data.server_type;
+ if(settings.dropServerId)delete data.serverid;
  calls.push(JSON.parse(JSON.stringify(data)));
  ajax_with_recommend({data,
   onRequest(){document.querySelector('#loading_img').style.display='';document.querySelector('#search_result').innerHTML='';document.querySelector('#pager').innerHTML='';},
@@ -103,7 +103,13 @@ function menu(id,choices){
 }
 menu('server_type_panel',[[3,'3年以上服'],[2,'1到3年服'],[1,'1年内服']]);
 menu('fair_show_panel',settings.jewelry||settings.jade?[[1,'已上架'],[0,'公示期']]:[['pass_fair_show','已上架'],['fair_show','公示期']]);
-field('overall_sel_area','select',[['6','测试区']]);field('ovarall_sel_server','select',[['33','测试服']]);
+window.server_data=settings.serverData||{'6':[['测试区'],[['1','目标服'],['33','其他服'],['94','武当山'],['123','对照服'],['203','西岳华山'],['377','另一个服']]]};
+field('overall_sel_area','select',Object.entries(server_data).map(([id,group])=>[id,group[0][0]]));
+field('ovarall_sel_server','select');
+document.querySelector('#overall_sel_area').addEventListener('change',event=>{
+ const group=server_data[event.target.value];
+ document.querySelector('#ovarall_sel_server').innerHTML='<option value="">不限</option>'+(group?.[1]||[]).map(([id,name])=>'<option value="'+id+'">'+name+'</option>').join('');
+});
 field('user_serverid','hidden');document.querySelector('#user_serverid').value='99';
 add('<button id="btn_reset_user_server">重置购入服</button><button id="reset_all">重置</button>');
 window.uiEvents=[];
@@ -228,7 +234,7 @@ ${settings.onlyRecommendation ? recommend : settings.panelDelay ? '<div id="dela
 <div id="RecommendedTipsBox" role="tooltip" style="display:none;white-space:pre-line">${escape(recommendedName + "\n" + settings.description.replace("防御：50", "防御：99"))}</div>
 <script>
 window.IsLogin=1;window.hovers=[];window.tooltipDelay=${settings.tooltipDelay};
-${settings.rawPrice ? `window.equip={price:${JSON.stringify(settings.rawPriceValue ?? settings.price)},equip_name:${JSON.stringify(settings.rawName || settings.name)},eid:${settings.rawEid ? JSON.stringify(settings.rawEid) : "new URL(location.href).searchParams.get('eid')"},server_id:1${settings.kindId !== null ? ",kindid:" + JSON.stringify(settings.kindId) : ""}${settings.selling !== null ? `,is_selling:${JSON.stringify(settings.selling)}` : ""}${settings.modelId !== null ? ",equip_type:" + JSON.stringify(settings.modelId) : settings.modelDescription !== null ? ",equip_type:2912" : ""}};` : ""}
+${settings.rawPrice ? `window.equip={price:${JSON.stringify(settings.rawPriceValue ?? settings.price)},equip_name:${JSON.stringify(settings.rawName || settings.name)},eid:${settings.rawEid ? JSON.stringify(settings.rawEid) : "new URL(location.href).searchParams.get('eid')"},server_id:${JSON.stringify(settings.serverId || "1")}${settings.kindId !== null ? ",kindid:" + JSON.stringify(settings.kindId) : ""}${settings.selling !== null ? `,is_selling:${JSON.stringify(settings.selling)}` : ""}${settings.modelId !== null ? ",equip_type:" + JSON.stringify(settings.modelId) : settings.modelDescription !== null ? ",equip_type:2912" : ""}};` : ""}
 ${settings.modelDescription !== null ? `window.CBG_GAME_CONFIG={equip_info:{2912:{name:${JSON.stringify(settings.modelName || settings.name)},desc:${JSON.stringify(settings.modelDescription)}},9999:{name:"其他装备",desc:"【装备角色】男"}}};` : ""}
 ${settings.panelDelay ? "setTimeout(()=>document.getElementById('delayed-main').innerHTML=" + JSON.stringify(main).replaceAll("<", "\\u003c") + "," + settings.panelDelay + ");" : ""}
 ${settings.infoDelay ? "const info=document.getElementById('info_panel'),content=info.innerHTML;info.innerHTML='';setTimeout(()=>info.innerHTML=content," + settings.infoDelay + ");" : ""}

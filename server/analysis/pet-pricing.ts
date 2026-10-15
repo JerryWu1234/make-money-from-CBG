@@ -230,7 +230,12 @@ export function petInventory(record: SavedRoleRecord) {
         description,
         query: skipReason
           ? ""
-          : "梦幻西游电脑版 藏宝阁 全服 召唤兽 " + name + " " + description.replace(/\n/g, " "),
+          : "梦幻西游电脑版 藏宝阁 目标单服 " +
+            record.listing.serverId +
+            " 召唤兽 " +
+            name +
+            " " +
+            description.replace(/\n/g, " "),
         status: skipReason
           ? "no_match"
           : bound
@@ -259,6 +264,7 @@ export function petInventory(record: SavedRoleRecord) {
   const inputHash = hash(
     JSON.stringify({
       marketScope: GLOBAL_MARKET_SCOPE_VERSION,
+      serverId: record.listing.serverId,
       searchUI: MARKET_SEARCH_UI_VERSION,
       comparisonPolicy: PET_COMPARISON_POLICY_VERSION,
       queryPolicy: "pet-observed-star-trait-v1",
@@ -857,6 +863,10 @@ export async function searchPetPricing(
       try {
         candidate.url = safeEquipmentUrl(candidate.url);
         const identity = equipmentIdentity(candidate.url);
+        if (identity.split(":")[0] !== record.listing.serverId) {
+          readFailed = true;
+          throw new Error("宝宝候选不属于目标单服，未采用报价");
+        }
         if (seen.has(identity)) {
           if (!diagnostic && seen.get(identity) !== candidate.price) {
             readFailed = true;

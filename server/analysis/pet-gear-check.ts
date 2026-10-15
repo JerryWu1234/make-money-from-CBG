@@ -41,7 +41,7 @@ export async function checkPetGear(input: Record<string, unknown>, requestSignal
     AbortSignal.timeout(input.mode === "discover" ? 150_000 : 300_000),
   ]);
   signal.throwIfAborted();
-  const source = await createPetGearSource(signal);
+  const source = await createPetGearSource(signal, record.listing.serverId);
   try {
     if (selected) {
       const result = await source.findCandidates([selected], signal);

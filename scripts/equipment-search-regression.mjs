@@ -200,7 +200,8 @@ try {
       await route.abort();
       return;
     }
-    let body;
+    let body,
+      status = 200;
     if (url.pathname === "/sentinel-role-list") body = roleSentinelDocument;
     else if (url.pathname === "/equip") {
       const eid = url.searchParams.get("eid");
@@ -212,6 +213,7 @@ try {
         await route.fulfill({ status: 302, headers: { location: settings.redirect } });
         return;
       }
+      status = settings.httpStatus || 200;
       body = equipmentDetailDocument(settings);
     } else if (url.pathname === "/cgi-bin/recommend.py") {
       marketRequests.push(Object.fromEntries(url.searchParams));
@@ -222,7 +224,7 @@ try {
       return;
     }
     try {
-      await route.fulfill({ contentType: "text/html; charset=utf-8", body });
+      await route.fulfill({ status, contentType: "text/html; charset=utf-8", body });
     } catch (error) {
       if (!route.request().isNavigationRequest()) throw error;
     }
@@ -249,6 +251,7 @@ try {
       bounded(searchPage),
       bounded(detailPage),
       control.signal,
+      "1",
     );
     return { source, searchPage, detailPage, control };
   };
@@ -314,7 +317,11 @@ try {
         assert.equal(result.knownTotal, 123);
         assert.deepEqual(detailVisits, ["core-good"]);
         const calls = await searchPage.evaluate(() => window.calls);
-        assert.ok(calls.every((call) => call.kindid === "20" && call.init_hp === 250));
+        assert.ok(
+          calls.every(
+            (call) => call.kindid === "20" && call.init_hp === undefined && call.serverid === "1",
+          ),
+        );
         assert.ok(!result.queries.some((query) => query.includes("混合宝石剑")));
         if (process.env.CBG_CORE_PROOF)
           await writeFile(
@@ -409,7 +416,7 @@ try {
     );
   });
 
-  await check("普通无匹配装备经过两组全服表单穷尽后排除，仍没有0元价格", () =>
+  await check("普通无匹配装备在单服单条件读完后跳过，仍没有0元价格", () =>
     withSource({ pages: [[]] }, {}, async ({ source, control }) => {
       const collectedAt = new Date().toISOString();
       const record = {
@@ -502,8 +509,13 @@ try {
           calls.map((call) => call.page),
           [1],
         );
-        assert.ok(calls.every((call) => call.server_type === "3" && call.level_min === 100));
-        assert.equal(result.searchItems[0].uiQueries[0].submittedArgs.gem_level, 8);
+        assert.ok(
+          calls.every(
+            (call) =>
+              call.serverid === "1" && call.server_type === undefined && call.level_min === 100,
+          ),
+        );
+        assert.equal(result.searchItems[0].uiQueries[0].submittedArgs.gem_level, undefined);
       },
     );
   });
@@ -587,7 +599,7 @@ try {
 
   await check("前五件相近报价保留官网顺序，不按属性距离重新挑样本", () => {
     const prices = [145, 100, 130, 110, 120, 101, 102, 103, 104, 105, 1];
-    const defenses = [55, 49, 54, 48, 51, 52, 53, 49, 47, 46, 50];
+    const defenses = [45, 49, 44, 48, 41, 42, 43, 49, 47, 46, 50];
     return withSource(
       {
         pages: [
@@ -619,7 +631,7 @@ try {
     );
   });
 
-  await check("官方列表调用保留全区条件，取实际href、主商品价格和查询记录", () =>
+  await check("官方列表仅查询目标服，取实际href、主商品价格和查询记录", () =>
     withSource({}, { recommend: true }, async ({ source, searchPage, control }) => {
       const input = item();
       const result = await source.findCandidates([input], control.signal);
@@ -638,24 +650,24 @@ try {
       assert.equal(query.level_min, 100);
       assert.equal(query.front_status, "pass_fair_show");
       assert.equal(query.act, "overall_search_equip");
-      assert.equal(query.serverid, undefined);
-      assert.equal(query.server_type, "3");
-      assert.equal(result.searchItems[0].serverAge, "3年以上服");
+      assert.equal(query.serverid, "1");
+      assert.equal(query.server_type, undefined);
+      assert.equal(result.searchItems[0].serverId, "1");
       assert.equal(
         result.searchItems[0].searchUrl,
         "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=show_overall_search_equip",
       );
-      assert.equal(result.searchItems[0].uiQueries[0].submittedArgs.gem_level, 8);
+      assert.equal(result.searchItems[0].uiQueries[0].submittedArgs.gem_level, undefined);
       assert.deepEqual(result.searchItems[0].scopeEvidence, [
         {
-          mode: "exact",
+          mode: "base-attributes",
           request: {
             endpoint: "https://xyq.cbg.163.com/cgi-bin/recommend.py",
             act: "recommd_by_role",
             searchType: "overall_search_equip",
-            serverType: "3",
+            serverType: "",
             page: 1,
-            restrictions: {},
+            restrictions: { serverid: "1" },
           },
           rowCount: 1,
           candidateServers: { 1: 1 },
@@ -665,7 +677,8 @@ try {
       const events = await searchPage.evaluate(() => window.uiEvents);
       assert.ok(
         events.some(
-          (event) => event.type === "input" && event.id === "txt_gem_level" && event.value === "8",
+          (event) =>
+            event.type === "change" && event.id === "ovarall_sel_server" && event.value === "1",
         ),
       );
       assert.ok(events.some((event) => event.type === "click" && event.id === "btn_equip_search"));
@@ -715,7 +728,7 @@ try {
             control.signal,
           );
           const [query] = await searchPage.evaluate(() => window.calls);
-          assert.equal(query[sample.parameter], sample.raw);
+          assert.equal(query[sample.parameter], undefined);
           assert.equal(
             query.attr_without_melt,
             1,
@@ -725,7 +738,7 @@ try {
             }),
           );
           assert.equal(query.attr_with_melt, undefined);
-          assert.equal(marketRequests[0][sample.parameter], String(sample.raw));
+          assert.equal(marketRequests[0][sample.parameter], undefined);
           for (const request of marketRequests) {
             assert.equal(request.attr_without_melt, "1");
             assert.equal(request.attr_with_melt, undefined);
@@ -748,7 +761,7 @@ try {
       label: "已开孔装备",
       input: item({ description: equipmentDescription + "\n开运孔数：3孔/3孔" }),
       search: {},
-      expected: { hole_num: 3 },
+      expected: {},
     },
     {
       label: "简易灵饰",
@@ -824,7 +837,7 @@ try {
       category: "人物装备 · 鞋子",
       level: 70,
       description: "等级70\n防御30\n敏捷20",
-      expected: { kindid: "19", level_min: 70, level_max: 70, init_defense: 30, init_dex: 20 },
+      expected: { kindid: "19", level_min: 70, level_max: 70 },
     },
     {
       name: "另一把剑",
@@ -835,8 +848,7 @@ try {
         kindid: "6",
         level_min: 160,
         level_max: 160,
-        gem_level: 10,
-        gem_value: "2",
+
         special_skill: "1036",
         special_effect: "5",
       },
@@ -852,8 +864,7 @@ try {
         kindid: "63",
         equip_level_min: 100,
         equip_level_max: 100,
-        fengyin: 25,
-        jinglian_level: 6,
+
         suit_effect: "1",
         suit_effect_level: 3,
       },
@@ -889,7 +900,7 @@ try {
     },
     {
       label: "字段被官网忽略",
-      settings: { dropUiField: "gem_level" },
+      settings: { dropUiField: "kindid" },
       target: item(),
       stage: "ui_condition_verify",
     },
@@ -927,12 +938,9 @@ try {
       }),
     );
 
-  await check("官网组件丢失3年以上服参数时拒绝使用报价", () =>
-    withSource({ dropServerType: true }, {}, async ({ source, control }) => {
-      await assert.rejects(
-        source.findCandidates([item()], control.signal),
-        /三年以上服|3年以上服条件/,
-      );
+  await check("官网组件丢失目标服务器参数时拒绝使用报价", () =>
+    withSource({ dropServerId: true }, {}, async ({ source, control }) => {
+      await assert.rejects(source.findCandidates([item()], control.signal), /单服|服务器/);
       assert.deepEqual(detailVisits, []);
     }),
   );
@@ -948,58 +956,43 @@ try {
       withSource(settings, {}, async ({ source, control }) => {
         await assert.rejects(
           source.findCandidates([item()], control.signal),
-          /全服|三年以上服|3年以上服|请求|限制/,
+          /单服|服务器|请求|限制/,
         );
         assert.deepEqual(detailVisits, []);
       }),
     );
 
-  await check("真实市场请求允许空或0范围，逐页保存不同服务器来源", () =>
+  await check("目标单服请求保留逐页证据，不从其他服务器读取详情", () =>
     withSource(
       {
-        marketOverrides: { serverid: "0", area_id: "" },
+        marketOverrides: { area_id: "" },
         pages: [
-          [
-            { eid: "server-a", name: "其他装备", serverId: "33" },
-            { eid: "server-b", name: "其他装备", serverId: "123" },
-          ],
-          [{ eid: "server-c", name: "其他装备", serverId: "377" }],
+          [{ eid: "other-server", name: equipmentName, serverId: "33" }],
+          [{ eid: "target-server", name: equipmentName }],
         ],
       },
       {},
       async ({ source, control }) => {
-        const result = await source.findCandidates(
-          [item({ description: "等级100\n防御50\n气血250" })],
-          control.signal,
-        );
-        const evidence = result.searchItems[0].scopeEvidence;
-        assert.equal(evidence.length, 4);
+        const result = await source.findCandidates([item()], control.signal);
         assert.deepEqual(
-          evidence.map((entry) => entry.request.page),
-          [1, 2, 1, 2],
+          result.searchItems[0].scopeEvidence.map((entry) => entry.request.page),
+          [1, 2],
         );
-        assert.deepEqual(
-          evidence.map((entry) => entry.request.restrictions),
-          [
-            { serverid: "0", area_id: "" },
-            { serverid: "0", area_id: "" },
-            { serverid: "0", area_id: "" },
-            { serverid: "0", area_id: "" },
-          ],
+        assert(
+          result.searchItems[0].scopeEvidence.every(
+            (entry) =>
+              entry.request.restrictions.serverid === "1" && entry.request.serverType === "",
+          ),
         );
-        assert.deepEqual(
-          evidence.map((entry) => entry.candidateServers),
-          [{ 33: 1, 123: 1 }, { 377: 1 }, { 33: 1, 123: 1 }, { 377: 1 }],
-        );
-        assert.equal(result.items[0].searchState, "completed");
-        assert.deepEqual(detailVisits, []);
+        assert.deepEqual(detailVisits, ["target-server"]);
+        assert.equal(result.items[0].candidates[0].verified, true);
       },
     ),
   );
 
   for (const missingConfig of [false, true])
     await check(
-      `套装官网映射${missingConfig ? "缺失仍核验详情" : "实际传给查询并保存原始args"}`,
+      `普通套装映射${missingConfig ? "缺失仍核验详情" : "存在也不增加套装搜索条件"}`,
       () => {
         const name = "风月宝链",
           description =
@@ -1025,16 +1018,10 @@ try {
               control.signal,
             );
             const calls = await searchPage.evaluate(() => window.calls);
-            assert.equal(calls[0].suit_effect, missingConfig ? undefined : "4013");
-            assert.equal(
-              result.searchItems[0].args.suit_effect,
-              missingConfig ? undefined : "4013",
-            );
-            assert.equal(
-              result.searchItems[0].modes[0].args.suit_effect,
-              missingConfig ? undefined : "4013",
-            );
-            if (!missingConfig) assert.match(result.queries[0], /"suit_effect":"4013"/);
+            assert.equal(calls[0].suit_effect, undefined);
+            assert.equal(result.searchItems[0].args.suit_effect, undefined);
+            assert.equal(result.searchItems[0].modes[0].args.suit_effect, undefined);
+            assert.doesNotMatch(result.queries[0], /"suit_effect"/);
             assert.equal(result.items[0].candidates[0].verified, true);
           },
         );
@@ -1054,7 +1041,7 @@ try {
     ),
   );
 
-  await check("无宝石装备向官网发送初血初防筛选，详情仍逐项核对", () => {
+  await check("无宝石装备不填≥数值下限，详情仍逐项核对基础值上限", () => {
     const description = "等级 100\n气血 +176 防御 +50\n耐久度 435";
     return withSource(
       {},
@@ -1062,8 +1049,8 @@ try {
       async ({ source, searchPage, control }) => {
         const result = await source.findCandidates([item({ description })], control.signal);
         const [query] = await searchPage.evaluate(() => window.calls);
-        assert.equal(query.init_hp, 176);
-        assert.equal(query.init_defense, 50);
+        assert.equal(query.init_hp, undefined);
+        assert.equal(query.init_defense, undefined);
         assert.equal(query.attr_without_melt, 1);
         assert.equal(query.hp, undefined);
         assert.equal(query.defense, undefined);
@@ -1071,7 +1058,7 @@ try {
       },
     );
   });
-  await check("初防衣服全流程：填写、提交、翻页、独立报价核验与最低价", async () => {
+  await check("初防衣服全流程：目标单服宽搜、翻页、基础值上限核验与最低价", async () => {
     const name = "模拟月亮石衣服";
     const description =
       "等级100\n防御296\n耐久300\n锻炼等级8\n镶嵌宝石 月亮石\n熔炼效果：\n+10防御";
@@ -1139,7 +1126,7 @@ try {
         );
         for (const call of calls) {
           assert.equal(call.kindid, "18");
-          assert.equal(call.init_defense, 200);
+          assert.equal(call.init_defense, undefined);
           assert.equal(call.attr_without_melt, 1);
           assert.equal(call.attr_with_melt, undefined);
         }
@@ -1147,7 +1134,7 @@ try {
         assert.ok(
           events.some(
             (event) =>
-              event.type === "input" && event.id === "txt_init_defense" && event.value === "200",
+              event.type === "change" && event.id === "ovarall_sel_server" && event.value === "1",
           ),
         );
         assert.deepEqual(
@@ -1197,7 +1184,7 @@ try {
     { category: "饰品", field: "灵力", gem: "舍利子", shown: 232, base: 172, param: "init_wakan" },
     { category: "腰带", field: "气血", gem: "光芒石", shown: 576, base: 176, param: "init_hp" },
   ])
-    await check("宝石基础值实际填框：" + sample.category, () => {
+    await check("宝石基础值仅用于详情方向核验：" + sample.category, () => {
       const name = "模拟基础值" + sample.category;
       const description = `等级100\n${sample.field}${sample.shown}\n耐久300\n锻炼等级10\n镶嵌宝石 ${sample.gem}\n熔炼效果：\n+10${sample.field}`;
       return withSource(
@@ -1209,13 +1196,14 @@ try {
             control.signal,
           );
           const [query] = await searchPage.evaluate(() => window.calls);
-          assert.equal(query[sample.param], sample.base);
+          assert.equal(query[sample.param], undefined);
           assert.equal(query.attr_without_melt, 1);
           assert.equal(result.items[0].candidates[0].verified, true);
-          assert.ok(
+          assert.equal(
             result.searchItems[0].uiQueries[0].actions.some(
-              (a) => a.control === "txt_" + sample.param && a.value === String(sample.base),
+              (a) => a.control === "txt_" + sample.param,
             ),
+            false,
           );
           await mkdir("data/pr27-fix-validation", { recursive: true });
           await writeFile(
@@ -1249,7 +1237,7 @@ try {
   );
 
   await check("前5条列表均不匹配时不补查第6条及后排有效商品", () => {
-    const description = "等级 100\n气血 +176 防御 +50\n耐久度 435";
+    const description = "等级 100\n气血 +176 防御 +50\n锻炼等级0\n耐久度 435";
     const wrong = Array.from({ length: 10 }, (_, i) => ({
       eid: "wrong-list-" + i,
       name: equipmentName,
@@ -1285,7 +1273,7 @@ try {
     );
   });
 
-  await check("先采用同宝石同段匹配，不为已有同配扩大段数或换算总属性", () =>
+  await check("单条件宽搜不按宝石段数排除，双方基础属性核验后采用", () =>
     withSource(
       {
         pages: [
@@ -1308,12 +1296,12 @@ try {
       }),
       async ({ source, searchPage, control }) => {
         const result = await source.findCandidates([item({ modelId: "2912" })], control.signal);
-        assert.deepEqual(detailVisits, ["matching"]);
+        assert.deepEqual(detailVisits, ["other-gem", "matching"]);
         assert.equal(result.items[0].candidates[0].verified, true);
-        assert.equal(result.items[0].candidates.length, 1);
+        assert.equal(result.items[0].candidates.length, 2);
         const [query] = await searchPage.evaluate(() => window.calls);
-        assert.equal(query.gem_level, 8);
-        assert.equal(query.init_defense, 50);
+        assert.equal(query.gem_level, undefined);
+        assert.equal(query.init_defense, undefined);
       },
     ),
   );
@@ -1341,7 +1329,7 @@ try {
     ),
   );
 
-  await check("灵饰使用独立分类、主属性和双法伤组合筛选，列表排除不同词条", () => {
+  await check("灵饰只按独立分类宽搜，列表拒绝高于目标的基础词条", () => {
     const name = "测试耳饰";
     const description =
       "等级 80\n法术伤害 +16\n精炼等级 7\n附加属性：\n法术伤害 +8[+28]\n法术伤害 +9[+28]\n速度 +8[+21]";
@@ -1369,10 +1357,10 @@ try {
         const [query] = await searchPage.evaluate(() => window.calls);
         assert.equal(query.act, "overall_search_lingshi");
         assert.equal(query.kindid, "62");
-        assert.equal(query.magic_damage, 16);
-        assert.equal(query["added_attr.4"], 2);
-        assert.equal(query["added_attr.3"], 1);
-        assert.equal(query.added_attr_num, "3");
+        assert.equal(query.magic_damage, undefined);
+        assert.equal(query["added_attr.4"], undefined);
+        assert.equal(query["added_attr.3"], undefined);
+        assert.equal(query.added_attr_num, undefined);
         assert.deepEqual(detailVisits, ["matching"]);
         assert.equal(result.items[0].candidates[0].verified, true);
       },
@@ -1385,7 +1373,7 @@ try {
       "等级 80\n防御 +21\n耐久度 84\n精炼等级 5\n附加属性：\n法术伤害结果 +8 [+15]\n法术伤害 +8 [+20]\n法术暴击等级 +10 [+20]\n特效：健步如飞（2级）\n速度 +2\n速度+7（已生效）\n装备条件：等级80";
     const standalone = description
       .replace("速度+7（已生效）\n", "")
-      .replace("法术伤害 +8 [+20]", "法术伤害 +10 [+20]");
+      .replace("法术伤害 +8 [+20]", "法术伤害 +6 [+20]");
     return withSource(
       {
         jewelry: true,
@@ -1418,16 +1406,16 @@ try {
           assert.equal(candidate.verified, true);
           assert.equal(candidate.matchType, "similar");
           assert.ok(candidate.differences.includes("已生效套装加成：速度:+7 → 未标明"));
-          assert.ok(candidate.differences.includes("法术伤害：+8 [+20] → +10 [+20]"));
+          assert.ok(candidate.differences.includes("法术伤害：+8 [+20] → +6 [+20]"));
           assert.equal(
             candidate.price,
             [1000, 1100, 1200, 1300, 1450][Number(candidate.url.slice(-1))],
           );
         }
         const [query] = await searchPage.evaluate(() => window.calls);
-        assert.equal(query.server_type, "3");
+        assert.equal(query.server_type, undefined);
         assert.equal(query.kindid, "61");
-        assert.equal(query.jinglian_level, 5);
+        assert.equal(query.jinglian_level, undefined);
         assert.equal(query.suit_effect, "4");
         assert.equal(query.suit_effect_level, 2);
         assert.equal(detailVisits.length, 5);
@@ -1436,7 +1424,7 @@ try {
           result.searchItems[0].scopeEvidence[0].request.searchType,
           "overall_search_lingshi",
         );
-        assert.equal(result.searchItems[0].scopeEvidence[0].request.serverType, "3");
+        assert.equal(result.searchItems[0].scopeEvidence[0].request.serverType, "");
         assert.deepEqual(result.searchItems[0].scopeEvidence[0].candidateServers, { 1: 5 });
       },
     );
@@ -1475,7 +1463,7 @@ try {
         const [query] = await searchPage.evaluate(() => window.calls);
         assert.equal(query.suit_effect, "4");
         assert.equal(query.suit_effect_level, 2);
-        assert.equal(query.server_type, "3");
+        assert.equal(query.server_type, undefined);
         assert.equal(result.items[0].searchState, "completed");
         assert.equal(result.items[0].candidates.length, 4);
         assert.deepEqual(detailVisits, ["ear-0", "ear-1", "ear-2", "ear-3"]);
@@ -1508,9 +1496,9 @@ try {
           false,
         );
         const rejected = result.searchItems.flatMap((record) => record.rejectedCandidates || []);
-        assert.equal(rejected.length, 4);
+        assert.equal(rejected.length, 1);
         assert.equal(rejected[0].verified, false);
-        assert.match(rejected[0].reason, /主属性.*法术伤害.*20%/);
+        assert.match(rejected[0].reason, /法术伤害.*高于目标/);
         assert.deepEqual(detailVisits, ["swapped-ear"]);
       },
     );
@@ -1546,12 +1534,14 @@ try {
       },
       { renderedPanel: true, selling: 1, name, description },
       async ({ source, searchPage, control }) => {
-        await source.findCandidates(
+        const result = await source.findCandidates(
           [item({ name, category: "人物装备", level: 90, description })],
           control.signal,
         );
-        const [query] = await searchPage.evaluate(() => window.calls);
-        assert.equal(query.kindid, undefined);
+        assert.equal(result.items[0].searchState, "read_failed");
+        assert.match(result.items[0].note, /装备类型无法对应官网筛选/);
+        assert.deepEqual(await searchPage.evaluate(() => window.calls), []);
+        assert.deepEqual(detailVisits, []);
       },
     );
   });
@@ -1574,13 +1564,12 @@ try {
       {},
       { renderedPanel: true, independentPanels: true, selling: 1, rawEid: "wrong-product" },
       async ({ source, control }) => {
-        const result = await source.findCandidates([item()], control.signal);
-        assert.equal(result.items[0].candidates[0].verified, false);
-        assert.equal(
-          result.searchItems[0].detailFailures[0].diagnostics.product.id,
-          "wrong-product",
-        );
-        assert.equal(result.searchItems[0].detailFailures[0].diagnostics.panels.length, 1);
+        await assert.rejects(source.findCandidates([item()], control.signal), (error) => {
+          assert.match(error.message, /当前商品ID.*报价未采用/);
+          assert.equal(error.equipmentDiagnostics.product.id, "wrong-product");
+          assert.equal(error.equipmentDiagnostics.panels.length, 1);
+          return true;
+        });
       },
     ),
   );
@@ -1603,27 +1592,34 @@ try {
           ],
         ],
       },
-      { renderedPanel: true, selling: 1, modelId: 2912 },
+      (eid) => ({
+        renderedPanel: true,
+        selling: 1,
+        modelId: 2912,
+        description:
+          eid === "near"
+            ? equipmentDescription.replace("防御：50", "防御：49")
+            : equipmentDescription,
+      }),
       async ({ source, control }) => {
         const result = await source.findCandidates([item({ modelId: "2912" })], control.signal);
         assert.deepEqual(detailVisits, ["near", "exact-0", "exact-1", "exact-2"]);
-        assert(result.items[0].candidates.every((candidate) => candidate.matchType === "exact"));
+        assert(result.items[0].candidates.every((candidate) => candidate.verified));
+        assert.equal(result.items[0].candidates[0].matchType, "similar");
       },
     ),
   );
 
-  await check("同配为空后使用80%下限、3年以上服，取得5件相近样本后停止", () => {
+  await check("单服宽搜前5条逐项核验基础值≤目标，高属性与第6条均不采用", () => {
     const description = "等级100\n气血176 防御50\n耐久300\n修理失败0";
-    const health = [172, 174, 178, 179, 180];
+    const health = [172, 174, 176, 179, 180, 170];
     return withSource(
       {
-        pages: [[]],
-        broadenedPages: [
+        pages: [
           health.map((value, index) => ({
-            eid: "similar-" + index,
+            eid: "bounded-" + index,
             name: equipmentName,
             modelId: "2912",
-            description: description.replace("气血176", "气血" + value),
           })),
         ],
       },
@@ -1631,33 +1627,30 @@ try {
         renderedPanel: true,
         selling: 1,
         modelId: 2912,
-        price: 1000 + Number(eid.split("-")[1]) * 50,
-        description: description.replace("气血176", "气血" + health[Number(eid.split("-")[1])]),
+        description: description.replace("气血176", "气血" + health[Number(eid.slice(-1))]),
+        price: [1000, 900, 1100, 1, 2, 3][Number(eid.slice(-1))],
       }),
       async ({ source, searchPage, control }) => {
         const result = await source.findCandidates(
           [item({ description, modelId: "2912" })],
           control.signal,
         );
-        assert.equal(result.queries.length, 2);
-        assert.deepEqual(
-          result.searchItems[0].modes.map((mode) => mode.mode),
-          ["exact", "similar"],
-        );
         const calls = await searchPage.evaluate(() => window.calls);
-        assert.equal(calls[1].init_hp, 141);
-        assert(calls.every((call) => call.server_type === "3"));
-        assert.equal(result.items[0].candidates.length, 5);
-        assert.equal(detailVisits.length, 5);
-        assert.equal(buildEquipmentEstimate(result.items[0].candidates).average, 1100);
-        assert(
-          result.items[0].candidates.every(
-            (candidate) =>
-              candidate.verified &&
-              candidate.matchType === "similar" &&
-              candidate.differences.length,
-          ),
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].serverid, "1");
+        assert.equal(calls[0].init_hp, undefined);
+        assert.deepEqual(detailVisits, [
+          "bounded-0",
+          "bounded-1",
+          "bounded-2",
+          "bounded-3",
+          "bounded-4",
+        ]);
+        assert.deepEqual(
+          result.items[0].candidates.filter((c) => c.verified).map((c) => c.price),
+          [1000, 900, 1100],
         );
+        assert.equal(result.searchItems[0].modes[0].mode, "base-attributes");
       },
     );
   });
@@ -1677,7 +1670,7 @@ try {
         const call = (await searchPage.evaluate(() => window.calls))[0];
         assert.equal(call.act, "yupo_search");
         assert.equal(result.searchItems[0].scopeEvidence[0].request.searchType, "yupo_search");
-        assert.equal(result.searchItems[0].scopeEvidence[0].request.serverType, "3");
+        assert.equal(result.searchItems[0].scopeEvidence[0].request.serverType, "");
         assert.deepEqual(result.searchItems[0].scopeEvidence[0].candidateServers, { 1: 1 });
         assert.equal(call.equip_type, "61717");
         assert.equal(call.level_min, undefined);
@@ -1686,7 +1679,7 @@ try {
     );
   });
 
-  await check("分散报价仍按官网顺序计均价，继续翻页补到实际八件", () => {
+  await check("前5条低于目标的样本保留官网顺序，不读取后页", () => {
     const rows = (prefix, count) =>
       Array.from({ length: count }, (_, index) => ({
         eid: prefix + index,
@@ -1704,7 +1697,7 @@ try {
         selling: 1,
         description: equipmentDescription.replace(
           "防御：50",
-          eid.startsWith("distant-") ? "防御：55" : "防御：49",
+          eid.startsWith("distant-") ? "防御：45" : "防御：49",
         ),
         price: eid.startsWith("distant-")
           ? (Number(eid.slice(-1)) + 1) * 100
@@ -1741,7 +1734,7 @@ try {
     );
   });
 
-  await check("已读完三件时按实际数量计均价，阶段排除项保留审计不纳入", () =>
+  await check("已读完三件时保留实际数量及审计均值，排除项不纳入", () =>
     withSource(
       {
         pages: [
@@ -1887,6 +1880,13 @@ try {
         {},
         { renderedPanel: true, missingInfoPanel: true, selling: 1, recommend: true, ...options },
         async ({ source, control }) => {
+          if (options.rawEid) {
+            await assert.rejects(
+              source.findCandidates([item()], control.signal),
+              /当前商品ID.*报价未采用/,
+            );
+            return;
+          }
           const result = await source.findCandidates([item()], control.signal);
           assert.equal(
             result.items[0].candidates.some((candidate) => candidate.verified),
@@ -2063,11 +2063,52 @@ try {
       assert.match(result.items[0].note, /已读完/);
       assert.ok(result.searchItems[0].scopeEvidence.length > 0);
       for (const entry of result.searchItems[0].scopeEvidence) {
-        assert.equal(entry.request.serverType, "3");
+        assert.equal(entry.request.serverType, "");
         assert.equal(entry.rowCount, 0);
         assert.deepEqual(entry.candidateServers, {});
       }
     }),
+  );
+
+  // Failure case: a valid earlier price must not hide a later access restriction
+  // inside detailFailures or let the two-failure exclusion rule consume it.
+  await check("前1条有效而第2条权限拒绝时上抛暂停，不当作无样本跳过", () =>
+    withSource(
+      {
+        pages: [
+          [
+            { eid: "accepted-first", name: equipmentName },
+            { eid: "permission-denied", name: equipmentName },
+            { eid: "must-not-read", name: equipmentName },
+          ],
+        ],
+      },
+      (eid) => ({ httpStatus: eid === "permission-denied" ? 403 : 200 }),
+      async ({ source, searchPage, control }) => {
+        let failure;
+        await assert.rejects(source.findCandidates([item()], control.signal), (error) => {
+          failure = error.message;
+          return /403|权限/.test(error.message);
+        });
+        assert.deepEqual(detailVisits, ["accepted-first", "permission-denied"]);
+        await mkdir("data/pr27-fix-validation", { recursive: true });
+        await writeFile(
+          "data/pr27-fix-validation/equipment-permission-gate.json",
+          JSON.stringify(
+            {
+              simulated: true,
+              targetServerId: "1",
+              failure,
+              detailVisits,
+              requests: marketRequests,
+              calls: await searchPage.evaluate(() => window.calls),
+            },
+            null,
+            2,
+          ),
+        );
+      },
+    ),
   );
 
   await check("详情连续读取失败保留重试URL，恢复后不把失败当作空结果", () =>
@@ -2141,7 +2182,7 @@ try {
     );
   }
 
-  await check("第一页列表无同名装备直接换筛选，不查询后续页", () =>
+  await check("第一页前5条无同名装备直接停止，不查询后续页", () =>
     withSource(
       {
         pages: [
@@ -2251,7 +2292,7 @@ try {
       kindId: "20",
       description: equipmentDescription.replace(
         "防御：50",
-        eid === "saved-1" ? "防御：49" : "防御：51",
+        eid === "saved-1" ? "防御：49" : "防御：50",
       ),
     });
     let saved;
@@ -2504,12 +2545,19 @@ try {
         const calls = await searchPage.evaluate(() => window.calls);
         assert.equal(calls[0].init_attrs, '{"102":"25"}');
         assert.equal(calls.at(-1).init_attrs, '{"102":"20"}');
-        assert.ok(calls.every((call) => call.server_type === "3" && call.level_min === undefined));
+        assert.ok(
+          calls.every(
+            (call) =>
+              call.serverid === "1" &&
+              call.server_type === undefined &&
+              call.level_min === undefined,
+          ),
+        );
       },
     );
   });
 
-  await check("零样本首屏立即切换阶段，不为行预算继续翻页", () =>
+  await check("单条件前5条零样本立即停止，不为行预算继续翻页", () =>
     withSource(
       {
         pages: Array.from({ length: 6 }, (_, page) =>

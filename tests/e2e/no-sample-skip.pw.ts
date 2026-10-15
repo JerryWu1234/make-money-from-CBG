@@ -24,6 +24,7 @@ import { buildProductDocument } from "../../server/analysis/product-document";
 for (const rule of [
   "no-sample",
   "no-sample-large-input",
+  "two-failures",
   "zero-level",
   "wild",
   "special-type",
@@ -31,7 +32,8 @@ for (const rule of [
   test(`资产查价直接分析 ${rule}：汇总、详情与刷新`, async ({ page }, testInfo) => {
     const crawl = new CrawlStore(":memory:");
     const record = valuationRecord("skip-workflow");
-    const noSample = rule.startsWith("no-sample");
+    record.listing.serverId = "1";
+    const noSample = rule.startsWith("no-sample") || rule === "two-failures";
     if (rule === "no-sample-large-input")
       record.detail!.tabs[0].text += "\n【模拟长原文】" + "x".repeat(140 * 1024);
     const captured = {
@@ -52,7 +54,14 @@ for (const rule of [
       tooltips: [],
       items: [
         { index: 0, kind: "equipment", category: "腰带", name: "无样本腰带", description },
-        { index: 1, kind: "equipment", category: "腰带", name: "有报价腰带", description },
+        {
+          index: 1,
+          kind: "equipment",
+          category: "腰带",
+          kindId: "20",
+          name: "有报价腰带",
+          description,
+        },
         {
           index: 2,
           kind: "equipment",
@@ -130,7 +139,7 @@ for (const rule of [
       true,
       true,
     );
-    const samplePrices = [100, 110, 120, 130, 140];
+    const samplePrices = [900, 100, 120, 130, 140];
     const sampleMinimum = 100;
     let equipmentCalls = 0,
       equipmentCheckpoints = 0,
@@ -140,6 +149,22 @@ for (const rule of [
     const source: EquipmentSource = {
       findCandidates: async (items) => {
         equipmentCalls++;
+        if (rule === "two-failures" && items.some((item) => item.name === "无样本腰带")) {
+          return {
+            queries: ["模拟查询失败，非真实行情"],
+            searchItems: items.map((item) => ({
+              key: item.key,
+              failure: { stage: "query_submit", message: "模拟按钮超时" },
+            })),
+            items: items.map((item) => ({
+              key: item.key,
+              query: "模拟本服1单件查询：按钮超时，非真实行情",
+              searchState: "read_failed" as const,
+              candidates: [],
+              note: "模拟单件查询按钮超时",
+            })),
+          };
+        }
         expect(
           items.some((item) =>
             ["专用腰带", "不支持等级腰带", "初始气血未知腰带"].includes(item.name),
@@ -155,12 +180,14 @@ for (const rule of [
             item.name === "无样本腰带"
               ? {
                   key: item.key,
+                  query: "模拟本服1 / 100级腰带 / 前5条无有效样本，非真实行情",
                   candidates: [],
                   searchState: "pending" as const,
                   samplingStopped: true,
                 }
               : {
                   key: item.key,
+                  query: "模拟本服1 / 100级腰带 / 前5条详情核验基础值≤目标，非真实行情",
                   searchState: "completed" as const,
                   candidates: samplePrices.map((price) => ({
                     url: "https://xyq.cbg.163.com/equip/1/fixture-skip-" + price,
@@ -177,8 +204,12 @@ for (const rule of [
           ),
         };
       },
-      readSource: async (url) =>
-        `<p>在售</p><h1>有报价腰带</h1><pre>${description}</pre><div>挂牌价：¥${url.match(/fixture-skip-(\d+)/)![1]}</div>`,
+      readSource: async (url) => {
+        const price = Number(url.match(/fixture-skip-(\d+)/)![1]);
+        const attributes =
+          price === 900 ? description : description.replace("防御：50", "防御：40");
+        return `<main data-cbg-kind-id="20"><p>在售</p><h1>有报价腰带</h1><pre>${attributes}</pre><div>挂牌价：¥${price}</div></main>`;
+      },
     };
     const runner = new AnalysisRunner(store, async () => ({
       model: "fixture-model",
@@ -322,7 +353,19 @@ for (const rule of [
         searchState: "skipped",
         referencePrice: null,
       });
+      if (rule === "two-failures")
+        expect(result.equipment_pricing?.items[0]).toMatchObject({
+          searchState: "skipped",
+          searchFailureCount: 2,
+          referencePrice: null,
+          skipReason: expect.stringContaining("累计失败2次"),
+        });
       expect(result.equipment_pricing?.items[1].referencePrice).toBe(sampleMinimum);
+      expect(result.equipment_pricing?.items[1].candidates[1]).toMatchObject({
+        verified: true,
+        matchType: "similar",
+        price: sampleMinimum,
+      });
       expect(result.pet_pricing?.items[0]).toMatchObject({
         searchState: "skipped",
         referencePrice: null,
@@ -358,13 +401,15 @@ for (const rule of [
       await dialog.getByText("查看估值依据与查价记录", { exact: true }).click();
       for (const asset of ["装备", "宝宝"]) {
         const skipLabel =
-          asset === "装备" || noSample
-            ? "无样本，未计入参考合计"
-            : rule === "zero-level"
-              ? "0级宝宝，未计入参考合计"
-              : rule === "special-type"
-                ? "官网无独立交易筛选的特殊宝宝，未计入参考合计"
-                : "野生宝宝，未计入参考合计";
+          asset === "装备" && rule === "two-failures"
+            ? "累计失败2次"
+            : asset === "装备" || noSample
+              ? "无样本，未计入参考合计"
+              : rule === "zero-level"
+                ? "0级宝宝，未计入参考合计"
+                : rule === "special-type"
+                  ? "官网无独立交易筛选的特殊宝宝，未计入参考合计"
+                  : "野生宝宝，未计入参考合计";
         await expect(
           dialog.getByRole("region", {
             name: asset + (asset === "宝宝" && !noSample ? "查价" : "联网查价"),
@@ -377,6 +422,7 @@ for (const rule of [
       );
       await expect(dialog).toContainText("市场售价未知");
       await expect(dialog).toContainText("采用实际有效样本的最低挂牌价");
+      await expect(dialog).toContainText("基础值不高于目标的最低挂牌价");
       if (noSample) await expect(dialog).toContainText("随身装备不再核验");
       await expect(dialog.getByRole("region", { name: "装备联网查价", exact: true })).toContainText(
         "专用或绑定装备，未计入参考合计",
@@ -394,15 +440,32 @@ for (const rule of [
         );
       await expect(dialog).not.toContainText("还有未定价项目，总估值暂无法计算。");
       await dialog.screenshot({ path: testInfo.outputPath("no-sample-skip.png") });
+      const pricedCard = dialog
+        .getByRole("region", { name: "装备联网查价", exact: true })
+        .locator(".analysis-evidence-card")
+        .filter({ has: page.locator("header strong", { hasText: "有报价腰带" }) });
+      await expect(pricedCard).not.toContainText("仅1条挂牌样本");
+      await pricedCard.getByText("有报价腰带 · 同配置，已核实来源", { exact: true }).click();
+      await pricedCard
+        .getByText("有报价腰带 · 相近配置，已核实来源", { exact: true })
+        .first()
+        .click();
+      await pricedCard.screenshot({ path: testInfo.outputPath("base-upper-bound-price.png") });
+      if (rule === "two-failures")
+        await dialog
+          .getByRole("region", { name: "装备联网查价", exact: true })
+          .locator(".analysis-evidence-card")
+          .filter({ has: page.locator("header strong", { hasText: "无样本腰带" }) })
+          .screenshot({ path: testInfo.outputPath("two-failures-skip.png") });
       await page.reload();
       await expect(completed.getByRole("article")).toHaveCount(1);
       expect([equipmentCalls, petCalls, aiCalls]).toEqual([
-        2,
+        rule === "two-failures" ? 3 : 2,
         noSample || rule === "special-type" ? 1 : 0,
         1,
       ]);
       expect(gearCalls).toBe(noSample ? 1 : 0);
-      expect(equipmentCheckpoints).toBe(2);
+      expect(equipmentCheckpoints).toBe(rule === "two-failures" ? 3 : 2);
       await writeFile(
         testInfo.outputPath("no-sample-skip.json"),
         JSON.stringify(
@@ -423,6 +486,20 @@ for (const rule of [
       );
     } finally {
       await runner.shutdown();
+      const overview = store.overview();
+      await writeFile(
+        testInfo.outputPath("workflow-state.json"),
+        JSON.stringify(
+          {
+            overview,
+            details: overview.records.items.map((item) =>
+              item.taskId ? store.detail(item.taskId, profile) : null,
+            ),
+          },
+          null,
+          2,
+        ),
+      );
       crawl.db.close();
     }
   });

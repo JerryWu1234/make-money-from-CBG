@@ -234,12 +234,14 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     expect(store.overview().runs).toHaveLength(1);
     const startsBeforeRefresh = starts;
     await page.reload();
-    await expect(page.getByLabel("分析模型")).toHaveValue("deepseek-v4-pro");
+    await expect(page.getByLabel("分析模型")).toHaveValue("");
     await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
       2,
     );
     expect(starts).toBe(startsBeforeRefresh);
     expect(calls).toBe(3);
+    expect(store.overview().run?.model).toBe("deepseek-v4-pro");
+    await page.getByLabel("分析模型").selectOption("deepseek-v4-pro");
     // Collection saves six new complete goods; the next analysis handles only these six.
     for (const key of ["c", "d", "e", "f", "g", "h"]) {
       const record = analysisRecord(key);
@@ -369,7 +371,7 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
     store.release(owner);
     const oldResult = store.detail(completed.id);
     let starts = 0,
-      resumes = 0;
+      retries = 0;
     const obsolete = !!savedVersion && savedVersion !== CALCULATION_VERSION;
     const runner = new AnalysisRunner(store, async () => ({
       model: "test-model",
@@ -417,9 +419,9 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
                 await runner.start(input.provider, false, profile, false, input.model),
               );
               break;
-            case "/api/analysis/resume":
-              resumes++;
-              await runner.resume(input.runId);
+            case "/api/analysis/retry":
+              retries++;
+              await runner.resume(input.runId, true);
               body = store.run(input.runId);
               break;
             default:
@@ -450,7 +452,7 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
         page.getByRole("button", { name: /^重试失败(?:及待补齐)?的 1 件$/ }),
       ).toHaveCount(obsolete ? 0 : 1);
       if (obsolete) {
-        await expect(runner.resume(oldRunId)).rejects.toThrow("估值规则已更新");
+        await expect(runner.resume(oldRunId, true)).rejects.toThrow("估值规则已更新");
         await expect(
           page.getByText("估值规则已更新，下次分析使用新规则，已有结果保留。", {
             exact: true,
@@ -458,10 +460,18 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
         ).toBeVisible();
         await page.screenshot({ path: testInfo.outputPath("analysis-rule-upgrade-fixture.png") });
       }
-      await primary.click();
+      if (obsolete) await primary.click();
+      else {
+        await expect(runner.resume(oldRunId)).rejects.toThrow(
+          "请先重试失败或待补齐的商品，再继续分析",
+        );
+        expect(store.activeRun()).toBeNull();
+        expect(store.run(oldRunId)).toMatchObject({ completed: 1, failed: 1, queued: 1 });
+        await page.getByRole("button", { name: /^重试失败(?:及待补齐)?的 1 件$/ }).click();
+      }
       await expect(page.getByRole("button", { name: "暂停分析", exact: true })).toBeVisible();
       expect(starts).toBe(obsolete ? 1 : 0);
-      expect(resumes).toBe(obsolete ? 0 : 1);
+      expect(retries).toBe(obsolete ? 0 : 1);
       expect(store.overview().runs).toHaveLength(obsolete ? 2 : 1);
       const active = store.activeRun()!;
       if (obsolete) {
@@ -475,6 +485,10 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
         });
       } else expect(active.id).toBe(oldRunId);
       expect(store.detail(completed.id)).toEqual(oldResult);
+      await page.screenshot({
+        path: testInfo.outputPath("analysis-rule-compatibility-fixture.png"),
+        fullPage: true,
+      });
     } finally {
       await runner.shutdown();
       crawl.close();

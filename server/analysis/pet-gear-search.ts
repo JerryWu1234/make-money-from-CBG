@@ -1,4 +1,5 @@
 import type { SavedRoleRecord } from "../crawler/types";
+import { pricingCandidatesFresh, pricingTimestampFresh } from "./pricing-integrity";
 import { createPetGearSource } from "./browser-pet-gear-source";
 import type { PetPricingSnapshot } from "./pet-pricing";
 import {
@@ -17,12 +18,8 @@ export async function searchPetGearPricing(
 ): Promise<PetGearPricingSnapshot> {
   signal.throwIfAborted();
   const inventory = petGearInventory(record);
-  const previousAge = previous ? Date.now() - Date.parse(previous.searchedAt) : Infinity;
   const reusable =
-    previous?.inputHash === inventory.inputHash &&
-    Number.isFinite(previousAge) &&
-    previousAge >= -60_000 &&
-    previousAge < 24 * 60 * 60 * 1000;
+    previous?.inputHash === inventory.inputHash && pricingTimestampFresh(previous.searchedAt);
   const snapshot: PetGearPricingSnapshot = {
     version: 1,
     inputHash: inventory.inputHash,
@@ -61,6 +58,7 @@ export async function searchPetGearPricing(
       const savedAge = saved?.queriedAt ? Date.now() - Date.parse(saved.queriedAt) : Infinity;
       return saved &&
         !saved.skippedWithPet &&
+        pricingCandidatesFresh(saved.candidates) &&
         ["completed", "skipped", "pending", "read_failed"].includes(saved.searchStatus || "") &&
         savedAge >= -60_000 &&
         savedAge < 24 * 60 * 60 * 1000 &&
@@ -90,7 +88,7 @@ export async function searchPetGearPricing(
       !["completed", "skipped"].includes(item.searchStatus || ""),
   );
   if (pending.length) {
-    const source = await createPetGearSource(signal);
+    const source = await createPetGearSource(signal, record.listing.serverId);
     try {
       const result = await source.findCandidates(pending, signal);
       signal.throwIfAborted();

@@ -3,7 +3,11 @@ import type {
   EquipmentPricingSnapshot,
   EquipmentSearchCursor,
 } from "./equipment-pricing";
-import { unfinishedPricingSearch, validateExactPricing } from "./pricing-integrity";
+import {
+  unfinishedPricingSearch,
+  validateExactPricing,
+  pricingCandidatesFresh,
+} from "./pricing-integrity";
 
 export type PricingSearchState =
   | "completed"
@@ -96,6 +100,7 @@ export function resumePricingItems<T extends EquipmentPricingSnapshot>(
     const saved = reusable ? previous!.items.find((value) => value.key === item.key) : undefined;
     if (
       saved &&
+      pricingCandidatesFresh(saved.candidates) &&
       ["completed", "unsupported", "pending", "read_failed", "skipped"].includes(
         saved.searchState || "",
       )
@@ -201,6 +206,12 @@ export function pricingSearchAdvanced(
     return false;
   return current.items.some((item) => {
     const saved = previous?.items.find((value) => value.key === item.key);
+    if (
+      item.searchState === "pending" &&
+      item.searchFailureCount === 1 &&
+      !saved?.searchFailureCount
+    )
+      return true;
     if (
       ["completed", "unsupported", "skipped"].includes(item.searchState || "") &&
       item.searchState !== saved?.searchState

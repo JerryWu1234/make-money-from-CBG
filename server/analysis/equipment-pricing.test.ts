@@ -36,6 +36,7 @@ const sourcePage = (price: number, desc = description, status = "在售") =>
   "</div>";
 function recordWithEquipment(empty = false): SavedRoleRecord {
   const record = valuationRecord();
+  record.listing.serverId = "1";
   record.detail!.equipmentCapture = {
     version: 1,
     collectedAt: record.detail!.collectedAt,
@@ -106,7 +107,91 @@ async function matchedPricing(record = recordWithEquipment()) {
 }
 
 describe("装备联网查价的来源核对", () => {
-  it("本件读取失败保存检查点后停止，不查询后续装备", async () => {
+  it.each(["人物装备", "灵饰"])(
+    "%s统一采用基础值不高于目标的前五条合格样本最低价，保持官方顺序",
+    async (category) => {
+      const record = recordWithEquipment();
+      const targetDescription =
+        category === "灵饰"
+          ? "等级：100\n防御：50\n精炼等级：6\n附加属性：\n气血+100 [+168]"
+          : description;
+      Object.assign(record.detail!.tabs.at(-1)!.items![0], {
+        modelId: "2912",
+        category,
+        description: targetDescription,
+      });
+      const prices = [900, 100, 1];
+      const descriptions = [50, 49, 51].map((value) =>
+        targetDescription.replace("防御：50", "防御：" + value),
+      );
+      const rows = prices.map((price, index) => ({
+        ...candidate(price, `https://xyq.cbg.163.com/equip/1/unified-${index}`),
+        quote: quote(price, descriptions[index]),
+      }));
+      const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+        findCandidates: async () => searchResponse(rows),
+        readSource: async (url) => {
+          const index = rows.findIndex((row) => row.url === url);
+          return (
+            '<main data-cbg-model-id="2912">' +
+            sourcePage(prices[index], descriptions[index]) +
+            "</main>"
+          );
+        },
+      });
+      expect(pricing).toMatchObject({ total: 100, knownTotal: 100, searchComplete: true });
+      expect(pricing.items[0]).toMatchObject({
+        comparisonPolicy: "base-upper-bound-v1",
+        status: "priced",
+        referencePrice: 100,
+      });
+      expect(pricing.items[0].candidates.map((row) => row.url)).toEqual(rows.map((row) => row.url));
+      expect(pricing.items[0].candidates.slice(0, 2).map((row) => row.matchType)).toEqual([
+        "exact",
+        "similar",
+      ]);
+      expect(pricing.items[0].candidates[1].differences?.length).toBeGreaterThan(0);
+      expect(pricing.items[0].candidates[2]).toMatchObject({
+        verified: false,
+        reason: expect.stringContaining("高于目标"),
+      });
+      expect(pricing.items[0].similarEstimate).toBeUndefined();
+      const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"));
+      const combined = combineEquipmentPricing(
+        calculateValuation(record, profile),
+        record,
+        pricing,
+      );
+      const line = combined.items.find((row) => row.name.startsWith("装备："))!;
+      expect(line).toMatchObject({ amount: 100, confirmed: true });
+      expect(line.formula).toContain("基础属性≤目标");
+      expect(line.formula).toContain("2条样本");
+      expect(line.evidence).toHaveLength(2);
+    },
+  );
+
+  it("旧快照缺少统一池身份时重新查询，不能沿用旧的同配优先报价", async () => {
+    const record = recordWithEquipment();
+    const { pricing } = await matchedPricing(record);
+    const legacy = structuredClone(pricing);
+    delete (legacy.items[0] as EquipmentPricingItem & { comparisonPolicy?: string })
+      .comparisonPolicy;
+    const findCandidates = vi.fn().mockResolvedValue(searchResponse([candidate(80)]));
+    const refreshed = await searchEquipmentPrices(
+      record,
+      new AbortController().signal,
+      {
+        findCandidates,
+        readSource: async () => sourcePage(80),
+      },
+      undefined,
+      legacy,
+    );
+    expect(findCandidates).toHaveBeenCalledOnce();
+    expect(refreshed.total).toBe(80);
+  });
+
+  it("本件首次读取失败保存检查点后待重试，不查询后续装备", async () => {
     const record = recordWithEquipment();
     const tab = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!;
     tab.items!.push({ ...tab.items![0], index: 1 }, { ...tab.items![0], index: 2 });
@@ -133,7 +218,7 @@ describe("装备联网查价的来源核对", () => {
     expect(checkpoint).toHaveBeenCalledTimes(2);
     expect(snapshot.items.map((item) => item.searchState)).toEqual([
       "completed",
-      "read_failed",
+      "pending",
       "pending",
     ]);
     expect(snapshot.searchComplete).toBe(false);
@@ -286,7 +371,11 @@ describe("装备联网查价的来源核对", () => {
         readSource: async () => sourcePage(100),
       },
     );
-    expect(result.items[0]).toMatchObject({ searchState: "read_failed", referencePrice: null });
+    expect(result.items[0]).toMatchObject({
+      searchState: "pending",
+      searchFailureCount: 1,
+      referencePrice: null,
+    });
     expect(result.items[0].candidates.at(-1)?.reason).toContain("报价冲突");
     expect(result.searchComplete).toBe(false);
     expect(result.total).toBeNull();
@@ -366,7 +455,11 @@ describe("装备联网查价的来源核对", () => {
       },
     });
     expect(first).toMatchObject({ total: null, knownTotal: 0, searchComplete: false });
-    expect(first.items[0]).toMatchObject({ searchState: "read_failed", referencePrice: null });
+    expect(first.items[0]).toMatchObject({
+      searchState: "pending",
+      searchFailureCount: 1,
+      referencePrice: null,
+    });
     expect(first.items[0].candidates.filter((row) => row.verified)).toHaveLength(4);
     const recovered = await searchEquipmentPrices(
       record,
@@ -507,7 +600,7 @@ describe("装备联网查价的来源核对", () => {
     );
     expect(firstSearch.mock.calls.at(-1)![0]).toHaveLength(2);
   });
-  it("已读完但只有3条相近报价按实际数量生成平均价和范围，同配报价优先", async () => {
+  it("前5条中排除更高属性样本，同值与较低基础值报价统一取最低价", async () => {
     const record = recordWithEquipment();
     record.detail!.tabs.at(-1)!.items![0].modelId = "2912";
     const descriptions = [48, 49, 52].map((value) =>
@@ -530,32 +623,30 @@ describe("装备联网查价的来源核对", () => {
       readSource: vi.fn(async (url: string) => pages.get(url)!),
     };
     const result = await searchEquipmentPrices(record, new AbortController().signal, source);
-    expect(result).toMatchObject({ total: null, knownTotal: 0 });
+    expect(result).toMatchObject({ total: 100, knownTotal: 100 });
     expect(result.items[0]).toMatchObject({
-      referencePrice: null,
-      similarEstimate: {
-        status: "range",
-        sampleCount: 3,
-        median: 120,
-        average: 120,
-        range: { min: 100, max: 140 },
-      },
+      status: "priced",
+      referencePrice: 100,
     });
+    expect(result.items[0].similarEstimate).toBeUndefined();
     expect(
-      result.items[0].candidates.every((value) => value.verified && value.matchType === "similar"),
+      result.items[0].candidates
+        .slice(0, 2)
+        .every((value) => value.verified && value.matchType === "similar"),
     ).toBe(true);
+    expect(result.items[0].candidates[2].reason).toContain("高于目标");
     const exact = candidate(110, "https://xyq.cbg.163.com/equip/1/exact");
     pages.set(exact.url, sourcePage(110));
     source.findCandidates.mockResolvedValue(searchResponse([...candidates, exact]));
     const mixed = await searchEquipmentPrices(record, new AbortController().signal, source);
-    expect(mixed.items[0]).toMatchObject({ status: "priced", referencePrice: 110 });
-    expect(mixed.total).toBe(110);
+    expect(mixed.items[0]).toMatchObject({ status: "priced", referencePrice: 100 });
+    expect(mixed.total).toBe(100);
   });
 
   it("相近装备保留官方顺序前五件，不按属性距离另挑三件", async () => {
     const record = recordWithEquipment();
     record.detail!.tabs.at(-1)!.items![0].modelId = "2912";
-    const stats = [55, 54, 49, 51, 48];
+    const stats = [45, 44, 49, 41, 48];
     const prices = [100, 110, 120, 130, 145];
     const descriptions = stats.map((value) => description.replace("防御：50", "防御：" + value));
     const candidates = descriptions.map((desc, index) => ({
@@ -575,18 +666,14 @@ describe("装备联网查价的来源核对", () => {
       findCandidates: async () => response,
       readSource: async (url) => pages.get(url)!,
     });
-    expect(result.items[0].similarEstimate).toMatchObject({
-      status: "range",
-      sampleCount: 5,
-      average: 121,
-      median: 120,
-    });
+    expect(result.items[0]).toMatchObject({ status: "priced", referencePrice: 100 });
+    expect(result.items[0].similarEstimate).toBeUndefined();
     expect(result.items[0].candidates.map((value) => value.price)).toEqual(prices);
     expect(buildEquipmentEstimate(result.items[0].candidates).average).toBe(121);
     expect(JSON.parse(result.rawResponse!).items[0].candidates).toHaveLength(5);
   });
 
-  it("离线重放核心属性核验后的报价，分散时显示平均值与差异", () => {
+  it("离线重放历史样本，更高基础值不再采用，合格样本取最低价", () => {
     const record = recordWithEquipment();
     record.detail!.tabs.at(-1)!.items = savedComparables.items.map(({ target }) => ({
       ...target,
@@ -610,17 +697,22 @@ describe("装备联网查价的来源核对", () => {
           new Date().toISOString(),
         );
       });
+      const expected: Record<string, number[]> = {
+        水晶帽: [],
+        神火扇: [],
+        八卦坠: [1194.4, 1045, 1192, 888],
+        龙骨甲: [],
+      };
+      const prices = verified.filter((row) => row.verified).map((row) => row.price);
+      expect(prices, item.name).toEqual(expected[item.name]);
       const estimate = buildEquipmentEstimate(verified);
-      expect(
-        estimate.status,
-        item.name + ": " + verified.map((row) => row.reason).join(" / "),
-      ).toBe("range");
-      expect(estimate.sampleCount).toBeGreaterThanOrEqual(3);
-      expect(estimate.range).not.toBeNull();
-      expect(estimate.average).toBeGreaterThan(0);
-      expect(
-        verified.filter((row) => row.verified).every((row) => row.matchType === "similar"),
-      ).toBe(true);
+      if (!prices.length) {
+        expect(estimate.status).toBe("insufficient");
+        expect(estimate.range).toBeNull();
+      } else {
+        expect(estimate.sampleCount).toBe(4);
+        expect(estimate.range?.min).toBe(888);
+      }
     }
   });
 
@@ -806,6 +898,7 @@ describe("装备联网查价的来源核对", () => {
       referencePrice: null,
     });
     expect(inventory.items[1].issues).not.toContain("装备等级缺失");
+    expect(inventory.items[1].comparisonPolicy).toBeUndefined();
     const { pricing, search } = await matchedPricing(record);
     expect(search.mock.calls[0][0].map((item: { name: string }) => item.name)).toEqual([
       equipmentName,
@@ -833,6 +926,7 @@ describe("装备联网查价的来源核对", () => {
         status: "no_match",
         referencePrice: null,
       });
+      expect(inventory.items[0].comparisonPolicy).toBeUndefined();
       const findCandidates = vi.fn().mockResolvedValue({
           queries: ["元身独立表单"],
           items: [{ key: "道具/法宝:0", candidates: [] }],
@@ -1177,7 +1271,7 @@ describe("装备联网查价的来源核对", () => {
     expect(read).not.toHaveBeenCalled();
   });
 
-  it("首次组件失败没有实际查询时，仍保存逐件read_failed诊断且不采纳返回金额", async () => {
+  it("首次组件失败没有实际查询时，保留诊断和失败计数等待重试且不采纳金额", async () => {
     const read = vi.fn();
     const pricing = await searchEquipmentPrices(
       recordWithEquipment(),
@@ -1198,7 +1292,11 @@ describe("装备联网查价的来源核对", () => {
         readSource: read,
       },
     );
-    expect(pricing.items[0]).toMatchObject({ searchState: "read_failed", referencePrice: null });
+    expect(pricing.items[0]).toMatchObject({
+      searchState: "pending",
+      searchFailureCount: 1,
+      referencePrice: null,
+    });
     expect(pricing.items[0].issues.join(" ")).toContain("bootstrap");
     expect(pricing.searchItems).toMatchObject([{ failure: { stage: "bootstrap" } }]);
     expect(pricing.searchComplete).toBe(false);
@@ -1216,7 +1314,11 @@ describe("装备联网查价的来源核对", () => {
       },
     });
     expect(failed).toMatchObject({ searchComplete: false, total: null, knownTotal: 0 });
-    expect(failed.items[0]).toMatchObject({ searchState: "read_failed", referencePrice: null });
+    expect(failed.items[0]).toMatchObject({
+      searchState: "pending",
+      searchFailureCount: 1,
+      referencePrice: null,
+    });
     expect(failed.items[0].candidates[0].reason).toBe("主商品区域未识别");
     const find = vi.fn().mockResolvedValue(searchResponse([candidate()]));
     const retried = await searchEquipmentPrices(
@@ -1401,7 +1503,7 @@ describe("装备联网查价的来源核对", () => {
         100,
         "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=buy_show_equip_info&eid=fixture-eid&" +
           parameter +
-          "=132",
+          "=1",
       ),
     );
     const search = vi.fn().mockResolvedValue(searchResponse(candidates));
@@ -1460,7 +1562,7 @@ describe("装备联网查价的来源核对", () => {
       label: "更高属性数字前缀相同",
       source: sourcePage(100, description.replace("防御：50", "防御：500")),
       changed: { quote: quote(100, description.replace("防御：50", "防御：500")) },
-      reason: "关键属性",
+      reason: "高于目标",
     },
     {
       label: "整号总价",
@@ -1563,11 +1665,11 @@ describe("装备联网查价的来源核对", () => {
         new Date().toISOString(),
       );
       expect(result.verified).toBe(false);
-      expect(result.reason).toContain("多出");
+      expect(result.reason).toMatch(/多出|缺失/);
     },
   );
 
-  it("有官方类型证据的额外双加可作相近参考，但0耐久修理次数不放宽", () => {
+  it("目标没有对应双加基础值时不采用，0耐久修理次数也不放宽", () => {
     const item = { ...equipmentInventory(recordWithEquipment()).items[0], modelId: "2912" };
     const desc = description + "\n力量：20";
     const verified = verifyEquipmentCandidate(
@@ -1576,8 +1678,8 @@ describe("装备联网查价的来源核对", () => {
       '<main data-cbg-model-id="2912">' + sourcePage(100, desc) + "</main>",
       new Date().toISOString(),
     );
-    expect(verified).toMatchObject({ verified: true, matchType: "similar", price: 100 });
-    expect(verified.differences?.join(" ")).toContain("力量");
+    expect(verified).toMatchObject({ verified: false, price: 100 });
+    expect(verified.reason).toContain("力量");
     const broken = description.replace("耐久：300", "耐久：0");
     const changed = broken.replace("修理失败：0", "修理失败：3");
     const rejected = verifyEquipmentCandidate(
@@ -1614,7 +1716,7 @@ describe("装备联网查价的来源核对", () => {
         new Date().toISOString(),
       );
       expect(result.verified).toBe(false);
-      expect(result.reason).toContain("多出");
+      expect(result.reason).toMatch(/多出|缺失/);
     },
   );
 
