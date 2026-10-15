@@ -705,6 +705,7 @@ export class AnalysisStore {
     task: AnalysisTask,
     snapshot: EquipmentPricingSnapshot,
     owner: string,
+    keepRunning = false,
   ): AnalysisTask {
     if (
       !task.profile?.equipmentSearch ||
@@ -724,12 +725,13 @@ export class AnalysisStore {
       if (
         this.db
           .prepare(
-            "UPDATE analysis_tasks SET equipment_pricing_json=?,prompt_text=?,prompt_hash=?,status='queued',error=NULL WHERE id=? AND status='running' AND equipment_pricing_json IS ?",
+            "UPDATE analysis_tasks SET equipment_pricing_json=?,prompt_text=?,prompt_hash=?,status=?,error=NULL WHERE id=? AND status='running' AND equipment_pricing_json IS ?",
           )
           .run(
             JSON.stringify(snapshot),
             prompt,
             textHash(prompt),
+            keepRunning ? "running" : "queued",
             task.id,
             task.equipmentPricing ? JSON.stringify(task.equipmentPricing) : null,
           ).changes !== 1

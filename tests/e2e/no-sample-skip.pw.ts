@@ -126,6 +126,7 @@ for (const rule of [
     const samplePrices = [100, 110, 120, 130, 140];
     const sampleMinimum = 100;
     let equipmentCalls = 0,
+      equipmentCheckpoints = 0,
       petCalls = 0,
       gearCalls = 0,
       aiCalls = 0;
@@ -137,28 +138,34 @@ for (const rule of [
         );
         return {
           queries: ["模拟条件，非真实行情"],
-          searchItems: [
-            { key: items[0].key, modes: [{ mode: "exact", exhausted: false }] },
-            { key: items[1].key, modes: [{ mode: "exact", exhausted: false }] },
-          ],
-          items: [
-            { key: items[0].key, candidates: [], searchState: "pending", samplingStopped: true },
-            {
-              key: items[1].key,
-              searchState: "completed",
-              candidates: samplePrices.map((price) => ({
-                url: "https://xyq.cbg.163.com/equip/1/fixture-skip-" + price,
-                title: "有报价腰带",
-                price,
-                priceType: "listing" as const,
-                quote: "挂牌价：¥" + price,
-                verified: false,
-                reason: "",
-                fetchedAt: null,
-                sourceHash: null,
-              })),
-            },
-          ],
+          searchItems: items.map((item) => ({
+            key: item.key,
+            modes: [{ mode: "exact", exhausted: false }],
+          })),
+          items: items.map((item) =>
+            item.name === "无样本腰带"
+              ? {
+                  key: item.key,
+                  candidates: [],
+                  searchState: "pending" as const,
+                  samplingStopped: true,
+                }
+              : {
+                  key: item.key,
+                  searchState: "completed" as const,
+                  candidates: samplePrices.map((price) => ({
+                    url: "https://xyq.cbg.163.com/equip/1/fixture-skip-" + price,
+                    title: "有报价腰带",
+                    price,
+                    priceType: "listing" as const,
+                    quote: "挂牌价：¥" + price,
+                    verified: false,
+                    reason: "",
+                    fetchedAt: null,
+                    sourceHash: null,
+                  })),
+                },
+          ),
         };
       },
       readSource: async (url) =>
@@ -166,8 +173,12 @@ for (const rule of [
     };
     const runner = new AnalysisRunner(store, async () => ({
       model: "fixture-model",
-      searchEquipment: (record, signal, settings, previous) =>
-        searchEquipmentPrices(record, signal, source, settings, previous),
+      searchEquipment: (record, signal, settings, previous, _progress, checkpoint) =>
+        searchEquipmentPrices(record, signal, source, settings, previous, (snapshot) => {
+          checkpoint?.(snapshot);
+          equipmentCheckpoints++;
+          expect(store.activeRun()?.status).toBe("running");
+        }),
       searchPets: (record, signal, previous) =>
         searchPetPricing(
           record,
@@ -369,11 +380,12 @@ for (const rule of [
       await page.reload();
       await expect(completed.getByRole("article")).toHaveCount(1);
       expect([equipmentCalls, petCalls, aiCalls]).toEqual([
-        1,
+        2,
         noSample || rule === "special-type" ? 1 : 0,
         1,
       ]);
       expect(gearCalls).toBe(noSample ? 1 : 0);
+      expect(equipmentCheckpoints).toBe(2);
       await writeFile(
         testInfo.outputPath("no-sample-skip.json"),
         JSON.stringify(
@@ -383,7 +395,7 @@ for (const rule of [
             inputBytes,
             samplePrices,
             sampleMinimum,
-            calls: { equipmentCalls, petCalls, gearCalls, aiCalls },
+            calls: { equipmentCalls, equipmentCheckpoints, petCalls, gearCalls, aiCalls },
             bareValue: bare.model_value,
             expectedValue: bare.model_value! + sampleMinimum,
             detail: store.detail(saved.taskId, profile),

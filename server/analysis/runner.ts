@@ -22,6 +22,7 @@ export type AnalysisClient = {
     settings?: ValuationSettings,
     previous?: EquipmentPricingSnapshot,
     onProgress?: (progress: PricingSearchProgress) => void,
+    onCheckpoint?: (snapshot: EquipmentPricingSnapshot) => void,
   ) => Promise<EquipmentPricingSnapshot>;
   searchPets?: (
     record: SavedRoleRecord,
@@ -295,6 +296,15 @@ export class AnalysisRunner {
               task.profile.settings,
               task.equipmentPricing,
               reportProgress,
+              (checkpoint) => {
+                signal.throwIfAborted();
+                task = this.store.saveEquipmentPricing(
+                  task!,
+                  structuredClone(checkpoint),
+                  owner,
+                  true,
+                );
+              },
             ),
             signal,
           );

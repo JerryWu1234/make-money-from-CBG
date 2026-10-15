@@ -227,6 +227,7 @@ async function searchEquipment(
   settings?: ValuationSettings,
   previous?: EquipmentPricingSnapshot,
   onProgress?: (progress: import("./analysis/equipment-pricing").PricingSearchProgress) => void,
+  onCheckpoint?: (snapshot: EquipmentPricingSnapshot) => void,
 ) {
   try {
     signal.throwIfAborted();
@@ -235,11 +236,18 @@ async function searchEquipment(
       !equipmentCaptureSearchable(record, plan) ||
       !plan.items.some((item) => item.searchState === "pending")
     )
-      return await searchEquipmentPrices(record, signal, unusedEquipmentSource, settings, previous);
+      return await searchEquipmentPrices(
+        record,
+        signal,
+        unusedEquipmentSource,
+        settings,
+        previous,
+        onCheckpoint,
+      );
     const source = await createEquipmentSource(signal, onProgress);
     try {
       signal.throwIfAborted();
-      return await searchEquipmentPrices(record, signal, source, settings, previous);
+      return await searchEquipmentPrices(record, signal, source, settings, previous, onCheckpoint);
     } finally {
       await source.close();
     }

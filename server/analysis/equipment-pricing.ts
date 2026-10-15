@@ -599,6 +599,7 @@ export async function searchEquipmentPrices(
   source: EquipmentSource,
   settings?: ValuationSettings,
   previous?: EquipmentPricingSnapshot,
+  onCheckpoint?: (snapshot: EquipmentPricingSnapshot) => void,
 ): Promise<EquipmentPricingSnapshot> {
   const snapshot = resumePricingItems(equipmentPricingPlan(record, settings), previous, true);
   signal.throwIfAborted();
@@ -620,8 +621,27 @@ export async function searchEquipmentPrices(
     ? JSON.stringify({ ...JSON.parse(snapshot.requestText), lookupItems })
     : JSON.stringify(lookupItems);
   snapshot.requestHash = hash(snapshot.requestText);
-  const response = await source.findCandidates(lookupItems, signal);
-  signal.throwIfAborted();
+  const batches = onCheckpoint ? searchable.map((item) => [item]) : [searchable];
+  for (const batch of batches) {
+    const response = await source.findCandidates(
+      lookupItems.filter((item) => batch.some((entry) => entry.key === item.key)),
+      signal,
+    );
+    signal.throwIfAborted();
+    await applyEquipmentSearchResponse(snapshot, batch, response, source, signal);
+    onCheckpoint?.(snapshot);
+    if (batch.some((item) => item.searchState === "read_failed")) break;
+  }
+  return finishPricingSearch(snapshot);
+}
+
+async function applyEquipmentSearchResponse(
+  snapshot: EquipmentPricingSnapshot,
+  searchable: EquipmentPricingItem[],
+  response: Awaited<ReturnType<EquipmentSource["findCandidates"]>>,
+  source: EquipmentSource,
+  signal: AbortSignal,
+) {
   snapshot.rawResponse = JSON.stringify(response);
   saveSearchAttempt(snapshot, response);
   if (!response.queries.some((query) => query.trim())) {
@@ -768,7 +788,7 @@ export async function searchEquipmentPrices(
       if (verified.length === 1) item.issues.push("仅1条挂牌样本，参考范围有限");
       if (verified.length < EQUIPMENT_QUOTE_LIMIT)
         item.issues.push(
-          `已核实${verified.length}件同配置在售商品，目标为${EQUIPMENT_QUOTE_LIMIT}件，均价使用实际样本数`,
+          `已核实${verified.length}件同配置在售商品，最多${EQUIPMENT_QUOTE_LIMIT}件，参考价取有效样本最低挂牌价`,
         );
     } else {
       item.similarEstimate = buildEquipmentEstimate(item.candidates);

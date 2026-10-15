@@ -96,6 +96,41 @@ function setup(petSearch = false) {
   });
   return { crawl, store, runner, profile, analyze, search, searchPets };
 }
+it("逐件检查点保持运行，连续保存不污染CAS基线，暂停后保留且拒绝迟到写入", async () => {
+  const c = setup();
+  let lateCheckpoint: ((snapshot: ReturnType<typeof equipmentPricingPlan>) => void) | undefined;
+  c.search.mockImplementationOnce(
+    async (record, signal, _settings, _previous, _report, checkpoint) => {
+      lateCheckpoint = checkpoint;
+      const snapshot = { ...equipmentPricingPlan(record), searchComplete: false };
+      snapshot.queries = ["first"];
+      checkpoint?.(snapshot);
+      snapshot.queries.push("second");
+      checkpoint?.(snapshot);
+      const row = c.crawl.db
+        .prepare("SELECT status,equipment_pricing_json FROM analysis_tasks WHERE status='running'")
+        .get()!;
+      expect(row.status).toBe("running");
+      expect(JSON.parse(String(row.equipment_pricing_json)).queries).toEqual(["first", "second"]);
+      await new Promise<void>((_resolve, reject) =>
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+      );
+      return snapshot;
+    },
+  );
+  const id = await c.runner.start("codex", true, c.profile);
+  await vi.waitFor(() => expect(lateCheckpoint).toBeTypeOf("function"));
+  await c.runner.pause(id);
+  expect(c.store.run(id)).toMatchObject({ status: "paused", queued: 2 });
+  const row = c.crawl.db
+    .prepare(
+      "SELECT equipment_pricing_json FROM analysis_tasks WHERE run_id=? ORDER BY ordinal LIMIT 1",
+    )
+    .get(id)!;
+  expect(JSON.parse(String(row.equipment_pricing_json)).queries).toEqual(["first", "second"]);
+  expect(() => lateCheckpoint?.(equipmentPricingPlan(valuationRecord()))).toThrow();
+  expect(c.analyze).not.toHaveBeenCalled();
+});
 it("宝宝成长表单误差隔离当前角色，后续角色继续且不生成错误报价", async () => {
   const c = setup(true);
   c.searchPets.mockImplementationOnce(async () => {

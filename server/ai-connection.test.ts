@@ -349,7 +349,15 @@ describe("AI 连接验证", () => {
     const record = equipmentRecord(),
       signal = new AbortController().signal;
     const onProgress = vi.fn();
-    const snapshot = await client.searchEquipment(record, signal, undefined, undefined, onProgress);
+    const onCheckpoint = vi.fn();
+    const snapshot = await client.searchEquipment(
+      record,
+      signal,
+      undefined,
+      undefined,
+      onProgress,
+      onCheckpoint,
+    );
     expect(snapshot.provider).toBe("browser");
     expect(mocks.createEquipmentSource).toHaveBeenCalledWith(signal, onProgress);
     expect(mocks.searchEquipmentPrices).toHaveBeenCalledWith(
@@ -362,6 +370,7 @@ describe("AI 连接验证", () => {
       },
       undefined,
       undefined,
+      onCheckpoint,
     );
     expect(mocks.closeSource).toHaveBeenCalledOnce();
     expect(mocks.codexAccount).not.toHaveBeenCalled();

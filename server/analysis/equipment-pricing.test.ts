@@ -10,6 +10,8 @@ import {
   searchEquipmentPrices,
   verifyEquipmentCandidate,
   type EquipmentCandidate,
+  type EquipmentPricingItem,
+  type EquipmentPricingSnapshot,
 } from "./equipment-pricing";
 import { createProfile, DEFAULT_SETTINGS, PROMPT_FILE } from "./profile";
 import { calculateValuation } from "./valuation-calculator";
@@ -103,6 +105,89 @@ async function matchedPricing(record = recordWithEquipment()) {
 }
 
 describe("装备联网查价的来源核对", () => {
+  it("本件读取失败保存检查点后停止，不查询后续装备", async () => {
+    const record = recordWithEquipment();
+    const tab = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!;
+    tab.items!.push({ ...tab.items![0], index: 1 }, { ...tab.items![0], index: 2 });
+    const find = vi
+      .fn()
+      .mockResolvedValueOnce(searchResponse([candidate(100)]))
+      .mockResolvedValueOnce({
+        ...searchResponse([]),
+        items: [{ key: "道具/法宝:1", candidates: [], searchState: "read_failed" }],
+      });
+    const checkpoint = vi.fn();
+    const snapshot = await searchEquipmentPrices(
+      record,
+      new AbortController().signal,
+      {
+        findCandidates: find,
+        readSource: async () => sourcePage(100),
+      },
+      undefined,
+      undefined,
+      checkpoint,
+    );
+    expect(find).toHaveBeenCalledTimes(2);
+    expect(checkpoint).toHaveBeenCalledTimes(2);
+    expect(snapshot.items.map((item) => item.searchState)).toEqual([
+      "completed",
+      "read_failed",
+      "pending",
+    ]);
+    expect(snapshot.searchComplete).toBe(false);
+    expect(snapshot.knownTotal).toBe(100);
+  });
+  it("逐件保存已核验快照，下一件失败后续跑只查询未完成件", async () => {
+    const record = recordWithEquipment();
+    const tab = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!;
+    tab.items!.push({ ...tab.items![0], index: 1 });
+    const find = vi
+      .fn()
+      .mockResolvedValueOnce(searchResponse([candidate(100)]))
+      .mockRejectedValueOnce(new Error("藏宝阁登录已失效"));
+    const checkpoints: EquipmentPricingSnapshot[] = [];
+    await expect(
+      searchEquipmentPrices(
+        record,
+        new AbortController().signal,
+        {
+          findCandidates: find,
+          readSource: async () => sourcePage(100),
+        },
+        undefined,
+        undefined,
+        (snapshot) => checkpoints.push(structuredClone(snapshot)),
+      ),
+    ).rejects.toThrow("登录已失效");
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0].items.map((item) => item.searchState)).toEqual(["completed", "pending"]);
+    expect(checkpoints[0].knownTotal).toBe(100);
+    const resumedFind = vi.fn(async (items: EquipmentPricingItem[]) => ({
+      ...searchResponse([candidate(200, "https://xyq.cbg.163.com/equip/1/second")]),
+      items: [
+        {
+          key: items[0].key,
+          candidates: [candidate(200, "https://xyq.cbg.163.com/equip/1/second")],
+        },
+      ],
+    }));
+    const final = await searchEquipmentPrices(
+      record,
+      new AbortController().signal,
+      {
+        findCandidates: resumedFind,
+        readSource: async () => sourcePage(200),
+      },
+      undefined,
+      checkpoints[0],
+      () => {},
+    );
+    expect(resumedFind).toHaveBeenCalledOnce();
+    expect(resumedFind.mock.calls[0][0].map((item) => item.key)).toEqual(["道具/法宝:1"]);
+    expect(final.total).toBe(300);
+    expect(final.searchComplete).toBe(true);
+  });
   it("首屏无样本跳过这一件，另一件正常计价；恢复旧查价进度也不重新查询空样本项", async () => {
     const record = recordWithEquipment();
     const tab = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!;
