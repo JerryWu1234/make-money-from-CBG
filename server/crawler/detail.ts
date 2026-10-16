@@ -22,6 +22,18 @@ export const MAIN_TABS = [
   "玩家之家",
 ];
 
+function unidentifiedEquipmentLevel(text: string): number | null {
+  if (!text.split("\n").some((line) => line.trim() === "未鉴定物品")) return null;
+  const levels = [
+    ...new Set(
+      [...text.matchAll(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})(?=\s*(?:\n|$))/g)].map((match) =>
+        Number(match[1]),
+      ),
+    ),
+  ];
+  return levels.length === 1 ? levels[0] : null;
+}
+
 async function capture(page: Page, name: string): Promise<TabSnapshot> {
   return page.evaluate((tabName) => {
     const root = document.querySelector<HTMLElement>("[data-cbg-detail-root]");
@@ -195,10 +207,13 @@ async function inspectItems(
     await hoverForInspection(page, icon);
     await pace(signal, 300, 200);
     const tipId = attrs.data_tip_box;
+    const levelText =
+      item.attributes?.等级 || item.description?.match(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})/)?.[1];
+    const expectedLevel = levelText && /^\d{1,3}$/.test(levelText) ? Number(levelText) : null;
     if (tipId || incompleteEquipment)
       await page
         .waitForFunction(
-          ({ id, name, requireStats }) => {
+          ({ id, name, requireStats, expectedLevel }) => {
             const boxes = id
               ? [document.getElementById(id)]
               : Array.from(
@@ -208,18 +223,37 @@ async function inspectItems(
                 );
             return boxes.some((box) => {
               const text = box?.innerText.trim() || "";
+              const levels = [
+                ...new Set(
+                  [...text.matchAll(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})(?=\s*(?:\n|$))/g)].map(
+                    (match) => Number(match[1]),
+                  ),
+                ),
+              ];
+              const unidentified =
+                !!name &&
+                text.split("\n")[0].trim() === name &&
+                text.split("\n").some((line) => line.trim() === "未鉴定物品") &&
+                levels.length === 1 &&
+                (expectedLevel === null || levels[0] === expectedLevel);
               return (
                 box?.checkVisibility() &&
                 text &&
                 (!name || text.includes(name)) &&
                 (!requireStats ||
+                  unidentified ||
                   /(?:命中(?:率)?|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|抗物理暴击|抗法术暴击|抗固伤|固伤暴击|穿刺|狂暴|治疗能力|格挡|抵抗|抗封印)(?:等级|值)?\s*[：:]?\s*[+＋−-]?\d/.test(
                     text,
                   ))
               );
             });
           },
-          { id: tipId || "", name: attrs.data_equip_name || "", requireStats: incompleteEquipment },
+          {
+            id: tipId || "",
+            name: attrs.data_equip_name || "",
+            requireStats: incompleteEquipment,
+            expectedLevel,
+          },
           { timeout: 4000 },
         )
         .catch((error: unknown) => {
@@ -244,6 +278,15 @@ async function inspectItems(
       ].join("\n");
     }, tipId || "");
     if (tooltip) {
+      if (tooltip.split("\n").some((line) => line.trim() === "未鉴定物品")) {
+        const level = unidentifiedEquipmentLevel(tooltip);
+        if (
+          tooltip.split("\n")[0].trim() !== attrs.data_equip_name ||
+          level === null ||
+          (expectedLevel !== null && level !== expectedLevel)
+        )
+          issues?.push(`${snapshot.name}：${item.name} 的未鉴定提示框名称或等级与物品不一致`);
+      }
       item = itemFromAttributes({ ...attrs, data_equip_desc: tooltip }, index);
       if (item.name.startsWith("图标 ")) item.name = tooltip.split("\n")[0];
     }
@@ -321,7 +364,12 @@ export function equipmentCaptureSummary(
         /(?:^|\n|\s)(?:命中|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|抗物理暴击|抗法术暴击|抗固伤|固伤暴击|穿刺|狂暴|治疗能力|格挡|抵抗)(?:等级|值)?\s*[：:]?\s*[+＋−-]?\d/.test(
           item.description || "",
         );
-      if (!describedStats && !stats) issues.push(`${tab.name}：${item.name} 的装备属性未完整读取`);
+      const unidentifiedLevel = unidentifiedEquipmentLevel(item.description || "");
+      const completeUnidentified =
+        unidentifiedLevel !== null &&
+        (item.attributes?.等级 === undefined || Number(item.attributes.等级) === unidentifiedLevel);
+      if (!describedStats && !stats && !completeUnidentified)
+        issues.push(`${tab.name}：${item.name} 的装备属性未完整读取`);
       const level =
         /^\d{1,3}$/.test(item.attributes?.等级 || "") ||
         /(?:^|[\n\s【：:])等级\s*[：:]?\s*\d{1,3}/.test(

@@ -10,6 +10,9 @@ import {
 import { CAPTURE_VERSION, itemFromAttributes } from "./compact";
 import type { Listing, RoleDetail, TabSnapshot } from "./types";
 import { createCrawlSource } from "./source";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { equipmentInventory } from "../analysis/equipment-pricing";
 
 vi.mock("./page", async (original) => ({
   ...(await original<typeof import("./page")>()),
@@ -426,6 +429,64 @@ describe("装备局部补采", () => {
       await page.close();
     }
   }, 15000);
+  it.each([
+    { label: "complete", tooltip: "水晶棒\n等级 70\n未鉴定物品", complete: true },
+    { label: "wrong-name", tooltip: "另一把武器\n等级 70\n未鉴定物品", complete: false },
+    { label: "wrong-level", tooltip: "水晶棒\n等级 80\n未鉴定物品", complete: false },
+    { label: "missing-level", tooltip: "水晶棒\n未鉴定物品", complete: false },
+    { label: "identified-missing-stats", tooltip: "水晶棒\n等级 70", complete: false },
+  ])(
+    "未鉴定装备采集身份与未知价格边界：$label",
+    async ({ label, tooltip, complete }) => {
+      const page = await browser.newPage();
+      try {
+        const gear = `<p>道具和法宝</p><div id="RoleEquip"><img width="40" height="40" data_equip_name="水晶棒" data_equip_category="人物装备 · 魔棒" data_equip_level="70" data_tip_box="UnidentifiedTipsBox" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseover="document.getElementById('UnidentifiedTipsBox').style.display='block'"><div id="UnidentifiedTipsBox" style="display:none;white-space:pre-line">${tooltip}</div></div>`;
+        await page.route(url, (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: fixture(false, undefined, undefined, "", "", gear),
+          }),
+        );
+        const detail = await collectValuationDetail(
+          page,
+          listing,
+          previous(),
+          new AbortController().signal,
+        );
+        expect(detail.equipmentCapture?.complete).toBe(complete);
+        const item = detail.tabs.find((entry) => entry.name === "道具/法宝")!.items![0];
+        const inventory = equipmentInventory({
+          listing,
+          detail,
+          status: complete ? "complete" : "failed",
+          error: null,
+        });
+        if (complete) {
+          expect(item.name).toBe("水晶棒");
+          expect(item.description).toContain("未鉴定物品");
+          expect(item.description).not.toMatch(/伤害|命中/);
+          expect(inventory.captureComplete).toBe(true);
+          expect(inventory.items[0]).toMatchObject({
+            referencePrice: null,
+            searchState: "skipped",
+            candidates: [],
+          });
+          expect(inventory.items[0].skipReason).toContain("核心初始伤害无法可靠还原");
+        } else expect(detail.equipmentCapture?.issues.length).toBeGreaterThan(0);
+        const directory = path.resolve("data/capture-regression/unidentified");
+        await mkdir(directory, { recursive: true });
+        await writeFile(
+          path.join(directory, label + ".json"),
+          JSON.stringify({ simulated: true, label, tooltip, detail, inventory }, null, 2),
+        );
+        await page.screenshot({ path: path.join(directory, label + ".png") });
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
+
   it.each([false, true])(
     "只有等级的非空描述仍读取提示框，提示框缺失=%s",
     async (missingTooltip) => {
