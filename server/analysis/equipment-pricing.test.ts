@@ -18,6 +18,8 @@ import { createProfile, DEFAULT_SETTINGS, PROMPT_FILE } from "./profile";
 import { calculateValuation } from "./valuation-calculator";
 import savedComparables from "../../tests/fixtures/equipment-comparables-20329459.json";
 import { buildEquipmentEstimate } from "./pricing-estimate";
+import { combinePetPricing, searchPetPricing } from "./pet-pricing";
+import { applyValuationRange } from "./valuation-range";
 
 const equipmentName = "测试腰带";
 const description =
@@ -2149,6 +2151,137 @@ it("前件耗尽预算时后件已有游标和两条样本原样保留，不重�
 });
 
 describe("核心初始值缺失的装备排除", () => {
+  const unidentifiedRecord = () => {
+    const record = recordWithEquipment();
+    record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items = [
+      {
+        index: 5,
+        name: "水晶棒",
+        kind: "equipment",
+        modelId: "1808",
+        location: "store_equip_tips4",
+        description: "等级 70\n未鉴定物品",
+        attributes: { 装备条件: "等级70", 装备角色: "玄彩娥，骨精灵，影精灵" },
+      },
+    ];
+    return record;
+  };
+
+  it("真实未鉴定装备缺category仍进入库存，跳过后完成参考报价而非只给小计", async () => {
+    const record = unidentifiedRecord();
+    const inventory = equipmentInventory(record);
+    expect(inventory.captureComplete).toBe(true);
+    expect(inventory.issues).toEqual([]);
+    expect(inventory.items).toHaveLength(1);
+    expect(inventory.items[0]).toMatchObject({
+      key: "道具/法宝:5",
+      name: "水晶棒",
+      referencePrice: null,
+      searchState: "skipped",
+    });
+    expect(inventory.items[0].skipReason).toMatch(/未鉴定.*初始.*未知/);
+    expect(inventory.items[0].kindId).toBeUndefined();
+    expect(inventory.items[0].category).toBe("人物装备");
+    expect(inventory.items[0].baselineEstimate).toBeUndefined();
+    const findCandidates = vi.fn(),
+      readSource = vi.fn();
+    const profile = createProfile(
+      readFileSync(PROMPT_FILE, "utf8"),
+      {
+        ...DEFAULT_SETTINGS,
+        servers: [
+          {
+            serverId: "1",
+            age: "three",
+            rank: 13,
+            goldPrice: 218.29,
+            goldUnit: 30000000,
+            baselineUnitConfirmed: true,
+          },
+        ],
+      },
+      true,
+    );
+    const pricing = await searchEquipmentPrices(
+      record,
+      new AbortController().signal,
+      { findCandidates, readSource },
+      profile.settings,
+    );
+    expect(pricing.captureComplete).toBe(true);
+    expect(pricing.searchComplete).toBe(true);
+    expect(pricing.items[0].referencePrice).toBeNull();
+    expect(findCandidates).not.toHaveBeenCalled();
+    expect(readSource).not.toHaveBeenCalled();
+    record.detail!.petCapture = {
+      version: 1,
+      collectedAt: record.detail!.collectedAt,
+      complete: true,
+      issues: [],
+    };
+    record.detail!.tabs.push({
+      name: "召唤兽/孩子",
+      text: "召唤兽(0/10)",
+      fields: [],
+      tables: [],
+      elements: [],
+      tooltips: [],
+      petCount: 0,
+      pets: [],
+    });
+    const pets = await searchPetPricing(record, new AbortController().signal, {
+      findCandidates,
+      readSource,
+    });
+    const bare = calculateValuation(record, profile);
+    expect(bare.model_value).not.toBeNull();
+    const result = applyValuationRange(
+      combinePetPricing(
+        combineEquipmentPricing(bare, record, pricing, profile.settings),
+        record,
+        pets,
+      ),
+      bare,
+      record,
+      profile,
+    );
+    expect(result.estimate_missing_count).toBe(0);
+    expect(result.estimated_value).toBe(bare.model_value);
+    expect(result.excluded_assets).toContainEqual({
+      key: "道具/法宝:5",
+      name: "水晶棒",
+      reason: inventory.items[0].skipReason,
+    });
+    expect(result.items.find((item) => item.name.includes("道具/法宝:5"))?.amount).toBeNull();
+    expect(result.missing_fields.join(" ")).not.toMatch(/水晶棒|分类未识别|装备.*未采齐/);
+    expect(findCandidates).not.toHaveBeenCalled();
+    expect(readSource).not.toHaveBeenCalled();
+  });
+
+  it.each(["等级70", "未鉴定物品", "等级70\n未鉴定物品说明"])(
+    "未识别分类但缺少完整精确状态时仍不完整：%s",
+    (description) => {
+      const record = unidentifiedRecord();
+      const target = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
+      target.description = description;
+      if (description === "未鉴定物品") delete target.attributes;
+      expect(equipmentInventory(record).captureComplete).toBe(false);
+    },
+  );
+
+  it.each([
+    { category: "召唤兽装备" },
+    { category: "道具 · 任务物品" },
+    { category: "材料 · 精魄灵石" },
+    { modelId: "4036" },
+    { modelId: "611" },
+    { attributes: { 装备对象: "召唤兽" } },
+  ])("未鉴定状态不改变宠装和道具材料排除：%j", (override) => {
+    const record = unidentifiedRecord();
+    Object.assign(record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0], override);
+    expect(equipmentInventory(record).items).toEqual([]);
+  });
+
   it.each([
     ["武器", "伤害581\n命中750\n锻炼等级10\n宝石：太阳石 红玛瑙\n气血0", "伤害"],
     ["腰带", "气血348\n防御34\n锻炼等级8\n宝石：光芒石 黑宝石", "气血"],

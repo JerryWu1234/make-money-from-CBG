@@ -440,7 +440,7 @@ describe("装备局部补采", () => {
     async ({ label, tooltip, complete }) => {
       const page = await browser.newPage();
       try {
-        const gear = `<p>道具和法宝</p><div id="RoleEquip"><img width="40" height="40" data_equip_name="水晶棒" data_equip_category="人物装备 · 魔棒" data_equip_level="70" data_tip_box="UnidentifiedTipsBox" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseover="document.getElementById('UnidentifiedTipsBox').style.display='block'"><div id="UnidentifiedTipsBox" style="display:none;white-space:pre-line">${tooltip}</div></div>`;
+        const gear = `<p>道具和法宝</p><div id="store_equip_tips4"><img width="40" height="40" data_equip_name="水晶棒" data_equip_type="1808" data_equip_level="70" data_tip_box="UnidentifiedTipsBox" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseover="document.getElementById('UnidentifiedTipsBox').style.display='block'"><div id="UnidentifiedTipsBox" style="display:none;white-space:pre-line">${tooltip}</div></div>`;
         await page.route(url, (route) =>
           route.fulfill({
             contentType: "text/html",
@@ -471,7 +471,10 @@ describe("装备局部补采", () => {
             searchState: "skipped",
             candidates: [],
           });
-          expect(inventory.items[0].skipReason).toContain("核心初始伤害无法可靠还原");
+          expect(item.category).toBeUndefined();
+          expect(item.modelId).toBe("1808");
+          expect(item.location).toBe("store_equip_tips4");
+          expect(inventory.items[0].skipReason).toMatch(/未鉴定.*初始.*未知/);
         } else expect(detail.equipmentCapture?.issues.length).toBeGreaterThan(0);
         const directory = path.resolve("data/capture-regression/unidentified");
         await mkdir(directory, { recursive: true });

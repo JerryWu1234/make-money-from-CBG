@@ -73,8 +73,7 @@ export function EquipmentPricingView({
       )}
       {queried && snapshot.items.some((item) => item.priceMethod === "first-five-minimum-v4") && (
         <p>
-          {asset === "宝宝装备" ? "最多取前5件有效在售商品" : "每个筛选条件只核验前5条不同候选"}
-          ，采用实际有效样本的最低挂牌价；无样本跳过，搜索范围有限。
+          每个筛选条件只核验前5条不同候选，采用实际有效样本的最低挂牌价；无样本跳过，搜索范围有限。
           {hasBaseUpperBound
             ? "装备和灵饰的基础值相等或较低样本一起取最低价，属性差异保留在下方。"
             : "同配与相近样本分别计价。"}

@@ -168,6 +168,7 @@ export async function startWorkPageEvidence(directory: string, getBrowser: () =>
     shotAt: string;
     url: string;
     signature: string;
+    captureMode: "full-page" | "viewport";
     files: Array<{ name: string; sha256: string }>;
   }> = [];
   const failures = new Map<
@@ -185,7 +186,7 @@ export async function startWorkPageEvidence(directory: string, getBrowser: () =>
     minimumPauseMs: 750,
     limits: [
       "May miss pages visible for less than a polling cycle; serial page reads extend the interval",
-      "Viewport only; no scrolling or hovering",
+      "Search forms use full-page screenshots; detail pages use viewport screenshots; no scrolling or hovering",
       "No wire listener: submittedArgs are page state, not independently recorded HTTP parameters",
       "Stable observations are not proof of every request or complete per-role coverage",
       "Image/description hashes differ from production sourceHash",
@@ -226,9 +227,11 @@ export async function startWorkPageEvidence(directory: string, getBrowser: () =>
             const signature = evidenceSignature(before);
             if (seen.get(page) === signature) continue;
             const shotAt = new Date().toISOString();
+            const fullPage = new URL(before.url).pathname.startsWith("/cgi-bin/");
+            const captureMode = fullPage ? "full-page" : "viewport";
             const png = await page.screenshot({
-              timeout: 2000,
-              fullPage: false,
+              timeout: fullPage ? 5000 : 2000,
+              fullPage,
               mask: [page.locator(accountRegions)],
               maskColor: "#20394b",
             });
@@ -245,6 +248,7 @@ export async function startWorkPageEvidence(directory: string, getBrowser: () =>
                 shotAt,
                 verifiedAt: new Date().toISOString(),
                 signature,
+                captureMode,
                 descriptionSha256: hash(before.description),
                 observation: before,
               },
@@ -259,6 +263,7 @@ export async function startWorkPageEvidence(directory: string, getBrowser: () =>
               shotAt,
               url: before.url,
               signature,
+              captureMode,
               files: [
                 { name: relative(stem + ".png"), sha256: hash(png) },
                 { name: relative(stem + ".json"), sha256: hash(json) },

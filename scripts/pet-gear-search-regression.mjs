@@ -380,6 +380,98 @@ try {
       ),
     );
   });
+  await check("前五候选：名称等级属性拒项占名额，不读取第六件低价", async () => {
+    const ids = ["bad-name", "bad-level", "bad-stat", "valid-four", "valid-five", "six-cheap"];
+    const result = await run(target, {
+      pages: [ids],
+      rowNames: { "bad-name": "另一件宝宝装备" },
+      rowLevels: { "bad-level": target.level + 10 },
+      descriptions: { "bad-stat": target.description.replace("+20", "+100") },
+      prices: { "valid-four": 100, "valid-five": 110, "six-cheap": 1 },
+    });
+    assert.equal(result.items[0].searchStatus, "completed", result.items[0].note);
+    assert.deepEqual(detailVisits, ["bad-stat", "valid-four", "valid-five"]);
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 100);
+    assert.ok(
+      result.searchItems.some((record) =>
+        record.modes?.some((mode) => mode.sampled === 5 && mode.samplingComplete === true),
+      ),
+    );
+    await mkdir("data/pr27-fix-validation", { recursive: true });
+    await writeFile(
+      "data/pr27-fix-validation/pet-gear-first-five-rejections.json",
+      JSON.stringify({ simulated: true, result, requests, detailVisits }, null, 2),
+    );
+  });
+  await check("前五候选：全拒时不采用第六件有效低价", async () => {
+    const ids = [
+      "reject-one",
+      "reject-two",
+      "reject-three",
+      "reject-four",
+      "reject-five",
+      "six-cheap",
+    ];
+    const result = await run(target, {
+      pages: [ids],
+      descriptions: Object.fromEntries(
+        ids.slice(0, 5).map((id) => [id, target.description.replace("+20", "+100")]),
+      ),
+      prices: { "six-cheap": 1 },
+    });
+    assert.deepEqual(detailVisits, ids.slice(0, 5));
+    assert.equal(result.items[0].samplingStopped, true, result.items[0].note);
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, null);
+    assert.ok(result.items[0].note.includes("范围有限"));
+  });
+  await check("前五候选：续跑保留拒项计数，重复URL不占新名额且不读第六", async () => {
+    const ids = ["one", "two", "two", "three", "four", "five", "six-cheap"];
+    const settings = {
+      pages: [ids],
+      descriptions: { one: target.description.replace("+20", "+100") },
+      prices: { "six-cheap": 1 },
+    };
+    const first = await run(target, settings, {}, { maxDetails: 2 });
+    assert.equal(first.items[0].searchStatus, "pending");
+    const second = await run({ ...target, ...first.items[0] }, settings);
+    assert.deepEqual(detailVisits, ["two", "three", "four", "five"]);
+    assert.equal(second.items[0].searchStatus, "completed", second.items[0].note);
+    assert.equal(petGearReference(second.items[0].candidates).referencePrice, 100);
+    assert.ok(
+      second.searchItems.some((record) =>
+        record.modes?.some((mode) => mode.sampled === 5 && mode.samplingComplete === true),
+      ),
+    );
+  });
+  await check("前五候选：全拒断点续跑不重置计数或重读已拒商品", async () => {
+    const ids = [
+      "reject-one",
+      "reject-two",
+      "reject-three",
+      "reject-four",
+      "reject-five",
+      "six-cheap",
+    ];
+    const settings = {
+      pages: [ids],
+      descriptions: Object.fromEntries(
+        ids.slice(0, 5).map((id) => [id, target.description.replace("+20", "+100")]),
+      ),
+      prices: { "six-cheap": 1 },
+    };
+    const first = await run(target, settings, {}, { maxDetails: 2 });
+    assert.equal(first.items[0].searchStatus, "pending");
+    assert.equal(first.items[0].searchCursor.seen.length, 2);
+    const second = await run({ ...target, ...first.items[0] }, settings);
+    assert.deepEqual(detailVisits, ids.slice(2, 5));
+    assert.equal(second.items[0].samplingStopped, true, second.items[0].note);
+    assert.equal(petGearReference(second.items[0].candidates).referencePrice, null);
+    const modes = second.searchItems.flatMap((record) => record.modes || []);
+    assert.deepEqual(
+      modes.map(({ sampled }) => sampled),
+      [5, 5],
+    );
+  });
   await check("前五件宝宝装备跨页去重取最低价，不采用第六件低价", async () => {
     const prices = [100, 110, 120, 130, 140, 150, 160, 170, 180, 900, 1];
     const ids = prices.map((_, index) => `ten-${index}`);
@@ -415,41 +507,29 @@ try {
     assert.equal(petGearReference(second.items[0].candidates).referencePrice, 200);
     assertClearedFilters();
   });
-  await check("无样本第一页停止翻页，未读完页面变动后仍完整重读当前条件", async () => {
+  await check("前五候选：第一页三拒项仍跨页补足五条，第六不读", async () => {
     const ids = ["empty-one", "empty-two", "empty-three"];
-    const overrides = {
-      pages: [ids, ["later-valid"]],
+    const result = await run(target, {
+      pages: [ids, ["valid-four", "valid-five", "six-cheap"]],
       descriptions: Object.fromEntries(
         ids.map((id) => [id, target.description.replace("+20", "+100")]),
       ),
-    };
-    const first = await run(target, overrides, {}, { maxDetails: 2 });
-    assert.equal(first.items[0].searchStatus, "pending");
-    assert.equal(first.items[0].searchCursor.rowIndex, 2);
-    assert.equal(
-      first.items[0].candidates.some((candidate) => candidate.verified),
-      false,
+      prices: { "valid-four": 100, "valid-five": 110, "six-cheap": 1 },
+    });
+    assert.equal(result.items[0].searchStatus, "completed", result.items[0].note);
+    assert.deepEqual(detailVisits, [...ids, "valid-four", "valid-five"]);
+    assert.deepEqual(
+      requests.map(({ page }) => page),
+      ["1", "2"],
     );
-    const second = await run(
-      { ...target, ...first.items[0] },
-      { ...overrides, pages: [[...ids].reverse(), ["later-valid"]] },
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 100);
+    assert.ok(
+      result.searchItems.every((record) => (record.modes || []).every((mode) => mode.sampled <= 5)),
     );
-    assert.equal(second.items[0].samplingStopped, true, second.items[0].note);
-    assert.equal(second.items[0].searchStatus, "pending");
-    assert.equal(
-      second.items[0].candidates.some((candidate) => candidate.verified),
-      false,
-    );
-    assert.ok(requests.every((request) => request.page === "1"));
-    assert.equal(
-      second.searchItems.some((record) => record.reason === "result_order_changed"),
-      false,
-    );
-    assert.ok(second.items[0].note.includes("市场售价未知"));
     await mkdir("data/pr27-fix-validation", { recursive: true });
     await writeFile(
-      "data/pr27-fix-validation/pet-gear-empty-first-page.json",
-      JSON.stringify({ simulated: true, first, second, requests, detailVisits }, null, 2),
+      "data/pr27-fix-validation/pet-gear-first-five-cross-page.json",
+      JSON.stringify({ simulated: true, result, requests, detailVisits }, null, 2),
     );
   });
 

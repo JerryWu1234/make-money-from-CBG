@@ -150,6 +150,8 @@ export const isJewelryEquipment = (
   [61, 62, 63, 64].includes(Number(item.kindId));
 
 export const EQUIPMENT_CORE_INITIAL_POLICY = "required-slot-initial-attribute-v1";
+const unidentifiedEquipmentDescription = (description: string) =>
+  description.split("\n").some((line) => line.trim() === "未鉴定物品");
 
 /** Unknown inventory categories defer to the observed official search kind. */
 export function equipmentCoreSkipReason(
@@ -157,8 +159,10 @@ export function equipmentCoreSkipReason(
   category = item.category,
 ): string | null {
   if (isJewelryEquipment(item) || /元身|上古玉魄/.test(category)) return null;
+  const unidentified = unidentifiedEquipmentDescription(item.description);
   const slot = slotFromCategory(category) || (/双环|魔棒|伞|棍/.test(category) ? "weapon" : null);
-  if (!slot) return null;
+  if (!slot)
+    return unidentified ? "未鉴定装备核心初始属性未知，未计入参考合计；市场售价未知" : null;
   const field = {
     weapon: "伤害",
     body: "防御",
@@ -167,7 +171,8 @@ export function equipmentCoreSkipReason(
     neck: "灵力",
     belt: "气血",
   }[slot];
-  return equipmentInitialAttribute(parseEquipmentAttributes(item.description), field) === null
+  return unidentified ||
+    equipmentInitialAttribute(parseEquipmentAttributes(item.description), field) === null
     ? "核心初始" + field + "无法可靠还原，未计入参考合计；市场售价未知"
     : null;
 }
@@ -244,7 +249,8 @@ export function equipmentInventory(record: SavedRoleRecord) {
         /人物装备|灵饰|武器|头盔|衣服|项链|腰带|鞋|上古玉魄/.test(category) ||
         (level !== null &&
           level >= 0 &&
-          /伤害|防御|灵力|敏捷|速度|气血|封印|治疗/.test(description));
+          (/伤害|防御|灵力|敏捷|速度|气血|封印|治疗/.test(description) ||
+            (item.kind === "equipment" && unidentifiedEquipmentDescription(description))));
       if (/装备对象[：:]?\s*召唤兽|【?携带/.test(description)) continue;
       if (!equipment) {
         if (item.kind === "equipment")

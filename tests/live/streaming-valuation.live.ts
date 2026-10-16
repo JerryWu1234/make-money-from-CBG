@@ -201,7 +201,16 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     const reviewed = new Set<string>();
     const reviewResults = async (overview: AnalysisOverview) => {
       for (const item of overview.records.items) {
-        if (item.state !== "completed" || !item.taskId || reviewed.has(item.taskId)) continue;
+        const reference = item.valuation?.model_value ?? item.valuation?.estimated_value;
+        if (
+          item.state !== "completed" ||
+          !item.taskId ||
+          reviewed.has(item.taskId) ||
+          typeof reference !== "number" ||
+          !Number.isFinite(reference) ||
+          (item.valuation?.estimate_missing_count || 0) > 0
+        )
+          continue;
         await reviewPage.goto(baseURL + "/analysis-preview");
         await reviewPage.getByRole("tab", { name: /^分析记录/ }).click();
         const [response] = await Promise.all([
@@ -604,7 +613,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
               expect(["", "0"]).toContain(request.serverType);
               scopes.push(scope);
             }
-          if (asset !== "宝宝装备" && Array.isArray(record.modes))
+          if (Array.isArray(record.modes))
             for (const mode of record.modes) {
               if (typeof mode.sampled === "number") expect(mode.sampled).toBeLessThanOrEqual(5);
             }

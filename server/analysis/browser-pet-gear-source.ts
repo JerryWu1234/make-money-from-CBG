@@ -126,7 +126,7 @@ export function petGearSearchPlanHash(item: PetGearPricingItem, serverId: string
   return createHash("sha256")
     .update(
       JSON.stringify({
-        version: "official-pet-gear-first-page-empty-stop-v2",
+        version: "official-pet-gear-first-five-candidates-v3",
         serverId,
         resumePolicy: PRICING_RESUME_POLICY,
         priceMethod: EQUIPMENT_QUOTE_POLICY,
@@ -489,7 +489,6 @@ export async function createPetGearSource(
                   fetchedAt: new Date().toISOString(),
                   sourceHash: createHash("sha256").update(source.html).digest("hex"),
                 });
-                seen.add(identity);
                 failedUrls.delete(url);
               } catch (error) {
                 workSignal.throwIfAborted();
@@ -499,6 +498,8 @@ export async function createPetGearSource(
             };
             // Only a bounded nearest cohort is refreshed; old quotations never inherit a fresh timestamp.
             if (reusable) {
+              for (const candidate of item.candidates.filter((value) => !value.verified))
+                candidates.set(equipmentIdentity(candidate.url), candidate);
               const refresh = selectPetGearCandidates(item.candidates);
               const refreshIds = new Set<string>();
               for (const candidate of refresh) {
@@ -521,22 +522,16 @@ export async function createPetGearSource(
               if (details >= maxDetails || Date.now() >= deadline) break;
               await readCandidate(url, modeIndex);
             }
-            // Never reuse an old row offset when no quote has ever been adopted.
-            // Freshly read the active first page while preserving completed conditions.
-            if (
-              reusable &&
-              next.pageNumber === 1 &&
-              !failedUrls.size &&
-              !item.candidates.some((candidate) => candidate.verified) &&
-              ![...candidates.values()].some((candidate) => candidate.verified)
-            ) {
-              next.rowIndex = 0;
-              next.pageRowsHash = "";
-              next.seen = [];
-              seen.clear();
-            }
             queryStages: for (let modeIndex = next.modeIndex; modeIndex < 2; modeIndex++) {
               if (budgetEnded() || failedUrls.size || (queried && enoughSamples())) break;
+              let inspected = [...seen].filter((key) => key.startsWith(modeIndex + "|")).length;
+              const sampling = {
+                mode: modeIndex === 1 ? "similar" : "exact",
+                sampleLimit: EQUIPMENT_QUOTE_LIMIT,
+                sampled: inspected,
+                samplingComplete: false,
+                exhausted: false,
+              };
               const similar = modeIndex === 1;
               await searchPage.goto(PET_GEAR_SEARCH_URL, {
                 waitUntil: "domcontentloaded",
@@ -602,6 +597,7 @@ export async function createPetGearSource(
                   actions: applied.actions,
                   rowCount: listing.rows.length,
                   candidateServers: [...new Set(listing.rows.map((row) => row.server))],
+                  modes: [sampling],
                   ...(replay ? { replay: true } : {}),
                 });
                 assertEquipmentUIArguments(applied.args, submittedArgs);
@@ -646,35 +642,47 @@ export async function createPetGearSource(
                 let fullyRead = true;
                 for (let rowIndex = startRow; rowIndex < listing.rows.length; rowIndex++) {
                   const row = listing.rows[rowIndex];
-                  if (details >= maxDetails || Date.now() >= deadline || enoughSamples()) {
+                  if (
+                    details >= maxDetails ||
+                    Date.now() >= deadline ||
+                    enoughSamples() ||
+                    inspected >= EQUIPMENT_QUOTE_LIMIT
+                  ) {
                     fullyRead = false;
                     break;
                   }
                   next.rowIndex = rowIndex + 1;
-                  if (row.name !== item.name || Number(row.level) !== item.level) continue;
                   const url = safeEquipmentUrl(row.url),
                     identity = equipmentIdentity(url);
-                  if (seen.has(identity)) continue;
+                  const seenKey = modeIndex + "|" + identity;
+                  if (seen.has(seenKey)) continue;
+                  seen.add(seenKey);
+                  sampling.sampled = ++inspected;
+                  if (row.name !== item.name || Number(row.level) !== item.level) {
+                    result.searchItems.push({
+                      key: item.key,
+                      mode: sampling.mode,
+                      url,
+                      reason: row.name !== item.name ? "宝宝装备名称不匹配" : "宝宝装备等级不匹配",
+                    });
+                    continue;
+                  }
+                  if (candidates.has(identity)) continue;
                   await readCandidate(url, modeIndex);
                 }
-                if (!fullyRead || enoughSamples()) break;
-                if (
-                  pageNumber === 1 &&
-                  fullyRead &&
-                  !failedUrls.size &&
-                  ![...candidates.values()].some((candidate) => candidate.verified) &&
-                  listing.totalPages > 1
-                ) {
-                  next.emptyFirstPageModes = [
-                    ...new Set([...(next.emptyFirstPageModes || []), modeIndex]),
-                  ];
-                  next.modeIndex = modeIndex + 1;
+                if (inspected >= EQUIPMENT_QUOTE_LIMIT && !failedUrls.size) {
+                  sampling.samplingComplete = true;
+                  next.modeIndex = [...candidates.values()].some((candidate) => candidate.verified)
+                    ? 2
+                    : modeIndex + 1;
                   next.pageNumber = 1;
                   next.rowIndex = 0;
                   next.pageRowsHash = "";
                   break;
                 }
+                if (!fullyRead || enoughSamples()) break;
                 if (pageNumber >= listing.totalPages) {
+                  sampling.exhausted = true;
                   next.modeIndex = [...candidates.values()].some((candidate) => candidate.verified)
                     ? 2
                     : modeIndex + 1;
@@ -703,7 +711,12 @@ export async function createPetGearSource(
               halted = note;
           }
           const samplingStopped =
-            !!next?.emptyFirstPageModes?.length &&
+            !!next &&
+            [0, 1].some(
+              (mode) =>
+                [...seen].filter((key) => key.startsWith(mode + "|")).length >=
+                EQUIPMENT_QUOTE_LIMIT,
+            ) &&
             next.modeIndex >= 2 &&
             !failed &&
             !refreshSkipped &&
@@ -719,13 +732,13 @@ export async function createPetGearSource(
             ((queried && enoughSamples()) || next.modeIndex >= 2);
           if (!failed)
             note = samplingStopped
-              ? "严格与相近筛选第一页均未取得有效宝宝装备样本，按规则跳过；不继续翻页，不计价，市场售价未知。"
+              ? "严格与相近筛选的有限范围内均无有效宝宝装备样本，按规则跳过；每条件最多前5条不同候选（拒项计入），搜索范围有限，不计价，市场售价未知。"
               : orderChanged
                 ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。"
                 : completed
                   ? enoughSamples()
-                    ? "已核验官网结果顺序中的前5件有效宝宝装备挂牌样本，采用最低挂牌价；有限样本不代表遍历全部在售商品。"
-                    : "本次筛选结果已读完，按实际有效样本数计算平均价；没有有效样本则保留未定价。"
+                    ? "已核验官网结果顺序中的前5条不同宝宝装备候选（拒项计入），采用有效样本最低挂牌价；搜索范围有限，未遍历全部商品。"
+                    : "本次筛选结果已读完或已核验前5条不同候选（拒项计入），采用实际有效样本最低挂牌价；搜索范围有限，没有有效样本则保留未定价。"
                   : "本轮宝宝装备查询预算已用完，已保存筛选阶段、页码和行位置，下一轮继续补查。";
           if (Date.now() >= deadline) halted ||= note;
           const values = [...candidates.values()];
