@@ -247,12 +247,10 @@ export function matchComparableEquipmentAttributes(
     const normalizedSource = normalizeInitial(source, partial);
     if (normalizedTarget.reason) return reject("目标" + normalizedTarget.reason);
     if (normalizedSource.reason) return reject("报价" + normalizedSource.reason);
-    if (!partial) {
-      if (equipmentGemOnlySpeedMatchesAbsent(target, source))
-        delete normalizedTarget.attributes!.fields.初始速度;
-      if (equipmentGemOnlySpeedMatchesAbsent(source, target))
-        delete normalizedSource.attributes!.fields.初始速度;
-    }
+    if (!partial && equipmentGemOnlySpeedMatchesAbsent(target, source))
+      delete normalizedTarget.attributes!.fields.初始速度;
+    if (equipmentGemOnlySpeedMatchesAbsent(source, target))
+      delete normalizedSource.attributes!.fields.初始速度;
     target = normalizedTarget.attributes!;
     source = normalizedSource.attributes!;
   }

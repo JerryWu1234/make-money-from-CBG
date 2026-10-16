@@ -165,6 +165,20 @@ describe("同核心装备粗略参考价匹配", () => {
       expect(comparable(target, source).reason).toBeNull();
     },
   );
+  it("列表初筛允许候选已可靠扣成0的宝石速度，正初速仍拒绝", () => {
+    const target = parseEquipmentAttributes("等级100\n敏捷40");
+    const zero = "等级100\n敏捷40\n速度32\n锻炼等级4\n宝石：黑宝石";
+    expect(
+      matchComparableEquipmentAttributes(target, parseEquipmentAttributes(zero), true).reason,
+    ).toBeNull();
+    expect(
+      matchComparableEquipmentAttributes(
+        target,
+        parseEquipmentAttributes(zero.replace("速度32", "速度33")),
+        true,
+      ).matchType,
+    ).toBeNull();
+  });
   it.each([
     "速度33\n锻炼等级4\n宝石：黑宝石",
     "速度32\n宝石：黑宝石",

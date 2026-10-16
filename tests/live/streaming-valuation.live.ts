@@ -17,6 +17,7 @@ import {
   officialSourceIdentity,
   pricingTimestampFresh,
 } from "../../server/analysis/pricing-integrity";
+import { startWorkPageEvidence } from "./work-page-evidence";
 
 // Isolated workflow failures are listed in docs/live-valuation-e2e.md.
 // No website, quote, capture detail, or AI response is mocked in this test.
@@ -76,6 +77,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     productKeys: prior?.productKeys || ([] as string[]),
     excludedProductKeys: [...excluded],
     error: "",
+    workPageEvidence: { state: "not_started", error: "" },
     files: [] as { name: string; sha256: string }[],
   };
   const save = async (name: string, value: unknown) => {
@@ -173,6 +175,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
   let producerFailure: unknown;
   let stopping = false;
   let producer: Promise<void> | undefined;
+  let evidence: Awaited<ReturnType<typeof startWorkPageEvidence>> | undefined;
   console.log(`CBG_LIVE_RUN ${directory}\n${baseURL}`);
   process.chdir(directory);
   const server = await createServer({
@@ -182,11 +185,62 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
   });
   try {
     await server.listen();
+    try {
+      const session = await server.ssrLoadModule("/server/session.ts");
+      evidence = await startWorkPageEvidence(directory, () => session.getBrowser(false));
+      manifest.workPageEvidence.state = "recording";
+    } catch (error) {
+      manifest.workPageEvidence = { state: "unavailable", error: String(error) };
+    }
     await save("manifest.json", manifest);
     if (!resume) {
       await save("selection.json", { roles: [] });
       await save("timeline.json", []);
     }
+    const reviewPage = await page.context().newPage();
+    const reviewed = new Set<string>();
+    const reviewResults = async (overview: AnalysisOverview) => {
+      for (const item of overview.records.items) {
+        if (item.state !== "completed" || !item.taskId || reviewed.has(item.taskId)) continue;
+        await reviewPage.goto(baseURL + "/analysis-preview");
+        await reviewPage.getByRole("tab", { name: /^分析记录/ }).click();
+        const [response] = await Promise.all([
+          reviewPage.waitForResponse(
+            (reply) =>
+              reply.url().includes("/api/analysis/detail?") &&
+              new URL(reply.url()).searchParams.get("taskId") === item.taskId,
+          ),
+          reviewPage
+            .getByRole("button", { name: `查看分析详情：${item.name}`, exact: true })
+            .click(),
+        ]);
+        const detail = (await response.json()) as AnalysisDetail;
+        expect(detail.taskId).toBe(item.taskId);
+        expect(detail.listing.key).toBe(item.key);
+        const dialog = reviewPage.getByRole("dialog", { name: item.name, exact: true });
+        await expect(dialog.locator(".analysis-input-preview")).toContainText(item.key);
+        const ordinal = selected.findIndex((role) => role.key === item.key) + 1;
+        const name = `analysis-review-${ordinal}`;
+        const image = await reviewPage.screenshot({
+          path: path.join(directory, name + ".png"),
+          mask: [reviewPage.locator(".analysis-agent-account + small")],
+          maskColor: "#20394b",
+        });
+        manifest.files.push({
+          name: name + ".png",
+          sha256: createHash("sha256").update(image).digest("hex"),
+        });
+        await save(name + ".json", {
+          at: new Date().toISOString(),
+          taskId: detail.taskId,
+          role: item.key,
+          reference:
+            detail.result?.valuation?.model_value ?? detail.result?.valuation?.estimated_value,
+          renderedText: await dialog.innerText(),
+        });
+        reviewed.add(item.taskId);
+      }
+    };
     if (!resume) {
       const cleared = await api<CrawlStatus>("/api/crawl/clear", {});
       const empty = await api<AnalysisOverview>("/api/analysis/status?provider=codex");
@@ -442,6 +496,16 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
         deadline = Date.now() + 180 * 60000;
         continue;
       }
+      if (run?.status !== "paused") {
+        try {
+          await reviewResults(overview);
+        } catch (error) {
+          await save("analysis-review-error.json", {
+            at: new Date().toISOString(),
+            error: String(error),
+          });
+        }
+      }
       if (run) {
         manifest.runId = run.id;
         expect(run.model).toBe("gpt-6-luna");
@@ -644,6 +708,14 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
       .catch(() => {});
     await producer?.catch(() => {});
     await eventWrites;
+    if (evidence) {
+      try {
+        manifest.files.push(await evidence.stop());
+        manifest.workPageEvidence.state = "indexed_review_required";
+      } catch (error) {
+        manifest.workPageEvidence = { state: "index_failed", error: String(error) };
+      }
+    }
     manifest.finishedAt = new Date().toISOString();
     await save("manifest.json", manifest);
     await server.close();
