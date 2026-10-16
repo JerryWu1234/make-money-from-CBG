@@ -28,6 +28,8 @@ export type ValuationSettings = {
   }[];
 };
 export type AnalysisProfile = {
+  /** Operator confirmation for this product and the exact five skill levels used by the formula. */
+  ascendedSchoolFormulaConfirmations?: Record<string, number[]>;
   marketSources?: import("./market").MarketServer[];
   equipmentSearch?: boolean;
   petSearch?: boolean;

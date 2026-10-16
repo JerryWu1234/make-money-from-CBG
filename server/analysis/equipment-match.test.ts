@@ -156,6 +156,67 @@ describe("同核心装备粗略参考价匹配", () => {
       ).toBeNull();
     },
   );
+  it("太阳石伤害全为宝石贡献时不误拒真实头盔样本", () => {
+    const target =
+      "等级80\n防御46 魔法87\n伤害40\n锻炼等级5\n宝石：太阳石\n套装效果：变身术之风伯\n装备角色：男";
+    const source = "等级80\n防御34 魔法80\n套装效果：变身术之风伯\n装备角色：男";
+    expect(comparable(source, target).reason).toBeNull();
+    expect(comparable(source.replace("防御34", "防御47"), target).matchType).toBeNull();
+    expect(comparable(source.replace("魔法80", "魔法88"), target).matchType).toBeNull();
+  });
+  it.each(["", "\n锻炼等级3\n宝石：红宝石"])(
+    "可靠太阳石零初伤在完整详情双方均不等同缺少原生属性：%s",
+    (gems) => {
+      const zero = "等级80\n防御34\n伤害40\n锻炼等级5\n宝石：太阳石";
+      const absent = "等级80\n防御34" + gems;
+      expect(comparable(absent, zero).reason).toBeNull();
+      expect(comparable(zero, absent).reason).toBeNull();
+    },
+  );
+  it.each([
+    "伤害41\n锻炼等级5\n宝石：太阳石",
+    "伤害40\n宝石：太阳石",
+    "伤害40\n锻炼等级5\n宝石：太阳石 红玛瑙",
+    "伤害40\n锻炼等级5\n宝石：未知宝石",
+    "伤害100001\n初始伤害0\n锻炼等级5\n宝石：太阳石",
+    "伤害40\n初始伤害1\n锻炼等级5\n宝石：太阳石",
+    "初始伤害0",
+  ])("正值或不可靠初伤不能等同未显示伤害：%s", (stats) => {
+    const plain = "等级80\n防御34";
+    expect(comparable(plain, plain + "\n" + stats).matchType).toBeNull();
+    expect(comparable(plain + "\n" + stats, plain).matchType).toBeNull();
+  });
+  it.each(["太阳石", "太阳石 红玛瑙", "未知宝石"])(
+    "缺伤害一方含%s时不能推断宝石贡献为零",
+    (gem) => {
+      const zero = "等级80\n防御34\n伤害40\n锻炼等级5\n宝石：太阳石";
+      expect(comparable("等级80\n防御34\n锻炼等级5\n宝石：" + gem, zero).matchType).toBeNull();
+    },
+  );
+  it("红宝石吸收贡献可靠时与相同初灵的舍利子样本双方可比较", () => {
+    const ruby =
+      "等级80\n灵力77\n锻炼等级3\n宝石：红宝石\n法术吸收率 火+12%\n套装效果：变身术之风伯";
+    const relic = "等级80\n灵力95\n锻炼等级3\n宝石：舍利子\n套装效果：变身术之风伯";
+    expect(comparable(relic, ruby).reason).toBeNull();
+    expect(comparable(ruby, relic).reason).toBeNull();
+    expect(comparable(relic.replace("灵力95", "灵力96"), ruby).matchType).toBeNull();
+    expect(comparable(relic.replace("风伯", "鬼将"), ruby).matchType).toBeNull();
+  });
+  it.each([
+    "锻炼等级3\n宝石：红宝石\n法术吸收率 火+11%",
+    "锻炼等级3\n宝石：红宝石\n法术吸收率 水+12%",
+    "锻炼等级3\n宝石：红宝石 蓝宝石\n法术吸收率 火+12%",
+    "锻炼等级3\n宝石：未知宝石\n法术吸收率 火+12%",
+    "宝石：红宝石\n法术吸收率 火+12%",
+    "锻炼等级0\n宝石：红宝石\n法术吸收率 火+12%",
+    "锻炼等级10001\n宝石：红宝石\n法术吸收率 火+40004%",
+    "锻炼等级3\n宝石：红宝石\n法术吸收率 火+12%\n抗未知属性+1",
+  ])("无法用单宝石等级解释或另有未知属性时保留拒绝：%s", (stats) => {
+    const source = "等级80\n灵力77";
+    const target = source + "\n" + stats;
+    expect(comparable(source, target).matchType).toBeNull();
+    expect(comparable(target, source).matchType).toBeNull();
+  });
   it.each(["", "\n锻炼等级4\n宝石：月亮石"])(
     "纯黑宝石可靠扣到速度0可与完整候选缺速度比较：%s",
     (gems) => {

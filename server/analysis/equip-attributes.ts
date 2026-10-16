@@ -166,20 +166,21 @@ export function equipmentInitialDefense(attributes: EquipmentAttributes, partial
   return equipmentInitialAttribute(attributes, "防御", partial);
 }
 
-/** A displayed black-gem-only speed bonus is not a missing native stat on the other item. */
-export function equipmentGemOnlySpeedMatchesAbsent(
+/** A proven gem-only zero is not a missing native stat on the other item. */
+export function equipmentGemOnlyAttributeMatchesAbsent(
   present: EquipmentAttributes,
   absent: EquipmentAttributes,
+  field: "速度" | "伤害",
 ) {
-  if (absent.fields.速度 || absent.fields.初始速度) return false;
+  if (absent.fields[field] || absent.fields["初始" + field]) return false;
   const presentGems = equipmentGems(present);
   const displayedFields = { ...present.fields };
-  delete displayedFields.初始速度;
+  delete displayedFields["初始" + field];
   if (
     presentGems.length !== 1 ||
-    presentGems[0] !== "黑宝石" ||
-    equipmentInitialAttribute({ ...present, fields: displayedFields }, "速度") !== 0 ||
-    equipmentInitialAttribute(present, "速度") !== 0
+    presentGems[0] !== (field === "速度" ? "黑宝石" : "太阳石") ||
+    equipmentInitialAttribute({ ...present, fields: displayedFields }, field) !== 0 ||
+    equipmentInitialAttribute(present, field) !== 0
   )
     return false;
   const absentGems = equipmentGems(absent);
@@ -191,8 +192,31 @@ export function equipmentGemOnlySpeedMatchesAbsent(
   return (
     absentGems.length === 1 &&
     gemEffects[absentGems[0]] !== undefined &&
-    !gemEffects[absentGems[0]].速度
+    !gemEffects[absentGems[0]][field]
   );
+}
+
+/** Official equip_info[4006]: each ruby grade contributes 4% fire absorption. */
+export function equipmentWithoutGemAbsorption(
+  attributes: EquipmentAttributes,
+): EquipmentAttributes {
+  const gems = equipmentGems(attributes);
+  const grades = attributes.fields.锻炼等级;
+  if (
+    gems.length !== 1 ||
+    gems[0] !== "红宝石" ||
+    grades?.length !== 1 ||
+    !/^\+?[1-9]\d*$/.test(grades[0]) ||
+    Number(grades[0]) > 10000
+  )
+    return attributes;
+  return {
+    ...attributes,
+    unknownLines: attributes.unknownLines.filter((line) => {
+      const fire = line.match(/^法术吸收率\s+火\s*[+＋]\s*(\d+(?:\.\d+)?)\s*[%％]$/);
+      return !fire || Number(fire[1]) !== Number(grades[0]) * 4;
+    }),
+  };
 }
 
 function canonical(value: string) {

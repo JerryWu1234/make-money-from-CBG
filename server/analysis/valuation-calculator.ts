@@ -354,6 +354,15 @@ export function calculateValuation(
     },
   ];
   const schoolLevels = school.map((item) => number(item.level));
+  const highestSchoolLevels = schoolLevels
+    .filter((value): value is number => value !== null)
+    .sort((a, b) => b - a)
+    .slice(0, 5);
+  const confirmedSchoolLevels = profile.ascendedSchoolFormulaConfirmations?.[record.listing.key];
+  const ascendedFormulaConfirmed =
+    highestSchoolLevels.length === 5 &&
+    confirmedSchoolLevels?.length === 5 &&
+    highestSchoolLevels.every((value, index) => value === confirmedSchoolLevels[index]);
   const schoolAmount =
     state && schoolLevels.every((value) => value !== null)
       ? schoolPrice(schoolLevels as number[], state, settings.schoolCapConfirmed)
@@ -361,7 +370,10 @@ export function calculateValuation(
   add(
     "师门技能",
     school.map((item) => item.name + "=" + (item.level ?? "未知")).join("、") || "未知",
-    "按当前状态公式，取最高六项/五项或七项逐项计值",
+    "按当前状态公式，取最高六项/五项或七项逐项计值" +
+      (state === "已飞升" && ascendedFormulaConfirmed
+        ? "；用户已确认本角色当前技能按原公式计算"
+        : ""),
     schoolAmount,
     skillItems.flatMap((item, i) => (item.category === "师门技能" ? skillProof(i) : [])),
   );
@@ -375,11 +387,8 @@ export function calculateValuation(
     pending.add("化圣状态与七项180级技能存在冲突");
   if (
     state === "已飞升" &&
-    schoolLevels
-      .filter((value): value is number => value !== null)
-      .sort((a, b) => b - a)
-      .slice(0, 5)
-      .some((value) => value > 150 || value < 56)
+    highestSchoolLevels.some((value) => value > 150 || value < 56) &&
+    !ascendedFormulaConfirmed
   )
     pending.add("飞升师门技能公式出现反常溢价，需核实适用范围");
   if (!skillTab || !Array.isArray(skillTab.items))

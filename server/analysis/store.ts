@@ -86,7 +86,11 @@ function overviewResult(result: ProductAnalysis | null, summary: boolean) {
   };
 }
 
-function profileScope(value: AnalysisProfile | null | undefined, serverId: string) {
+function profileScope(
+  value: AnalysisProfile | null | undefined,
+  serverId: string,
+  listingKey: string,
+) {
   const configured = value?.settings.servers.find((server) => server.serverId === serverId);
   const source = value?.marketSources?.find((server) => server.serverId === serverId);
   const { serverName: _name, fetchedAt: _at, sources: _sources, ...automatic } = source || {};
@@ -98,6 +102,8 @@ function profileScope(value: AnalysisProfile | null | undefined, serverId: strin
         template: value.template,
         calculationVersion: value.calculationVersion,
         calculationCompatible: value.calculationCompatible,
+        ascendedSchoolFormulaConfirmation:
+          value.ascendedSchoolFormulaConfirmations?.[listingKey] || null,
         equipmentSearch: !!value.equipmentSearch,
         petSearch: !!value.petSearch,
         petGearSearch: !!value.petGearSearch,
@@ -360,8 +366,8 @@ export class AnalysisStore {
           : null;
         if (
           !isDeepStrictEqual(
-            profileScope(savedProfile, record.listing.serverId),
-            profileScope(profile, record.listing.serverId),
+            profileScope(savedProfile, record.listing.serverId, record.listing.key),
+            profileScope(profile, record.listing.serverId, record.listing.key),
           )
         )
           continue;
@@ -939,8 +945,8 @@ export class AnalysisStore {
       profileChanged:
         !!currentProfile &&
         !isDeepStrictEqual(
-          profileScope(savedProfile, listing.serverId),
-          profileScope(currentProfile, listing.serverId),
+          profileScope(savedProfile, listing.serverId, listing.key),
+          profileScope(currentProfile, listing.serverId, listing.key),
         ),
       equipmentPricing: row.equipment_pricing_json
         ? JSON.parse(String(row.equipment_pricing_json))
@@ -975,8 +981,8 @@ export class AnalysisStore {
         !!row.task_id &&
         !!currentProfile &&
         !isDeepStrictEqual(
-          profileScope(savedProfile, listing.serverId),
-          profileScope(currentProfile, listing.serverId),
+          profileScope(savedProfile, listing.serverId, listing.key),
+          profileScope(currentProfile, listing.serverId, listing.key),
         ),
       valuation: row.state === "completed" ? overviewResult(result, summary)?.valuation : undefined,
     };
@@ -1103,8 +1109,8 @@ export class AnalysisStore {
           profileChanged:
             !!options.currentProfile &&
             !isDeepStrictEqual(
-              profileScope(savedProfile, listing.serverId),
-              profileScope(options.currentProfile, listing.serverId),
+              profileScope(savedProfile, listing.serverId, listing.key),
+              profileScope(options.currentProfile, listing.serverId, listing.key),
             ),
           result: overviewResult(
             JSON.parse(String(row.result_json)) as ProductAnalysis,

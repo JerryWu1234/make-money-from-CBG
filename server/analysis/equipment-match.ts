@@ -1,7 +1,8 @@
 import {
   compareEquipmentAttributes,
   equipmentInitialAttribute,
-  equipmentGemOnlySpeedMatchesAbsent,
+  equipmentGemOnlyAttributeMatchesAbsent,
+  equipmentWithoutGemAbsorption,
   separateJewelryAttributes,
   type EquipmentAttributes,
 } from "./equip-attributes";
@@ -247,12 +248,14 @@ export function matchComparableEquipmentAttributes(
     const normalizedSource = normalizeInitial(source, partial);
     if (normalizedTarget.reason) return reject("目标" + normalizedTarget.reason);
     if (normalizedSource.reason) return reject("报价" + normalizedSource.reason);
-    if (!partial && equipmentGemOnlySpeedMatchesAbsent(target, source))
-      delete normalizedTarget.attributes!.fields.初始速度;
-    if (equipmentGemOnlySpeedMatchesAbsent(source, target))
-      delete normalizedSource.attributes!.fields.初始速度;
-    target = normalizedTarget.attributes!;
-    source = normalizedSource.attributes!;
+    for (const field of ["速度", "伤害"] as const) {
+      if (!partial && equipmentGemOnlyAttributeMatchesAbsent(target, source, field))
+        delete normalizedTarget.attributes!.fields["初始" + field];
+      if (equipmentGemOnlyAttributeMatchesAbsent(source, target, field))
+        delete normalizedSource.attributes!.fields["初始" + field];
+    }
+    target = equipmentWithoutGemAbsorption(normalizedTarget.attributes!);
+    source = equipmentWithoutGemAbsorption(normalizedSource.attributes!);
   }
   const numericName = (name: string) =>
     name.replace(/^(?:主属性|附加属性)·/, "").replace(/^初始/, "");

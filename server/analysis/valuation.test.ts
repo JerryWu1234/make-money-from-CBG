@@ -144,6 +144,67 @@ describe("裸号估值的复算与可追溯输入", () => {
       price_difference: null,
     });
   });
+  it("飞升原公式确认仅适用于同一角色和已确认的最高五项技能", () => {
+    const record = completeRecord();
+    record.detail!.tabs[0].fields.find((field) => field.name === "飞升/渡劫/化圣")!.value =
+      "已飞升";
+    const skills = record.detail!.tabs[1].items!.filter((item) => item.category === "师门技能");
+    [150, 154, 130, 130, 130, 150, 125].forEach((level, index) => {
+      skills[index].level = String(level);
+    });
+    const configured = {
+      ...profile(),
+      ascendedSchoolFormulaConfirmations: { [record.listing.key]: [154, 150, 150, 130, 130] },
+    };
+    const actual = calculateValuation(record, configured);
+    expect(actual.items.find((item) => item.name === "师门技能")?.amount).toBeCloseTo(16.36);
+    expect(actual.pending_rules).toEqual([]);
+    expect(actual.model_value).not.toBeNull();
+    expect(actual.items.find((item) => item.name === "机缘调整")?.confirmed).toBe(true);
+
+    const unconfirmed = "飞升师门技能公式出现反常溢价，需核实适用范围";
+    expect(calculateValuation(record, profile()).pending_rules).toContain(unconfirmed);
+    record.listing.key += "-another";
+    expect(calculateValuation(record, configured).pending_rules).toContain(unconfirmed);
+    record.listing.key = Object.keys(configured.ascendedSchoolFormulaConfirmations)[0];
+    skills[1].level = "155";
+    expect(calculateValuation(record, configured).pending_rules).toContain(unconfirmed);
+    expect(calculateValuation(record, configured).model_value).toBeNull();
+  });
+  it("冻结的飞升公式确认按角色比较，其他角色确认不改变本角色规则", () => {
+    const crawl = new CrawlStore(":memory:");
+    const record = completeRecord();
+    crawl.observe(record.listing);
+    crawl.save(record.listing, record.detail!);
+    const store = new AnalysisStore(crawl.db);
+    const confirmed = {
+      ...profile(),
+      ascendedSchoolFormulaConfirmations: { [record.listing.key]: [154, 150, 150, 130, 130] },
+    };
+    try {
+      const id = store.createRun("codex", "test", true, confirmed);
+      const taskId = store.overview({ runId: id }).records.items[0].taskId!;
+      expect(store.detail(taskId, confirmed)?.profileChanged).toBe(false);
+      expect(store.detail(taskId, profile())?.profileChanged).toBe(true);
+      expect(
+        store.detail(taskId, {
+          ...confirmed,
+          ascendedSchoolFormulaConfirmations: {
+            ...confirmed.ascendedSchoolFormulaConfirmations,
+            another: [160, 160, 160, 160, 160],
+          },
+        })?.profileChanged,
+      ).toBe(false);
+      expect(
+        store.detail(taskId, {
+          ...confirmed,
+          ascendedSchoolFormulaConfirmations: { [record.listing.key]: [155, 150, 150, 130, 130] },
+        })?.profileChanged,
+      ).toBe(true);
+    } finally {
+      crawl.db.close();
+    }
+  });
   it("AI只核对结论，金额和缺项由程序产生；错误买入结论仍拒绝", () => {
     const record = completeRecord();
     record.listing.price = "100000";

@@ -2,10 +2,20 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   compareEquipmentAttributes,
   equipmentInitialAttribute,
+  equipmentWithoutGemAbsorption,
   parseEquipmentAttributes,
 } from "./equip-attributes";
 
 describe("装备价敏字段的结构化比较", () => {
+  it("只消解可靠红宝石吸收行，不修改原始证据或删除其它未知属性", () => {
+    const parsed = parseEquipmentAttributes(
+      "等级80\n灵力77\n锻炼等级3\n宝石：红宝石\n法术吸收率 火+12%\n抗未知属性+1",
+    );
+    const normalized = equipmentWithoutGemAbsorption(parsed);
+    expect(normalized.unknownLines).toEqual(["抗未知属性+1"]);
+    expect(normalized.fields).toEqual(parsed.fields);
+    expect(parsed.unknownLines).toEqual(["法术吸收率 火+12%", "抗未知属性+1"]);
+  });
   it.each([
     ["防御", 296, "月亮石", 8, 200],
     ["伤害", 581, "太阳石", 10, 501],
