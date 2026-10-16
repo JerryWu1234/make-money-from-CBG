@@ -15,7 +15,7 @@ const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
-function setup(keys = ["a", "b"], recordFactory = analysisRecord) {
+function setup(keys = ["a", "b"], recordFactory = analysisRecord, captureRunning?: () => boolean) {
   const crawl = new CrawlStore(":memory:");
   for (const key of keys) {
     const record = recordFactory(key);
@@ -48,7 +48,7 @@ function setup(keys = ["a", "b"], recordFactory = analysisRecord) {
       analyze,
     }),
   );
-  const runner = new AnalysisRunner(store, connect);
+  const runner = new AnalysisRunner(store, connect, captureRunning);
   cleanups.push(async () => {
     await runner.shutdown();
     crawl.db.close();
@@ -134,6 +134,68 @@ function untilAborted(signal: AbortSignal): Promise<never> {
 }
 
 describe("持久化的商品分析队列", () => {
+  it.each([false, true])(
+    "暂停的跟随采集空队列可续跑，采集运行=%s，首角色不重算且新角色同批追加",
+    async (captureAtResume) => {
+      let capturing = true;
+      const keys = ["a"];
+      const { crawl, store, runner, analyze, connect } = setup(
+        keys,
+        analysisRecord,
+        () => capturing,
+      );
+      const id = await runner.start("codex");
+      await vi.waitFor(() => expect(store.run(id)?.completed).toBe(1));
+      await runner.pause(id);
+      expect(store.run(id)).toMatchObject({ status: "paused", completed: 1, queued: 0 });
+      expect(store.hasCapturedPending(id)).toBe(false);
+      const taskId = store.overview({ runId: id }).records.items[0].taskId!;
+      const first = structuredClone(store.detail(taskId));
+
+      capturing = captureAtResume;
+      await runner.resume(id, true);
+      if (!captureAtResume) await runner.settled();
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(store.run(id)).toMatchObject({
+        status: captureAtResume ? "running" : "completed",
+        completed: 1,
+        queued: 0,
+      });
+      expect(analyze).toHaveBeenCalledOnce();
+
+      keys.push("b");
+      const record = analysisRecord("b");
+      crawl.observe(record.listing);
+      crawl.save(record.listing, record.detail!);
+      if (captureAtResume) expect(runner.appendCaptured()).toBe(1);
+      capturing = false;
+      expect(await runner.resume(id)).toBe(id);
+      await runner.settled();
+      expect(store.run(id)).toMatchObject({
+        status: "completed",
+        total: 2,
+        completed: 2,
+        failed: 0,
+      });
+      expect(store.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n).toBe(1);
+      expect(analyze).toHaveBeenCalledTimes(2);
+      expect(store.detail(taskId)).toEqual(first);
+    },
+  );
+
+  it("非跟随采集的空队列继续仍不连接AI或重算已完成角色", async () => {
+    const { store, runner, analyze, connect } = setup(["a"]);
+    const id = await runner.start("codex", false, undefined, true);
+    await runner.settled();
+    expect(store.followsCapture(id)).toBe(false);
+    expect(store.run(id)).toMatchObject({ status: "completed", completed: 1, queued: 0 });
+    await runner.resume(id, true);
+    await runner.settled();
+    expect(connect).toHaveBeenCalledOnce();
+    expect(analyze).toHaveBeenCalledOnce();
+    expect(store.run(id)).toMatchObject({ status: "completed", completed: 1, queued: 0 });
+  });
+
   it("列表摘要保留报价，详情仍返回完整证据，读取不改写保存结果", async () => {
     const { store, runner, profile } = await valuationSetup();
     await runner.start("codex", false, profile);
@@ -621,6 +683,7 @@ describe("持久化的商品分析队列", () => {
         waitingPricing: 1,
       });
       expect(analyze).not.toHaveBeenCalled();
+      await expect(runner.resume(id)).rejects.toThrow("先重试");
       expect(
         store.detail(store.overview({ runId: id }).records.items[0].taskId!)![
           module === "equipment" ? "equipmentPricing" : "petPricing"

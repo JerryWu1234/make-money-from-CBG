@@ -170,7 +170,8 @@ export class AnalysisRunner {
     if (
       !run.queued &&
       !(retryFailed && (run.failed || run.waitingPricing)) &&
-      !this.store.hasCapturedPending(id)
+      !this.store.hasCapturedPending(id) &&
+      !(run.status === "paused" && this.store.followsCapture(id))
     )
       return id;
     if (run.calculationVersion && run.calculationVersion !== CALCULATION_VERSION)
