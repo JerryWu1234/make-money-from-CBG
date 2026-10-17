@@ -7,7 +7,7 @@ import { petGearInventory, type PetGearPricingSnapshot } from "./pet-gear-invent
 import { ANALYSIS_SCHEMA, validateAnalysis } from "./contract";
 import { AnalysisStore } from "./store";
 import type { PricingSearchProgress } from "./equipment-pricing";
-import { VALUATION_SCHEMA, validateValuation } from "./valuation-contract";
+import { VALUATION_SCHEMA, validateValuation, recalculateValuation } from "./valuation-contract";
 import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { CALCULATION_VERSION } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
@@ -247,7 +247,8 @@ export class AnalysisRunner {
       if (budget.taskId !== task.id) budget = { taskId: task.id, started: Date.now(), rounds: 0 };
       const equipmentPricingCurrent =
         !!task.equipmentPricing &&
-        task.equipmentPricing.inputHash === equipmentInventory(task.record).inputHash &&
+        task.equipmentPricing.inputHash ===
+          equipmentInventory(task.record, task.profile?.settings).inputHash &&
         pricingSnapshotFresh(task.equipmentPricing);
       const pendingPricing =
         (task.profile?.equipmentSearch &&
@@ -492,8 +493,38 @@ export class AnalysisRunner {
         }
         continue;
       }
+      if (
+        task.profile &&
+        task.previousResult?.inputHash === task.document.contentHash &&
+        task.previousResult.productKey === task.document.productKey &&
+        task.previousResult.valuation?.calculation_version === task.profile.calculationVersion
+      ) {
+        const result = recalculateValuation(
+          task.previousResult,
+          task.document,
+          task.record,
+          task.profile,
+          task.equipmentPricing,
+          task.petPricing,
+        );
+        const attempt = this.store.begin(
+          task,
+          owner,
+          "仅复用本任务相同输入中已验证的本体事实，按当前规则和新查价快照重新核算；本次未调用AI。",
+        );
+        this.store.finish(task, attempt, owner, {
+          state: "completed",
+          result,
+          usage: { source: "validated-body-recalculation", inputHash: task.document.contentHash },
+        });
+        continue;
+      }
       const prompt =
-        task.profile && task.lastError && !task.lastError.startsWith("已暂停") && task.attempts > 0
+        task.profile &&
+        task.lastError &&
+        task.lastAttemptHadResponse &&
+        !task.lastError.startsWith("已暂停") &&
+        task.attempts > 0
           ? task.prompt +
             "\n\n上次输出校验未通过：" +
             task.lastError.slice(0, 1000) +

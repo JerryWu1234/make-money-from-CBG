@@ -190,7 +190,7 @@ it("采集重读仍有缺项时不启动AI，也不创建半成品分析批次",
     },
   });
   await expect((await import("./controller")).startAnalysis("codex")).rejects.toThrow(
-    "采集阶段仍有 1 个角色未核验完整",
+    "还有 1 个角色资料待补采：角色a",
   );
   expect(mocks.connect).not.toHaveBeenCalled();
   expect(crawl.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n).toBe(0);

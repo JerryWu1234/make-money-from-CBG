@@ -61,8 +61,10 @@ window.ajax_with_recommend=async function(options){
    if(settings.mode==='stalled'){options.onComplete();return;}
    if(settings.mode==='error'){options.onSuccess({status:1,msg:'装备查询请求失败'});options.onComplete();return;}
    const page=options.data.page, activePages=settings.broadenedPages && options.data.init_hp<176 ? settings.broadenedPages : settings.pages;
-   const rows=(activePages[page-1]||[]).filter(row=>['damage','all_wakan','init_damage_raw','init_wakan','init_defense','init_hp','init_dex'].every(key=>row.rawAttributes?.[key]===undefined || options.data[key]===undefined || row.rawAttributes[key]+(options.data.attr_with_melt?(row.meltAttributes?.[key]||0):0)>=options.data[key]));
-   options.onSuccess({status:0,msg:rows,paging:{cur_page:page,num_begin:1,num_end:activePages.length}});
+   let filtered=(settings.initialSort?activePages.flat():(activePages[page-1]||[])).filter(row=>['all_damage','damage','all_wakan','init_damage','init_damage_raw','init_wakan','init_defense','init_hp','init_dex'].every(key=>row.rawAttributes?.[key]===undefined || options.data[key]===undefined || row.rawAttributes[key]+(options.data.attr_with_melt?(row.meltAttributes?.[key]||0):0)>=options.data[key]));
+   if(settings.initialSort&&options.data.order_by){const [key,direction]=options.data.order_by.split(' ');filtered.sort((a,b)=>(a.rawAttributes[key]-b.rawAttributes[key])*(direction==='ASC'?1:-1));}
+   const size=activePages[0]?.length||15,rows=settings.initialSort?filtered.slice((page-1)*size,page*size):filtered;
+   options.onSuccess({status:0,msg:rows,paging:{cur_page:page,num_begin:1,num_end:settings.initialSort?Math.max(1,Math.ceil(filtered.length/size)):activePages.length}});
    options.onComplete();
  },settings.delay);
 };
@@ -78,6 +80,8 @@ window.overall_search=function(args,page,order){
    const root=document.querySelector('#search_result');
    if(!result.msg.length){root.innerHTML='<p>没有符合条件的商品</p>';return;}
    const table=document.createElement('table');
+   if(settings.duplicateInitialHeaders){const outside=document.createElement('span');outside.textContent='初伤';document.body.append(outside);const hidden=document.createElement('span');hidden.textContent='初伤';hidden.style.display='none';root.append(hidden)}
+   if(!settings.jewelry&&!settings.jade&&!settings.yuanshen&&!settings.missingInitialSort){const header=table.insertRow();for(const [label,key] of [['初伤','init_damage'],['初防','init_defense'],['初灵','init_wakan'],['初血','init_hp'],['初敏','init_dex']]){const cell=document.createElement('th'),link=document.createElement('a');link.textContent=label+(settings.initialSortArrows&&CurSearchValue.order_by.key===key?(CurSearchValue.order_by.sort==='ASC'?'↑':'↓'):'');link.href='#';link.onclick=event=>{event.preventDefault();const old=CurSearchValue.order_by;CurSearchValue.order_by={key,sort:old.key===key&&old.sort==='DESC'?'ASC':'DESC'};overall_search(CurSearchValue.arg,1,CurSearchValue.order_by)};cell.append(link);header.append(cell)}}
    for(const row of result.msg){const tr=document.createElement('tr'),td=document.createElement('td'),a=document.createElement('a'),img=document.createElement('img');a.className='soldImg';a.href='https://xyq.cbg.163.com/equip?s='+encodeURIComponent(row.serverId||'1')+'&eid='+encodeURIComponent(row.eid)+'&from_shareid=must-not-send-viewer&reco_request_id=tracking&cross_buy_serverid=99';img.src=${JSON.stringify(pixel)};img.width=40;img.height=40;img.setAttribute('data_equip_name',row.name);img.setAttribute('data_equipid','ordersn-'+row.eid);if(row.kindId!==undefined)img.setAttribute('data_kindid',row.kindId);if(row.modelId!==undefined)img.setAttribute('data_equip_type',row.modelId);if(row.level!==undefined)img.setAttribute('data_equip_level',row.level);a.append(img);td.append(a);if(row.description!==undefined){const desc=document.createElement('textarea');desc.id='equip_desc_'+(row.descriptionOrdersn||'ordersn-'+row.eid);desc.style.display='none';desc.value=row.description;td.append(desc);}tr.append(td);table.append(tr);}root.append(table);
    const pager=document.querySelector('#pager');
    if(result.paging.num_end>1){pager.append('第'+page+'页, 共'+result.paging.num_end+'页');const jump=document.createElement('input');jump.id='pager_input';jump.addEventListener('keydown',event=>{if(event.key==='Enter')goto(Number(jump.value));});pager.append(jump);if(page>1)pager.insertAdjacentHTML('beforeend','<a href="javascript:goto('+(page-1)+')">上一页</a>');if(page<result.paging.num_end)pager.insertAdjacentHTML('beforeend','<a href="javascript:goto('+(page+1)+')">下一页</a>');}
@@ -145,7 +149,7 @@ if(settings.yuanshen){
  for(let i=1;i<=3;i++)field('sel_add_attr'+i,'select',attrs);
 }else{
  buildSlider('level_slider',10,20);menu('kind_check_panel',EquipKinds);menu('special_effect_panel',SpecialEffects);menu('special_skill_panel',SpecialSkills);menu('gem_panel',Gems);
- for(const key of ['repair_fail','damage','all_wakan','gem_level','init_defense','init_damage_raw','init_wakan','init_hp','init_dex','hole_num'])field('txt_'+key,'text');
+ for(const key of ['repair_fail','all_damage','damage','all_wakan','gem_level','init_defense','init_damage','init_damage_raw','init_wakan','init_hp','init_dex','hole_num'])field('txt_'+key,'text');
  field('chk_attr_with_melt','checkbox');
  add('<div id="check_mode_panel"><input type="radio" name="special_mode" value="and" checked><input type="radio" name="special_mode" value="or"></div>');
  field('radio_short_cut','radio');field('sel_short_cut','select',settings.suitShortcutOptions||window.SuitEffects||[]);

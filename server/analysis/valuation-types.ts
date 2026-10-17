@@ -2,6 +2,9 @@ import type { Evidence } from "./types";
 
 export type Decision = "BUY" | "WATCH" | "PASS" | "NEED_INFO" | "OUT_OF_SCOPE";
 export type ValuationSettings = {
+  pricingScope?: "all" | "equipment";
+  /** Explicit operator choice to leave jade assets unpriced in this batch. */
+  deferJade?: boolean;
   equipmentBaselinePrices?: import("./equipment-baseline").EquipmentBaselinePrices;
   b: number | null;
   a: number | null;

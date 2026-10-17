@@ -47,6 +47,12 @@ export interface TabSnapshot {
   pets?: PetSnapshot[];
   petCount?: number;
   equipmentEmptyProof?: "official-containers";
+  equipmentContainers?: Array<{
+    id: string;
+    present: boolean;
+    visible: boolean;
+    icons: Array<{ name: string; modelId: string }>;
+  }>;
 }
 export interface PetSnapshot {
   index: number;
@@ -67,6 +73,20 @@ export interface DetailItem {
   kindId?: string;
   /** Original official data_equip_type model number, not a search category ID. */
   modelId?: string;
+  categoryConfirmation?: {
+    source: "user";
+    category: string;
+    confirmedAt: string;
+  };
+  categoryEvidence?: {
+    version: 1;
+    modelId: string;
+    name: string;
+    category: string;
+    roleKey: string;
+    location: string;
+    collectedAt: string;
+  };
   location?: string;
   level?: string;
   skillObservation?: {

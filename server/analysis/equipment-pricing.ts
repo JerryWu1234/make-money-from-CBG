@@ -11,9 +11,16 @@ import {
   PRICING_RESUME_POLICY,
   skippedPricingItem,
 } from "./pricing-integrity";
-import { equipmentInitialAttribute, parseEquipmentAttributes } from "./equip-attributes";
+import {
+  equipmentInitialAttribute,
+  equipmentWeaponTotalDamage,
+  parseEquipmentAttributes,
+} from "./equip-attributes";
 import { hasUnconfirmedEmptyEquipment, observedEquipmentCategory } from "../crawler/compact";
-import { matchComparableEquipmentAttributes } from "./equipment-match";
+import {
+  matchComparableEquipmentAttributes,
+  matchInitialSearchEquipmentAttributes,
+} from "./equipment-match";
 import { matchSpecialAsset, SPECIAL_ASSET_MATCH_POLICY } from "./special-asset-match";
 import {
   equipmentExclusion,
@@ -79,7 +86,7 @@ export type EquipmentPricingItem = {
   status: "priced" | "no_match" | "incomplete" | "untradable" | "unsupported";
   referencePrice: number | null;
   priceMethod?: typeof EQUIPMENT_QUOTE_POLICY | "first-five-average-v3";
-  comparisonPolicy?: "base-upper-bound-v1";
+  comparisonPolicy?: "base-upper-bound-v1" | "core-initial-first-five-v3";
   candidates: EquipmentCandidate[];
   issues: string[];
   similarEstimate?: SimilarEstimate;
@@ -120,6 +127,7 @@ export type EquipmentSource = {
     items: Array<{
       key: string;
       kindId?: string;
+      kindName?: string;
       candidates: EquipmentCandidate[];
       note?: string;
       query?: string;
@@ -149,7 +157,57 @@ export const isJewelryEquipment = (
   /精炼等级/.test(item.description) ||
   [61, 62, 63, 64].includes(Number(item.kindId));
 
-export const EQUIPMENT_CORE_INITIAL_POLICY = "required-slot-initial-attribute-v1";
+export const EQUIPMENT_CORE_INITIAL_POLICY = "required-slot-initial-hit4-first-five-tolerance2-v4";
+export const EQUIPMENT_WEAPON_QUERY_POLICY = "raw-initial-and-total-damage-fields-v1";
+export const EQUIPMENT_CORE_INITIAL_TOLERANCE = 2;
+/** The core field validates form/detail values; the label selects the confirmed public sort header. */
+export function equipmentCoreInitial(
+  item: Pick<EquipmentPricingItem, "category" | "description" | "kindId">,
+  category = item.category,
+) {
+  if (isJewelryEquipment(item) || /元身|上古玉魄/.test(category)) return null;
+  const slot = slotFromCategory(category) || (/双环|魔棒|伞|棍/.test(category) ? "weapon" : null);
+  if (!slot) return null;
+  const [field, control, label] = {
+    weapon: ["伤害", "init_damage_raw", "初伤"],
+    body: ["防御", "init_defense", "初防"],
+    head: ["防御", "init_defense", "初防"],
+    shoe: ["敏捷", "init_dex", "初敏"],
+    neck: ["灵力", "init_wakan", "初灵"],
+    belt: ["气血", "init_hp", "初血"],
+  }[slot];
+  const attributes = parseEquipmentAttributes(item.description);
+  const value = equipmentInitialAttribute(attributes, field);
+  const combinedValue = slot === "weapon" ? equipmentWeaponTotalDamage(attributes) : null;
+  return value === null
+    ? null
+    : { field, control, label, value, ...(combinedValue === null ? {} : { combinedValue }) };
+}
+
+export function equipmentCoreMismatch(
+  item: EquipmentPricingItem,
+  source: ReturnType<typeof parseEquipmentAttributes>,
+  partial = false,
+) {
+  if (item.comparisonPolicy !== "core-initial-first-five-v3") return null;
+  const core = equipmentCoreInitial(item);
+  if (!core) return "目标核心初始属性未确认";
+  const value = equipmentInitialAttribute(source, core.field, partial);
+  if (value === null && partial) return null;
+  if (value === null || value < core.value || value > core.value + EQUIPMENT_CORE_INITIAL_TOLERANCE)
+    return `报价${core.label}${value ?? "未知"}不在目标${core.value}至${core.value + EQUIPMENT_CORE_INITIAL_TOLERANCE}范围内`;
+  if (core.combinedValue !== undefined) {
+    const combined = equipmentWeaponTotalDamage(source, partial);
+    if (combined === null && partial) return null;
+    if (
+      combined === null ||
+      combined < core.combinedValue ||
+      combined > core.combinedValue + EQUIPMENT_CORE_INITIAL_TOLERANCE
+    )
+      return `报价总伤（初伤+命中÷4）${combined ?? "未知"}不在目标${core.combinedValue}至${core.combinedValue + EQUIPMENT_CORE_INITIAL_TOLERANCE}范围内`;
+  }
+  return null;
+}
 const unidentifiedEquipmentDescription = (description: string) =>
   description.split("\n").some((line) => line.trim() === "未鉴定物品");
 
@@ -211,7 +269,7 @@ export function equipmentLevelUnsupportedReason(
 }
 
 /** Only owned role equipment, not skills, artifacts, consumables or pet gear. */
-export function equipmentInventory(record: SavedRoleRecord) {
+export function equipmentInventory(record: SavedRoleRecord, settings?: ValuationSettings) {
   const tabs = record.detail?.tabs.filter((tab) => /^道具\/法宝(?:\s*\/|$)/.test(tab.name)) || [];
   const items: EquipmentPricingItem[] = [];
   const locations = new Map<string, string>();
@@ -314,7 +372,15 @@ export function equipmentInventory(record: SavedRoleRecord) {
         level,
         category: inferred,
         ...(failureBudgetApplies({ category: inferred })
-          ? { comparisonPolicy: "base-upper-bound-v1" as const }
+          ? {
+              comparisonPolicy: equipmentCoreInitial({
+                category: inferred,
+                description,
+                kindId: item.kindId,
+              })
+                ? ("core-initial-first-five-v3" as const)
+                : ("base-upper-bound-v1" as const),
+            }
           : {}),
         ...(item.kindId ? { kindId: item.kindId } : {}),
         ...(item.modelId ? { modelId: item.modelId } : {}),
@@ -351,12 +417,35 @@ export function equipmentInventory(record: SavedRoleRecord) {
     issues.push("人物装备库存是否为空尚未核对，需要自动补采装备区域");
   const captureComplete =
     !!capture?.complete && tabs.some((tab) => tab.name === "道具/法宝") && !issues.length;
+  if (settings?.pricingScope === "equipment")
+    for (const item of items)
+      if (isJewelryEquipment(item) && item.status !== "incomplete") {
+        item.searchState = "skipped";
+        item.skipReason = "本轮先分析人物装备；灵饰待查，未计入参考合计，市场售价未知";
+      }
+  if (settings?.deferJade)
+    for (const item of items)
+      if (item.category === "上古玉魄") {
+        item.searchState = "skipped";
+        item.skipReason = "用户确认本轮上古玉魄待查，未计入参考合计，市场售价未知";
+      }
   const inputHash = hash(
     JSON.stringify({
+      pricingScope: settings?.pricingScope || "all",
+      ...(settings?.deferJade && items.some((item) => item.category === "上古玉魄")
+        ? { deferJade: true }
+        : {}),
       scopeVersion: GLOBAL_MARKET_SCOPE_VERSION,
       searchUI: MARKET_SEARCH_UI_VERSION,
-      comparisonVersion: "same-kind-exact-suit-v5",
+      comparisonVersion: "core-initial-sorted-first-five-tolerance2-v9",
       coreInitialPolicy: EQUIPMENT_CORE_INITIAL_POLICY,
+      ...(items.some(
+        (item) =>
+          !isJewelryEquipment(item) &&
+          equipmentWeaponTotalDamage(parseEquipmentAttributes(item.description)) !== null,
+      )
+        ? { weaponQueryPolicy: EQUIPMENT_WEAPON_QUERY_POLICY }
+        : {}),
       specialAssetPolicy: SPECIAL_ASSET_MATCH_POLICY,
       exclusionPolicy: EQUIPMENT_EXCLUSION_POLICY,
       queryPolicy: EQUIPMENT_QUOTE_POLICY,
@@ -576,10 +665,14 @@ export function verifyEquipmentCandidate(
     /<pre\b[^>]*data-cbg-equipment-description[^>]*>([\s\S]*?)<\/pre>/i,
   )?.[1];
   if ((jade || yuanshen) && !specialDescription) return reject("玉魄/元身完整属性描述尚未读取");
+  const coreMismatch = equipmentCoreMismatch(item, sourceAttributes);
+  if (coreMismatch) return reject(coreMismatch);
   const match =
     jade || yuanshen
       ? matchSpecialAsset(item, pageText(specialDescription!))
-      : matchComparableEquipmentAttributes(targetAttributes, sourceAttributes);
+      : item.comparisonPolicy === "core-initial-first-five-v3"
+        ? matchInitialSearchEquipmentAttributes(targetAttributes, sourceAttributes)
+        : matchComparableEquipmentAttributes(targetAttributes, sourceAttributes);
   if (match.reason) return reject(match.reason);
   if (
     match.matchType === "similar" &&
@@ -624,9 +717,9 @@ export type Search = (
 /** Each tradable equipment item uses current market quotations; presets do not skip search. */
 export function equipmentPricingPlan(
   record: SavedRoleRecord,
-  _settings?: ValuationSettings,
+  settings?: ValuationSettings,
 ): EquipmentPricingSnapshot {
-  const inventory = equipmentInventory(record);
+  const inventory = equipmentInventory(record, settings);
   const snapshot: EquipmentPricingSnapshot = {
     version: 1,
     inputHash: inventory.inputHash,
@@ -674,7 +767,9 @@ const quoteCandidates = (item: EquipmentPricingItem) =>
   item.candidates.filter(
     (candidate) =>
       candidate.verified &&
-      (item.comparisonPolicy === "base-upper-bound-v1" || candidate.matchType !== "similar"),
+      (item.comparisonPolicy === "base-upper-bound-v1" ||
+        item.comparisonPolicy === "core-initial-first-five-v3" ||
+        candidate.matchType !== "similar"),
   );
 
 function skipFailedEquipment(item: EquipmentPricingItem, reason: string) {
@@ -850,7 +945,14 @@ async function applyEquipmentSearchResponse(
           item.issues.push(result.note.slice(0, 500));
       }
     }
-    snapshot.issues.push("本次检索没有实际查询记录，返回价格未采纳");
+    if (
+      !Array.isArray(response.items) ||
+      !response.items.length ||
+      response.items.some(
+        (item) => item.searchState !== "read_failed" || item.candidates.length > 0,
+      )
+    )
+      snapshot.issues.push("本次检索没有实际查询记录，返回价格未采纳");
     return finishPricingSearch(snapshot);
   }
   if (!Array.isArray(response.items) || response.items.length > 100) {
@@ -891,8 +993,20 @@ async function applyEquipmentSearchResponse(
       throw new Error("官网查询装备种类无效，未采用报价");
     if (item.kindId && result.kindId && Number(item.kindId) !== Number(result.kindId))
       throw new Error("官网查询装备种类与库存不一致，未采用报价");
-    const target =
+    let target =
       !item.kindId && result.kindId ? { ...item, kindId: result.kindId as string } : item;
+    if (result.kindName !== undefined) {
+      if (
+        typeof result.kindName !== "string" ||
+        !result.kindName.trim() ||
+        result.kindName.length > 80 ||
+        !result.kindId
+      )
+        throw new Error("官网查询装备类型名称无效，未采用报价");
+      const resolved = { ...target, category: result.kindName };
+      if (!isJewelryEquipment(item) && equipmentCoreInitial(resolved))
+        target = { ...resolved, comparisonPolicy: "core-initial-first-five-v3" };
+    }
     item.query = typeof result.query === "string" ? result.query : "";
     item.searchCursor = result.searchCursor as EquipmentSearchCursor | undefined;
     item.samplingStopped = result.samplingStopped === true;
@@ -961,7 +1075,9 @@ async function applyEquipmentSearchResponse(
       item.candidates.push(candidate);
     }
     if (readFailed) item.searchState = "read_failed";
-    const unified = item.comparisonPolicy === "base-upper-bound-v1";
+    const unified =
+      item.comparisonPolicy === "base-upper-bound-v1" ||
+      item.comparisonPolicy === "core-initial-first-five-v3";
     if (!unified) {
       const closest = item.candidates
         .filter((candidate) => candidate.verified && candidate.matchType === "similar")
@@ -985,20 +1101,22 @@ async function applyEquipmentSearchResponse(
       if (verified.length === 1) item.issues.push("仅1条挂牌样本，参考范围有限");
       if (verified.length < EQUIPMENT_QUOTE_LIMIT)
         item.issues.push(
-          `已核实${verified.length}件${unified ? "基础属性≤目标的合格" : "同配置"}在售商品，最多${EQUIPMENT_QUOTE_LIMIT}件，参考价取有效样本最低挂牌价`,
+          `已核实${verified.length}件${item.comparisonPolicy === "core-initial-first-five-v3" ? "前5条中核心初始值在目标至目标+2范围内的" : unified ? "基础属性≤目标的合格" : "同配置"}在售商品，最多${EQUIPMENT_QUOTE_LIMIT}件，参考价取有效样本最低挂牌价`,
         );
     } else {
       if (!unified) item.similarEstimate = buildEquipmentEstimate(item.candidates);
       if (verified.length)
         item.issues.push(
-          `已核实${verified.length}件${unified ? "基础属性≤目标的合格" : "同配置"}商品，继续收集至${EQUIPMENT_QUOTE_LIMIT}件或确认结果已读完`,
+          `已核实${verified.length}件${item.comparisonPolicy === "core-initial-first-five-v3" ? "前5条中核心初始值在目标至目标+2范围内的" : unified ? "基础属性≤目标的合格" : "同配置"}商品，继续完成排序后前${EQUIPMENT_QUOTE_LIMIT}条的核验`,
         );
       item.issues.push(
         item.similarEstimate?.status === "range"
           ? "暂无完全同配置报价，采用已核验相近装备样本最低挂牌价作为参考价，并保留报价范围和配置差异"
-          : unified
-            ? "可靠的基础属性≤目标样本不足，暂不自动定价"
-            : "可靠的同配或相近样本不足，暂不自动定价",
+          : item.comparisonPolicy === "core-initial-first-five-v3"
+            ? "核心初始值在目标至目标+2范围内的可靠样品尚未补齐，暂不自动定价"
+            : unified
+              ? "可靠的基础属性≤目标样本不足，暂不自动定价"
+              : "可靠的同配或相近样本不足，暂不自动定价",
       );
     }
   }
@@ -1025,7 +1143,7 @@ export function combineEquipmentPricing(
   pricing?: EquipmentPricingSnapshot,
   settings?: ValuationSettings,
 ): ValuationResult {
-  const inventory = equipmentInventory(record);
+  const inventory = equipmentInventory(record, settings);
   const valid =
     pricing?.inputHash === inventory.inputHash &&
     inventoryMatchesSnapshot(pricing, inventory.items);
@@ -1168,11 +1286,13 @@ export function combineEquipmentPricing(
                     baseline.source.label
                 : item.baselineInvalidReason
                   ? "默认参考价已失效：" + item.baselineInvalidReason
-                  : (item.comparisonPolicy === "base-upper-bound-v1"
-                      ? "已核对基础属性≤目标的装备前五条合格挂牌价的最低值（"
-                      : item.priceMethod === EQUIPMENT_QUOTE_POLICY
-                        ? "已核对同配置装备前五件有效挂牌价的最低值（"
-                        : "已核对同配置装备挂牌价的中位数（") +
+                  : (item.comparisonPolicy === "core-initial-first-five-v3"
+                      ? "已核对排序后前五条中核心初始值在目标至目标+2范围内的样品的最低挂牌价（"
+                      : item.comparisonPolicy === "base-upper-bound-v1"
+                        ? "已核对基础属性≤目标的装备前五条合格挂牌价的最低值（"
+                        : item.priceMethod === EQUIPMENT_QUOTE_POLICY
+                          ? "已核对同配置装备前五件有效挂牌价的最低值（"
+                          : "已核对同配置装备挂牌价的中位数（") +
                     quoteCandidates(item).length +
                     "条样本）",
           amount: baseline ? baseline.amount : fresh && verified ? item.referencePrice : null,

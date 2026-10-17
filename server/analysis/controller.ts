@@ -14,6 +14,7 @@ import { AnalysisStore } from "./store";
 import { refreshMarket, marketServers } from "./market";
 import { loadProfile, saveProfile, PROMPT_FILE } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
+import { reconcileCapturedEquipmentCategories } from "./equipment-category-evidence";
 
 type CapturePreparation = {
   controller: AbortController;
@@ -81,7 +82,10 @@ async function prepareCaptures(keys?: string[]) {
   const analysis = service();
   if (analysis.preparing) throw new Error("正在采集角色完整资料，请等待当前准备完成");
   const missing = captureRetryItems(keys);
-  if (!missing.length) return;
+  if (!missing.length) {
+    reconcileCapturedEquipmentCategories(analysis.store.db, keys);
+    return;
+  }
   const preparation: CapturePreparation = {
     controller: new AbortController(),
     ownsCapture: false,
@@ -121,14 +125,21 @@ async function prepareCaptures(keys?: string[]) {
       throw new Error(status.error || status.message);
     const incomplete = captureRetryItems(keys);
     if (incomplete.length)
-      throw new Error(
-        `采集阶段仍有 ${incomplete.length} 个角色未核验完整，本次未进入分析。` +
-          (status.lastItemError || ""),
+      throw Object.assign(
+        new Error(
+          `还有 ${incomplete.length} 个角色资料待补采：${incomplete
+            .slice(0, 5)
+            .map((item) => item.name)
+            .join("、")}${incomplete.length > 5 ? "等" : ""}。` +
+            "请先在采集列表查看失败原因并补采，资料完整后再开始分析。",
+        ),
+        { name: "CapturePreparationError" },
       );
   })().finally(() => {
     if (analysis.preparing === preparation) analysis.preparing = undefined;
   });
   await preparation.completion;
+  reconcileCapturedEquipmentCategories(analysis.store.db, keys);
 }
 export async function analysisSettings() {
   const db = service().store.db;

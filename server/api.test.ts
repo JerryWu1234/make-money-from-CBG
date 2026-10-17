@@ -74,6 +74,19 @@ beforeEach(() => {
   });
 });
 
+it("资料待补采返回409并保留明确的角色提示", async () => {
+  const message = "还有 1 个角色资料待补采：29534033。";
+  mocks.startAnalysis.mockRejectedValue(
+    Object.assign(new Error(message), { name: "CapturePreparationError" }),
+  );
+  const res = response();
+  await (
+    await import("./api")
+  ).apiMiddleware(request("/api/analysis/start", { provider: "codex" }), res, vi.fn());
+  expect(res.statusCode).toBe(409);
+  expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ error: message });
+});
+
 describe("指定商品试分析", () => {
   it("宝宝装备表单诊断沿用请求取消，不启动AI或分析队列", async () => {
     const input = { productKey: "941:role", mode: "discover" };

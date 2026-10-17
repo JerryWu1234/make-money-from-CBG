@@ -32,8 +32,10 @@ export type AnalysisTask = {
   attempts: number;
   profile: AnalysisProfile | null;
   lastError: string | null;
+  lastAttemptHadResponse?: boolean;
   equipmentPricing?: EquipmentPricingSnapshot;
   petPricing?: PetPricingSnapshot;
+  previousResult?: ProductAnalysis;
 };
 const now = () => new Date().toISOString();
 const nullable = (value: SQLOutputValue | undefined) => (value == null ? null : String(value));
@@ -384,7 +386,8 @@ export class AnalysisStore {
         if (
           profile.equipmentSearch &&
           (equipment?.searchComplete !== true ||
-            !validateExactPricing(equipment, equipmentInventory(record).items))
+            equipment.inputHash !== equipmentInventory(record, profile.settings).inputHash ||
+            !validateExactPricing(equipment, equipmentInventory(record, profile.settings).items))
         )
           continue;
         if (
@@ -643,7 +646,11 @@ export class AnalysisStore {
   next(runId: string): AnalysisTask | null {
     const row = this.db
       .prepare(
-        "SELECT t.*,r.profile_json FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id WHERE t.run_id=? AND t.status='queued' ORDER BY t.ordinal ASC LIMIT 1",
+        `SELECT t.*,r.profile_json,
+          (SELECT length(trim(coalesce(a.raw_response,'')))>0 FROM analysis_attempts a
+           WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1) last_attempt_had_response
+         FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id
+         WHERE t.run_id=? AND t.status='queued' ORDER BY t.ordinal ASC LIMIT 1`,
       )
       .get(runId);
     if (!row) return null;
@@ -667,6 +674,8 @@ export class AnalysisStore {
       attempts: Number(row.attempt_count),
       profile: row.profile_json ? JSON.parse(String(row.profile_json)) : null,
       lastError: nullable(row.error),
+      lastAttemptHadResponse: row.last_attempt_had_response === 1,
+      ...(row.result_json ? { previousResult: JSON.parse(String(row.result_json)) } : {}),
       ...(row.equipment_pricing_json
         ? { equipmentPricing: JSON.parse(String(row.equipment_pricing_json)) }
         : {}),
@@ -715,7 +724,7 @@ export class AnalysisStore {
   ): AnalysisTask {
     if (
       !task.profile?.equipmentSearch ||
-      snapshot.inputHash !== equipmentInventory(task.record).inputHash
+      snapshot.inputHash !== equipmentInventory(task.record, task.profile?.settings).inputHash
     )
       throw new Error("装备查价资料与当前任务不匹配");
     const prompt = valuationPrompt(

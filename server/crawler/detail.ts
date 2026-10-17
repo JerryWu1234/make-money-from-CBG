@@ -83,6 +83,36 @@ async function capture(page: Page, name: string): Promise<TabSnapshot> {
       elements: [],
       tooltips: [],
       items: [],
+      ...(/^道具\/法宝(?:\s*\/|$)/.test(tabName)
+        ? {
+            equipmentContainers: equipmentScopes.map((id, index) => ({
+              id,
+              present: !!scopes[index],
+              visible:
+                scopes[index]?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
+                false,
+              icons: Array.from(
+                scopes[index]?.querySelectorAll("img, [data_equip_name], [data-equip-name]") || [],
+              )
+                .filter(
+                  (icon) =>
+                    !/\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#].*)?$/i.test(
+                      icon.getAttribute("src") || "",
+                    ),
+                )
+                .map((icon) => ({
+                  name:
+                    icon.getAttribute("data_equip_name") ||
+                    icon.getAttribute("data-equip-name") ||
+                    "",
+                  modelId:
+                    icon.getAttribute("data_equip_type") ||
+                    icon.getAttribute("data-equip-type") ||
+                    "",
+                })),
+            })),
+          }
+        : {}),
       ...(emptyEquipment ? { equipmentEmptyProof: "official-containers" as const } : {}),
     };
   }, name);

@@ -107,6 +107,7 @@ export function AnalysisSettings({
     setSettings((current) => (current ? { ...current, [key]: value } : current));
   const choice = (
     key:
+      | "pricingScope"
       | "strengthMode"
       | "capMode"
       | "capTie"
@@ -254,6 +255,10 @@ export function AnalysisSettings({
               建议方案：强壮神速计算一次；攻法上限取有效项，同级选攻击；化圣不叠加等级溢价；69级机缘用公式；坐骑边界取下档、多只分别求和；区服比例相加，只调整角色本体。20及以下修炼上限没有额外溢价。
             </p>
             <div className="analysis-settings-grid">
+              {choice("pricingScope", "本轮查价范围", [
+                ["all", "全部资产"],
+                ["equipment", "人物装备；灵饰和宝宝待查"],
+              ])}
               {choice("strengthMode", "强壮、神速", [
                 ["single", "按当前等级计算一次"],
                 ["cumulative", "从1级逐级累加"],

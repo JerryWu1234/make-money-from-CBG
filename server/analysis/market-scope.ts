@@ -10,6 +10,7 @@ export type GlobalMarketRequest = {
   searchType: string;
   serverType: string;
   page: number;
+  orderBy?: string;
   restrictions: Record<string, string>;
 };
 
@@ -92,6 +93,7 @@ export function marketRequestEvidence(
     searchType,
     serverType: parameter(params, "server_type"),
     page: Number(parameter(params, "page")),
+    ...(params.has("order_by") ? { orderBy: parameter(params, "order_by") } : {}),
     restrictions,
   };
 }

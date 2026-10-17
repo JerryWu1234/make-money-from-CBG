@@ -23,6 +23,7 @@ import {
   coreEquipmentDescription,
 } from "./compact";
 import { equipmentCaptureSummary, onShelfFromText, MAIN_TABS } from "./detail";
+import { IncompleteCaptureError } from "./capture-readiness";
 const signal = () => new AbortController().signal;
 const item = (id: number, time = 10000 - id): Listing => ({
   ...parseListing(
@@ -118,6 +119,35 @@ const refreshDetail = (listing: Listing, price = "500.00"): RoleDetail => ({
   },
 });
 const readSaved = (db: CrawlStore, key: string) => db.detail(key) as SavedRoleRecord | null;
+it.each([false, true])(
+  "采集失败保留部分详情且不推进成功断点，补采模式=%s",
+  async (backfillOnly) => {
+    const db = memory(),
+      target = item(1),
+      partial = detail(target);
+    partial.equipmentCapture!.complete = false;
+    partial.equipmentCapture!.issues = ["装备库存未核验"];
+    if (backfillOnly) db.observe(target);
+    const collector = source([[target]]);
+    collector.detail = vi
+      .fn()
+      .mockRejectedValue(
+        new IncompleteCaptureError("重读后仍缺项", partial, new Error("装备库存未核验")),
+      );
+    await crawl(collector, db, signal(), vi.fn(), { backfillOnly });
+    expect(db.detail(target.key)).toMatchObject({
+      status: "failed",
+      error: "重读后仍缺项",
+      detail: {
+        equipmentCapture: { complete: false },
+        tabs: [{ fields: [{ name: "攻击修炼", value: "20" }] }],
+      },
+    });
+    expect(db.count()).toBe(0);
+    expect(db.checkpoint()).toBeUndefined();
+  },
+);
+
 describe("按商品刷新完整资料", () => {
   it("仅刷新指定完整商品，不访问其他待采记录、不移动断点", async () => {
     const db = memory(),

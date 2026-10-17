@@ -4,7 +4,50 @@ import {
   itemFromAttributes,
   jewelryDescriptionSections,
   observedEquipmentCategory,
+  equipmentEmptyProof,
 } from "./compact";
+import type { TabSnapshot } from "./types";
+
+it.each([
+  "confirmed",
+  "missing-worn",
+  "hidden-store",
+  "unread-object",
+  "wrong-name",
+  "wrong-model",
+  "unknown-icon",
+])("人物空装备证据与随身宝宝装备逐件绑定：%s", (kind) => {
+  const tab: TabSnapshot = {
+    name: "道具/法宝",
+    text: "现金100",
+    fields: [],
+    tables: [],
+    elements: [],
+    tooltips: [],
+    items: [
+      {
+        index: 0,
+        name: kind === "wrong-name" ? "另一件" : "嵌宝金环",
+        modelId: kind === "wrong-model" ? "9999" : "9210",
+        kind: "equipment",
+        attributes: kind === "unread-object" ? {} : { 装备对象: "召唤兽" },
+      },
+    ],
+    equipmentContainers: [
+      { id: "RoleUsingEquips", present: kind !== "missing-worn", visible: true, icons: [] },
+      {
+        id: "RoleStoreEquips",
+        present: true,
+        visible: kind !== "hidden-store",
+        icons: [
+          { name: "嵌宝金环", modelId: "9210" },
+          ...(kind === "unknown-icon" ? [{ name: "未知", modelId: "123" }] : []),
+        ],
+      },
+    ],
+  };
+  expect(equipmentEmptyProof([tab])).toBe(kind === "confirmed" ? "official-containers" : undefined);
+});
 
 describe("有官网证据的角色装备分类", () => {
   it.each(["4221", "4223", "4233", "4246", "63232"])(

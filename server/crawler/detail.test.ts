@@ -346,6 +346,37 @@ describe("装备局部补采", () => {
     }
   });
 
+  it("人物装备为空但随身有宝宝装备时，以可见容器及已读装备对象确认完整", async () => {
+    const page = await browser.newPage();
+    try {
+      const body =
+        '<p>现金：100</p><table id="RoleUsingEquips"><tr><td></td></tr></table><table id="RoleStoreEquips"><tr><td><img width="40" height="40" data_equip_name="嵌宝金环" data_equip_type="9210" data_equip_desc="等级 95#r速度 +24#r耐久 500" data_equip_type_desc="【装备对象】召唤兽#r【装备条件】等级95"></td></tr></table>';
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, "", "", body),
+        }),
+      );
+      const captured = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(captured.equipmentCapture).toMatchObject({
+        complete: true,
+        emptyProof: "official-containers",
+        issues: [],
+      });
+      expect(captured.tabs.find((tab) => tab.name === "道具/法宝")?.items?.[0]).toMatchObject({
+        name: "嵌宝金环",
+        attributes: { 装备对象: "召唤兽" },
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
   it("新采保存官网模型号，玉魄、技能书和镶嵌材料不误报装备属性缺失", async () => {
     const page = await browser.newPage();
     try {

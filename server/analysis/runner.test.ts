@@ -134,6 +134,51 @@ function untilAborted(signal: AbortSignal): Promise<never> {
 }
 
 describe("持久化的商品分析队列", () => {
+  it("仅上次实际返回错误输出时附加校验反馈，后续无输出超时不沿用旧反馈", async () => {
+    const { store, runner, analyze, profile } = await valuationSetup();
+    analyze
+      .mockResolvedValueOnce({ text: "not-json" })
+      .mockRejectedValueOnce(new Error("分析超时，请重试"));
+    const id = await runner.start("codex", false, profile);
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({ status: "paused", completed: 0 });
+    await runner.resume(id, true);
+    await runner.settled();
+    expect(analyze.mock.calls[1][0]).toContain("上次输出校验未通过");
+    expect(store.run(id)).toMatchObject({ status: "paused", completed: 0 });
+    await runner.resume(id, true);
+    await runner.settled();
+    expect(analyze.mock.calls[2][0]).toBe(analyze.mock.calls[0][0]);
+    expect(store.run(id)).toMatchObject({ status: "completed", completed: 1 });
+  });
+  it("同输入只更新查价时复用已验证本体，不再次调用AI；输入变化则仍调用AI", async () => {
+    const context = await valuationSetup();
+    const id = await context.runner.start("codex", false, context.profile);
+    await context.runner.settled();
+    const row = context.store.db
+      .prepare("SELECT id,result_json FROM analysis_tasks WHERE run_id=?")
+      .get(id)!;
+    expect(context.analyze).toHaveBeenCalledTimes(1);
+    context.store.db.prepare("UPDATE analysis_tasks SET status='queued' WHERE id=?").run(row.id);
+    await context.runner.resume(id);
+    await context.runner.settled();
+    expect(context.store.run(id)?.completed).toBe(1);
+    expect(context.analyze).toHaveBeenCalledTimes(1);
+    const attempt = context.store.db
+      .prepare(
+        "SELECT raw_response,usage_json,request_text FROM analysis_attempts ORDER BY rowid DESC LIMIT 1",
+      )
+      .get()!;
+    expect(attempt.raw_response).toBeNull();
+    expect(String(attempt.request_text)).toContain("本次未调用AI");
+    expect(JSON.parse(String(attempt.usage_json)).source).toBe("validated-body-recalculation");
+    context.store.db
+      .prepare("UPDATE analysis_tasks SET status='queued',input_hash='changed-input' WHERE id=?")
+      .run(row.id);
+    await context.runner.resume(id);
+    await context.runner.settled();
+    expect(context.analyze).toHaveBeenCalledTimes(2);
+  });
   it.each([false, true])(
     "暂停的跟随采集空队列可续跑，采集运行=%s，首角色不重算且新角色同批追加",
     async (captureAtResume) => {

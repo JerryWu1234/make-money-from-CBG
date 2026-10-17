@@ -155,7 +155,8 @@ export function unfinishedPricingSearch(item: PricingItem, records: unknown[] = 
     if (!candidate.verified || !identity || candidate.price === null || candidate.price <= 0)
       continue;
     const mode =
-      item.comparisonPolicy === "base-upper-bound-v1"
+      item.comparisonPolicy === "base-upper-bound-v1" ||
+      item.comparisonPolicy === "core-initial-first-five-v3"
         ? "*"
         : candidate.matchType === "similar"
           ? "similar"
@@ -226,7 +227,11 @@ const exactReference = (
       candidate.verified !== true ||
       (candidate.matchType !== undefined &&
         candidate.matchType !== "exact" &&
-        !(comparisonPolicy === "base-upper-bound-v1" && candidate.matchType === "similar")) ||
+        !(
+          (comparisonPolicy === "base-upper-bound-v1" ||
+            comparisonPolicy === "core-initial-first-five-v3") &&
+          candidate.matchType === "similar"
+        )) ||
       candidate.priceType !== "listing" ||
       candidate.price === null ||
       !Number.isFinite(candidate.price) ||

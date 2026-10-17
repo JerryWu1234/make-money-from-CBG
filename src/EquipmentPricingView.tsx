@@ -41,13 +41,18 @@ export function EquipmentPricingView({
   const hasBaseUpperBound = snapshot.items.some(
     (item) => item.comparisonPolicy === "base-upper-bound-v1",
   );
+  const hasCoreEqual = snapshot.items.some(
+    (item) => item.comparisonPolicy === "core-initial-first-five-v3",
+  );
   const exactCount = snapshot.items.reduce(
     (sum, item) =>
       sum +
       item.candidates.filter(
         (candidate) =>
           candidate.verified &&
-          (item.comparisonPolicy === "base-upper-bound-v1" || candidate.matchType !== "similar"),
+          (item.comparisonPolicy === "base-upper-bound-v1" ||
+            item.comparisonPolicy === "core-initial-first-five-v3" ||
+            candidate.matchType !== "similar"),
       ).length,
     0,
   );
@@ -73,10 +78,14 @@ export function EquipmentPricingView({
       )}
       {queried && snapshot.items.some((item) => item.priceMethod === "first-five-minimum-v4") && (
         <p>
-          每个筛选条件只核验前5条不同候选，采用实际有效样本的最低挂牌价；无样本跳过，搜索范围有限。
+          {hasCoreEqual
+            ? "人物装备同时填写等级、初始值下限和已有套装等条件，按初始属性升序后仅核验前5条不同商品，取其中可核验样品最低挂牌价；拒项占名额，不继续翻页补足。"
+            : "每个筛选条件只核验前5条不同候选，采用实际有效样本的最低挂牌价；无样本跳过，搜索范围有限。"}
           {hasBaseUpperBound
             ? "装备和灵饰的基础值相等或较低样本一起取最低价，属性差异保留在下方。"
-            : "同配与相近样本分别计价。"}
+            : !hasCoreEqual
+              ? "同配与相近样本分别计价。"
+              : null}
         </p>
       )}
       {hasBaseline && <p>普通装备默认参考价来自历史资料或人工预设，未实时核实藏宝阁报价。</p>}
@@ -166,7 +175,9 @@ export function EquipmentPricingView({
         const pendingAverage =
           !!item.priceMethod && ["pending", "read_failed"].includes(item.searchState || "");
         const minimumReference = item.priceMethod === "first-five-minimum-v4";
-        const baseUpperBound = item.comparisonPolicy === "base-upper-bound-v1";
+        const baseUpperBound =
+          item.comparisonPolicy === "base-upper-bound-v1" ||
+          item.comparisonPolicy === "core-initial-first-five-v3";
         return (
           <section key={item.key} className="analysis-evidence-card">
             <header>
@@ -208,7 +219,9 @@ export function EquipmentPricingView({
                     : item.status === "priced" && item.priceMethod
                       ? minimumReference
                         ? baseUpperBound
-                          ? "基础值不高于目标的最低挂牌价"
+                          ? item.comparisonPolicy === "core-initial-first-five-v3"
+                            ? "核心初始值在目标至目标+2范围内的最低挂牌价"
+                            : "基础值不高于目标的最低挂牌价"
                           : "同配置最低挂牌价"
                         : "同配置挂牌平均价"
                       : minimumReference && item.similarEstimate?.range

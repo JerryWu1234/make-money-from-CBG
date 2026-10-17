@@ -244,7 +244,12 @@ async function searchEquipment(
         previous,
         onCheckpoint,
       );
-    const source = await createEquipmentSource(signal, record.listing.serverId, onProgress);
+    const source = await createEquipmentSource(
+      signal,
+      record.listing.serverId,
+      onProgress,
+      record.listing.key,
+    );
     try {
       signal.throwIfAborted();
       return await searchEquipmentPrices(record, signal, source, settings, previous, onCheckpoint);

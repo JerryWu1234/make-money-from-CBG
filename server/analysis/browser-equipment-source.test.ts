@@ -269,7 +269,7 @@ describe("官方装备搜索条件", () => {
     expect(query.args.kindid).toBe("64");
     expect(query.args).not.toHaveProperty("speed");
   });
-  it("人物装备提交身份范围和实际特效特技套装，不带数值下限或孔数", () => {
+  it("人物装备提交身份范围和实际特效特技套装，填写初始属性下限，不带孔数", () => {
     const target = item({
       description: item().description + "\n开运孔数3\n套装：变身术之噬天虎\n特技：破血狂攻",
     });
@@ -293,6 +293,7 @@ describe("官方装备搜索条件", () => {
       special_skill: "1036",
       special_mode: "and",
       suit_effect: "1060",
+      init_hp: 250,
     });
   });
   it.each([
@@ -914,7 +915,7 @@ describe("实际装备的分阶段相近检索", () => {
       [6, "黑宝石"],
     ],
   };
-  it("实际人物装备只生成一条宽搜，宝石与修理不同不增加搜索阶段", () => {
+  it("实际人物装备只生成一条初始值下限查询，宝石与修理不同不增加搜索阶段", () => {
     const target = item({
       name: "黑魔冠",
       category: "人物装备 · 头盔",
@@ -932,6 +933,7 @@ describe("实际装备的分阶段相近检索", () => {
           serverid: "1",
           attr_without_melt: 1,
           kindid: "15",
+          init_defense: 46,
         },
       },
     ]);
@@ -1551,6 +1553,6 @@ it("官网类型已确认的衣服使用可还原初防，不因非核心气血�
     { ...config, namedKinds: [[18, "男衣"]] },
     "1",
   );
-  expect(query.args).not.toHaveProperty("init_defense");
+  expect(query.args.init_defense).toBe(168);
   expect(query.coreSkipReason).toBeNull();
 });

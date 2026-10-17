@@ -1,6 +1,6 @@
 import { expect, it, vi } from "vite-plus/test";
 import { CAPTURE_VERSION } from "./compact";
-import { captureIssues, collectCompleteCapture } from "./capture-readiness";
+import { captureIssues, collectCompleteCapture, IncompleteCaptureError } from "./capture-readiness";
 import { CrawlStore } from "./store";
 import { analysisRecord } from "../../tests/fixtures/analysis";
 
@@ -41,6 +41,19 @@ it("三次仍缺项时在采集阶段失败，不返回可分析的半成品", a
   });
   expect(read).toHaveBeenCalledTimes(3);
 });
+it("连续重读失败保留最后一次部分资料，供本地详情定位缺项", async () => {
+  const partial = complete();
+  partial.equipmentCapture.complete = false;
+  partial.equipmentCapture.issues = ["装备库存未核验"];
+  const error = await collectCompleteCapture(
+    vi.fn().mockResolvedValue(partial),
+    new AbortController().signal,
+    vi.fn(),
+  ).catch((error) => error);
+  expect(error).toBeInstanceOf(IncompleteCaptureError);
+  expect(error.detail).toBe(partial);
+  expect(captureIssues(error.detail, true)).toContain("装备库存未核验");
+});
 it("登录或安全验证不自动重试，停止采集而不越过访问限制", async () => {
   const read = vi
     .fn()
@@ -59,6 +72,27 @@ it("缺少完整性证据不能通过新采集核验", () => {
   expect(captureIssues(detail, true)).toEqual(
     expect.arrayContaining(["装备完整性未核验", "宝宝完整性未核验"]),
   );
+});
+it("装备空库存原因只显示一次，仍保留失败核验", () => {
+  const detail = complete();
+  delete (detail.equipmentCapture as { emptyProof?: string }).emptyProof;
+  detail.equipmentCapture.complete = false;
+  detail.equipmentCapture.issues = [
+    "人物装备库存是否为空尚未核对，需确认穿戴与随身装备区域后再计价",
+  ];
+  detail.tabs.push({
+    name: "道具/法宝",
+    text: "现金100",
+    fields: [],
+    tables: [],
+    elements: [],
+    tooltips: [],
+    items: [],
+  });
+  expect(
+    captureIssues(detail, true).filter((issue) => issue.includes("装备库存是否为空")),
+  ).toHaveLength(1);
+  expect(captureIssues(detail, true).length).toBeGreaterThan(0);
 });
 it("部分资料仍保存，但不标记详情完整、不推进成功断点；补采后才能转完整", () => {
   const store = new CrawlStore(":memory:");

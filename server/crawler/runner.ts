@@ -9,6 +9,7 @@ import type { CrawlStore } from "./store";
 import { prepareCrawlPages } from "./resume";
 import { CAPTURE_VERSION, hasUnconfirmedEmptyEquipment } from "./compact";
 import { MAIN_TABS } from "./detail";
+import { IncompleteCaptureError } from "./capture-readiness";
 export interface CrawlOptions {
   backfillOnly?: boolean;
   keys?: string[];
@@ -101,6 +102,8 @@ export async function crawl(
         publish({ saved, retryCompleted: index + 1, totalSaved: store.count() });
       } catch (error) {
         signal.throwIfAborted();
+        if (error instanceof IncompleteCaptureError && !options.refresh)
+          store.save(item, error.detail);
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
         failed++;
@@ -220,6 +223,7 @@ export async function crawl(
         publish({ saved, totalSaved: store.count(), checkpoint });
       } catch (error) {
         signal.throwIfAborted();
+        if (error instanceof IncompleteCaptureError) store.save(item, error.detail);
         store.fail(item.key, error instanceof Error ? error.message : String(error));
         if (error instanceof Error && error.name === "IncompleteDetailError") {
           failed++;

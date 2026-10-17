@@ -366,6 +366,7 @@ describe("AI 连接验证", () => {
       signal,
       record.listing.serverId,
       onProgress,
+      record.listing.key,
     );
     expect(mocks.searchEquipmentPrices).toHaveBeenCalledWith(
       record,

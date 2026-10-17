@@ -91,6 +91,26 @@ it("逐件展示关联搜索页面和实际条件，继续查询的历史记录�
   expect(html).toContain("submittedArgs");
   expect(html).not.toContain("other-asset-search-must-not-appear");
 });
+it("初始属性方案说明升序和五个有效样品，不沿用较低核心值取样说明", () => {
+  const pricing = snapshot([
+    {
+      ...item(),
+      baselineEstimate: undefined,
+      comparisonPolicy: "core-initial-first-five-v3",
+      priceMethod: "first-five-minimum-v4",
+      status: "priced",
+      referencePrice: 100,
+      searchState: "completed",
+    },
+  ]);
+  pricing.queries = ["初伤592升序"];
+  const html = renderToStaticMarkup(<EquipmentPricingView snapshot={pricing} />);
+  expect(html).toContain("仅核验前5条不同商品");
+  expect(html).toContain("拒项占名额，不继续翻页补足");
+  expect(html).toContain("核心初始值在目标至目标+2范围内的最低挂牌价");
+  expect(html).not.toContain("基础值相等或较低样本");
+  expect(html).not.toContain("拒项也占名额");
+});
 it("装备取得五件时显示报价与均价；搜索中断时主金额保留待查", () => {
   const gear: EquipmentPricingItem = {
     ...item(),

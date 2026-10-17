@@ -183,7 +183,12 @@ export function AnalysisPreview() {
       setTab("history");
       setResultsPage(1);
       if (sameCalculation && sameModel && run?.provider === selected && run.status === "paused")
-        await mutate("/api/analysis/resume", { runId: run.id });
+        await mutate(
+          run.failed + (run.waitingPricing || 0) > 0
+            ? "/api/analysis/retry"
+            : "/api/analysis/resume",
+          { runId: run.id },
+        );
       else
         await mutate("/api/analysis/start", {
           provider: selected,

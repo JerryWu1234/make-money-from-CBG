@@ -50,9 +50,49 @@ export function equipmentEmptyProof(tabs: TabSnapshot[]) {
   if (!tabs.length) return undefined;
   const explicit = (tab: TabSnapshot) =>
     /(?:^|\n)\s*(?:暂无道具|没有装备|无装备)\s*(?:$|\n)/.test(tab.text);
-  if (!tabs.every((tab) => tab.equipmentEmptyProof === "official-containers" || explicit(tab)))
+  const containersWithoutRoleEquipment = (tab: TabSnapshot) => {
+    const containers = tab.equipmentContainers;
+    if (
+      !containers ||
+      !["RoleUsingEquips", "RoleStoreEquips"].every((id) =>
+        containers.some(
+          (container) => container.id === id && container.present && container.visible,
+        ),
+      )
+    )
+      return false;
+    return containers
+      .filter((container) => container.present)
+      .every(
+        (container) =>
+          container.visible &&
+          container.icons.every(
+            (icon) =>
+              (icon.modelId === "17320" && icon.name === "三界密令") ||
+              (!!icon.name &&
+                !!icon.modelId &&
+                (tab.items || []).some(
+                  (item) =>
+                    item.name === icon.name &&
+                    item.modelId === icon.modelId &&
+                    item.attributes?.装备对象 === "召唤兽",
+                )),
+          ),
+      );
+  };
+  if (
+    !tabs.every(
+      (tab) =>
+        tab.equipmentEmptyProof === "official-containers" ||
+        explicit(tab) ||
+        containersWithoutRoleEquipment(tab),
+    )
+  )
     return undefined;
-  return tabs.some((tab) => tab.equipmentEmptyProof === "official-containers")
+  return tabs.some(
+    (tab) =>
+      tab.equipmentEmptyProof === "official-containers" || containersWithoutRoleEquipment(tab),
+  )
     ? ("official-containers" as const)
     : ("explicit-text" as const);
 }

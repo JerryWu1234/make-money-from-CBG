@@ -60,6 +60,37 @@ type Match = {
   differences: string[];
   reason: string | null;
 };
+
+/** Verify explicit search features; other differences do not replace the first five rows. */
+export function matchInitialSearchEquipmentAttributes(
+  target: EquipmentAttributes,
+  source: EquipmentAttributes,
+  partial = false,
+): Match {
+  for (const name of ["套装", "特技", "特效"]) {
+    const values = (fields: EquipmentAttributes["fields"]) =>
+      (fields[name] || []).flatMap((value) =>
+        name === "套装" ? [value] : value.split(/[、，,；;\s]+/).filter(Boolean),
+      );
+    const expected = values(target.fields);
+    const actual = values(source.fields);
+    if (partial && !actual.length) continue;
+    if (expected.some((value) => !actual.some((other) => sameField(name, [value], [other]))))
+      return {
+        matchType: null,
+        similarityScore: Infinity,
+        differences: [],
+        reason: "报价不符合已填写的" + name + "搜索条件",
+      };
+  }
+  const difference = compareEquipmentAttributes(target, source);
+  return {
+    matchType: difference ? "similar" : "exact",
+    similarityScore: 0,
+    differences: difference ? [difference + "；未作为额外搜索条件"] : [],
+    reason: null,
+  };
+}
 const empty = { level: null, fields: {}, restrictions: [], unknownLines: [] };
 const sameField = (name: string, left: string[], right: string[]) =>
   !compareEquipmentAttributes(

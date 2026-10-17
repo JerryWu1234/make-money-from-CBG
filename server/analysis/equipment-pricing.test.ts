@@ -820,7 +820,7 @@ describe("装备联网查价的来源核对", () => {
     expect(JSON.parse(result.rawResponse!).items[0].candidates).toHaveLength(5);
   });
 
-  it("离线重放历史样本，更高基础值不再采用，合格样本取最低价", () => {
+  it("离线重放历史样本，只采用核心初始值在目标至目标+2范围内的样本", () => {
     const record = recordWithEquipment();
     record.detail!.tabs.at(-1)!.items = savedComparables.items.map(({ target }) => ({
       ...target,
@@ -845,10 +845,10 @@ describe("装备联网查价的来源核对", () => {
         );
       });
       const expected: Record<string, number[]> = {
-        水晶帽: [],
+        水晶帽: [350, 370],
         神火扇: [],
-        八卦坠: [1194.4, 1045, 1192, 888],
-        龙骨甲: [],
+        八卦坠: [1350],
+        龙骨甲: [2299, 788, 599, 611, 1055],
       };
       const prices = verified.filter((row) => row.verified).map((row) => row.price);
       expect(prices, item.name).toEqual(expected[item.name]);
@@ -857,8 +857,8 @@ describe("装备联网查价的来源核对", () => {
         expect(estimate.status).toBe("insufficient");
         expect(estimate.range).toBeNull();
       } else {
-        expect(estimate.sampleCount).toBe(4);
-        expect(estimate.range?.min).toBe(888);
+        expect(estimate.sampleCount).toBe(prices.length);
+        expect(estimate.range?.min).toBe(Math.min(...expected[item.name]));
       }
     }
   });

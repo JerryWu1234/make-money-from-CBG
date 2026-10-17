@@ -356,7 +356,12 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
   } catch (error) {
     diagnostics.record("api.error", { route: pathname, error });
     if (res.destroyed) return;
-    res.statusCode = error instanceof ScheduleConfigError ? 400 : 500;
+    res.statusCode =
+      error instanceof ScheduleConfigError
+        ? 400
+        : error instanceof Error && error.name === "CapturePreparationError"
+          ? 409
+          : 500;
     res.end(JSON.stringify({ error: error instanceof Error ? error.message : "请求失败" }));
   }
 }

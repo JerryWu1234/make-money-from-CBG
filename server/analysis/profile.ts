@@ -14,10 +14,11 @@ import {
 } from "./equipment-baseline";
 
 export const PROMPT_FILE = resolve("prompts/role-valuation.md");
-export const CALCULATION_VERSION = "price-comparison-v35";
+export const CALCULATION_VERSION = "price-comparison-v37";
 // Update alongside the calculator when changing pricing sections III through VIII.
 const PRICING_HASH = "0b29ddcd68d656a7749b447604eb1c5eae6903c72d74fc3cb1876336a55f5ddf";
 export const DEFAULT_SETTINGS: ValuationSettings = {
+  pricingScope: "all",
   b: RECOMMENDED_BUY_FACTOR,
   a: null,
   budget: null,
@@ -115,6 +116,8 @@ export function normalizeSettings(input: unknown): ValuationSettings {
     }),
   ) as EquipmentBaselinePrices;
   return {
+    pricingScope: choice("pricingScope", ["all", "equipment"] as const) || "all",
+    ...(boolean("deferJade") ? { deferJade: true } : {}),
     equipmentBaselinePrices,
     b,
     a,
@@ -142,6 +145,7 @@ export function createProfile(
   if (!template.trim() || Buffer.byteLength(template, "utf8") > 64 * 1024)
     throw new Error("Prompt 不能为空或超过 64 KiB");
   const normalized = normalizeSettings(settings);
+  petSearch = petSearch && normalized.pricingScope !== "equipment";
   const start = template.indexOf("## 三、"),
     end = template.indexOf("## 九、");
   const calculationCompatible =
