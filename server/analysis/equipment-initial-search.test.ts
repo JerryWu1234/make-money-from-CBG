@@ -24,8 +24,119 @@ it("前五条口径不额外排除未搜索的套装或较高防御，已填写�
       parseEquipmentAttributes("等级70\n气血140\n特效：简易"),
       parseEquipmentAttributes("等级70\n气血140\n特效：精致 简易"),
     ).reason,
-  ).toBeNull();
+  ).toContain("特效");
 });
+
+it.each([
+  ["", "特技：破甲术", "特技"],
+  ["", "特效：愤怒", "特效"],
+  ["特技：晶清诀", "特技：晶清诀 破甲术", "特技"],
+  ["特效：简易", "特效：精致 简易", "特效"],
+])("前五条样本不能比目标多出特技或特效：%s / %s", (targetFeature, sourceFeature, field) => {
+  const target = parseEquipmentAttributes("等级70\n气血140\n" + targetFeature);
+  const source = parseEquipmentAttributes("等级70\n气血140\n" + sourceFeature);
+  for (const partial of [false, true])
+    expect(matchInitialSearchEquipmentAttributes(target, source, partial).reason).toContain(field);
+});
+
+it("特技特效相同、顺序不同仍匹配，列表省略字段时留给完整详情核验", () => {
+  const target = parseEquipmentAttributes("等级70\n气血140\n特技：破甲术\n特效：精致 简易");
+  const source = parseEquipmentAttributes("等级70\n气血140\n特技：破甲术\n特效：简易 精致");
+  expect(matchInitialSearchEquipmentAttributes(target, source).reason).toBeNull();
+  const omitted = parseEquipmentAttributes("等级70\n气血140");
+  expect(matchInitialSearchEquipmentAttributes(target, omitted, true).reason).toBeNull();
+  expect(matchInitialSearchEquipmentAttributes(target, omitted).reason).toContain("特技");
+});
+
+it.each(["特技：破甲术", "特效：愤怒"])("普通百窜云不能采用带%s的200元样本", (feature) => {
+  const target = {
+    ...equipmentInventory(record()).items[0],
+    name: "百窜云",
+    category: "人物装备 · 腰带",
+    kindId: "20",
+    level: 70,
+    description:
+      "等级70\n防御30 气血300\n耐久度235\n锻炼等级4\n镶嵌宝石 光芒石\n套装效果：追加法术神针撼海",
+  };
+  const quote =
+    "百窜云\n等级70\n防御30 气血300\n耐久度450\n锻炼等级4\n镶嵌宝石 光芒石\n" +
+    feature +
+    "\n套装效果：追加法术神针撼海\n在售\n挂牌价：¥200";
+  const result = verifyEquipmentCandidate(
+    target,
+    {
+      url: "https://xyq.cbg.163.com/equip?s=1&eid=extra-feature-fixture",
+      title: "百窜云",
+      price: 200,
+      priceType: "listing",
+      quote,
+      verified: false,
+      reason: "",
+      fetchedAt: null,
+      sourceHash: null,
+    },
+    `<main data-cbg-kind-id="20"><h1>百窜云</h1><pre>${quote}</pre></main>`,
+    new Date().toISOString(),
+  );
+  expect(result.verified).toBe(false);
+  expect(result.reason).toContain(feature.split("：")[0]);
+});
+
+it.each([false, true])(
+  "带额外属性的200元样本不进入合计，同范围普通样本存在=%s",
+  async (ordinary) => {
+    const value = record();
+    const description =
+      "等级70\n防御30 气血300\n耐久度235\n锻炼等级4\n镶嵌宝石 光芒石\n套装效果：追加法术神针撼海";
+    value.detail!.tabs.at(-1)!.items = [
+      {
+        index: 0,
+        kind: "equipment",
+        name: "百窜云",
+        category: "人物装备 · 腰带",
+        kindId: "20",
+        description,
+      },
+    ];
+    const variants = ["特技：破甲术", "特效：愤怒", ...(ordinary ? [""] : [])];
+    const rows = variants.map((feature, index) => {
+      const price = index === 2 ? 30 : 200;
+      return {
+        url: `https://xyq.cbg.163.com/equip?s=1&eid=feature-fixture-${index}`,
+        title: "百窜云",
+        price,
+        priceType: "listing" as const,
+        quote: `百窜云\n${description}\n${feature}\n在售\n挂牌价：¥${price}`,
+        verified: false,
+        reason: "",
+        fetchedAt: null,
+        sourceHash: null,
+      };
+    });
+    const findCandidates = vi.fn(async (items: ReturnType<typeof equipmentInventory>["items"]) => ({
+      queries: ["隔离回归：前五条特技特效"],
+      items: [{ key: items[0].key, candidates: rows, searchState: "completed" as const }],
+      searchItems: [{ key: items[0].key, mode: "base-attributes", exhausted: true }],
+    }));
+    const readSource = vi.fn(async (url: string) => {
+      const row = rows.find((item) => item.url === url)!;
+      return `<main data-cbg-kind-id="20"><h1>百窜云</h1><pre>${row.quote}</pre></main>`;
+    });
+    const result = await searchEquipmentPrices(value, new AbortController().signal, {
+      findCandidates,
+      readSource,
+    });
+    expect(findCandidates).toHaveBeenCalledOnce();
+    expect(readSource).toHaveBeenCalledTimes(rows.length);
+    expect(result.knownTotal).toBe(ordinary ? 30 : 0);
+    expect(result.searchComplete).toBe(true);
+    expect(result.items[0].referencePrice).toBe(ordinary ? 30 : null);
+    expect(result.items[0].candidates.filter((row) => row.verified)).toHaveLength(ordinary ? 1 : 0);
+    expect(
+      result.items[0].candidates.filter((row) => row.price === 200).every((row) => !row.verified),
+    ).toBe(true);
+  },
+);
 
 function record() {
   const value = valuationRecord("initial-search");

@@ -157,7 +157,8 @@ export const isJewelryEquipment = (
   /精炼等级/.test(item.description) ||
   [61, 62, 63, 64].includes(Number(item.kindId));
 
-export const EQUIPMENT_CORE_INITIAL_POLICY = "required-slot-initial-hit4-first-five-tolerance2-v4";
+export const EQUIPMENT_CORE_INITIAL_POLICY =
+  "required-slot-initial-hit4-first-five-tolerance2-features-v5";
 export const EQUIPMENT_WEAPON_QUERY_POLICY = "raw-initial-and-total-damage-fields-v1";
 export const EQUIPMENT_CORE_INITIAL_TOLERANCE = 2;
 /** The core field validates form/detail values; the label selects the confirmed public sort header. */

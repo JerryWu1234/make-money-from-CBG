@@ -61,7 +61,7 @@ type Match = {
   reason: string | null;
 };
 
-/** Verify explicit search features; other differences do not replace the first five rows. */
+/** Special skills/effects must match both ways; rejected rows still count in the first five. */
 export function matchInitialSearchEquipmentAttributes(
   target: EquipmentAttributes,
   source: EquipmentAttributes,
@@ -82,6 +82,18 @@ export function matchInitialSearchEquipmentAttributes(
         differences: [],
         reason: "报价不符合已填写的" + name + "搜索条件",
       };
+    if (name !== "套装") {
+      const extra = actual.filter(
+        (value) => !expected.some((other) => sameField(name, [value], [other])),
+      );
+      if (extra.length)
+        return {
+          matchType: null,
+          similarityScore: Infinity,
+          differences: [],
+          reason: `报价多出目标没有的${name}：${extra.join("、")}，不能作为估价样本`,
+        };
+    }
   }
   const difference = compareEquipmentAttributes(target, source);
   return {

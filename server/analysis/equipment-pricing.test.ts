@@ -848,10 +848,15 @@ describe("装备联网查价的来源核对", () => {
         水晶帽: [350, 370],
         神火扇: [],
         八卦坠: [1350],
-        龙骨甲: [2299, 788, 599, 611, 1055],
+        龙骨甲: [788, 599, 1055],
       };
       const prices = verified.filter((row) => row.verified).map((row) => row.price);
       expect(prices, item.name).toEqual(expected[item.name]);
+      if (item.name === "龙骨甲")
+        for (const row of verified.filter((row) => [2299, 611].includes(row.price!))) {
+          expect(row.verified).toBe(false);
+          expect(row.reason).toMatch(/多出目标没有的特[技效]/);
+        }
       const estimate = buildEquipmentEstimate(verified);
       if (!prices.length) {
         expect(estimate.status).toBe("insufficient");
