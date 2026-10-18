@@ -2841,7 +2841,11 @@ export async function createEquipmentSource(
     detailPage = await createHiddenPage(browser);
     signal.throwIfAborted();
     const evidence = productKey
-      ? (await import("./equipment-search-evidence")).equipmentSearchEvidence(productKey, serverId)
+      ? (await import("./equipment-search-evidence")).equipmentSearchEvidence(
+          productKey,
+          serverId,
+          signal,
+        )
       : undefined;
     return equipmentSourceFromPages(searchPage, detailPage, signal, serverId, onProgress, evidence);
   } catch (error) {
