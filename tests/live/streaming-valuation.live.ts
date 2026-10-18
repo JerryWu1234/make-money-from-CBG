@@ -18,10 +18,17 @@ import {
   pricingTimestampFresh,
 } from "../../server/analysis/pricing-integrity";
 import { startWorkPageEvidence } from "./work-page-evidence";
+import {
+  allAnalysisRecords,
+  hasSearchParameterCapture,
+  streamingRoleCount,
+} from "./streaming-options";
+
+const roleCount = streamingRoleCount(process.env.CBG_LIVE_ROLE_COUNT);
 
 // Isolated workflow failures are listed in docs/live-valuation-e2e.md.
 // No website, quote, capture detail, or AI response is mocked in this test.
-test("真实官网按顺序采集10个角色，第1个采齐即分析，后续自动入队并保存10份报价", async ({
+test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析，后续自动入队并保存${roleCount}份报价`, async ({
   page,
   request,
 }) => {
@@ -48,8 +55,20 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
   const prior = resume
     ? JSON.parse(await readFile(path.join(directory, "manifest.json"), "utf8"))
     : null;
-  if (prior && (prior.kind !== kind || prior.roleCount !== 10 || prior.analysisStartsAfter !== 1))
-    throw new Error("不能将其他测试的数据当作本轮10角色续跑");
+  if (
+    prior &&
+    (prior.kind !== kind || prior.roleCount !== roleCount || prior.analysisStartsAfter !== 1)
+  )
+    throw new Error(`不能将其他数量或类型的测试数据当作本轮${roleCount}角色续跑`);
+  const verifiedEvidenceFile = async (entry: { name: string; sha256: string }) => {
+    const file = path.resolve(directory, entry.name);
+    if (!file.startsWith(directory + path.sep)) throw new Error("续跑证据路径超出运行目录");
+    const bytes = await readFile(file);
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (actual !== entry.sha256) throw new Error(`续跑证据哈希不一致：${entry.name}`);
+    return bytes;
+  };
+  for (const entry of prior?.files || []) await verifiedEvidenceFile(entry);
   const excludedKeys: string[] =
     prior?.excludedProductKeys ||
     (process.env.CBG_LIVE_EXCLUDE_KEYS_FILE
@@ -69,7 +88,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     finishedAt: "",
     state: "running",
     resumed: !!resume,
-    roleCount: 10,
+    roleCount,
     analysisStartsAfter: 1,
     testMinimumAskingPrice: null,
     baseURL,
@@ -78,16 +97,19 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     excludedProductKeys: [...excluded],
     error: "",
     workPageEvidence: { state: "not_started", error: "" },
-    files: [] as { name: string; sha256: string }[],
+    files: [...(prior?.files || [])] as { name: string; sha256: string }[],
+  };
+  const registerFile = (entry: { name: string; sha256: string }) => {
+    const index = manifest.files.findIndex((item) => item.name === entry.name);
+    if (index < 0) manifest.files.push(entry);
+    else manifest.files[index] = entry;
   };
   const save = async (name: string, value: unknown) => {
     const bytes = Buffer.from(JSON.stringify(value, null, 2));
     await writeFile(path.join(directory, name), bytes, { mode: 0o600 });
     if (name === "manifest.json") return;
     const entry = { name, sha256: createHash("sha256").update(bytes).digest("hex") };
-    const index = manifest.files.findIndex((item) => item.name === name);
-    if (index < 0) manifest.files.push(entry);
-    else manifest.files[index] = entry;
+    registerFile(entry);
   };
   const timeline: { at: string; event: string; data: unknown }[] = resume
     ? JSON.parse(await readFile(path.join(directory, "timeline.json"), "utf8"))
@@ -128,6 +150,17 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     const result = await response.json();
     if (!response.ok()) throw new Error(result.error || `${route}: ${response.status()}`);
     return result as T;
+  };
+  const overviewAll = async () => {
+    const overview = await allAnalysisRecords((page) =>
+      api<AnalysisOverview>(
+        `/api/analysis/status?provider=codex&page=${page}` +
+          (manifest.runId ? `&runId=${encodeURIComponent(manifest.runId)}` : ""),
+      ),
+    );
+    if (manifest.runId && overview.run?.id !== manifest.runId)
+      throw new Error("原分析批次不存在，不能替换为其他批次续跑");
+    return overview;
   };
   const stopForRepair = (stage: string, message: string) => {
     if (repairWait) return repairWait;
@@ -212,16 +245,23 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
         )
           continue;
         await reviewPage.goto(baseURL + "/analysis-preview");
-        await reviewPage.getByRole("tab", { name: /^分析记录/ }).click();
+        await reviewPage.getByRole("tab", { name: /^全部商品/ }).click();
+        await Promise.all([
+          reviewPage.waitForResponse(
+            (reply) =>
+              new URL(reply.url()).pathname === "/api/analysis/status" &&
+              new URL(reply.url()).searchParams.get("search") === item.key,
+          ),
+          reviewPage.getByRole("searchbox", { name: "搜索商品" }).fill(item.key),
+        ]);
+        await expect(reviewPage.locator(".analysis-table-scroll tbody tr")).toHaveCount(1);
         const [response] = await Promise.all([
           reviewPage.waitForResponse(
             (reply) =>
               reply.url().includes("/api/analysis/detail?") &&
               new URL(reply.url()).searchParams.get("taskId") === item.taskId,
           ),
-          reviewPage
-            .getByRole("button", { name: `查看分析详情：${item.name}`, exact: true })
-            .click(),
+          reviewPage.getByRole("button", { name: "查看分析", exact: true }).click(),
         ]);
         const detail = (await response.json()) as AnalysisDetail;
         expect(detail.taskId).toBe(item.taskId);
@@ -235,7 +275,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
           mask: [reviewPage.locator(".analysis-agent-account + small")],
           maskColor: "#20394b",
         });
-        manifest.files.push({
+        registerFile({
           name: name + ".png",
           sha256: createHash("sha256").update(image).digest("hex"),
         });
@@ -252,7 +292,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     };
     if (!resume) {
       const cleared = await api<CrawlStatus>("/api/crawl/clear", {});
-      const empty = await api<AnalysisOverview>("/api/analysis/status?provider=codex");
+      const empty = await overviewAll();
       expect(cleared.totalSaved).toBe(0);
       expect(empty.counts.total).toBe(0);
       expect(empty.run).toBeNull();
@@ -283,7 +323,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
         api<SavedRoleRecord>(`/api/crawl/detail?key=${encodeURIComponent(item.key)}`),
       ),
     );
-    const alreadyCaptured = selected.length === 10 && previousRecords.every(ready);
+    const alreadyCaptured = selected.length === roleCount && previousRecords.every(ready);
     let listPage: any;
     let listings: any;
     let liveList: ListingPage | undefined;
@@ -318,7 +358,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
       await save(`list-page-${liveList!.page}.json`, liveList);
     }
     const startAnalysis = async () => {
-      const overview = await api<AnalysisOverview>("/api/analysis/status?provider=codex");
+      const overview = await overviewAll();
       const run = overview.run;
       if (run && (run.failed || run.waitingPricing)) {
         manifest.runId = run.id;
@@ -345,7 +385,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
       await save("manifest.json", manifest);
     };
     const capture = async () => {
-      for (let index = 0; index < 10 && !stopping; index++) {
+      for (let index = 0; index < roleCount && !stopping; index++) {
         while (flowBlocked && !stopping) await pause();
         if (stopping) return;
         let item = selected[index];
@@ -392,7 +432,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
         while (!ready(record) && !stopping) {
           while (flowBlocked && !stopping) await pause();
           if (stopping) return;
-          const before = await api<AnalysisOverview>("/api/analysis/status?provider=codex");
+          const before = await overviewAll();
           await api("/api/crawl/backfill", { keys: [item!.key] });
           const collector = await server.ssrLoadModule("/server/crawler/controller.ts");
           await event("capture_started", {
@@ -468,7 +508,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
       if (producerFailure) throw producerFailure;
       let overview: AnalysisOverview;
       try {
-        overview = await api<AnalysisOverview>("/api/analysis/status?provider=codex");
+        overview = await overviewAll();
       } catch (error) {
         await stopForRepair("api", String(error));
         deadline = Date.now() + 180 * 60000;
@@ -525,8 +565,11 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
             run.error || run.pauseNotice || "分析已暂停，断点已保留；处理后继续。",
           );
           deadline = Date.now() + 180 * 60000;
-        } else if (run.status === "completed") {
-          if (captureFinished && run.completed === 10) {
+        } else if (
+          run.status === "completed" ||
+          (run.status === "running" && run.phase === "waiting_capture")
+        ) {
+          if (captureFinished && run.completed === roleCount) {
             const unpriced = overview.records.items.filter(
               (record) =>
                 typeof (record.valuation?.model_value ?? record.valuation?.estimated_value) !==
@@ -552,8 +595,8 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
       await pause();
     }
     await producer;
-    expect(selected).toHaveLength(10);
-    expect(new Set(selected.map((item) => item.key)).size).toBe(10);
+    expect(selected).toHaveLength(roleCount);
+    expect(new Set(selected.map((item) => item.key)).size).toBe(roleCount);
     expect(selected.every((item) => !excluded.has(item.key))).toBe(true);
     const start = timeline.find((item) => item.event === "analysis_started")!;
     const first = timeline.find(
@@ -567,16 +610,22 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     expect(start).toBeTruthy();
     expect(first.at <= start.at && start.at <= second.at).toBe(true);
     expect(second.data).toMatchObject({ analysisActive: true, analysisRun: manifest.runId });
-    const overview = await api<AnalysisOverview>("/api/analysis/status?provider=codex");
+    const overview = await overviewAll();
+    expect(overview.records.items).toHaveLength(roleCount);
+    expect(new Set(overview.records.items.map((item) => item.key))).toEqual(
+      new Set(selected.map((item) => item.key)),
+    );
     await save("analysis-overview.json", overview);
-    expect(overview.counts).toEqual({ total: 10, complete: 10, waitingDetail: 0 });
+    expect(overview.counts).toEqual({ total: roleCount, complete: roleCount, waitingDetail: 0 });
     expect(overview.run).toMatchObject({
-      total: 10,
-      completed: 10,
+      total: roleCount,
+      completed: roleCount,
       failed: 0,
       waitingPricing: 0,
       reused: 0,
     });
+    await reviewResults(overview);
+    expect(reviewed.size).toBe(roleCount);
     const quotes = [];
     const pricingProof = [];
     for (const [index, item] of selected.entries()) {
@@ -693,17 +742,29 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     await save("pricing-policy-proof.json", pricingProof);
     await page.reload();
     await page.getByRole("tab", { name: /^分析记录/ }).click();
-    await expect(page.getByLabel("分析页面概览")).toContainText("10 件已有结果");
+    await expect(page.getByLabel("分析页面概览")).toContainText(`${roleCount} 件已有结果`);
     const screenshot = await page.screenshot({
       path: path.join(directory, "final-results.png"),
       fullPage: true,
       mask: [page.locator(".analysis-agent-account + small")],
       maskColor: "#20394b",
     });
-    manifest.files.push({
+    registerFile({
       name: "final-results.png",
       sha256: createHash("sha256").update(screenshot).digest("hex"),
     });
+    if (!evidence) throw new Error("搜索参数截图未启动，不能通过真实验收");
+    const evidenceIndex = await evidence.stop();
+    evidence = undefined;
+    registerFile(evidenceIndex);
+    manifest.workPageEvidence.state = "indexed_review_required";
+    const parametersCaptured = await hasSearchParameterCapture(
+      manifest.files,
+      verifiedEvidenceFile,
+    );
+    expect(parametersCaptured, "必须有实际填写与提交参数的官方搜索截图，覆盖缺口仍需审查").toBe(
+      true,
+    );
     manifest.state = "passed";
   } catch (error) {
     manifest.state = "incomplete";
@@ -719,7 +780,7 @@ test("真实官网按顺序采集10个角色，第1个采齐即分析，后续�
     await eventWrites;
     if (evidence) {
       try {
-        manifest.files.push(await evidence.stop());
+        registerFile(await evidence.stop());
         manifest.workPageEvidence.state = "indexed_review_required";
       } catch (error) {
         manifest.workPageEvidence = { state: "index_failed", error: String(error) };

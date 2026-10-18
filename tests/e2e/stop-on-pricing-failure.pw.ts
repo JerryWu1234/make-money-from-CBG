@@ -163,13 +163,21 @@ test("查价失败立即停队，刷新后显式重试，按顺序完成两个�
     await page.screenshot({ path: testInfo.outputPath("stopped.png"), fullPage: true });
     await page.reload();
     await expect(retry).toBeVisible();
-    await page.getByRole("button", { name: "继续分析", exact: true }).click();
-    await expect(
-      page.getByText("请先重试失败或待补齐的商品，再继续分析", { exact: true }),
-    ).toBeVisible();
+    const resume = await page.evaluate(async (runId) => {
+      const response = await fetch("/api/analysis/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId }),
+      });
+      return { status: response.status, body: await response.json() };
+    }, before.run!.id);
+    expect(resume).toEqual({
+      status: 400,
+      body: { error: "请先重试失败或待补齐的商品，再继续分析" },
+    });
     expect(searches).toEqual(["stop-first"]);
     await retry.click();
-    await runner.settled();
+    await expect.poll(() => store.overview().run?.completed).toBe(2);
     await writeFile(
       testInfo.outputPath("retry-state.json"),
       JSON.stringify(
@@ -185,7 +193,8 @@ test("查价失败立即停队，刷新后显式重试，按顺序完成两个�
     );
     await expect(page.getByLabel("分析页面概览")).toContainText("2 件已有结果");
     expect(store.overview().run).toMatchObject({
-      status: "completed",
+      status: "running",
+      phase: "waiting_capture",
       completed: 2,
       waitingPricing: 0,
       failed: 0,

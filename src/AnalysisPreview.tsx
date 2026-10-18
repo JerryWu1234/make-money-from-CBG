@@ -85,6 +85,7 @@ export function AnalysisPreview() {
   const active = data?.activeRun;
   const preparation = data?.capturePreparation;
   const running = !!active || !!preparation;
+  const waitingForRoles = active?.phase === "waiting_capture";
   const searchingEquipment =
     active?.phase === "equipment_search" ||
     active?.phase === "pet_search" ||
@@ -214,9 +215,11 @@ export function AnalysisPreview() {
     : busy
       ? "正在处理…"
       : running
-        ? searchingEquipment
-          ? "正在查价…"
-          : "正在分析…"
+        ? waitingForRoles
+          ? "等待新角色…"
+          : searchingEquipment
+            ? "正在查价…"
+            : "正在分析…"
         : run && !sameModel
           ? "按新模型开始分析"
           : run && !sameCalculation
@@ -311,9 +314,11 @@ export function AnalysisPreview() {
                   : data.counts.total === 0
                     ? "尚未采集商品，请先回到采集工作台采集详情。"
                     : active
-                      ? searchingEquipment
-                        ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
-                        : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                      ? waitingForRoles
+                        ? `现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
+                        : searchingEquipment
+                          ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                          : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
                       : run && !sameModel
                         ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
                         : run && !sameCalculation
@@ -360,9 +365,11 @@ export function AnalysisPreview() {
                 {preparation
                   ? "完整采集中"
                   : running
-                    ? searchingEquipment
-                      ? "联网查价中"
-                      : "分析中"
+                    ? waitingForRoles
+                      ? "等待新角色"
+                      : searchingEquipment
+                        ? "联网查价中"
+                        : "分析中"
                     : run?.status === "paused"
                       ? "已暂停"
                       : run?.status === "completed"
@@ -774,11 +781,13 @@ export function AnalysisPreview() {
                     ? searchingEquipment
                       ? `正在联网查${searchAsset}价格 · ${active.current}`
                       : `正在分析 ${active.current}`
-                    : running
-                      ? "正在准备下一件商品"
-                      : run?.status === "paused"
-                        ? "已暂停，等待继续"
-                        : "暂无正在执行的商品"}
+                    : waitingForRoles
+                      ? "等待新角色资料采集完整"
+                      : running
+                        ? "正在准备下一件商品"
+                        : run?.status === "paused"
+                          ? "已暂停，等待继续"
+                          : "暂无正在执行的商品"}
                 </p>
               </div>
               <p>

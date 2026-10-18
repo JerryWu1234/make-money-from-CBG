@@ -29,6 +29,8 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     crawl.save(record.listing, record.detail!);
   }
   const store = new AnalysisStore(crawl.db);
+  // Keep the manual finite-batch valuation controls covered independently of continuous waiting.
+  store.followsCapture = () => false;
   const automaticServer = {
     serverId: analysisRecord().listing.serverId,
     serverName: "测试服",

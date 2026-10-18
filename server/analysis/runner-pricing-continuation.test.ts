@@ -56,6 +56,8 @@ it.each([
     crawl.observe(record.listing);
     crawl.save(record.listing, record.detail!);
     const store = new AnalysisStore(crawl.db);
+    // These pricing regressions exercise a finite batch; streaming has its own suite.
+    vi.spyOn(store, "followsCapture").mockReturnValue(false);
     const profile = createProfile(
       readFileSync(PROMPT_FILE, "utf8"),
       {
@@ -163,6 +165,7 @@ it.each([
         expect(analyze).not.toHaveBeenCalled();
         await runner.shutdown();
         const reloadedStore = new AnalysisStore(crawl.db);
+        vi.spyOn(reloadedStore, "followsCapture").mockReturnValue(false);
         reopened = new AnalysisRunner(reloadedStore, connect);
         await reopened.resume(id, true);
         await reopened.settled();
@@ -176,7 +179,11 @@ it.each([
       expect(saved.decision).toBe("NEED_INFO");
       expect(saved.model_value).toBeNull();
       // Recreating a runner after completion behaves like refresh without duplicate AI.
-      reopened ||= new AnalysisRunner(new AnalysisStore(crawl.db), connect);
+      if (!reopened) {
+        const reloadedStore = new AnalysisStore(crawl.db);
+        vi.spyOn(reloadedStore, "followsCapture").mockReturnValue(false);
+        reopened = new AnalysisRunner(reloadedStore, connect);
+      }
       expect(await reopened.start("codex", false, profile)).toBe(id);
       await reopened.settled();
       expect(searches).toBe(finishAfter + Number(restart));

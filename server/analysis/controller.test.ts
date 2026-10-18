@@ -279,9 +279,12 @@ it("完整流程：采集发现缺项、自动重读、保存完整资料、查�
   const controller = await import("./controller");
   const run = (await controller.startAnalysis("codex"))!;
   await vi.waitFor(() =>
-    expect(
-      crawl.db.prepare("SELECT status FROM analysis_runs WHERE id=?").get(run.id)!.status,
-    ).toBe("completed"),
+    expect(controller.analysisOverview({}).activeRun).toMatchObject({
+      id: run.id,
+      status: "running",
+      completed: 1,
+      phase: "waiting_capture",
+    }),
   );
   const task = crawl.db
     .prepare(

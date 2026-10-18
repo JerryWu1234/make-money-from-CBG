@@ -44,7 +44,13 @@ export type AnalysisRun = {
   } | null;
   reused: number;
   current: string | null;
-  phase?: "equipment_search" | "pet_search" | "pet_gear_search" | "analysis" | null;
+  phase?:
+    | "equipment_search"
+    | "pet_search"
+    | "pet_gear_search"
+    | "analysis"
+    | "waiting_capture"
+    | null;
   profileHash?: string;
   calculationVersion?: string;
 };

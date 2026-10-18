@@ -262,7 +262,13 @@ export class AnalysisStore {
             : null,
           reused: Number(row.reused),
           current: nullable(row.current),
-          phase: nullable(row.phase) as AnalysisRun["phase"],
+          phase:
+            row.status === "running" &&
+            row.follow_capture === "1" &&
+            !row.phase &&
+            !Number(row.queued)
+              ? "waiting_capture"
+              : (nullable(row.phase) as AnalysisRun["phase"]),
           ...(row.profile_json
             ? {
                 profileHash: (JSON.parse(String(row.profile_json)) as AnalysisProfile).hash,
@@ -533,13 +539,26 @@ export class AnalysisStore {
         );
       });
       if (!inserted) {
-        this.db.prepare("DELETE FROM analysis_runs WHERE id=?").run(id);
+        // Reuse an ordinary batch only with the same frozen settings. A trial stays finite;
+        // otherwise retain this empty batch so newly captured roles still have a waiting worker.
         const latest = this.db
           .prepare(`SELECT id FROM analysis_runs
-          WHERE provider=? AND model=? AND rule_version=? ORDER BY created_at DESC,id DESC LIMIT 1`)
-          .get(provider, model, profile?.version || RULE_VERSION)!;
-        this.db.exec("COMMIT");
-        return String(latest.id);
+          WHERE id!=? AND provider=? AND model=? AND rule_version=? AND profile_json IS ?
+          AND follow_capture='1' AND error IS NULL
+          AND NOT EXISTS(SELECT 1 FROM analysis_tasks t WHERE t.run_id=analysis_runs.id AND t.status!='completed')
+          ORDER BY created_at DESC,id DESC LIMIT 1`)
+          .get(
+            id,
+            provider,
+            model,
+            profile?.version || RULE_VERSION,
+            profile ? JSON.stringify(profile) : null,
+          );
+        if (latest) {
+          this.db.prepare("DELETE FROM analysis_runs WHERE id=?").run(id);
+          this.db.exec("COMMIT");
+          return String(latest.id);
+        }
       }
       this.db.exec("COMMIT");
       return id;

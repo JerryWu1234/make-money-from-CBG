@@ -58,6 +58,8 @@ function setup(petSearch = false) {
     crawl.save(record.listing, record.detail!);
   }
   const store = new AnalysisStore(crawl.db);
+  // These pricing regressions exercise a finite batch; streaming has its own suite.
+  vi.spyOn(store, "followsCapture").mockReturnValue(false);
   const profile = createProfile(
     readFileSync(PROMPT_FILE, "utf8"),
     DEFAULT_SETTINGS,
@@ -228,7 +230,9 @@ it("单角色读取失败立即暂停，普通继续不越过，显式重试按�
   expect(detail.attempts).toEqual([]);
   expect(detail.equipmentPricing).toMatchObject({ searchComplete: false, total: null });
   expect(detail.error).toContain("单独重试待补齐项");
-  const reloaded = new AnalysisRunner(new AnalysisStore(c.crawl.db), async () => ({
+  const reloadedStore = new AnalysisStore(c.crawl.db);
+  vi.spyOn(reloadedStore, "followsCapture").mockReturnValue(false);
+  const reloaded = new AnalysisRunner(reloadedStore, async () => ({
     model: "test",
     analyze: c.analyze,
     searchEquipment: c.search,

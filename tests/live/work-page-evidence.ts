@@ -96,6 +96,14 @@ async function observe(page: Page) {
           .map((node) => ({
             id: node.id,
             name: node.name,
+            label:
+              node.getAttribute("aria-label") ||
+              Array.from(node.labels || [])
+                .map((label) => label.textContent?.trim())
+                .join(" ") ||
+              node.getAttribute("placeholder") ||
+              node.getAttribute("title") ||
+              "",
             type: node.type,
             value: node.value.slice(0, 4000),
             visible: visible(node),

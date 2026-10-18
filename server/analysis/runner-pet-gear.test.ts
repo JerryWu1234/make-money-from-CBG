@@ -86,6 +86,8 @@ function setup(captureComplete = true, petCount = 1) {
   crawl.observe(record.listing);
   crawl.save(record.listing, record.detail!);
   const store = new AnalysisStore(crawl.db);
+  // These pricing regressions exercise a finite batch; streaming has its own suite.
+  vi.spyOn(store, "followsCapture").mockReturnValue(false);
   const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), undefined, true, true);
   const base = {
     version: 1 as const,

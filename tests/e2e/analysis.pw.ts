@@ -16,6 +16,9 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     if (key === "a" || key === "b") crawl.save(record.listing, record.detail!);
   }
   const store = new AnalysisStore(crawl.db);
+  // This legacy finite-batch UI regression keeps its manual increment controls.
+  // The continuous queue and waiting UI are exercised separately below.
+  store.followsCapture = () => false;
   let automatic = false;
   let calls = 0;
   let starts = 0;
@@ -495,3 +498,132 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
     }
   });
 }
+
+test("没有采集任务：分析完等待新角色，刷新保留等待，新角色自动接续且可暂停", async ({
+  page,
+}, testInfo) => {
+  const crawl = new CrawlStore(":memory:");
+  const store = new AnalysisStore(crawl.db);
+  const add = (key: string, complete = true) => {
+    const record = analysisRecord(key);
+    crawl.observe(record.listing);
+    if (complete) crawl.save(record.listing, record.detail!);
+    return record;
+  };
+  add("a");
+  let calls = 0;
+  let connects = 0;
+  const runner = new AnalysisRunner(store, async () => {
+    connects++;
+    return {
+      model: "waiting-fixture-model",
+      analyze: async (prompt) => {
+        calls++;
+        const key = prompt.match(/商品 ID：([^。]+)。/)![1];
+        return { text: JSON.stringify(analysisResponse(crawl.detail(key) as SavedRoleRecord)) };
+      },
+    };
+  });
+  try {
+    await page.context().route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.origin !== "http://cbg-waiting.test") return route.abort();
+      if (url.pathname.startsWith("/api/")) {
+        const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
+        let body: unknown;
+        switch (url.pathname) {
+          case "/api/ai/status":
+            body = {
+              codex: { state: "configured" },
+              deepseek: { state: "unconfigured" },
+              deepseekModels: [],
+            };
+            break;
+          case "/api/ai/models":
+            body = {
+              provider: "codex",
+              defaultModel: "waiting-fixture-model",
+              models: [{ id: "waiting-fixture-model", name: "等待状态测试模型" }],
+            };
+            break;
+          case "/api/analysis/status":
+            body = store.overview();
+            break;
+          case "/api/analysis/start":
+            body = store.run(await runner.start("codex"));
+            break;
+          case "/api/analysis/pause":
+            await runner.pause(input.runId);
+            body = store.run(input.runId);
+            break;
+          case "/api/analysis/resume":
+            body = store.run(await runner.resume(input.runId));
+            break;
+          default:
+            throw new Error(`未模拟接口：${url.pathname}`);
+        }
+        return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
+      }
+      const file = path.join(
+        "dist",
+        url.pathname === "/analysis-preview" ? "index.html" : url.pathname,
+      );
+      return route.fulfill({
+        contentType: file.endsWith(".js")
+          ? "application/javascript"
+          : file.endsWith(".css")
+            ? "text/css"
+            : "text/html",
+        body: await readFile(file),
+      });
+    });
+    await page.goto("http://cbg-waiting.test/analysis-preview");
+    await page.getByRole("button", { name: "开始分析已有商品", exact: true }).click();
+    const waiting = page.getByRole("button", { name: "等待新角色…", exact: true });
+    await expect(waiting).toBeDisabled();
+    await expect(page.getByText(/现有角色已处理完，等待新角色/)).toBeVisible();
+    await expect(page.getByText("等待新角色资料采集完整", { exact: true })).toBeVisible();
+    const id = store.activeRun()!.id;
+    expect(calls).toBe(1);
+    const pending = add("b", false);
+    await page.reload();
+    await expect(waiting).toBeDisabled();
+    await expect(page.getByLabel("分析模型")).toHaveValue("waiting-fixture-model");
+    expect(calls).toBe(1);
+    expect(connects).toBe(1);
+    await page.screenshot({
+      path: testInfo.outputPath("waiting-for-new-roles.png"),
+      fullPage: true,
+    });
+    crawl.save(pending.listing, pending.detail!);
+    await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
+      2,
+    );
+    await expect(waiting).toBeDisabled();
+    expect(store.activeRun()).toMatchObject({ id, completed: 2, phase: "waiting_capture" });
+    expect(calls).toBe(2);
+    expect(connects).toBe(1);
+    await page.getByRole("button", { name: "暂停分析", exact: true }).click();
+    await expect(page.getByRole("button", { name: "继续分析", exact: true })).toBeEnabled();
+    add("c");
+    await page.reload();
+    await expect(page.getByRole("button", { name: "继续分析", exact: true })).toBeEnabled();
+    expect(calls).toBe(2);
+    await page.getByRole("button", { name: "继续分析", exact: true }).click();
+    await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
+      3,
+    );
+    await expect(waiting).toBeDisabled();
+    expect(store.activeRun()).toMatchObject({
+      id,
+      completed: 3,
+      total: 3,
+      phase: "waiting_capture",
+    });
+    expect(calls).toBe(3);
+    await page.screenshot({ path: testInfo.outputPath("new-roles-resumed.png"), fullPage: true });
+  } finally {
+    await runner.shutdown();
+    crawl.close();
+  }
+});

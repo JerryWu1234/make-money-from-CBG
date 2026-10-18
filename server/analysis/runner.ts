@@ -85,7 +85,6 @@ export class AnalysisRunner {
   constructor(
     readonly store: AnalysisStore,
     private client: (provider: AiProvider, model?: string) => Promise<AnalysisClient>,
-    private captureRunning: () => boolean = () => false,
   ) {}
   appendCaptured() {
     const active = this.active;
@@ -150,8 +149,10 @@ export class AnalysisRunner {
         sampleSize,
         productKeys,
       );
-      if (this.store.run(id)?.status === "running") this.launch(id, owner, client);
-      else this.store.release(owner);
+      if (this.store.run(id)?.status === "running" || (!sample && this.store.followsCapture(id))) {
+        this.store.setRun(id, "running", null, owner);
+        this.launch(id, owner, client);
+      } else this.store.release(owner);
       return id;
     } catch (error) {
       this.store.release(owner);
@@ -171,7 +172,7 @@ export class AnalysisRunner {
       !run.queued &&
       !(retryFailed && (run.failed || run.waitingPricing)) &&
       !this.store.hasCapturedPending(id) &&
-      !(run.status === "paused" && this.store.followsCapture(id))
+      !this.store.followsCapture(id)
     )
       return id;
     if (run.calculationVersion && run.calculationVersion !== CALCULATION_VERSION)
@@ -229,7 +230,8 @@ export class AnalysisRunner {
       this.store.appendCaptured(id, owner);
       let task = this.store.next(id);
       if (!task) {
-        if (this.store.followsCapture(id) && this.captureRunning()) {
+        // Collection may stop or restart independently; only pausing analysis ends this wait.
+        if (this.store.followsCapture(id)) {
           await new Promise<void>((resolve) => {
             const done = () => {
               clearTimeout(timer);

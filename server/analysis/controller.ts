@@ -44,7 +44,7 @@ function service() {
     const store = new AnalysisStore(crawlDatabase());
     analysis = runtime[serviceKey] = {
       store,
-      runner: new AnalysisRunner(store, prepareAnalysisClient, isCrawling),
+      runner: new AnalysisRunner(store, prepareAnalysisClient),
     };
   }
   return analysis;
