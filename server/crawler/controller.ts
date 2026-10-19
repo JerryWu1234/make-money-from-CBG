@@ -6,6 +6,7 @@ import { createCrawlSource } from "./source";
 import { CrawlStore } from "./store";
 import type { CrawlStatus, SavedRoleRecord } from "./types";
 import { diagnostics, watchWorkPage } from "../diagnostics";
+import { loadProfile, saveProfile } from "../analysis/profile";
 
 let storage: CrawlStore | undefined;
 const store = () => (storage ||= new CrawlStore());
@@ -69,8 +70,21 @@ export function savedDetail(key: string) {
 export function crawlDatabase() {
   return store().db;
 }
-export function captureRetryItems(keys?: string[]) {
-  return store().retryItems(keys);
+export function captureRetryItems(keys?: string[], includeAssets = true) {
+  return store().retryItems(keys, false, includeAssets);
+}
+export function equipmentAnalysisSettings() {
+  return { analyzeEquipment: loadProfile(store().db).settings.analyzeEquipment === true };
+}
+export function setEquipmentAnalysis(value: unknown) {
+  if (typeof value !== "boolean") throw new Error("装备分析开关无效");
+  const profile = loadProfile(store().db);
+  saveProfile(store().db, {
+    template: profile.template,
+    baseHash: profile.hash,
+    settings: { ...profile.settings, analyzeEquipment: value },
+  });
+  return equipmentAnalysisSettings();
 }
 export function savedRecords(page: number, pageSize: number) {
   return store().records(page, pageSize);
@@ -87,6 +101,10 @@ export async function startCrawl(
   options: CrawlOptions = {},
 ): Promise<CrawlStartResult> {
   validateCrawlOptions(options);
+  options = {
+    ...options,
+    includeAssets: options.includeAssets ?? equipmentAnalysisSettings().analyzeEquipment,
+  };
   if (options.refresh) store().retryItems(options.keys, true);
   if (isCrawling()) return { status: crawlStatus(), started: false, activity: activeRun };
   const current = await checkCbgStatus();
@@ -104,12 +122,17 @@ export async function startCrawl(
   const started = Date.now();
   const log = (event: string, data: Record<string, unknown> = {}) =>
     diagnostics.record(event, { crawlId: owner, ...data });
-  log("crawl.start", { checkpoint: db.checkpoint(), totalSaved: db.count() });
+  log("crawl.start", {
+    checkpoint: db.checkpoint(),
+    totalSaved: db.count(),
+    includeAssets: options.includeAssets,
+  });
   const control = new AbortController();
   abort = control;
   status = {
     ...status,
     running: true,
+    includeAssets: options.includeAssets,
     phase: "locating",
     message: "正在创建隐藏详情页并读取断点…",
     saved: 0,
@@ -143,6 +166,7 @@ export async function startCrawl(
           detailPage,
           signal: control.signal,
           preferredOrder,
+          includeAssets: options.includeAssets,
           savedRecord:
             options.backfillOnly && !options.refresh
               ? (key) => db.detail(key) as SavedRoleRecord | null

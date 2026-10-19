@@ -6,6 +6,7 @@ import { validateSampleSelection } from "./analysis/sample-selection";
 const getRoutes = new Set([
   "/api/browser/status",
   "/api/crawl/status",
+  "/api/crawl/settings",
   "/api/crawl/detail",
   "/api/crawl/records",
   "/api/scan/status",
@@ -21,6 +22,7 @@ const getRoutes = new Set([
 const postRoutes = new Set([
   "/api/browser/open",
   "/api/crawl/start",
+  "/api/crawl/settings/save",
   "/api/crawl/backfill",
   "/api/crawl/stop",
   "/api/crawl/clear",
@@ -274,6 +276,12 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
       const params = new URL(req.url!, expectedOrigin).searchParams;
       let result: unknown;
       switch (pathname) {
+        case "/api/crawl/settings":
+          result = crawler.equipmentAnalysisSettings();
+          break;
+        case "/api/crawl/settings/save":
+          result = crawler.setEquipmentAnalysis((body as Record<string, unknown>).analyzeEquipment);
+          break;
         case "/api/crawl/start":
         case "/api/crawl/backfill":
           {

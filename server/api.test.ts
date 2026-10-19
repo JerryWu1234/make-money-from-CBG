@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
   isCrawling: vi.fn(),
   clearCrawl: vi.fn(),
   startCrawl: vi.fn(),
+  equipmentAnalysisSettings: vi.fn(),
+  setEquipmentAnalysis: vi.fn(),
   disableScanSchedule: vi.fn(),
   scanScheduleStatus: vi.fn(),
   enableScanSchedule: vi.fn(),
@@ -85,6 +87,28 @@ it("资料待补采返回409并保留明确的角色提示", async () => {
   ).apiMiddleware(request("/api/analysis/start", { provider: "codex" }), res, vi.fn());
   expect(res.statusCode).toBe(409);
   expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ error: message });
+});
+
+it("首页装备开关读写不启动采集、登录或分析", async () => {
+  const { apiMiddleware } = await import("./api");
+  mocks.equipmentAnalysisSettings.mockReturnValue({ analyzeEquipment: false });
+  const read = request("/api/crawl/settings");
+  read.method = "GET";
+  const res = response();
+  await apiMiddleware(read, res, vi.fn());
+  expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ analyzeEquipment: false });
+  mocks.setEquipmentAnalysis.mockReturnValue({ analyzeEquipment: true });
+  const saved = response();
+  await apiMiddleware(
+    request("/api/crawl/settings/save", { analyzeEquipment: true }),
+    saved,
+    vi.fn(),
+  );
+  expect(mocks.setEquipmentAnalysis).toHaveBeenCalledWith(true);
+  expect(JSON.parse(saved.end.mock.calls[0][0])).toEqual({ analyzeEquipment: true });
+  expect(mocks.startCrawl).not.toHaveBeenCalled();
+  expect(mocks.startAnalysis).not.toHaveBeenCalled();
+  expect(mocks.checkCbgStatus).not.toHaveBeenCalled();
 });
 
 describe("指定商品试分析", () => {

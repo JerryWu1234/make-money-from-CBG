@@ -84,6 +84,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
         : null;
     const shown = {
       ...valuation,
+      asset_scope: undefined,
       ai_explanation: `【模拟测试长查询条件】${JSON.stringify({ query: "listed_condition_".repeat(80) })}`,
       ...compareListingPrice(value, valuation.asking_price),
       model_value: value,

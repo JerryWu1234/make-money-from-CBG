@@ -2,6 +2,8 @@ import type { Evidence } from "./types";
 
 export type Decision = "BUY" | "WATCH" | "PASS" | "NEED_INFO" | "OUT_OF_SCOPE";
 export type ValuationSettings = {
+  /** Homepage master switch. Missing legacy values default to bare-role analysis. */
+  analyzeEquipment?: boolean;
   pricingScope?: "all" | "equipment";
   /** Explicit operator choice to leave jade assets unpriced in this batch. */
   deferJade?: boolean;
@@ -62,6 +64,7 @@ export type ValuationFact = {
   quote: string;
 };
 export type ValuationResult = {
+  asset_scope?: "body";
   excluded_assets?: Array<{ key: string; name: string; reason: string }>;
   decision: Decision;
   comparison_mode?: "listing-only";

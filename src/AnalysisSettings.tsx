@@ -238,6 +238,10 @@ export function AnalysisSettings({
         <>
           <h3>计价方式</h3>
           <p className="analysis-pending-note">
+            装备总开关：{settings.analyzeEquipment ? "已开启" : "已关闭，仅分析裸号"}。
+            <a href="/">前往采集工作台修改</a>，新任务使用此设置。
+          </p>
+          <p className="analysis-pending-note">
             装备、灵饰和宝宝查角色本服同类挂牌，每个条件核验前5条候选，采用合格样本最低价。强壮神速按当前等级计价，参考依据和采用的价格会保存在结果里。
           </p>
           <button

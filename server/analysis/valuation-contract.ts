@@ -11,6 +11,16 @@ import { applyValuationRange } from "./valuation-range";
 const nullableNumber = { type: ["number", "null"] };
 const strings = { type: "array", items: { type: "string" } };
 function disclosePricingScope(result: ValuationResult, profile: AnalysisProfile): ValuationResult {
+  if (!profile.equipmentSearch && !profile.petSearch) {
+    const notice =
+      "本轮仅分析裸号本体；装备、灵饰、宝宝及宝宝装备、上古玉魄、锦衣和其他道具未核价、未计入。裸号估值不代表整号总价。";
+    return {
+      ...result,
+      asset_scope: "body",
+      price_comparison_scope: notice,
+      reason: result.reason + notice,
+    };
+  }
   if (profile.settings.pricingScope !== "equipment") return result;
   const notice =
     "本轮仅核算裸号本体与人物装备；灵饰、宝宝及宝宝装备" +
@@ -171,6 +181,9 @@ export function valuationPrompt(
   } = computed;
   return [
     profile.template,
+    !profile.equipmentSearch && !profile.petSearch
+      ? "【本轮范围】装备总开关已关闭，只核算裸号本体。忽略模板中要求装备、灵饰、宝宝、玉魄查价的部分，不将这些主动排除项列为待补齐，不把裸号价值称为整号总价。"
+      : "【本轮范围】装备总开关已开启，按本批次冻结的查价范围处理资产。",
     "【本平台的程序化输出要求】金额、明细及挂牌差额由服务端计算。AI只核对资料、解释价格关系，返回三个字段JSON，不返回金额和items，不输出Markdown或代码围栏。此结构取代模板中的完整报告格式。",
     "商品 ID：" +
       document.productKey +

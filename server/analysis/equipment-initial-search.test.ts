@@ -178,7 +178,11 @@ function record() {
 
 it("用户选择玉魄待查后不调用玉魄查询；不含玉魄的装备报价身份保持不变", async () => {
   const value = record();
-  const settings = { ...DEFAULT_SETTINGS, pricingScope: "equipment" as const };
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    analyzeEquipment: true,
+    pricingScope: "equipment" as const,
+  };
   const before = equipmentInventory(value, settings).inputHash;
   expect(equipmentInventory(value, { ...settings, deferJade: true }).inputHash).toBe(before);
   value.detail!.tabs.at(-1)!.items!.push({
@@ -355,7 +359,11 @@ it.each([450, 451, 459, 460])("武器未取整的总伤也执行2点范围：命
 
 it("人物装备范围冻结配置，灵饰待查且不调用其查询；恢复全范围时重新查询", async () => {
   const value = record();
-  const settings = { ...DEFAULT_SETTINGS, pricingScope: "equipment" as const };
+  const settings = {
+    ...DEFAULT_SETTINGS,
+    analyzeEquipment: true,
+    pricingScope: "equipment" as const,
+  };
   const profile = createProfile("scope", settings);
   expect(profile).toMatchObject({ equipmentSearch: true, petSearch: false, petGearSearch: false });
   expect(profile.hash).not.toBe(createProfile("scope", DEFAULT_SETTINGS).hash);

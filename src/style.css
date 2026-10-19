@@ -1767,3 +1767,14 @@ body {
     white-space: nowrap;
   }
 }
+.equipment-analysis-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+.equipment-analysis-toggle input {
+  width: 1.25rem;
+  height: 1.25rem;
+  accent-color: #62dccb;
+}

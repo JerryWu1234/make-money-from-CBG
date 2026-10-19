@@ -102,7 +102,13 @@ export type AnalysisOverview = {
   };
   profile?: Pick<
     AnalysisProfile,
-    "hash" | "version" | "promptHash" | "calculationCompatible" | "calculationVersion"
+    | "hash"
+    | "version"
+    | "promptHash"
+    | "calculationCompatible"
+    | "calculationVersion"
+    | "equipmentSearch"
+    | "petSearch"
   >;
   counts: { total: number; complete: number; waitingDetail: number };
   run: AnalysisRun | null;

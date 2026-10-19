@@ -19,6 +19,41 @@ export function CrawlPanel({
   const [error, setError] = useState("");
   const [transportError, setTransportError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [analyzeEquipment, setAnalyzeEquipment] = useState<boolean | null>(null);
+  const [savingMode, setSavingMode] = useState(false);
+  useEffect(() => {
+    const control = new AbortController();
+    void fetch("/api/crawl/settings", { signal: control.signal, cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || typeof data.analyzeEquipment !== "boolean")
+          throw new Error(data.error || "无法读取装备分析设置");
+        setAnalyzeEquipment(data.analyzeEquipment);
+      })
+      .catch((e) => {
+        if (!control.signal.aborted) setError(e.message);
+      });
+    return () => control.abort();
+  }, []);
+  const saveMode = async (checked: boolean) => {
+    setSavingMode(true);
+    setError("");
+    try {
+      const response = await fetch("/api/crawl/settings/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ analyzeEquipment: checked }),
+        signal: AbortSignal.timeout(15000),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "开关保存失败");
+      setAnalyzeEquipment(data.analyzeEquipment);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "开关保存失败");
+    } finally {
+      setSavingMode(false);
+    }
+  };
   const [selectedKey, setSelectedKey] = useState(savedRecordKey);
   const selectRecord = useCallback((key: string | null) => {
     setSelectedKey(key);
@@ -77,14 +112,31 @@ export function CrawlPanel({
     <section className="crawl-panel" aria-label="详情采集">
       <h2>详情采集与续采</h2>
       <p className="status-note">
-        逐条悬停核对商品，读取详情标签及装备、召唤兽资料，并自动翻页保存到
-        SQLite。开始或继续采集时会先补采未完成或旧版资料，资料完整的商品跳过详情。
-        每个角色的全部标签处理完才会保存，当前页所有角色处理完后自动进入下一页。
+        逐条核对角色并保存到 SQLite；当前模式所需资料完整后才进入分析，已完成的商品跳过重复采集。
+      </p>
+      <label className="equipment-analysis-toggle">
+        <input
+          type="checkbox"
+          checked={analyzeEquipment === true}
+          disabled={analyzeEquipment === null || savingMode || busy || !!status?.running}
+          onChange={(event) => void saveMode(event.target.checked)}
+        />
+        <strong>核对并分析装备</strong>
+      </label>
+      <p className="status-note" role="status">
+        {analyzeEquipment === null
+          ? "正在读取分析模式…"
+          : savingMode
+            ? "正在保存…"
+            : analyzeEquipment
+              ? "已开启：采集装备和宝宝资料，分析时按查价范围核对挂牌价格。"
+              : "已关闭（默认）：只采集并分析裸号本体，不核对装备、灵饰、宝宝及玉魄价格。"}
+        设置用于新采集和新分析任务；已开始的分析继续沿用原设置。
       </p>
       <div className="crawl-actions">
         <button
           className="btn-primary"
-          disabled={busy || !!status?.running || !ready}
+          disabled={busy || savingMode || analyzeEquipment === null || !!status?.running || !ready}
           onClick={() => void action("start")}
         >
           {status?.checkpoint ? "继续采集 / 检查新增" : "开始采集详情"}
@@ -98,7 +150,10 @@ export function CrawlPanel({
         </button>
       </div>
       <p className="status-note">手动开始采集会关闭已启用的定时计划。</p>
-      <ScanSchedulePanel ready={ready} running={!!status?.running} />
+      <ScanSchedulePanel
+        ready={ready && !savingMode && analyzeEquipment !== null}
+        running={!!status?.running}
+      />
       {error && (
         <p role="alert" className="error-message">
           {error}

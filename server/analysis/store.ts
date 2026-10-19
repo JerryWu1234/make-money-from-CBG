@@ -313,7 +313,10 @@ export class AnalysisStore {
           status: "complete",
           error: null,
         };
-        if (captureIssues(record.detail!).length)
+        if (
+          captureIssues(record.detail!, false, !!(profile?.equipmentSearch || profile?.petSearch))
+            .length
+        )
           throw new Error("采集完整性未核验，不能更新分析输入");
         const document = buildProductDocument(record);
         const prompt = profile
@@ -505,7 +508,8 @@ export class AnalysisStore {
         if (
           profile &&
           (profile.equipmentSearch || profile.petSearch) &&
-          captureIssues(record.detail!).length
+          captureIssues(record.detail!, false, !!(profile?.equipmentSearch || profile?.petSearch))
+            .length
         )
           throw new Error("角色资料尚未完整采集，不能进入分析任务");
         const document = buildProductDocument(record);
@@ -617,7 +621,8 @@ export class AnalysisStore {
         if (
           profile &&
           (profile.equipmentSearch || profile.petSearch) &&
-          captureIssues(record.detail!).length
+          captureIssues(record.detail!, false, !!(profile?.equipmentSearch || profile?.petSearch))
+            .length
         )
           continue;
         const document = buildProductDocument(record);

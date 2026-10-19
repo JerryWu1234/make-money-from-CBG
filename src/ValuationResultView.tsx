@@ -30,7 +30,10 @@ export const valuationMoney = (value: number | null | undefined) =>
 export function valuationPriceSummary(result: ValuationResult) {
   if (result.model_value != null)
     return {
-      label: result.comparison_mode === "listing-only" ? "总估值" : "裸号参考估值",
+      label:
+        result.asset_scope === "body" || result.comparison_mode !== "listing-only"
+          ? "裸号参考估值"
+          : "总估值",
       value: result.model_value,
     };
   if (result.estimated_value !== undefined)
@@ -57,7 +60,12 @@ export function valuationPriceSummary(result: ValuationResult) {
     return { label: "已算小计", value: result.known_subtotal };
   if (result.bare_role_value != null)
     return {
-      label: result.pet_pricing ? "裸号参考估值（附带资产待补齐）" : "裸号参考估值（装备待补齐）",
+      label:
+        result.asset_scope === "body"
+          ? "裸号参考估值"
+          : result.pet_pricing
+            ? "裸号参考估值（附带资产待补齐）"
+            : "裸号参考估值（装备待补齐）",
       value: result.bare_role_value,
     };
   if (result.body_value != null)
@@ -159,18 +167,27 @@ function ValuationPriceOverview({ result }: { result: ValuationResult }) {
         <div>
           <dt>装备</dt>
           <dd>
-            {assetPrice(
-              "装备",
-              result.equipment_value,
-              result.equipment_pricing,
-              result.estimated_equipment_range,
-            )}
+            {result.asset_scope === "body"
+              ? "本轮不分析"
+              : assetPrice(
+                  "装备",
+                  result.equipment_value,
+                  result.equipment_pricing,
+                  result.estimated_equipment_range,
+                )}
           </dd>
         </div>
         <div>
           <dt>宝宝</dt>
           <dd>
-            {assetPrice("宝宝", result.pet_value, result.pet_pricing, result.estimated_pet_range)}
+            {result.asset_scope === "body"
+              ? "本轮不分析"
+              : assetPrice(
+                  "宝宝",
+                  result.pet_value,
+                  result.pet_pricing,
+                  result.estimated_pet_range,
+                )}
           </dd>
         </div>
         <div>
@@ -178,7 +195,11 @@ function ValuationPriceOverview({ result }: { result: ValuationResult }) {
           <dd>未计价</dd>
         </div>
       </dl>
-      <p className="analysis-valuation-scope">锦衣和其他道具未计入总估值。</p>
+      <p className="analysis-valuation-scope">
+        {result.asset_scope === "body"
+          ? "本轮仅分析裸号本体，附带资产未计入；此价格不代表整号总价。"
+          : "锦衣和其他道具未计入总估值。"}
+      </p>
     </>
   );
 }

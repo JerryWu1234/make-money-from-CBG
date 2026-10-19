@@ -626,7 +626,7 @@ describe("裸号估值的复算与可追溯输入", () => {
       expect(preserved.missingData).toEqual([...pending.missing_fields, ...pending.pending_rules]);
     }
   });
-  it("修改计价规则停用旧算法；默认联网查价，费用不参与新设置指纹", () => {
+  it("修改计价规则停用旧算法；默认仅裸号，费用不参与新设置指纹", () => {
     expect(createProfile(template).calculationCompatible).toBe(true);
     expect(createProfile(template + "\n请简洁解释。").calculationCompatible).toBe(true);
     const changed = createProfile(template.replace("| 未飞升 | 0 元 |", "| 未飞升 | 10 元 |"));
@@ -648,8 +648,8 @@ describe("裸号估值的复算与可追溯输入", () => {
     });
     expect(() => normalizeSettings({ b: 0.8, a: 0.9 })).toThrow("0 < a ≤ b");
     const automatic = createProfile(template);
-    expect(automatic.equipmentSearch).toBe(true);
-    expect(automatic.petSearch).toBe(true);
+    expect(automatic.equipmentSearch).toBe(false);
+    expect(automatic.petSearch).toBe(false);
     const ignoredPolicy = createProfile(template, {
       ...DEFAULT_SETTINGS,
       b: 0.3,
@@ -659,7 +659,9 @@ describe("裸号估值的复算与可追溯输入", () => {
     });
     expect(ignoredPolicy.settingsHash).toBe(automatic.settingsHash);
     expect(ignoredPolicy.hash).toBe(automatic.hash);
-    expect(createProfile(template, DEFAULT_SETTINGS, false).hash).not.toBe(automatic.hash);
+    expect(createProfile(template, { ...DEFAULT_SETTINGS, analyzeEquipment: true }).hash).not.toBe(
+      automatic.hash,
+    );
   });
   it("保存设置防止覆盖并持久化，保留原Prompt逐字内容", () => {
     const directory = mkdtempSync(join(tmpdir(), "cbg-profile-")),

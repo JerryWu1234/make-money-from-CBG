@@ -104,6 +104,8 @@ export interface ValuationCapture {
   source: Record<string, unknown>;
 }
 export interface RoleDetail {
+  /** Body-only captures never establish equipment/pet completeness. */
+  captureMode?: "body" | "all";
   valuation?: ValuationCapture;
   equipmentCapture?: {
     version: 1;
@@ -140,6 +142,7 @@ export interface Checkpoint {
   savedAt: string;
 }
 export interface CrawlStatus {
+  includeAssets?: boolean;
   running: boolean;
   phase: "idle" | "locating" | "retrying" | "collecting" | "paused" | "completed" | "error";
   message: string;
@@ -182,6 +185,7 @@ export interface SavedListingPage {
     attemptCount: number;
     status: string;
     valuationReady?: boolean;
+    captureMode?: "body" | "all";
     error: string | null;
   }[];
 }

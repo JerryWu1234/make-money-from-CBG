@@ -18,6 +18,7 @@ export const CALCULATION_VERSION = "price-comparison-v38";
 // Update alongside the calculator when changing pricing sections III through VIII.
 const PRICING_HASH = "0b29ddcd68d656a7749b447604eb1c5eae6903c72d74fc3cb1876336a55f5ddf";
 export const DEFAULT_SETTINGS: ValuationSettings = {
+  analyzeEquipment: false,
   pricingScope: "all",
   b: RECOMMENDED_BUY_FACTOR,
   a: null,
@@ -116,6 +117,7 @@ export function normalizeSettings(input: unknown): ValuationSettings {
     }),
   ) as EquipmentBaselinePrices;
   return {
+    analyzeEquipment: boolean("analyzeEquipment")!,
     pricingScope: choice("pricingScope", ["all", "equipment"] as const) || "all",
     ...(boolean("deferJade") ? { deferJade: true } : {}),
     equipmentBaselinePrices,
@@ -139,13 +141,14 @@ export function normalizeSettings(input: unknown): ValuationSettings {
 export function createProfile(
   template: string,
   settings: unknown = DEFAULT_SETTINGS,
-  equipmentSearch = true,
-  petSearch = equipmentSearch,
+  equipmentSearch?: boolean,
+  petSearch?: boolean,
 ): AnalysisProfile {
   if (!template.trim() || Buffer.byteLength(template, "utf8") > 64 * 1024)
     throw new Error("Prompt 不能为空或超过 64 KiB");
   const normalized = normalizeSettings(settings);
-  petSearch = petSearch && normalized.pricingScope !== "equipment";
+  equipmentSearch ??= normalized.analyzeEquipment === true;
+  petSearch = (petSearch ?? equipmentSearch) && normalized.pricingScope !== "equipment";
   const start = template.indexOf("## 三、"),
     end = template.indexOf("## 九、");
   const calculationCompatible =

@@ -82,7 +82,7 @@ export class CrawlStore {
       )
       .run();
   }
-  observe(item: Listing): boolean {
+  observe(item: Listing, includeAssets = true): boolean {
     const now = new Date().toISOString();
     const old = this.db
       .prepare(
@@ -95,11 +95,16 @@ export class CrawlStore {
       old.selling_time === item.sellingTime &&
       old.version === CAPTURE_VERSION &&
       !old.valuation_issues &&
-      old.equipment_complete === 1 &&
-      !old.equipment_issues &&
-      old.pet_complete === 1 &&
-      !old.pet_issues &&
-      !hasUnconfirmedEmptyEquipment(old.detail_json ? JSON.parse(String(old.detail_json)) : null);
+      (!includeAssets ||
+        (old.equipment_complete === 1 &&
+          !old.equipment_issues &&
+          old.pet_complete === 1 &&
+          !old.pet_issues &&
+          !hasUnconfirmedEmptyEquipment(
+            old.detail_json ? JSON.parse(String(old.detail_json)) : null,
+          ))) &&
+      (!old.detail_json ||
+        !captureIssues(JSON.parse(String(old.detail_json)), false, includeAssets).length);
     this.db
       .prepare(`INSERT INTO listings(key,server_id,eid,ordersn,url,selling_time,created_time,name,price,listing_json,first_seen_at,last_seen_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET ordersn=excluded.ordersn,url=excluded.url,selling_time=excluded.selling_time,
@@ -126,7 +131,7 @@ export class CrawlStore {
         .run(now, item.key);
     return complete;
   }
-  retryItems(keys?: string[], refresh = false): Listing[] {
+  retryItems(keys?: string[], refresh = false, includeAssets = true): Listing[] {
     if (refresh) {
       if (keys?.length !== 1 || !keys[0]?.trim() || keys[0] !== keys[0].trim())
         throw new Error("刷新采集仅支持明确指定一个已保存商品");
@@ -140,16 +145,18 @@ export class CrawlStore {
     }
     return this.db
       .prepare(
-        `SELECT listing_json,detail_json,(status IN ('pending','failed') OR (status='complete' AND (coalesce(json_extract(detail_json,'$.captureVersion'),0) < ${CAPTURE_VERSION} OR json_array_length(json_extract(detail_json,'$.valuation.issues')) > 0 OR coalesce(json_extract(detail_json,'$.equipmentCapture.complete'),0)!=1 OR json_array_length(json_extract(detail_json,'$.equipmentCapture.issues'))>0 OR coalesce(json_extract(detail_json,'$.petCapture.complete'),0)!=1 OR json_array_length(json_extract(detail_json,'$.petCapture.issues'))>0))) AS needs_retry FROM listings WHERE status IN ('pending','failed','complete')
+        `SELECT status,listing_json,detail_json,(status IN ('pending','failed') OR (status='complete' AND (coalesce(json_extract(detail_json,'$.captureVersion'),0) < ${CAPTURE_VERSION} OR json_array_length(json_extract(detail_json,'$.valuation.issues')) > 0 OR coalesce(json_extract(detail_json,'$.equipmentCapture.complete'),0)!=1 OR json_array_length(json_extract(detail_json,'$.equipmentCapture.issues'))>0 OR coalesce(json_extract(detail_json,'$.petCapture.complete'),0)!=1 OR json_array_length(json_extract(detail_json,'$.petCapture.issues'))>0))) AS needs_retry FROM listings WHERE status IN ('pending','failed','complete')
         ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,first_seen_at ASC,key ASC`,
       )
       .all()
-      .filter(
-        (row) =>
-          row.needs_retry ||
-          hasUnconfirmedEmptyEquipment(
-            row.detail_json ? JSON.parse(String(row.detail_json)) : null,
-          ),
+      .filter((row) =>
+        includeAssets
+          ? row.needs_retry ||
+            (row.detail_json &&
+              captureIssues(JSON.parse(String(row.detail_json)), false, true).length)
+          : row.status !== "complete" ||
+            !row.detail_json ||
+            captureIssues(JSON.parse(String(row.detail_json)), true, false).length,
       )
       .map((row) => JSON.parse(String(row.listing_json)) as Listing)
       .filter((item) => !keys || keys.includes(item.key));
@@ -165,8 +172,9 @@ export class CrawlStore {
     const last = point && items.find((item) => item.key === point.key);
     return last ? [last, ...items.filter((item) => item.key !== last.key)] : items;
   }
-  beginRetry(key: string, refresh = false) {
-    if (!this.retryItems([key], refresh).length) throw new Error("待补采商品不存在或已完成");
+  beginRetry(key: string, refresh = false, includeAssets = true) {
+    if (!this.retryItems([key], refresh, includeAssets).length)
+      throw new Error("待补采商品不存在或已完成");
     const result = this.db
       .prepare(
         "UPDATE listings SET status='pending',error=NULL,attempt_count=attempt_count+1,last_attempt_at=? WHERE key=?",
@@ -290,16 +298,21 @@ export class CrawlStore {
           lastSeenAt: String(row.last_seen_at),
           lastAttemptAt: row.last_attempt_at ? String(row.last_attempt_at) : null,
           attemptCount: Number(row.attempt_count || 0),
+          captureMode: row.detail_json
+            ? JSON.parse(String(row.detail_json)).captureMode
+            : undefined,
           valuationReady:
-            row.capture_version === CAPTURE_VERSION &&
-            !row.valuation_issues &&
-            row.equipment_complete === 1 &&
-            !row.equipment_issues &&
-            row.pet_complete === 1 &&
-            !row.pet_issues &&
-            !hasUnconfirmedEmptyEquipment(
-              row.detail_json ? JSON.parse(String(row.detail_json)) : null,
-            ),
+            row.detail_json && JSON.parse(String(row.detail_json)).captureMode === "body"
+              ? !captureIssues(JSON.parse(String(row.detail_json)), true, false).length
+              : row.capture_version === CAPTURE_VERSION &&
+                !row.valuation_issues &&
+                row.equipment_complete === 1 &&
+                !row.equipment_issues &&
+                row.pet_complete === 1 &&
+                !row.pet_issues &&
+                !hasUnconfirmedEmptyEquipment(
+                  row.detail_json ? JSON.parse(String(row.detail_json)) : null,
+                ),
           status: String(row.status),
           error: row.error ? String(row.error) : null,
         };

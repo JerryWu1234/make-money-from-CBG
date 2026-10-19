@@ -252,7 +252,9 @@ export function AnalysisPreview() {
               <em>点开查看详情</em>
             </h1>
             <p>
-              先核对装备和宝宝，再联网查价，直接比较参考估值与挂牌价；缺资料或可靠报价时显示补齐办法。
+              {data?.profile?.equipmentSearch || data?.profile?.petSearch
+                ? "装备分析已开启：按设置核对资产并查价，比较参考估值与挂牌价。"
+                : "当前新任务只分析裸号本体，装备、宝宝等资产未计入。可在采集工作台开启装备分析。"}
             </p>
             <AiConnectionControl
               provider={provider}
@@ -809,9 +811,9 @@ export function AnalysisPreview() {
                   <li>
                     <span>2</span>
                     <div>
-                      <strong>先核对装备和宝宝，再联网查价</strong>
+                      <strong>按任务开始时的开关确定分析范围</strong>
                       <p>
-                        按装备属性、宝宝技能与成长查角色本服同类挂牌，保存来源、参考价和未采用原因。
+                        默认仅分析裸号。开启装备分析后，按查价范围核对本服挂牌并保存来源与未采用原因。
                       </p>
                     </div>
                   </li>

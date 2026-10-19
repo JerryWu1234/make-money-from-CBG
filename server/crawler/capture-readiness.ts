@@ -13,11 +13,25 @@ export class IncompleteCaptureError extends Error {
 }
 
 /** Partial snapshots remain useful, but are not complete collection evidence. */
-export function captureIssues(detail: RoleDetail, requireEvidence = false): string[] {
+export function captureIssues(
+  detail: RoleDetail,
+  requireEvidence = false,
+  includeAssets = detail.captureMode !== "body",
+): string[] {
   const issues = [...(detail.valuation?.issues || [])];
   if (requireEvidence && detail.captureVersion !== CAPTURE_VERSION)
     issues.push("角色资料采集版本过旧，需重新核验");
   if (requireEvidence && !detail.valuation) issues.push("角色本体资料未核验");
+  if (!includeAssets) {
+    if (detail.captureMode === "body") {
+      if (detail.captureVersion !== CAPTURE_VERSION || !detail.valuation)
+        issues.push("裸号资料未核验");
+      for (const name of ["人物/修炼", "技能", "道具/法宝", "坐骑"])
+        if (!detail.tabs.some((tab) => tab.name === name)) issues.push(`裸号缺少「${name}」标签`);
+    }
+    return [...new Set(issues)];
+  }
+  if (detail.captureMode === "body") issues.push("本次仅采集裸号，装备和宝宝尚未核验");
   for (const [capture, label] of [
     [detail.equipmentCapture, "装备"],
     [detail.petCapture, "宝宝"],

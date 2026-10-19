@@ -75,6 +75,8 @@ export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[
       promptHash: profile.promptHash,
       calculationCompatible: profile.calculationCompatible,
       calculationVersion: profile.calculationVersion,
+      equipmentSearch: profile.equipmentSearch,
+      petSearch: profile.petSearch,
     },
   };
 }
@@ -109,6 +111,7 @@ async function prepareCaptures(keys?: string[]) {
     if (!remaining.length) return;
     const attempt = await startCrawl("manual", undefined, {
       backfillOnly: true,
+      includeAssets: true,
       keys: remaining.map((item) => item.key),
     });
     preparation.ownsCapture = attempt.started;

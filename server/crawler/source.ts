@@ -9,6 +9,7 @@ interface SourceOptions {
   detailPage: Page;
   signal: AbortSignal;
   preferredOrder?: string;
+  includeAssets?: boolean;
   savedRecord?: (key: string) => SavedRoleRecord | null;
   onDetailProgress: (message: string) => void;
   log: (event: string, data?: Record<string, unknown>) => void;
@@ -19,6 +20,7 @@ export function createCrawlSource({
   detailPage,
   signal,
   preferredOrder,
+  includeAssets = true,
   savedRecord,
   onDetailProgress,
   log,
@@ -58,7 +60,8 @@ export function createCrawlSource({
       const result = await collectCompleteCapture(
         async () => {
           await pace(signal, 1800, 1700);
-          return previous?.detail &&
+          return includeAssets &&
+            previous?.detail &&
             !captureIssues(previous.detail, true).length &&
             MAIN_TABS.every((name) => previous.detail!.tabs.some((tab) => tab.name === name))
             ? await collectValuationDetail(
@@ -68,7 +71,7 @@ export function createCrawlSource({
                 signal,
                 onDetailProgress,
               )
-            : await collectDetail(detailPage, item, signal, onDetailProgress);
+            : await collectDetail(detailPage, item, signal, onDetailProgress, includeAssets);
         },
         signal,
         onDetailProgress,
