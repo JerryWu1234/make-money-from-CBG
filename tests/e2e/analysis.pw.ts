@@ -499,7 +499,7 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
   });
 }
 
-test("没有采集任务：分析完等待新角色，刷新保留等待，新角色自动接续且可暂停", async ({
+test("空库先启动等待：首个角色采齐自动分析，刷新保留等待，新角色自动接续且可暂停", async ({
   page,
 }, testInfo) => {
   const crawl = new CrawlStore(":memory:");
@@ -510,7 +510,6 @@ test("没有采集任务：分析完等待新角色，刷新保留等待，新�
     if (complete) crawl.save(record.listing, record.detail!);
     return record;
   };
-  add("a");
   let calls = 0;
   let connects = 0;
   const runner = new AnalysisRunner(store, async () => {
@@ -578,12 +577,28 @@ test("没有采集任务：分析完等待新角色，刷新保留等待，新�
       });
     });
     await page.goto("http://cbg-waiting.test/analysis-preview");
-    await page.getByRole("button", { name: "开始分析已有商品", exact: true }).click();
+    const start = page.getByRole("button", { name: "开始分析并等待采集", exact: true });
+    await expect(start).toBeEnabled();
+    await start.click();
     const waiting = page.getByRole("button", { name: "等待新角色…", exact: true });
     await expect(waiting).toBeDisabled();
+    await expect(page.getByText(/正在等待首个角色资料采集完整/)).toBeVisible();
+    const id = store.activeRun()!.id;
+    expect(store.activeRun()).toMatchObject({ total: 0, phase: "waiting_capture" });
+    expect(calls).toBe(0);
+    await page.reload();
+    await expect(waiting).toBeDisabled();
+    await expect(page.getByText(/正在等待首个角色资料采集完整/)).toBeVisible();
+    expect(store.activeRun()!.id).toBe(id);
+    const first = add("a", false);
+    expect(runner.appendCaptured()).toBe(0);
+    expect(calls).toBe(0);
+    crawl.save(first.listing, first.detail!);
+    await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
+      1,
+    );
     await expect(page.getByText(/现有角色已处理完，等待新角色/)).toBeVisible();
     await expect(page.getByText("等待新角色资料采集完整", { exact: true })).toBeVisible();
-    const id = store.activeRun()!.id;
     expect(calls).toBe(1);
     const pending = add("b", false);
     await page.reload();

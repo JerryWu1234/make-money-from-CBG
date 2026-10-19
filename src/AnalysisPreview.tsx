@@ -228,7 +228,9 @@ export function AnalysisPreview() {
               ? "继续分析"
               : run?.status === "completed"
                 ? "分析新增或已更新商品"
-                : "开始分析已有商品";
+                : data?.counts.complete === 0
+                  ? "开始分析并等待采集"
+                  : "开始分析已有商品";
 
   return (
     <div className="analysis-page">
@@ -268,7 +270,7 @@ export function AnalysisPreview() {
               onDefaultModelChange={updateDefaultModel}
               onStart={start}
               startLabel={startLabel}
-              disabled={busy || running || !data || data.counts.total === 0}
+              disabled={busy || running || !data}
               locked={busy || running}
             />
             <div className="analysis-hero-actions">
@@ -313,14 +315,16 @@ export function AnalysisPreview() {
                 ? "正在读取已采集商品…"
                 : preparation
                   ? `正在采集并核验角色资料：${preparation.completed}/${preparation.total} 个 · ${preparation.current || "准备下一角色"} · ${preparation.message}`
-                  : data.counts.total === 0
-                    ? "尚未采集商品，请先回到采集工作台采集详情。"
-                    : active
-                      ? waitingForRoles
-                        ? `现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
-                        : searchingEquipment
-                          ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
-                          : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                  : active
+                    ? waitingForRoles
+                      ? active.total === 0
+                        ? "正在等待首个角色资料采集完整，完成后自动开始分析，无需再次点击。"
+                        : `现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
+                      : searchingEquipment
+                        ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                        : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                    : data.counts.total === 0
+                      ? "尚未采集商品；可以先开始分析并等待，角色资料采集完整后会自动分析。"
                       : run && !sameModel
                         ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
                         : run && !sameCalculation

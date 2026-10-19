@@ -226,7 +226,7 @@ export function AnalysisSettings({
       </header>
       <p>
         每次开始分析都会冻结这份 Prompt
-        和参数。新批次使用新设置，历史结果保留。先核对装备和宝宝，再联网查价，比较挂牌差异；区服金价和热度自动匹配。
+        和参数。新批次使用新设置，历史结果保留。采集始终保存完整角色和资产资料，装备开关只控制分析时是否核价；区服金价和热度自动匹配。
       </p>
       {error && (
         <p role="alert" className="analysis-pending-note">

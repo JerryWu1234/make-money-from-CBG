@@ -111,7 +111,6 @@ async function prepareCaptures(keys?: string[]) {
     if (!remaining.length) return;
     const attempt = await startCrawl("manual", undefined, {
       backfillOnly: true,
-      includeAssets: true,
       keys: remaining.map((item) => item.key),
     });
     preparation.ownsCapture = attempt.started;
@@ -186,7 +185,7 @@ export async function startAnalysis(
   const preparationProfile = loadProfile(analysis.store.db);
   if (
     !analysis.runner.isRunning() &&
-    !(!sample && !productKeys && isCrawling() && analysis.store.counts().complete > 0) &&
+    !(!sample && !productKeys && (isCrawling() || analysis.store.counts().total === 0)) &&
     (preparationProfile.equipmentSearch ||
       preparationProfile.petSearch ||
       preparationProfile.petGearSearch)
@@ -234,8 +233,8 @@ export async function resumeAnalysis(id: string, retry = false) {
         .all(id)
         .map((task) => String(task.listing_key));
       await prepareCaptures(keys);
-      analysis.store.refreshPendingCaptures(id);
     }
+    analysis.store.refreshPendingCaptures(id);
   }
   await service().runner.resume(id, retry);
   return service().store.run(id);

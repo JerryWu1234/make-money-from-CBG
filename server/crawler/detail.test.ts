@@ -86,13 +86,12 @@ describe("装备局部补采", () => {
   afterAll(async () => {
     await browser?.close();
   });
-  it("关闭装备开关时跳过坏装备与宝宝详情，只读裸号所需标签", async () => {
+  it("采集始终读取所有标签、装备及宝宝，不受只分析裸号的设置影响", async () => {
     const page = await browser.newPage();
-    const progress: string[] = [];
     await page.route("**/*", (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: fixture(true, "<p>召唤兽资料加载失败</p>"),
+        body: fixture(false, completePet()),
       }),
     );
     try {
@@ -100,22 +99,16 @@ describe("装备局部补采", () => {
         listPage: page,
         detailPage: page,
         signal: new AbortController().signal,
-        includeAssets: false,
-        onDetailProgress: (message) => progress.push(message),
+        onDetailProgress: () => {},
         log: () => {},
       });
       const result = await source.detail(listing);
-      expect(result.captureMode).toBe("body");
-      expect(result.equipmentCapture).toBeUndefined();
-      expect(result.petCapture).toBeUndefined();
-      expect(result.tabs.map((tab) => tab.name)).toEqual([
-        "人物/修炼",
-        "技能",
-        "道具/法宝",
-        "坐骑",
-      ]);
-      expect(result.tabs.find((tab) => tab.name === "道具/法宝")!.items).toEqual([]);
-      expect(progress.join(" ")).not.toMatch(/召唤兽|锦衣|玩家之家|新武器|重读/);
+      expect(result.captureMode).toBe("all");
+      expect(result.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      expect(result.petCapture).toMatchObject({ complete: true, issues: [] });
+      expect(MAIN_TABS.every((name) => result.tabs.some((tab) => tab.name === name))).toBe(true);
+      expect(result.tabs.find((tab) => tab.name === "道具/法宝")!.items!.length).toBeGreaterThan(0);
+      expect(result.tabs.find((tab) => tab.name === "召唤兽/孩子")!.pets).toHaveLength(1);
     } finally {
       await page.close();
     }

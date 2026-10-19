@@ -118,7 +118,8 @@ export class AnalysisRunner {
         throw new Error("请先暂停当前分析，再切换模型");
       return existing.id;
     }
-    if (!this.store.counts().complete) throw new Error("暂无详情完整的商品，请先采集商品详情");
+    if (sample && !this.store.counts().complete)
+      throw new Error("暂无详情完整的商品，请先采集商品详情");
     const client = await this.client(provider, selectedModel);
     // The lease also protects the await above and separate local Node services.
     const afterConnect = this.currentActivity();

@@ -565,6 +565,7 @@ export async function collectValuationDetail(
   }
   return {
     ...previous,
+    captureMode: "all" as const,
     captureVersion: CAPTURE_VERSION,
     valuation,
     equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
@@ -580,16 +581,12 @@ export async function collectDetail(
   item: Listing,
   signal: AbortSignal,
   report: (message: string) => void = () => {},
-  includeAssets = true,
 ): Promise<RoleDetail> {
   await openDetail(page, item, signal, report);
   const tabs: TabSnapshot[] = [];
   const equipmentIssues: string[] = [];
   let petCapture: RoleDetail["petCapture"];
-  const requiredTabs = includeAssets
-    ? MAIN_TABS
-    : MAIN_TABS.filter((name) => !["召唤兽/孩子", "锦衣/外观", "玩家之家"].includes(name));
-  for (const name of requiredTabs) {
+  for (const name of MAIN_TABS) {
     checkAborted(signal);
     report(`正在读取标签 ${MAIN_TABS.indexOf(name) + 1}/${MAIN_TABS.length}：${name}`);
     const tab = page.getByText(name, { exact: true }).filter({ visible: true }).first();
@@ -602,7 +599,6 @@ export async function collectDetail(
     const snapshot = await capture(page, name);
     tabs.push(snapshot);
     if (name === "道具/法宝") {
-      if (!includeAssets) continue;
       const snapshots = await inspectEquipmentTabs(page, snapshot, signal, report, equipmentIssues);
       tabs.push(...snapshots.slice(1));
       continue;
@@ -656,43 +652,39 @@ export async function collectDetail(
       await inspectItems(page, entrySnapshot, signal, report);
     }
   }
-  const raw = includeAssets
-    ? await page.evaluate(() => {
-        const globals = window as unknown as Record<string, unknown>;
-        const result: Record<string, unknown> = {};
-        const encoded = document.querySelector<HTMLTextAreaElement>("#equip_desc_value")?.value;
-        if (encoded) result.encodedRoleData = encoded;
-        // 只保存商品详情的数据，不读取 Cookie、登录信息或其他页面的账户。
-        for (const key of [
-          "EquipInfo",
-          "RoleInfo",
-          "RoleData",
-          "role_info",
-          "role_data",
-          "equip_info",
-        ]) {
-          const value = globals[key];
-          if (value && typeof value === "object") {
-            try {
-              result[key] = JSON.parse(JSON.stringify(value));
-            } catch {
-              throw new Error(`商品原始数据 ${key} 无法完整序列化`);
-            }
-          }
+  const raw = await page.evaluate(() => {
+    const globals = window as unknown as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    const encoded = document.querySelector<HTMLTextAreaElement>("#equip_desc_value")?.value;
+    if (encoded) result.encodedRoleData = encoded;
+    // 只保存商品详情的数据，不读取 Cookie、登录信息或其他页面的账户。
+    for (const key of [
+      "EquipInfo",
+      "RoleInfo",
+      "RoleData",
+      "role_info",
+      "role_data",
+      "equip_info",
+    ]) {
+      const value = globals[key];
+      if (value && typeof value === "object") {
+        try {
+          result[key] = JSON.parse(JSON.stringify(value));
+        } catch {
+          throw new Error(`商品原始数据 ${key} 无法完整序列化`);
         }
-        return result;
-      })
-    : {};
+      }
+    }
+    return result;
+  });
   checkAborted(signal);
   report("全部标签读取完成，正在保存详情…");
   const now = new Date().toISOString();
   return {
-    captureMode: includeAssets ? "all" : "body",
+    captureMode: "all" as const,
     captureVersion: CAPTURE_VERSION,
     valuation: await captureValuation(page),
-    ...(includeAssets
-      ? { equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues) }
-      : {}),
+    equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
     petCapture,
     url: item.url,
     collectedAt: now,

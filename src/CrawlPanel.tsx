@@ -112,16 +112,16 @@ export function CrawlPanel({
     <section className="crawl-panel" aria-label="详情采集">
       <h2>详情采集与续采</h2>
       <p className="status-note">
-        逐条核对角色并保存到 SQLite；当前模式所需资料完整后才进入分析，已完成的商品跳过重复采集。
+        始终完整采集角色、装备、灵饰、宝宝等资料并保存到 SQLite；资料完整后才进入分析。
       </p>
       <label className="equipment-analysis-toggle">
         <input
           type="checkbox"
           checked={analyzeEquipment === true}
-          disabled={analyzeEquipment === null || savingMode || busy || !!status?.running}
+          disabled={analyzeEquipment === null || savingMode || busy}
           onChange={(event) => void saveMode(event.target.checked)}
         />
-        <strong>核对并分析装备</strong>
+        <strong>分析装备</strong>
       </label>
       <p className="status-note" role="status">
         {analyzeEquipment === null
@@ -129,14 +129,14 @@ export function CrawlPanel({
           : savingMode
             ? "正在保存…"
             : analyzeEquipment
-              ? "已开启：采集装备和宝宝资料，分析时按查价范围核对挂牌价格。"
-              : "已关闭（默认）：只采集并分析裸号本体，不核对装备、灵饰、宝宝及玉魄价格。"}
-        设置用于新采集和新分析任务；已开始的分析继续沿用原设置。
+              ? "已开启：分析时按查价范围核对装备等资产的挂牌价格。"
+              : "已关闭（默认）：只分析裸号本体，不查装备、灵饰、宝宝及玉魄价格；采集仍保留全部资料。"}
+        开关只影响新分析任务；已开始的分析沿用原设置。
       </p>
       <div className="crawl-actions">
         <button
           className="btn-primary"
-          disabled={busy || savingMode || analyzeEquipment === null || !!status?.running || !ready}
+          disabled={busy || !!status?.running || !ready}
           onClick={() => void action("start")}
         >
           {status?.checkpoint ? "继续采集 / 检查新增" : "开始采集详情"}
@@ -150,10 +150,7 @@ export function CrawlPanel({
         </button>
       </div>
       <p className="status-note">手动开始采集会关闭已启用的定时计划。</p>
-      <ScanSchedulePanel
-        ready={ready && !savingMode && analyzeEquipment !== null}
-        running={!!status?.running}
-      />
+      <ScanSchedulePanel ready={ready} running={!!status?.running} />
       {error && (
         <p role="alert" className="error-message">
           {error}

@@ -313,10 +313,7 @@ export class AnalysisStore {
           status: "complete",
           error: null,
         };
-        if (
-          captureIssues(record.detail!, false, !!(profile?.equipmentSearch || profile?.petSearch))
-            .length
-        )
+        if (captureIssues(record.detail!).length)
           throw new Error("采集完整性未核验，不能更新分析输入");
         const document = buildProductDocument(record);
         const prompt = profile
@@ -492,7 +489,7 @@ export class AnalysisStore {
             productKeys.indexOf(String(left.key)) - productKeys.indexOf(String(right.key)),
         );
       }
-      if (!rows.length) throw new Error("暂无详情完整的商品，请先采集商品详情");
+      if (!rows.length && sample) throw new Error("暂无详情完整的商品，请先采集商品详情");
       const insert = this.db.prepare(
         `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       );
@@ -505,12 +502,7 @@ export class AnalysisStore {
           error: null,
         };
         if (record.listing.key !== row.key) throw new Error("商品 ID 与数据库记录不一致");
-        if (
-          profile &&
-          (profile.equipmentSearch || profile.petSearch) &&
-          captureIssues(record.detail!, false, !!(profile?.equipmentSearch || profile?.petSearch))
-            .length
-        )
+        if (profile && captureIssues(record.detail!).length)
           throw new Error("角色资料尚未完整采集，不能进入分析任务");
         const document = buildProductDocument(record);
         const prompt = profile
@@ -618,13 +610,7 @@ export class AnalysisStore {
           error: null,
         };
         if (record.listing.key !== row.key) throw new Error("商品 ID 与数据库记录不一致");
-        if (
-          profile &&
-          (profile.equipmentSearch || profile.petSearch) &&
-          captureIssues(record.detail!, false, !!(profile?.equipmentSearch || profile?.petSearch))
-            .length
-        )
-          continue;
+        if (profile && captureIssues(record.detail!).length) continue;
         const document = buildProductDocument(record);
         const prompt = profile
           ? valuationPrompt(document, record, profile)

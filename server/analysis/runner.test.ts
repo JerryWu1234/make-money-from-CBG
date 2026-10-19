@@ -960,9 +960,9 @@ describe("持久化的商品分析队列", () => {
       .records.items.find((item) => item.state === "failed")!;
     expect(store.detail(item.taskId!)?.inputText).toContain("大".repeat(100_000));
   });
-  it("空库不连接 AI，分页查询覆盖全部记录，暂停后清空同时删除分析历史", async () => {
+  it("空库试分析不连接 AI，分页查询覆盖全部记录，暂停后清空同时删除分析历史", async () => {
     const { crawl, store, runner, connect } = setup([]);
-    await expect(runner.start("codex")).rejects.toThrow("暂无详情完整");
+    await expect(runner.start("codex", false, undefined, true)).rejects.toThrow("暂无详情完整");
     expect(connect).not.toHaveBeenCalled();
     for (let i = 0; i < 25; i++) crawl.observe(analysisRecord(String(i)).listing);
     expect(store.overview({ page: 2 }).records).toMatchObject({

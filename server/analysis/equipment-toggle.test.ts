@@ -13,14 +13,19 @@ import { calculateValuation } from "./valuation-calculator";
 import { valuationPriceSummary } from "../../src/ValuationResultView";
 
 const template = readFileSync(PROMPT_FILE, "utf8");
-function bodyRecord() {
+function fullRecord() {
   const record = valuationRecord();
-  record.detail!.captureMode = "body";
+  record.detail!.captureMode = "all";
   record.detail!.captureVersion = CAPTURE_VERSION;
   record.detail!.valuation = { version: 1, fields: [], issues: [], source: {} };
-  delete record.detail!.equipmentCapture;
-  delete record.detail!.petCapture;
-  record.detail!.tabs = record.detail!.tabs.filter((tab) => tab.name !== "召唤兽/孩子");
+  record.detail!.equipmentCapture = {
+    version: 1,
+    collectedAt: "now",
+    complete: true,
+    issues: [],
+    emptyProof: "explicit-text",
+  };
+  record.detail!.petCapture = { version: 1, collectedAt: "now", complete: true, issues: [] };
   for (const name of ["道具/法宝", "坐骑"])
     if (!record.detail!.tabs.some((tab) => tab.name === name))
       record.detail!.tabs.push({
@@ -47,8 +52,8 @@ it("默认关闭且持久化；开启改变新任务指纹，不改已创建任�
       petGearSearch: false,
     });
     expect(() => createProfile(template, { analyzeEquipment: "true" })).toThrow("无效");
-    const record = bodyRecord();
-    crawl.observe(record.listing, false);
+    const record = fullRecord();
+    crawl.observe(record.listing);
     expect(crawl.save(record.listing, record.detail!)).toBe(true);
     const store = new AnalysisStore(crawl.db);
     const runId = store.createRun("codex", "test", true, before, true);
@@ -69,26 +74,28 @@ it("默认关闭且持久化；开启改变新任务指纹，不改已创建任�
         store.db.prepare("SELECT id FROM analysis_tasks WHERE run_id=?").get(runId)!.id as string,
       )?.profile?.equipmentSearch,
     ).toBe(false);
-    expect(() => store.createRun("codex", "test", true, enabled, true)).toThrow("尚未完整采集");
+    expect(store.createRun("codex", "test", true, enabled, true)).toBeTruthy();
   } finally {
     crawl.close();
     rmSync(folder, { recursive: true, force: true });
   }
 });
 
-it("裸号资料可保存、续采跳过；开启后要求补采资产；裸号本体缺项仍失败", () => {
+it("关闭装备分析仍须完整采集；旧裸号资料不能冒充完整角色", () => {
   const crawl = new CrawlStore(":memory:");
   try {
-    const record = bodyRecord();
-    crawl.observe(record.listing, false);
+    const record = fullRecord();
+    const partial = structuredClone(record.detail!);
+    partial.captureMode = "body";
+    delete partial.equipmentCapture;
+    delete partial.petCapture;
+    crawl.observe(record.listing);
+    expect(crawl.save(record.listing, partial)).toBe(false);
+    expect(crawl.retryItems()).toHaveLength(1);
+    expect(captureIssues(partial, true)).toContain("本次仅采集裸号，装备和宝宝尚未核验");
     expect(crawl.save(record.listing, record.detail!)).toBe(true);
-    expect(crawl.retryItems(undefined, false, false)).toEqual([]);
-    expect(crawl.observe(record.listing, false)).toBe(true);
-    expect(crawl.retryItems(undefined, false, true)).toHaveLength(1);
-    expect(crawl.observe(record.listing, true)).toBe(false);
-    expect(captureIssues(record.detail!, true, true)).toContain(
-      "本次仅采集裸号，装备和宝宝尚未核验",
-    );
+    expect(crawl.retryItems()).toEqual([]);
+    expect(crawl.observe(record.listing)).toBe(true);
     record.detail!.valuation!.issues = ["坐骑成长缺失"];
     expect(crawl.save(record.listing, record.detail!)).toBe(false);
   } finally {
@@ -99,7 +106,7 @@ it("裸号资料可保存、续采跳过；开启后要求补采资产；裸号�
 it("裸号从队列到结果正常完成，绝不调用装备/宝宝查价，不生成资产待补齐", async () => {
   const crawl = new CrawlStore(":memory:");
   const store = new AnalysisStore(crawl.db);
-  const record = bodyRecord();
+  const record = fullRecord();
   const profile = createProfile(template, {
     ...DEFAULT_SETTINGS,
     servers: [{ serverId: record.listing.serverId, age: "three", rank: 10 }],
@@ -120,7 +127,7 @@ it("裸号从队列到结果正常完成，绝不调用装备/宝宝查价，不
     searchPetGear: search,
   }));
   try {
-    crawl.observe(record.listing, false);
+    crawl.observe(record.listing);
     crawl.save(record.listing, record.detail!);
     const id = await runner.start("codex", true, profile, true);
     await runner.settled();

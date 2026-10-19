@@ -70,8 +70,8 @@ export function savedDetail(key: string) {
 export function crawlDatabase() {
   return store().db;
 }
-export function captureRetryItems(keys?: string[], includeAssets = true) {
-  return store().retryItems(keys, false, includeAssets);
+export function captureRetryItems(keys?: string[]) {
+  return store().retryItems(keys);
 }
 export function equipmentAnalysisSettings() {
   return { analyzeEquipment: loadProfile(store().db).settings.analyzeEquipment === true };
@@ -101,10 +101,6 @@ export async function startCrawl(
   options: CrawlOptions = {},
 ): Promise<CrawlStartResult> {
   validateCrawlOptions(options);
-  options = {
-    ...options,
-    includeAssets: options.includeAssets ?? equipmentAnalysisSettings().analyzeEquipment,
-  };
   if (options.refresh) store().retryItems(options.keys, true);
   if (isCrawling()) return { status: crawlStatus(), started: false, activity: activeRun };
   const current = await checkCbgStatus();
@@ -125,14 +121,14 @@ export async function startCrawl(
   log("crawl.start", {
     checkpoint: db.checkpoint(),
     totalSaved: db.count(),
-    includeAssets: options.includeAssets,
+    includeAssets: true,
   });
   const control = new AbortController();
   abort = control;
   status = {
     ...status,
     running: true,
-    includeAssets: options.includeAssets,
+    includeAssets: true,
     phase: "locating",
     message: "正在创建隐藏详情页并读取断点…",
     saved: 0,
@@ -166,7 +162,6 @@ export async function startCrawl(
           detailPage,
           signal: control.signal,
           preferredOrder,
-          includeAssets: options.includeAssets,
           savedRecord:
             options.backfillOnly && !options.refresh
               ? (key) => db.detail(key) as SavedRoleRecord | null

@@ -16,7 +16,7 @@ export class IncompleteCaptureError extends Error {
 export function captureIssues(
   detail: RoleDetail,
   requireEvidence = false,
-  includeAssets = detail.captureMode !== "body",
+  includeAssets = true,
 ): string[] {
   const issues = [...(detail.valuation?.issues || [])];
   if (requireEvidence && detail.captureVersion !== CAPTURE_VERSION)

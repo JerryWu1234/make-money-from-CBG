@@ -140,6 +140,22 @@ function captureFixture() {
   });
   return { record, analyze };
 }
+it.each([false, true])(
+  "普通分析可先等待首个完整角色，不抢占采集准备（正在采集：%s）",
+  async (crawling) => {
+    const { record, analyze } = captureFixture();
+    crawl.clear();
+    if (crawling) crawl.observe(record.listing);
+    mocks.crawling.mockReturnValue(crawling);
+    const controller = await import("./controller");
+    const run = await controller.startAnalysis("codex");
+    expect(run).toMatchObject({ status: "running", total: 0, phase: "waiting_capture" });
+    expect(mocks.retries).not.toHaveBeenCalled();
+    expect(mocks.startCrawl).not.toHaveBeenCalled();
+    expect(analyze).not.toHaveBeenCalled();
+    expect(controller.analysisOverview({}).capturePreparation).toBeUndefined();
+  },
+);
 it("完整采集完成前不冻结任务、不调用AI；完成后从最新资料自动进入分析", async () => {
   const { record, analyze } = captureFixture();
   const incomplete = structuredClone(record.detail!);

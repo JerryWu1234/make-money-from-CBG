@@ -61,7 +61,7 @@ test("首页装备总开关默认关闭、持久保存，保存失败不伪装�
     });
   });
   await page.goto("http://cbg-ui.test");
-  const toggle = page.getByRole("checkbox", { name: "核对并分析装备" });
+  const toggle = page.getByRole("checkbox", { name: "分析装备" });
   await expect(toggle).toBeEnabled();
   await expect(toggle).not.toBeChecked();
   await expect(page.getByText("已关闭（默认）", { exact: false })).toBeVisible();

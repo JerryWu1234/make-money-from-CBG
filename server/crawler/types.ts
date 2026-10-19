@@ -104,7 +104,7 @@ export interface ValuationCapture {
   source: Record<string, unknown>;
 }
 export interface RoleDetail {
-  /** Body-only captures never establish equipment/pet completeness. */
+  /** Legacy body-only captures require full recapture before reuse. */
   captureMode?: "body" | "all";
   valuation?: ValuationCapture;
   equipmentCapture?: {

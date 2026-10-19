@@ -11,7 +11,6 @@ import { CAPTURE_VERSION, hasUnconfirmedEmptyEquipment } from "./compact";
 import { MAIN_TABS } from "./detail";
 import { IncompleteCaptureError } from "./capture-readiness";
 export interface CrawlOptions {
-  includeAssets?: boolean;
   backfillOnly?: boolean;
   keys?: string[];
   refresh?: boolean;
@@ -38,7 +37,7 @@ export async function crawl(
   let saved = 0,
     skipped = 0,
     failed = 0;
-  const retries = store.retryItems(options.keys, options.refresh, options.includeAssets);
+  const retries = store.retryItems(options.keys, options.refresh);
   const retryFailed = new Set<string>();
   if (retries.length) {
     publish({
@@ -51,7 +50,7 @@ export async function crawl(
     });
     for (const [index, item] of retries.entries()) {
       signal.throwIfAborted();
-      store.beginRetry(item.key, options.refresh, options.includeAssets);
+      store.beginRetry(item.key, options.refresh);
       publish({
         current: item.name || item.eid,
         retryCompleted: index,
@@ -68,19 +67,12 @@ export async function crawl(
             typeof asking === "string" || typeof asking === "number" ? String(asking) : "";
           if (
             detail.captureVersion !== CAPTURE_VERSION ||
-            !(
-              options.includeAssets === false
-                ? MAIN_TABS.filter(
-                    (name) => !["召唤兽/孩子", "锦衣/外观", "玩家之家"].includes(name),
-                  )
-                : MAIN_TABS
-            ).every((name) => detail.tabs.some((tab) => tab.name === name)) ||
-            (options.includeAssets !== false &&
-              (!detail.equipmentCapture?.complete ||
-                detail.equipmentCapture.issues.length ||
-                hasUnconfirmedEmptyEquipment(detail) ||
-                !detail.petCapture?.complete ||
-                detail.petCapture.issues.length)) ||
+            !MAIN_TABS.every((name) => detail.tabs.some((tab) => tab.name === name)) ||
+            !detail.equipmentCapture?.complete ||
+            detail.equipmentCapture.issues.length ||
+            hasUnconfirmedEmptyEquipment(detail) ||
+            !detail.petCapture?.complete ||
+            detail.petCapture.issues.length ||
             !detail.valuation ||
             detail.valuation.issues.length ||
             String(detail.valuation.source.eid) !== item.eid ||
@@ -208,7 +200,7 @@ export async function crawl(
       }
       handled.add(listed.key);
       publish({ current: item.name || item.eid });
-      if (store.observe(item, options.includeAssets)) {
+      if (store.observe(item)) {
         skipped++;
         publish({ skipped, detailProgress: "详情已完整保存，跳过重复采集" });
         continue;

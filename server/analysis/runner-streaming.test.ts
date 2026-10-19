@@ -70,6 +70,42 @@ function setup() {
   };
 }
 describe("分析队列持续处理并等待新角色", () => {
+  it("空库可先启动等待，未完整角色不调用AI，首个采齐后自动分析，空批次暂停恢复不丢设置", async () => {
+    const x = setup();
+    const profile = createProfile("空库冻结设置", undefined, false);
+    const id = await x.runner.start("codex", false, profile);
+    expect(x.store.run(id)).toMatchObject({
+      status: "running",
+      total: 0,
+      phase: "waiting_capture",
+    });
+    expect(x.analyzed).toEqual([]);
+    expect(await x.runner.start("codex", false, profile)).toBe(id);
+    expect(x.connect).toHaveBeenCalledOnce();
+    await x.runner.pause(id);
+    expect(x.store.run(id)).toMatchObject({ status: "paused", total: 0 });
+    await x.runner.resume(id);
+    expect(x.store.run(id)).toMatchObject({ status: "running", phase: "waiting_capture" });
+    x.add("first", 1, false);
+    expect(x.runner.appendCaptured()).toBe(0);
+    expect(x.analyzed).toEqual([]);
+    const record = analysisRecord("first");
+    x.crawl.save(record.listing, record.detail!);
+    x.release();
+    await vi.waitFor(
+      () =>
+        expect(x.store.run(id)).toMatchObject({
+          status: "running",
+          total: 1,
+          completed: 1,
+          phase: "waiting_capture",
+        }),
+      { timeout: 2500 },
+    );
+    expect(x.analyzed).toEqual(["first"]);
+    const task = x.crawl.db.prepare("SELECT id FROM analysis_tasks WHERE run_id=?").get(id)!;
+    expect(x.store.detail(String(task.id))?.profile?.hash).toBe(profile.hash);
+  });
   it("没有采集任务也处理完已有角色，空闲不调用AI，新完整角色自动同批接续", async () => {
     const x = setup();
     x.add("a", 1);
