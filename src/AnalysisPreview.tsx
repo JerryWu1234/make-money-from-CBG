@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { AiProvider } from "../server/ai/types";
 import type { AnalysisItem, AnalysisOverview, AnalysisRun } from "../server/analysis/types";
 import { AiConnectionControl } from "./AiConnectionControl";
+import { AssetCounts, EquipmentSummary } from "./AssetCounts";
 import { AnalysisResultDrawer } from "./AnalysisResultDrawer";
 import { AnalysisSettings } from "./AnalysisSettings";
 import {
@@ -348,6 +349,12 @@ export function AnalysisPreview() {
                 {` · 本角色第 ${active.pricingProgress.round} 轮 · 最近进度 ${displayTime(active.pricingProgress.updatedAt)}`}
               </p>
             )}
+            {active?.assetCounts && (
+              <p className="analysis-start-hint">
+                <AssetCounts counts={active.assetCounts} />
+              </p>
+            )}
+            {active?.assetCounts && <EquipmentSummary counts={active.assetCounts} />}
             {(error || loadError || run?.error) && (
               <p className="analysis-auth-notice" role="alert">
                 {error || loadError || run?.error}
@@ -808,8 +815,10 @@ export function AnalysisPreview() {
                   <li>
                     <span>1</span>
                     <div>
-                      <strong>完整商品 + 你的 Prompt</strong>
-                      <p>每件角色的全部数据库字段一次提交，保留当时的原文和规则。</p>
+                      <strong>完整存档，按范围提交</strong>
+                      <p>
+                        完整采集资料始终保留；关闭装备分析时仅向 AI 提交裸号资料与专用核对规则。
+                      </p>
                     </div>
                   </li>
                   <li>

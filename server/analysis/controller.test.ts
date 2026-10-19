@@ -7,6 +7,9 @@ import { equipmentPricingPlan } from "./equipment-pricing";
 import { petInventory } from "./pet-pricing";
 import type { AnalysisClient } from "./runner";
 import { collectCompleteCapture } from "../crawler/capture-readiness";
+import { buildProductDocument } from "./product-document";
+import { valuationPrompt } from "./valuation-contract";
+import { textHash } from "./contract";
 
 const mocks = vi.hoisted(() => ({
   database: vi.fn(),
@@ -89,6 +92,7 @@ describe("分析服务刷新恢复", () => {
 
 function captureFixture() {
   const record = valuationRecord("a");
+  record.detail!.captureMode = "all";
   record.detail!.captureVersion = CAPTURE_VERSION;
   record.detail!.valuation = { version: 1, fields: [], issues: [], source: {} };
   record.detail!.equipmentCapture = {
@@ -194,61 +198,95 @@ it("完整采集完成前不冻结任务、不调用AI；完成后从最新资�
   );
   expect(controller.analysisOverview({}).capturePreparation).toBeUndefined();
 });
-it("采集重读仍有缺项时不启动AI，也不创建半成品分析批次", async () => {
-  const { record } = captureFixture();
-  record.detail!.petCapture!.complete = false;
-  record.detail!.petCapture!.issues = ["宝宝装备图标未完整读取"];
-  crawl.save(record.listing, record.detail!);
-  mocks.startCrawl.mockResolvedValue({
-    started: true,
-    activity: {
-      completion: Promise.resolve({ phase: "completed", lastItemError: "宝宝装备未读全" }),
-    },
-  });
-  await expect((await import("./controller")).startAnalysis("codex")).rejects.toThrow(
-    "还有 1 个角色资料待补采：角色a",
-  );
-  expect(mocks.connect).not.toHaveBeenCalled();
-  expect(crawl.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n).toBe(0);
-});
-it("继续旧批次先重采并更新冻结输入，保留原设置，旧资料和报价不送入AI", async () => {
-  const { record, analyze } = captureFixture();
-  crawl.save(record.listing, record.detail!);
-  const controller = await import("./controller");
-  const run = (await controller.startAnalysis("codex"))!;
-  await vi.waitFor(() => expect(analyze).toHaveBeenCalledOnce());
-  await controller.pauseAnalysis(run.id);
-  const originalProfile = String(
-    crawl.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(run.id)!.profile_json,
-  );
-  const incomplete = structuredClone(record.detail!);
-  incomplete.equipmentCapture!.complete = false;
-  incomplete.equipmentCapture!.issues = ["武器属性未完整读取"];
-  crawl.save(record.listing, incomplete);
-  record.detail!.collectedAt = "2026-10-13T02:00:00Z";
-  record.detail!.tabs[0].fields.push({ name: "采集验证", value: "本次新资料" });
-  mocks.profile.mockReturnValue(createProfile("后改的设置不进入旧批次", undefined, false));
-  mocks.startCrawl.mockImplementation(async () => {
+it.each([false, true])(
+  "采集重读仍有缺项时不启动AI，也不创建半成品批次（分析装备：%s）",
+  async (assets) => {
+    const { record } = captureFixture();
+    mocks.profile.mockReturnValue(createProfile("capture first", undefined, assets, assets));
+    record.detail!.petCapture!.complete = false;
+    record.detail!.petCapture!.issues = ["宝宝装备图标未完整读取"];
     crawl.save(record.listing, record.detail!);
-    return { started: true, activity: { completion: Promise.resolve({ phase: "completed" }) } };
-  });
-  await controller.resumeAnalysis(run.id);
-  await vi.waitFor(() => expect(analyze).toHaveBeenCalledTimes(2));
-  const task = crawl.db
-    .prepare(
-      "SELECT collected_at,prompt_text,source_detail_json FROM analysis_tasks WHERE run_id=?",
-    )
-    .get(run.id)!;
-  expect(task.collected_at).toBe(record.detail!.collectedAt);
-  expect(task.prompt_text).toContain("本次新资料");
-  expect(task.source_detail_json).toBe(
-    crawl.db.prepare("SELECT detail_json FROM listings WHERE key=?").get(record.listing.key)!
-      .detail_json,
-  );
-  expect(
-    crawl.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(run.id)!.profile_json,
-  ).toBe(originalProfile);
-});
+    mocks.startCrawl.mockResolvedValue({
+      started: true,
+      activity: {
+        completion: Promise.resolve({ phase: "completed", lastItemError: "宝宝装备未读全" }),
+      },
+    });
+    await expect((await import("./controller")).startAnalysis("codex")).rejects.toThrow(
+      "还有 1 个角色资料待补采：角色a",
+    );
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(crawl.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n).toBe(0);
+  },
+);
+it.each([false, true])(
+  "旧body断点先完整重采并更新输入，保留冻结设置（分析装备：%s）",
+  async (assets) => {
+    const { record, analyze } = captureFixture();
+    mocks.profile.mockReturnValue(createProfile("capture first", undefined, assets, assets));
+    crawl.save(record.listing, record.detail!);
+    const controller = await import("./controller");
+    const run = (await controller.startAnalysis("codex"))!;
+    await vi.waitFor(() => expect(analyze).toHaveBeenCalledOnce());
+    await controller.pauseAnalysis(run.id);
+    const originalProfile = String(
+      crawl.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(run.id)!
+        .profile_json,
+    );
+    const incomplete = structuredClone(record.detail!);
+    incomplete.captureMode = "body";
+    delete incomplete.equipmentCapture;
+    delete incomplete.petCapture;
+    const oldRecord = { ...record, detail: incomplete };
+    const oldDocument = buildProductDocument(oldRecord);
+    const oldPrompt = valuationPrompt(oldDocument, oldRecord, JSON.parse(originalProfile));
+    crawl.db
+      .prepare(
+        "UPDATE analysis_tasks SET source_detail_json=?,input_text=?,input_hash=?,prompt_text=?,prompt_hash=? WHERE run_id=?",
+      )
+      .run(
+        JSON.stringify(incomplete),
+        oldDocument.text,
+        oldDocument.contentHash,
+        oldPrompt,
+        textHash(oldPrompt),
+        run.id,
+      );
+    crawl.save(record.listing, incomplete);
+    expect(
+      crawl.db.prepare("SELECT status FROM listings WHERE key=?").get(record.listing.key)!.status,
+    ).toBe("failed");
+    expect(
+      crawl.db.prepare("SELECT status FROM analysis_tasks WHERE run_id=?").get(run.id)!.status,
+    ).toBe("queued");
+    record.detail!.collectedAt = "2026-10-13T02:00:00Z";
+    record.detail!.tabs[0].fields.push({ name: "采集验证", value: "本次新资料" });
+    mocks.profile.mockReturnValue(createProfile("后改的设置不进入旧批次", undefined, false));
+    mocks.startCrawl.mockImplementation(async () => {
+      crawl.save(record.listing, record.detail!);
+      return { started: true, activity: { completion: Promise.resolve({ phase: "completed" }) } };
+    });
+    await controller.resumeAnalysis(run.id);
+    await vi.waitFor(() => expect(analyze).toHaveBeenCalledTimes(2));
+    const task = crawl.db
+      .prepare(
+        "SELECT collected_at,input_text,prompt_text,source_detail_json FROM analysis_tasks WHERE run_id=?",
+      )
+      .get(run.id)!;
+    expect(task.collected_at).toBe(record.detail!.collectedAt);
+    expect(task.input_text).toContain("本次新资料");
+    expect(JSON.parse(String(task.source_detail_json)).captureMode).toBe("all");
+    if (!assets) expect(task.prompt_text).not.toContain(String(task.input_text));
+    expect(task.source_detail_json).toBe(
+      crawl.db.prepare("SELECT detail_json FROM listings WHERE key=?").get(record.listing.key)!
+        .detail_json,
+    );
+    expect(
+      crawl.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(run.id)!
+        .profile_json,
+    ).toBe(originalProfile);
+  },
+);
 it("采集准备可以暂停，暂停后不会继续连接AI或创建分析批次", async () => {
   const { record } = captureFixture();
   record.detail!.equipmentCapture!.complete = false;

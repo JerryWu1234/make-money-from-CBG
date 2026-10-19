@@ -15,7 +15,13 @@ import {
   probeDeepSeek,
   requestDeepSeek,
 } from "./ai/deepseek";
-import type { AiConnectionStatus, AiModelOptions, AiProvider, AiStatus } from "./ai/types";
+import type {
+  AiConnectionStatus,
+  AiModelOptions,
+  AiProvider,
+  AiStatus,
+  AnalysisRequestOptions,
+} from "./ai/types";
 import type { SavedRoleRecord } from "./crawler/types";
 import {
   equipmentPricingPlan,
@@ -319,12 +325,21 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
       searchEquipment,
       searchPets,
       searchPetGear,
-      async analyze(prompt: string, schema: unknown, signal: AbortSignal) {
+      async analyze(
+        prompt: string,
+        schema: unknown,
+        signal: AbortSignal,
+        options?: AnalysisRequestOptions,
+      ) {
         const current = await codexAccount();
         if (!current || current.email !== account.email)
           throw new Error("ChatGPT 登录账号已变化，请重新连接");
         try {
-          return await requestCodex(prompt, signal, { model, outputSchema: schema });
+          return await requestCodex(prompt, signal, {
+            model,
+            outputSchema: schema,
+            ...(options?.bareRoleReview ? { bareRoleReview: true } : {}),
+          });
         } catch (error) {
           throw new Error(publicError(error));
         }

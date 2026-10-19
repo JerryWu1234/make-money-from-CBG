@@ -545,6 +545,12 @@ describe("AI 连接验证", () => {
     });
     await expect(prepareAnalysisClient("codex", "unknown-model")).rejects.toThrow("重新选择");
     expect(mocks.requestCodex).toHaveBeenCalledTimes(1);
+    await codex.analyze("裸号核对", schema, signal, { bareRoleReview: true });
+    expect(mocks.requestCodex).toHaveBeenLastCalledWith("裸号核对", signal, {
+      model: "other-model",
+      outputSchema: schema,
+      bareRoleReview: true,
+    });
 
     mocks.readFile.mockResolvedValue(
       JSON.stringify({ deepseek: { apiKey: fakeKey, model: "deepseek-v4-pro" } }),

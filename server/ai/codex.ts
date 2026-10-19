@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { Codex, type WebSearchItem } from "@openai/codex-sdk";
+import { Codex, type WebSearchItem, type ThreadItem } from "@openai/codex-sdk";
 import type { CodexLogin } from "./types";
 
 type Account = { type: "chatgpt"; email: string | null; planType: string | null };
@@ -222,7 +222,7 @@ export async function codexModels() {
 async function runCodexRequest(
   prompt: string,
   signal: AbortSignal,
-  options?: { model: string; outputSchema: unknown },
+  options?: { model: string; outputSchema: unknown; bareRoleReview?: boolean },
   search = false,
   probe = false,
 ) {
@@ -234,7 +234,7 @@ async function runCodexRequest(
         forced_login_method: "chatgpt",
         model_provider: "openai",
         ...(!probe && !search && options?.model === "gpt-6-luna" ? { service_tier: "fast" } : {}),
-        ...(search
+        ...(search || options?.bareRoleReview
           ? {
               features: {
                 shell_tool: false,
@@ -254,22 +254,30 @@ async function runCodexRequest(
       sandboxMode: "read-only",
       approvalPolicy: "never",
       webSearchMode: search ? "live" : "disabled",
-      modelReasoningEffort: !probe && !search && options?.model === "gpt-6-luna" ? "max" : "low",
+      modelReasoningEffort:
+        !probe && !search && !options?.bareRoleReview && options?.model === "gpt-6-luna"
+          ? "max"
+          : "low",
     });
-    if (probe) {
-      const { events } = await thread.runStreamed(prompt, { signal });
+    if (probe || options?.bareRoleReview) {
+      const { events } = await thread.runStreamed(prompt, {
+        signal,
+        ...(options?.bareRoleReview ? { outputSchema: options.outputSchema } : {}),
+      });
       let finalResponse = "";
+      const items: ThreadItem[] = [];
       for await (const event of events) {
         signal.throwIfAborted();
-        if (event.type === "item.completed" && event.item.type === "agent_message")
-          finalResponse = event.item.text;
+        if (event.type === "item.completed") {
+          items.push(event.item);
+          if (event.item.type === "agent_message") finalResponse = event.item.text;
+        }
         if (event.type === "turn.failed") throw new Error(event.error.message);
         // Closing this completed stream also releases the SDK-owned process.
-        if (event.type === "turn.completed")
-          return { items: [], finalResponse, usage: event.usage };
+        if (event.type === "turn.completed") return { items, finalResponse, usage: event.usage };
       }
       signal.throwIfAborted();
-      throw new Error("Codex 连接验证未收到完整完成事件，请重试");
+      throw new Error("Codex 调用未收到完整完成事件，请重试");
     }
     return await thread.run(prompt, {
       signal,
@@ -283,10 +291,20 @@ async function runCodexRequest(
 export async function requestCodex(
   prompt: string,
   signal: AbortSignal,
-  options?: { model: string; outputSchema: unknown },
+  options?: { model: string; outputSchema: unknown; bareRoleReview?: boolean },
 ) {
   const result = await runCodexRequest(prompt, signal, options);
-  return { text: result.finalResponse.trim(), usage: result.usage ?? null };
+  return {
+    text: result.finalResponse.trim(),
+    usage: options?.bareRoleReview
+      ? {
+          ...result.usage,
+          input_scope: "body",
+          reasoning_effort: "low",
+          completion_mode: "turn.completed",
+        }
+      : (result.usage ?? null),
+  };
 }
 
 /** The caller supplies public equipment criteria, never account or browser-session data. */

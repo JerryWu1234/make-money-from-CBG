@@ -5,6 +5,20 @@ import type { EquipmentPricingSnapshot } from "./equipment-pricing";
 import type { PetPricingSnapshot } from "./pet-pricing";
 
 export type DimensionId = "foundation" | "equipment" | "pets";
+export type CapturedAssetCounts = {
+  equipment: number | null;
+  jewelry: number | null;
+  pets: number;
+  equipmentTotal?: number;
+  equipmentItems?: Array<{
+    name: string;
+    level: number | null;
+    gemLevel: number | null;
+    specialSkills: string[];
+    specialEffects: string[];
+    sets: string[];
+  }>;
+};
 export type Evidence = { path: string; value: string; reason: string };
 export type Dimension = { score: number | null; reason: string; evidence: Evidence[] };
 export type ProductAnalysis = {
@@ -19,6 +33,7 @@ export type ProductAnalysis = {
   valuation?: ValuationResult;
 };
 export type AnalysisRun = {
+  assetCounts?: CapturedAssetCounts | null;
   id: string;
   provider: AiProvider;
   model: string;
@@ -128,6 +143,7 @@ export type AnalysisOverview = {
   }[];
 };
 export type AnalysisDetail = {
+  assetCounts?: CapturedAssetCounts | null;
   taskId: string;
   runId: string;
   provider: AiProvider;
@@ -139,6 +155,7 @@ export type AnalysisDetail = {
   inputText: string;
   promptHash: string;
   promptText: string;
+  requestTemplate?: string;
   result: ProductAnalysis | null;
   completedAt: string | null;
   error: string | null;

@@ -7,6 +7,7 @@ import { validateValuationFacts } from "./valuation-facts";
 import { combineEquipmentPricing, type EquipmentPricingSnapshot } from "./equipment-pricing";
 import { combinePetPricing, type PetPricingSnapshot } from "./pet-pricing";
 import { applyValuationRange } from "./valuation-range";
+import { bareRolePrompt } from "./bare-role-prompt";
 
 const nullableNumber = { type: ["number", "null"] };
 const strings = { type: "array", items: { type: "string" } };
@@ -163,6 +164,8 @@ export function valuationPrompt(
   petPricing?: PetPricingSnapshot,
 ) {
   const computed = computedValuation(record, profile, equipmentPricing, petPricing);
+  if (!profile.equipmentSearch && !profile.petSearch)
+    return bareRolePrompt(document, record, profile, computed, VALUATION_SCHEMA);
   const {
     b: _b,
     a: _a,

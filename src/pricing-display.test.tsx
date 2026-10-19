@@ -9,6 +9,7 @@ import { DEFAULT_EQUIPMENT_BASELINE_PRICES } from "../server/analysis/equipment-
 import { EquipmentBaselinePriceFields } from "./AnalysisSettings";
 import { EquipmentPricingView } from "./EquipmentPricingView";
 import { ValuationResultView } from "./ValuationResultView";
+import { AssetCounts } from "./AssetCounts";
 
 const baseline = (
   override: Partial<NonNullable<EquipmentPricingItem["baselineEstimate"]>> = {},
@@ -171,6 +172,46 @@ const valuation = (override: Partial<ValuationResult> = {}): ValuationResult => 
   estimated_value_range: { min: 1001.1, max: 1001.1 },
   estimated_sources: ["baseline"],
   ...override,
+});
+
+it("裸号显示已采数量与装备简要配置，隐藏未检测和未计价状态", () => {
+  const counts = {
+    equipment: 1,
+    jewelry: 2,
+    pets: 3,
+    equipmentItems: [
+      {
+        name: "测试头盔",
+        level: 80,
+        gemLevel: 6,
+        specialSkills: ["破甲术"],
+        specialEffects: [],
+        sets: [],
+      },
+    ],
+  };
+  const result = valuation({
+    asset_scope: "body",
+    model_value: 1000,
+    estimated_sources: undefined,
+    estimated_value_range: undefined,
+  });
+  const html = renderToStaticMarkup(<ValuationResultView result={result} assetCounts={counts} />);
+  const overview = html.split('<details class="analysis-valuation-details">')[0];
+  expect(overview).toContain("<dt>装备</dt><dd>1件</dd>");
+  expect(overview).toContain("<dt>灵饰</dt><dd>2件</dd>");
+  expect(overview).toContain("<dt>宝宝</dt><dd>3只</dd>");
+  expect(overview).toContain("测试头盔 · 80级 · 宝石6段 · 特技：破甲术");
+  expect(overview).not.toMatch(/未检测|未计价|本轮不分析/);
+  expect(renderToStaticMarkup(<AssetCounts counts={counts} />)).toContain(
+    "装备 1件 · 灵饰 2件 · 宝宝 3只",
+  );
+  expect(renderToStaticMarkup(<AssetCounts counts={null} />)).toBe("");
+  const unclassified = renderToStaticMarkup(
+    <AssetCounts counts={{ equipment: null, jewelry: null, equipmentTotal: 1, pets: 0 }} />,
+  );
+  expect(unclassified).toContain("装备/灵饰 1件");
+  expect(unclassified).not.toContain("装备 1件");
 });
 
 it("核算排除保留原因，分项不显示0元", () => {

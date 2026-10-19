@@ -13,6 +13,7 @@ import { CALCULATION_VERSION } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
 import { pricingSearchAdvanced } from "./pricing-progress";
 import { pricingSnapshotFresh } from "./pricing-integrity";
+import { captureIssues } from "../crawler/capture-readiness";
 
 export type AnalysisClient = {
   model: string;
@@ -39,6 +40,7 @@ export type AnalysisClient = {
     prompt: string,
     schema: unknown,
     signal: AbortSignal,
+    options?: import("../ai/types").AnalysisRequestOptions,
   ) => Promise<{ text: string; usage?: unknown; truncated?: boolean }>;
 };
 export const MAX_PRICING_ROUNDS = 16;
@@ -245,6 +247,10 @@ export class AnalysisRunner {
           continue;
         }
         this.store.setRun(id, "completed", null, owner);
+        return;
+      }
+      if (task.profile && (!task.record.detail || captureIssues(task.record.detail).length)) {
+        this.store.setRun(id, "paused", "角色资料尚未完整采集，请补采后继续分析", owner);
         return;
       }
       if (budget.taskId !== task.id) budget = { taskId: task.id, started: Date.now(), rounds: 0 };
@@ -537,10 +543,17 @@ export class AnalysisRunner {
       const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
       let raw: string | undefined, usage: unknown;
       try {
-        if (Buffer.byteLength(task.document.text, "utf8") > 256 * 1024)
-          throw new Error("完整商品原文超过 256 KiB，已保留原文，请先核对资料长度后重试");
+        if (Buffer.byteLength(prompt, "utf8") > 256 * 1024)
+          throw new Error("分析请求超过 256 KiB，已保留原文，请先核对请求长度后重试");
         const response = await pricingUntilAborted(
-          client.analyze(prompt, task.profile ? VALUATION_SCHEMA : ANALYSIS_SCHEMA, signal),
+          client.analyze(
+            prompt,
+            task.profile ? VALUATION_SCHEMA : ANALYSIS_SCHEMA,
+            signal,
+            ...(task.profile && !task.profile.equipmentSearch && !task.profile.petSearch
+              ? [{ bareRoleReview: true }]
+              : []),
+          ),
           signal,
         );
         raw = response.text;

@@ -589,13 +589,14 @@ describe("裸号估值的复算与可追溯输入", () => {
       crawl.db.close();
     }
   });
-  it("完整原文只出现一次，金额严格复算；AI改写待确认项时保留程序完整列表", () => {
+  it("裸号只发送核算投影，金额严格复算；AI改写待确认项时保留程序完整列表", () => {
     const record = completeRecord(),
       configured = profile(),
       doc = buildProductDocument(record);
     const prompt = valuationPrompt(doc, record, configured);
-    expect(prompt.startsWith(template)).toBe(true);
-    expect(prompt.split(doc.text)).toHaveLength(2);
+    expect(prompt).toContain("【裸号核对专用模板 v1】");
+    expect(prompt).not.toContain(doc.text);
+    expect(prompt).toContain(doc.contentHash);
     const computed = calculateValuation(record, configured);
     const result = validateValuation(JSON.stringify(computed), doc, record, configured);
     expect(result.valuation?.decision).toBe("BUY");

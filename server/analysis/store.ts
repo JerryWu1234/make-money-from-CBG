@@ -14,6 +14,7 @@ import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
 import { petGearInventory } from "./pet-gear-inventory";
 import { validateSampleSelection } from "./sample-selection";
 import { captureIssues } from "../crawler/capture-readiness";
+import { capturedAssetCounts } from "./asset-counts";
 import type {
   AnalysisDetail,
   AnalysisItem,
@@ -228,6 +229,8 @@ export class AnalysisStore {
       coalesce(sum(t.status='waiting_pricing'),0) waiting_pricing,
       (SELECT pricing_progress_json FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) pricing_progress_json,
       (SELECT json_extract(source_listing_json,'$.name') FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current,
+      (SELECT source_listing_json FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current_listing_json,
+      (SELECT source_detail_json FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current_detail_json,
       (SELECT CASE
         WHEN (equipment_pricing_json IS NULL OR json_type(equipment_pricing_json,'$.searchComplete')='false' OR ${expiredPricingTimeSql("equipment_pricing_json", "$")}) AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search'
         WHEN (pet_pricing_json IS NULL OR json_type(pet_pricing_json,'$.searchComplete')='false' OR ${expiredPricingTimeSql("pet_pricing_json", "$")}) AND json_extract(r.profile_json,'$.petSearch')=1 THEN 'pet_search'
@@ -262,6 +265,15 @@ export class AnalysisStore {
             : null,
           reused: Number(row.reused),
           current: nullable(row.current),
+          assetCounts:
+            row.current_listing_json && row.current_detail_json
+              ? capturedAssetCounts({
+                  listing: JSON.parse(String(row.current_listing_json)),
+                  detail: JSON.parse(String(row.current_detail_json)),
+                  status: "complete",
+                  error: null,
+                })
+              : null,
           phase:
             row.status === "running" &&
             row.follow_capture === "1" &&
@@ -305,8 +317,23 @@ export class AnalysisStore {
         if (
           row.source_listing_json === row.listing_json &&
           row.source_detail_json === row.detail_json
-        )
+        ) {
+          // Old queues froze a full-product request even with asset analysis disabled.
+          // Refresh only pending requests; retain full inputs and all previous attempts.
+          if (profile && !profile.equipmentSearch && !profile.petSearch) {
+            const record: SavedRoleRecord = {
+              listing: JSON.parse(String(row.source_listing_json)),
+              detail: JSON.parse(String(row.source_detail_json)),
+              status: "complete",
+              error: null,
+            };
+            const prompt = valuationPrompt(buildProductDocument(record), record, profile);
+            this.db
+              .prepare("UPDATE analysis_tasks SET prompt_text=?,prompt_hash=? WHERE id=?")
+              .run(prompt, textHash(prompt), row.id);
+          }
           continue;
+        }
         const record: SavedRoleRecord = {
           listing: JSON.parse(String(row.listing_json)),
           detail: JSON.parse(String(row.detail_json)),
@@ -951,11 +978,20 @@ export class AnalysisStore {
       model: String(row.model),
       ruleVersion: String(row.rule_version),
       listing,
+      assetCounts: capturedAssetCounts({
+        listing,
+        detail: JSON.parse(String(row.source_detail_json)),
+        status: "complete",
+        error: null,
+      }),
       state: String(row.status),
       inputHash: String(row.input_hash),
       inputText: String(row.input_text),
       promptHash: String(row.prompt_hash),
       promptText: String(row.prompt_text),
+      ...(String(row.prompt_text).startsWith("【裸号核对专用模板 ")
+        ? { requestTemplate: String(row.prompt_text).split("\n\n")[0] }
+        : {}),
       result: row.result_json ? JSON.parse(String(row.result_json)) : null,
       completedAt: nullable(row.completed_at),
       error: nullable(row.error),

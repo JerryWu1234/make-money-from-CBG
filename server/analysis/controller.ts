@@ -182,13 +182,9 @@ export async function startAnalysis(
 ) {
   validateSampleSelection(sample, sampleSize, productKeys);
   const analysis = service();
-  const preparationProfile = loadProfile(analysis.store.db);
   if (
     !analysis.runner.isRunning() &&
-    !(!sample && !productKeys && (isCrawling() || analysis.store.counts().total === 0)) &&
-    (preparationProfile.equipmentSearch ||
-      preparationProfile.petSearch ||
-      preparationProfile.petGearSearch)
+    !(!sample && !productKeys && (isCrawling() || analysis.store.counts().total === 0))
   ) {
     const keys =
       productKeys ||
@@ -220,20 +216,15 @@ export async function startAnalysis(
 export async function resumeAnalysis(id: string, retry = false) {
   const analysis = service();
   if (!analysis.runner.isRunning()) {
-    const row = analysis.store.db
-      .prepare("SELECT profile_json FROM analysis_runs WHERE id=?")
-      .get(id);
+    const row = analysis.store.db.prepare("SELECT id FROM analysis_runs WHERE id=?").get(id);
     if (!row) throw new Error("分析批次不存在");
-    const profile = row.profile_json ? JSON.parse(String(row.profile_json)) : null;
-    if (profile?.equipmentSearch || profile?.petSearch || profile?.petGearSearch) {
-      const keys = analysis.store.db
-        .prepare(
-          "SELECT listing_key FROM analysis_tasks WHERE run_id=? AND status IN ('queued','waiting_pricing','failed')",
-        )
-        .all(id)
-        .map((task) => String(task.listing_key));
-      await prepareCaptures(keys);
-    }
+    const keys = analysis.store.db
+      .prepare(
+        "SELECT listing_key FROM analysis_tasks WHERE run_id=? AND status IN ('queued','waiting_pricing','failed')",
+      )
+      .all(id)
+      .map((task) => String(task.listing_key));
+    if (keys.length) await prepareCaptures(keys);
     analysis.store.refreshPendingCaptures(id);
   }
   await service().runner.resume(id, retry);

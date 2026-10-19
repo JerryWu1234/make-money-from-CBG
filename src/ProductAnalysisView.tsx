@@ -1,4 +1,4 @@
-import type { DimensionId, ProductAnalysis } from "../server/analysis/types";
+import type { CapturedAssetCounts, DimensionId, ProductAnalysis } from "../server/analysis/types";
 import { ValuationResultView } from "./ValuationResultView";
 
 const dimensions: { id: DimensionId; label: string }[] = [
@@ -11,11 +11,13 @@ export function ProductAnalysisView({
   onConfigure,
   previousSettings,
   expanded = false,
+  assetCounts,
 }: {
   result: ProductAnalysis;
   onConfigure?: () => void;
   previousSettings?: boolean;
   expanded?: boolean;
+  assetCounts?: CapturedAssetCounts | null;
 }) {
   return result.valuation ? (
     <ValuationResultView
@@ -23,6 +25,7 @@ export function ProductAnalysisView({
       onConfigure={onConfigure}
       previousSettings={previousSettings}
       expanded={expanded}
+      assetCounts={assetCounts}
     />
   ) : (
     <>

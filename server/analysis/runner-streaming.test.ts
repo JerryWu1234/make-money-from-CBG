@@ -6,6 +6,7 @@ import { AnalysisStore } from "./store";
 import { AnalysisRunner } from "./runner";
 import { createProfile } from "./profile";
 import { calculateValuation } from "./valuation-calculator";
+import { BARE_ROLE_TEMPLATE } from "./bare-role-prompt";
 
 // Failure cases: new captures are omitted or duplicated, unfinished details enter the queue,
 // trial scope expands, a completed/paused run receives tasks, frozen settings change,
@@ -205,7 +206,11 @@ describe("分析队列持续处理并等待新角色", () => {
     const x = setup();
     x.add("role-1", 1);
     const profile = createProfile("frozen prompt", undefined, false);
+    profile.settings.mountBoundary = "lower";
+    const frozenProfile = structuredClone(profile);
     const id = await x.runner.start("codex", false, profile);
+    profile.template = "later template";
+    profile.settings.mountBoundary = "upper";
     expect(x.store.run(id)).toMatchObject({ total: 1, status: "running", model: "frozen-model" });
     for (let index = 2; index <= 10; index++) {
       x.add(`role-${index}`, index);
@@ -219,7 +224,14 @@ describe("分析队列持续处理并等待新角色", () => {
     expect(tasks.map((task) => task.listing_key)).toEqual(
       Array.from({ length: 10 }, (_, index) => `role-${index + 1}`),
     );
-    expect(tasks.every((task) => String(task.prompt_text).includes("frozen prompt"))).toBe(true);
+    expect(tasks.every((task) => String(task.prompt_text).startsWith(BARE_ROLE_TEMPLATE))).toBe(
+      true,
+    );
+    expect(
+      tasks.every((task) => String(task.prompt_text).includes('"mountBoundary":"lower"')),
+    ).toBe(true);
+    const stored = x.crawl.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(id)!;
+    expect(JSON.parse(String(stored.profile_json))).toEqual(frozenProfile);
     x.release();
     await vi.waitFor(() =>
       expect(x.store.run(id)).toMatchObject({

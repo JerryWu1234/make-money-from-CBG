@@ -1771,6 +1771,15 @@ body:has(.analysis-page) #root {
 .analysis-valuation-scope {
   color: #8da2b5;
 }
+.analysis-equipment-summary {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.75rem 0;
+  padding-left: 1.2rem;
+  color: #adbdce;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
 .analysis-valuation-details {
   padding-top: 0.5rem;
 }

@@ -7,6 +7,7 @@ import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { marketServers } from "./market";
 import { EQUIPMENT_SIMILAR_POLICY_VERSION, SIMILAR_POLICY_VERSION } from "./pricing-estimate";
 import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "./valuation-settings";
+import { BARE_ROLE_TEMPLATE } from "./bare-role-prompt";
 import {
   DEFAULT_EQUIPMENT_BASELINE_PRICES,
   EQUIPMENT_BASELINE_POLICY_VERSION,
@@ -184,6 +185,9 @@ export function createProfile(
         equipmentSearch,
         petSearch,
         "pet-gear-ui-v1",
+        ...(!equipmentSearch && !petSearch
+          ? ["bare-role-input-v1", textHash(BARE_ROLE_TEMPLATE)]
+          : []),
       ]),
     ),
   };

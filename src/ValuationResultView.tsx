@@ -1,5 +1,7 @@
 import type { Decision, ValuationResult } from "../server/analysis/valuation-types";
 import { EquipmentPricingView } from "./EquipmentPricingView";
+import type { CapturedAssetCounts } from "../server/analysis/types";
+import { EquipmentSummary } from "./AssetCounts";
 export const decisionLabels: Record<Decision, string> = {
   BUY: "建议买入",
   WATCH: "等降价再买",
@@ -89,7 +91,13 @@ export const valuationPriceDifferenceText = (result: ValuationResult) => {
     : "卖家要价比估值" + (difference < 0 ? "高 " : "低 ") + valuationMoney(Math.abs(difference));
 };
 
-function ValuationPriceOverview({ result }: { result: ValuationResult }) {
+function ValuationPriceOverview({
+  result,
+  assetCounts,
+}: {
+  result: ValuationResult;
+  assetCounts?: CapturedAssetCounts | null;
+}) {
   const amount = valuationPriceSummary(result);
   const complete = result.model_value != null || !!result.estimated_value_range;
   const assetPrice = (
@@ -164,37 +172,64 @@ function ValuationPriceOverview({ result }: { result: ValuationResult }) {
             {result.bare_role_value == null ? "未算完整" : valuationMoney(result.bare_role_value)}
           </dd>
         </div>
-        <div>
-          <dt>装备</dt>
-          <dd>
-            {result.asset_scope === "body"
-              ? "本轮不分析"
-              : assetPrice(
+        {result.asset_scope === "body" ? (
+          assetCounts && (
+            <>
+              {assetCounts.equipment === null || assetCounts.jewelry === null ? (
+                <div>
+                  <dt>装备/灵饰</dt>
+                  <dd>{assetCounts.equipmentTotal}件</dd>
+                </div>
+              ) : (
+                <>
+                  <div>
+                    <dt>装备</dt>
+                    <dd>{assetCounts.equipment}件</dd>
+                  </div>
+                  <div>
+                    <dt>灵饰</dt>
+                    <dd>{assetCounts.jewelry}件</dd>
+                  </div>
+                </>
+              )}
+              <div>
+                <dt>宝宝</dt>
+                <dd>{assetCounts.pets}只</dd>
+              </div>
+            </>
+          )
+        ) : (
+          <>
+            <div>
+              <dt>装备</dt>
+              <dd>
+                {assetPrice(
                   "装备",
                   result.equipment_value,
                   result.equipment_pricing,
                   result.estimated_equipment_range,
                 )}
-          </dd>
-        </div>
-        <div>
-          <dt>宝宝</dt>
-          <dd>
-            {result.asset_scope === "body"
-              ? "本轮不分析"
-              : assetPrice(
+              </dd>
+            </div>
+            <div>
+              <dt>宝宝</dt>
+              <dd>
+                {assetPrice(
                   "宝宝",
                   result.pet_value,
                   result.pet_pricing,
                   result.estimated_pet_range,
                 )}
-          </dd>
-        </div>
-        <div>
-          <dt>其他（锦衣、道具）</dt>
-          <dd>未计价</dd>
-        </div>
+              </dd>
+            </div>
+            <div>
+              <dt>其他（锦衣、道具）</dt>
+              <dd>未计价</dd>
+            </div>
+          </>
+        )}
       </dl>
+      {result.asset_scope === "body" && <EquipmentSummary counts={assetCounts} />}
       <p className="analysis-valuation-scope">
         {result.asset_scope === "body"
           ? "本轮仅分析裸号本体，附带资产未计入；此价格不代表整号总价。"
@@ -208,11 +243,13 @@ export function ValuationResultView({
   onConfigure,
   previousSettings = false,
   expanded = false,
+  assetCounts,
 }: {
   result: ValuationResult;
   onConfigure?: () => void;
   previousSettings?: boolean;
   expanded?: boolean;
+  assetCounts?: CapturedAssetCounts | null;
 }) {
   const amount = valuationPriceSummary(result);
   const hasBaseline =
@@ -240,7 +277,7 @@ export function ValuationResultView({
         </p>
       )}
       {comparison ? (
-        <ValuationPriceOverview result={result} />
+        <ValuationPriceOverview result={result} assetCounts={assetCounts} />
       ) : (
         <>
           <div className={"analysis-detail-score analysis-valuation-decision-" + result.decision}>

@@ -11,6 +11,8 @@ import { AnalysisRunner } from "./runner";
 import { createProfile, DEFAULT_SETTINGS, loadProfile, saveProfile, PROMPT_FILE } from "./profile";
 import { calculateValuation } from "./valuation-calculator";
 import { valuationPriceSummary } from "../../src/ValuationResultView";
+import { buildProductDocument } from "./product-document";
+import { BARE_ROLE_TEMPLATE } from "./bare-role-prompt";
 
 const template = readFileSync(PROMPT_FILE, "utf8");
 function fullRecord() {
@@ -107,18 +109,29 @@ it("裸号从队列到结果正常完成，绝不调用装备/宝宝查价，不
   const crawl = new CrawlStore(":memory:");
   const store = new AnalysisStore(crawl.db);
   const record = fullRecord();
+  record.detail!.raw = { assetDescription: "未参与分析的装备属性".repeat(40000) };
   const profile = createProfile(template, {
     ...DEFAULT_SETTINGS,
     servers: [{ serverId: record.listing.serverId, age: "three", rank: 10 }],
   });
   const search = vi.fn().mockRejectedValue(new Error("不应查价"));
-  const analyze = vi.fn(async () => ({
-    text: JSON.stringify({
-      decision: calculateValuation(record, profile).decision,
-      reason: "仅核对裸号资料",
-      extracted_facts: [],
-    }),
-  }));
+  const analyze = vi.fn(
+    async (
+      _prompt: string,
+      _schema: unknown,
+      _signal: AbortSignal,
+      options?: { bareRoleReview?: boolean },
+    ) => {
+      expect(options).toEqual({ bareRoleReview: true });
+      return {
+        text: JSON.stringify({
+          decision: calculateValuation(record, profile).decision,
+          reason: "仅核对裸号资料",
+          extracted_facts: [],
+        }),
+      };
+    },
+  );
   const runner = new AnalysisRunner(store, async () => ({
     model: "test",
     analyze,
@@ -134,6 +147,10 @@ it("裸号从队列到结果正常完成，绝不调用装备/宝宝查价，不
     expect(store.run(id)?.status).toBe("completed");
     expect(search).not.toHaveBeenCalled();
     expect(analyze).toHaveBeenCalledOnce();
+    expect(Buffer.byteLength(buildProductDocument(record).text)).toBeGreaterThan(256 * 1024);
+    const request = analyze.mock.calls[0][0];
+    expect(request.startsWith(BARE_ROLE_TEMPLATE)).toBe(true);
+    expect(request).not.toContain("未参与分析的装备属性");
     const row = store.db.prepare("SELECT result_json FROM analysis_tasks WHERE run_id=?").get(id)!;
     const result = JSON.parse(String(row.result_json)).valuation;
     expect(result.asset_scope).toBe("body");
@@ -141,6 +158,35 @@ it("裸号从队列到结果正常完成，绝不调用装备/宝宝查价，不
     expect(result.pet_pricing).toBeUndefined();
     expect(result.missing_fields.join(" ")).not.toMatch(/装备|宝宝|灵饰|玉魄/);
     expect(valuationPriceSummary(result).label).toBe("裸号参考估值");
+  } finally {
+    await runner.shutdown();
+    crawl.close();
+  }
+});
+
+it("直接恢复旧body任务也不会绕过完整性检查进入AI", async () => {
+  const crawl = new CrawlStore(":memory:"),
+    store = new AnalysisStore(crawl.db);
+  const analyze = vi.fn().mockRejectedValue(new Error("不应调用AI"));
+  const runner = new AnalysisRunner(store, async () => ({ model: "test", analyze }));
+  try {
+    const record = fullRecord();
+    crawl.observe(record.listing);
+    crawl.save(record.listing, record.detail!);
+    const id = store.createRun("codex", "test", true, createProfile(template), true);
+    const legacy = { ...record.detail!, captureMode: "body" };
+    crawl.db
+      .prepare("UPDATE analysis_tasks SET source_detail_json=? WHERE run_id=?")
+      .run(JSON.stringify(legacy), id);
+    await runner.resume(id);
+    await runner.settled();
+    expect(analyze).not.toHaveBeenCalled();
+    expect(store.run(id)).toMatchObject({
+      status: "paused",
+      completed: 0,
+      queued: 1,
+      error: expect.stringContaining("完整采集"),
+    });
   } finally {
     await runner.shutdown();
     crawl.close();
