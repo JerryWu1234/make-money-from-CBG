@@ -162,7 +162,7 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
       page
         .getByRole("tabpanel", { name: "分析记录" })
         .getByRole("heading", { name: "评分字段依据" }),
-    ).toBeVisible();
+    ).toHaveCount(0);
     await expect(page.getByLabel("分析批次")).toHaveCount(0);
     await expect(page.getByLabel("试分析数量")).toHaveCount(0);
     await expect(page.getByRole("button", { name: /先分析|全部重新分析/ })).toHaveCount(0);
@@ -234,12 +234,14 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     expect(store.overview().runs).toHaveLength(1);
     const startsBeforeRefresh = starts;
     await page.reload();
-    await expect(page.getByLabel("分析模型")).toHaveValue("deepseek-v4-pro");
+    await expect(page.getByLabel("分析模型")).toHaveValue("");
     await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
       2,
     );
     expect(starts).toBe(startsBeforeRefresh);
     expect(calls).toBe(3);
+    expect(store.overview().run?.model).toBe("deepseek-v4-pro");
+    await page.getByLabel("分析模型").selectOption("deepseek-v4-pro");
     // Collection saves six new complete goods; the next analysis handles only these six.
     for (const key of ["c", "d", "e", "f", "g", "h"]) {
       const record = analysisRecord(key);
@@ -259,7 +261,26 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
       "7",
       "8",
     ]);
-    await expect(records.getByRole("heading", { name: "评分字段依据" })).toHaveCount(8);
+    await expect(records.getByRole("heading", { name: "评分字段依据" })).toHaveCount(0);
+    await records.screenshot({ path: testInfo.outputPath("analysis-results-list-desktop.png") });
+    const firstResult = records.getByRole("button", { name: /查看分析详情/ }).first();
+    await firstResult.focus();
+    await page.keyboard.press("Enter");
+    const firstDetail = page.locator(".analysis-detail-dialog");
+    await expect(firstDetail).toBeVisible();
+    await expect(firstDetail.getByRole("heading", { name: "评分字段依据" })).toBeVisible();
+    const bounds = await firstDetail.boundingBox();
+    expect(bounds!.x).toBeGreaterThan(0);
+    expect(Math.abs(bounds!.x * 2 + bounds!.width - 1100)).toBeLessThanOrEqual(2);
+    await page.screenshot({ path: testInfo.outputPath("analysis-result-dialog.png") });
+    await page.keyboard.press("Escape");
+    await expect(firstDetail).not.toBeVisible();
+    await expect(firstResult).toBeFocused();
+    await firstResult.click();
+    await expect(firstDetail).toBeVisible();
+    await page.mouse.click(4, 4);
+    await expect(firstDetail).not.toBeVisible();
+    await expect(firstResult).toBeFocused();
     expect(calls).toBe(9);
     expect(store.overview().run).toMatchObject({ total: 6, completed: 6 });
     await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
@@ -280,7 +301,7 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     await expect(records.getByRole("article")).toHaveCount(8);
     await records
       .getByRole("article", { name: /角色b/ })
-      .getByRole("button", { name: "查看原文与调用记录 →" })
+      .getByRole("button", { name: /查看分析详情/ })
       .click();
     const savedCall = page.getByRole("dialog", { name: "角色b" });
     await expect(savedCall).toContainText("中断");
@@ -297,6 +318,21 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
     ).toBe(true);
+    await firstResult.click();
+    await expect(firstDetail).toBeVisible();
+    await expect(firstDetail.getByRole("heading", { name: "评分字段依据" })).toBeVisible();
+    expect(
+      await firstDetail.evaluate((element) => element.scrollWidth <= element.clientWidth),
+    ).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("analysis-result-dialog-mobile.png") });
+    const content = firstDetail.locator(".analysis-modal-content");
+    await content.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+    });
+    expect(await content.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+    await expect(firstDetail.getByRole("button", { name: "关闭分析详情" })).toBeInViewport();
+    await firstDetail.getByRole("button", { name: "关闭分析详情" }).click();
+    await expect(firstDetail).not.toBeVisible();
   } finally {
     await runner.shutdown();
     crawl.close();
@@ -335,7 +371,7 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
     store.release(owner);
     const oldResult = store.detail(completed.id);
     let starts = 0,
-      resumes = 0;
+      retries = 0;
     const obsolete = !!savedVersion && savedVersion !== CALCULATION_VERSION;
     const runner = new AnalysisRunner(store, async () => ({
       model: "test-model",
@@ -383,9 +419,9 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
                 await runner.start(input.provider, false, profile, false, input.model),
               );
               break;
-            case "/api/analysis/resume":
-              resumes++;
-              await runner.resume(input.runId);
+            case "/api/analysis/retry":
+              retries++;
+              await runner.resume(input.runId, true);
               body = store.run(input.runId);
               break;
             default:
@@ -412,11 +448,11 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
         exact: true,
       });
       await expect(primary).toBeEnabled();
-      await expect(page.getByRole("button", { name: "重试失败的 1 件", exact: true })).toHaveCount(
-        obsolete ? 0 : 1,
-      );
+      await expect(
+        page.getByRole("button", { name: /^重试失败(?:及待补齐)?的 1 件$/ }),
+      ).toHaveCount(obsolete ? 0 : 1);
       if (obsolete) {
-        await expect(runner.resume(oldRunId)).rejects.toThrow("估值规则已更新");
+        await expect(runner.resume(oldRunId, true)).rejects.toThrow("估值规则已更新");
         await expect(
           page.getByText("估值规则已更新，下次分析使用新规则，已有结果保留。", {
             exact: true,
@@ -424,10 +460,18 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
         ).toBeVisible();
         await page.screenshot({ path: testInfo.outputPath("analysis-rule-upgrade-fixture.png") });
       }
-      await primary.click();
+      if (obsolete) await primary.click();
+      else {
+        await expect(runner.resume(oldRunId)).rejects.toThrow(
+          "请先重试失败或待补齐的商品，再继续分析",
+        );
+        expect(store.activeRun()).toBeNull();
+        expect(store.run(oldRunId)).toMatchObject({ completed: 1, failed: 1, queued: 1 });
+        await page.getByRole("button", { name: /^重试失败(?:及待补齐)?的 1 件$/ }).click();
+      }
       await expect(page.getByRole("button", { name: "暂停分析", exact: true })).toBeVisible();
       expect(starts).toBe(obsolete ? 1 : 0);
-      expect(resumes).toBe(obsolete ? 0 : 1);
+      expect(retries).toBe(obsolete ? 0 : 1);
       expect(store.overview().runs).toHaveLength(obsolete ? 2 : 1);
       const active = store.activeRun()!;
       if (obsolete) {
@@ -441,6 +485,10 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
         });
       } else expect(active.id).toBe(oldRunId);
       expect(store.detail(completed.id)).toEqual(oldResult);
+      await page.screenshot({
+        path: testInfo.outputPath("analysis-rule-compatibility-fixture.png"),
+        fullPage: true,
+      });
     } finally {
       await runner.shutdown();
       crawl.close();

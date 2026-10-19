@@ -38,11 +38,17 @@ export function EquipmentPricingView({
       : [],
   );
   const hasBaseline = snapshot.items.some((item) => item.baselineEstimate);
+  const hasBaseUpperBound = snapshot.items.some(
+    (item) => item.comparisonPolicy === "base-upper-bound-v1",
+  );
   const exactCount = snapshot.items.reduce(
     (sum, item) =>
       sum +
-      item.candidates.filter((candidate) => candidate.verified && candidate.matchType !== "similar")
-        .length,
+      item.candidates.filter(
+        (candidate) =>
+          candidate.verified &&
+          (item.comparisonPolicy === "base-upper-bound-v1" || candidate.matchType !== "similar"),
+      ).length,
     0,
   );
   const pricedBaselines = baselines.filter(
@@ -60,9 +66,17 @@ export function EquipmentPricingView({
         {queried ? "联网查价" : "查价"}
       </h3>
       {browserQuery && queried && <p>查价方式：程序通过已登录藏宝阁查询，AI只接收核实后的结果。</p>}
-      {queried && snapshot.items.some((item) => item.priceMethod === "first-ten-average-v2") && (
+      {queried && snapshot.items.some((item) => item.priceMethod === "first-five-average-v3") && (
         <p>
-          每件资产优先收集前10件有效在售商品，按实际样本数计算算术平均价；同配与相近样本分别计价。
+          每件资产优先收集前5件有效在售商品，按实际样本数计算算术平均价；同配与相近样本分别计价。
+        </p>
+      )}
+      {queried && snapshot.items.some((item) => item.priceMethod === "first-five-minimum-v4") && (
+        <p>
+          每个筛选条件只核验前5条不同候选，采用实际有效样本的最低挂牌价；无样本跳过，搜索范围有限。
+          {hasBaseUpperBound
+            ? "装备和灵饰的基础值相等或较低样本一起取最低价，属性差异保留在下方。"
+            : "同配与相近样本分别计价。"}
         </p>
       )}
       {hasBaseline && <p>普通装备默认参考价来自历史资料或人工预设，未实时核实藏宝阁报价。</p>}
@@ -79,12 +93,17 @@ export function EquipmentPricingView({
       )}
       {snapshot.captureComplete && snapshot.items.length === 0 ? (
         <p>已确认没有{asset}。</p>
+      ) : snapshot.items.length && snapshot.items.every((item) => item.skipReason) ? (
+        <p>
+          本次{asset}按规则跳过，未计入参考合计；
+          {queried ? "查询未取得可用报价。" : "未发起查价。"}
+        </p>
       ) : accounting ? (
         <p>逐件参考报价与匹配依据见下方。</p>
       ) : hasBaseline && snapshot.total === null && snapshot.knownTotal === 0 ? (
-        <p>本次没有已核实同配置挂牌参考价；默认参考价另列。</p>
+        <p>本次没有已核实挂牌参考价；默认参考价另列。</p>
       ) : snapshot.total === null && snapshot.knownTotal === 0 ? (
-        <p>尚无同配置挂牌价；相近商品的参考价和未定价项目见下方。</p>
+        <p>尚无合格挂牌参考价；相近商品的参考价和未定价项目见下方。</p>
       ) : (
         <p>
           {snapshot.total !== null
@@ -94,7 +113,7 @@ export function EquipmentPricingView({
         </p>
       )}
       {hasBaseline && exactCount > 0 && (
-        <p>以上仅含已核实同配置挂牌参考价，不含普通装备默认参考价或相近配置区间。</p>
+        <p>以上仅含已核实挂牌参考价，不含普通装备默认参考价或另列的相近配置区间。</p>
       )}
       {!!pricedBaselines.length && (
         <p>
@@ -135,15 +154,19 @@ export function EquipmentPricingView({
             : null;
         const baselineLabel = baseline?.kind === "ignored" ? "低值未计入" : "默认参考价";
         const searchLabel =
-          item.searchState === "read_failed"
-            ? "详情读取失败，需重试"
-            : item.searchState === "pending"
-              ? "查价未完成，继续时重试"
-              : item.exclusion
-                ? "无匹配，未计入参考合计"
-                : label(item.status);
+          item.searchState === "skipped"
+            ? item.skipReason || "无样本，未计入参考合计"
+            : item.searchState === "read_failed"
+              ? "详情读取失败，需重试"
+              : item.searchState === "pending"
+                ? "查价未完成，继续时重试"
+                : item.exclusion
+                  ? "无匹配，未计入参考合计"
+                  : label(item.status);
         const pendingAverage =
           !!item.priceMethod && ["pending", "read_failed"].includes(item.searchState || "");
+        const minimumReference = item.priceMethod === "first-five-minimum-v4";
+        const baseUpperBound = item.comparisonPolicy === "base-upper-bound-v1";
         return (
           <section key={item.key} className="analysis-evidence-card">
             <header>
@@ -164,13 +187,15 @@ export function EquipmentPricingView({
                           : "默认参考价待补"
                       : pendingAverage
                         ? searchLabel
-                        : item.similarEstimate?.average !== undefined
-                          ? valuationMoney(item.similarEstimate.average)
-                          : item.similarEstimate?.median !== undefined
-                            ? valuationMoney(item.similarEstimate.median)
-                            : item.similarEstimate?.range
-                              ? valuationRangeMoney(item.similarEstimate.range)
-                              : searchLabel}
+                        : minimumReference && item.similarEstimate?.range
+                          ? valuationMoney(item.similarEstimate.range.min)
+                          : item.similarEstimate?.average !== undefined
+                            ? valuationMoney(item.similarEstimate.average)
+                            : item.similarEstimate?.median !== undefined
+                              ? valuationMoney(item.similarEstimate.median)
+                              : item.similarEstimate?.range
+                                ? valuationRangeMoney(item.similarEstimate.range)
+                                : searchLabel}
               </span>
             </header>
             <p>
@@ -181,14 +206,20 @@ export function EquipmentPricingView({
                   : pendingAverage
                     ? searchLabel
                     : item.status === "priced" && item.priceMethod
-                      ? "同配置挂牌平均价"
-                      : item.similarEstimate?.average !== undefined
-                        ? "相近" + asset + "参考价（挂牌平均价）"
-                        : item.similarEstimate?.median !== undefined
-                          ? "相近" + asset + "参考价（挂牌中位数）"
-                          : item.similarEstimate?.range
-                            ? "相近配置参考区间"
-                            : searchLabel}
+                      ? minimumReference
+                        ? baseUpperBound
+                          ? "基础值不高于目标的最低挂牌价"
+                          : "同配置最低挂牌价"
+                        : "同配置挂牌平均价"
+                      : minimumReference && item.similarEstimate?.range
+                        ? "相近" + asset + "参考价（最低挂牌价）"
+                        : item.similarEstimate?.average !== undefined
+                          ? "相近" + asset + "参考价（挂牌平均价）"
+                          : item.similarEstimate?.median !== undefined
+                            ? "相近" + asset + "参考价（挂牌中位数）"
+                            : item.similarEstimate?.range
+                              ? "相近配置参考区间"
+                              : searchLabel}
             </p>
             {"reason" in item &&
               typeof item.reason === "string" &&
@@ -246,10 +277,11 @@ export function EquipmentPricingView({
             )}
             {!baseline && (
               <p>
-                同配置挂牌样本：
+                {baseUpperBound ? "合格挂牌样本：" : "同配置挂牌样本："}
                 {
                   item.candidates.filter(
-                    (candidate) => candidate.verified && candidate.matchType !== "similar",
+                    (candidate) =>
+                      candidate.verified && (baseUpperBound || candidate.matchType !== "similar"),
                   ).length
                 }
                 条。
@@ -265,7 +297,8 @@ export function EquipmentPricingView({
             )}
             {item.status === "priced" &&
               item.candidates.filter(
-                (candidate) => candidate.verified && candidate.matchType !== "similar",
+                (candidate) =>
+                  candidate.verified && (baseUpperBound || candidate.matchType !== "similar"),
               ).length === 1 && (
                 <p className="analysis-pending-note">仅1条挂牌样本，参考范围有限。</p>
               )}
@@ -294,7 +327,9 @@ export function EquipmentPricingView({
             </p>
             {!baseline && (
               <p>
-                {browserQuery ? "筛选条件" : "搜索关键词"}：{item.query || "资料不足，未发起查价"}
+                {browserQuery ? "筛选条件" : "搜索关键词"}：
+                {item.query ||
+                  (item.skipReason ? "按规则跳过，未发起查价" : "资料不足，未发起查价")}
               </p>
             )}
             {!!itemIssues.length && (

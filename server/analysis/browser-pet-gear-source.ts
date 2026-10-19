@@ -17,7 +17,12 @@ import {
   moveObservedLevelSlider,
   selectObservedMenu,
 } from "./browser-equipment-source";
-import { createMarketScopeAudit, type GlobalMarketRequest } from "./market-scope";
+import {
+  assertMarketServerId,
+  createMarketScopeAudit,
+  selectMarketServer,
+  type GlobalMarketRequest,
+} from "./market-scope";
 import {
   equipmentIdentity,
   pageText,
@@ -110,16 +115,19 @@ export type PetGearSearchResult = {
     searchStatus: "completed" | "read_failed" | "pending";
     searchCursor?: EquipmentSearchCursor;
     skipped?: boolean;
+    samplingStopped?: boolean;
     scopeEvidence: GlobalMarketRequest[];
   }[];
   searchItems: unknown[];
 };
 
-export function petGearSearchPlanHash(item: PetGearPricingItem) {
+export function petGearSearchPlanHash(item: PetGearPricingItem, serverId: string) {
+  assertMarketServerId(serverId);
   return createHash("sha256")
     .update(
       JSON.stringify({
-        version: "official-pet-gear-resumable-ui-v1",
+        version: "official-pet-gear-first-five-candidates-v3",
+        serverId,
         resumePolicy: PRICING_RESUME_POLICY,
         priceMethod: EQUIPMENT_QUOTE_POLICY,
         name: item.name,
@@ -197,12 +205,18 @@ export async function readPetGearSearchForm(page: Page) {
   return { ...form, ...metadata };
 }
 
-async function applyPetGearUI(page: Page, item: PetGearPricingItem, similar: boolean) {
+async function applyPetGearUI(
+  page: Page,
+  item: PetGearPricingItem,
+  similar: boolean,
+  serverId: string,
+  signal: AbortSignal,
+) {
   const query = petGearUIQuery(item, similar);
   const args: Record<string, string | number> = {
     level_min: query.level,
     level_max: query.level,
-    server_type: "3",
+    serverid: serverId,
     ...query.inputs,
   };
   for (const addon of query.addons) args[addon] = "1";
@@ -231,7 +245,8 @@ async function applyPetGearUI(page: Page, item: PetGearPricingItem, similar: boo
       await locator.selectOption(neutral.value);
     }
   }
-  actions.push(await selectObservedMenu(page, "server_type_panel", "3"));
+  const scope = await selectMarketServer(page, serverId, signal);
+  actions.push(...scope.actions);
   actions.push(await moveObservedLevelSlider(page, "level_slider", query.level, query.level));
   for (const [id, value] of Object.entries(query.inputs)) {
     if (
@@ -309,8 +324,10 @@ async function readPetGearRows(page: Page, pageNumber: number) {
 
 export async function createPetGearSource(
   signal: AbortSignal,
+  serverId: string,
   budgets: { maxPages?: number; maxDetails?: number } = {},
 ) {
+  assertMarketServerId(serverId);
   signal.throwIfAborted();
   let page: Page | undefined, detailPage: Page | undefined;
   let scopeAudit: ReturnType<typeof createMarketScopeAudit> | undefined;
@@ -351,7 +368,7 @@ export async function createPetGearSource(
         const workSignal = AbortSignal.any([signal, requestSignal]);
         workSignal.throwIfAborted();
         const result: PetGearSearchResult = { queries: [], items: [], searchItems: [] };
-        scopeAudit ||= createMarketScopeAudit(searchPage);
+        scopeAudit ||= createMarketScopeAudit(searchPage, serverId);
         const deadline = Date.now() + 120_000;
         let halted = "";
         for (const item of items) {
@@ -408,7 +425,7 @@ export async function createPetGearSource(
             return next;
           };
           try {
-            const planHash = petGearSearchPlanHash(item);
+            const planHash = petGearSearchPlanHash(item, serverId);
             const reusable = equipmentCursorMatches(item.searchCursor, planHash, 2);
             next = reusable
               ? structuredClone(item.searchCursor!)
@@ -430,12 +447,15 @@ export async function createPetGearSource(
             const readCandidate = async (rawUrl: string, modeIndex: number) => {
               const url = safeEquipmentUrl(rawUrl),
                 identity = equipmentIdentity(url);
+              if (identity.split(":")[0] !== serverId)
+                throw new Error("宝宝装备候选不属于目标单服，未采用报价");
               attempted.add(identity);
               details++;
               try {
                 detailPage ||= await createHiddenPage(browser);
                 workSignal.throwIfAborted();
                 await detailPage.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+                await assertAvailable(detailPage);
                 if (equipmentIdentity(detailPage.url()) !== identity)
                   throw new Error("宝宝装备详情跳转到另一商品，报价未采用");
                 await pace(workSignal);
@@ -469,7 +489,6 @@ export async function createPetGearSource(
                   fetchedAt: new Date().toISOString(),
                   sourceHash: createHash("sha256").update(source.html).digest("hex"),
                 });
-                seen.add(identity);
                 failedUrls.delete(url);
               } catch (error) {
                 workSignal.throwIfAborted();
@@ -479,6 +498,8 @@ export async function createPetGearSource(
             };
             // Only a bounded nearest cohort is refreshed; old quotations never inherit a fresh timestamp.
             if (reusable) {
+              for (const candidate of item.candidates.filter((value) => !value.verified))
+                candidates.set(equipmentIdentity(candidate.url), candidate);
               const refresh = selectPetGearCandidates(item.candidates);
               const refreshIds = new Set<string>();
               for (const candidate of refresh) {
@@ -503,15 +524,28 @@ export async function createPetGearSource(
             }
             queryStages: for (let modeIndex = next.modeIndex; modeIndex < 2; modeIndex++) {
               if (budgetEnded() || failedUrls.size || (queried && enoughSamples())) break;
+              let inspected = [...seen].filter((key) => key.startsWith(modeIndex + "|")).length;
+              const sampling = {
+                mode: modeIndex === 1 ? "similar" : "exact",
+                sampleLimit: EQUIPMENT_QUOTE_LIMIT,
+                sampled: inspected,
+                samplingComplete: false,
+                exhausted: false,
+              };
               const similar = modeIndex === 1;
               await searchPage.goto(PET_GEAR_SEARCH_URL, {
                 waitUntil: "domcontentloaded",
                 timeout: 45_000,
               });
               await pace(workSignal);
-              const applied = await applyPetGearUI(searchPage, item, similar);
+              const applied = await applyPetGearUI(searchPage, item, similar, serverId, workSignal);
               queryText =
-                "全服三年以上 / 宝宝装备 / " + item.name + " / " + JSON.stringify(applied.query);
+                "目标单服 " +
+                serverId +
+                " / 宝宝装备 / " +
+                item.name +
+                " / " +
+                JSON.stringify(applied.query);
               result.queries.push(queryText);
               const loadPage = async (pageNumber: number, first: boolean, replay = false) => {
                 scopeAudit!.begin(PET_GEAR_SEARCH_ACTION, pageNumber);
@@ -524,6 +558,13 @@ export async function createPetGearSource(
                 await pace(workSignal);
                 const listing = await readPetGearRows(searchPage, pageNumber);
                 const request = scopeAudit!.confirm();
+                if (
+                  listing.rows.some(
+                    (row) =>
+                      equipmentIdentity(safeEquipmentUrl(row.url)).split(":")[0] !== serverId,
+                  )
+                )
+                  throw new Error("宝宝装备列表包含目标单服以外的商品，未采用报价");
                 scopeEvidence.push(request);
                 const submittedArgs = await searchPage.evaluate(() => {
                   const values = (window as unknown as { QueryArgs?: Record<string, unknown> })
@@ -556,6 +597,7 @@ export async function createPetGearSource(
                   actions: applied.actions,
                   rowCount: listing.rows.length,
                   candidateServers: [...new Set(listing.rows.map((row) => row.server))],
+                  modes: [sampling],
                   ...(replay ? { replay: true } : {}),
                 });
                 assertEquipmentUIArguments(applied.args, submittedArgs);
@@ -600,19 +642,47 @@ export async function createPetGearSource(
                 let fullyRead = true;
                 for (let rowIndex = startRow; rowIndex < listing.rows.length; rowIndex++) {
                   const row = listing.rows[rowIndex];
-                  if (details >= maxDetails || Date.now() >= deadline || enoughSamples()) {
+                  if (
+                    details >= maxDetails ||
+                    Date.now() >= deadline ||
+                    enoughSamples() ||
+                    inspected >= EQUIPMENT_QUOTE_LIMIT
+                  ) {
                     fullyRead = false;
                     break;
                   }
                   next.rowIndex = rowIndex + 1;
-                  if (row.name !== item.name || Number(row.level) !== item.level) continue;
                   const url = safeEquipmentUrl(row.url),
                     identity = equipmentIdentity(url);
-                  if (seen.has(identity)) continue;
+                  const seenKey = modeIndex + "|" + identity;
+                  if (seen.has(seenKey)) continue;
+                  seen.add(seenKey);
+                  sampling.sampled = ++inspected;
+                  if (row.name !== item.name || Number(row.level) !== item.level) {
+                    result.searchItems.push({
+                      key: item.key,
+                      mode: sampling.mode,
+                      url,
+                      reason: row.name !== item.name ? "宝宝装备名称不匹配" : "宝宝装备等级不匹配",
+                    });
+                    continue;
+                  }
+                  if (candidates.has(identity)) continue;
                   await readCandidate(url, modeIndex);
+                }
+                if (inspected >= EQUIPMENT_QUOTE_LIMIT && !failedUrls.size) {
+                  sampling.samplingComplete = true;
+                  next.modeIndex = [...candidates.values()].some((candidate) => candidate.verified)
+                    ? 2
+                    : modeIndex + 1;
+                  next.pageNumber = 1;
+                  next.rowIndex = 0;
+                  next.pageRowsHash = "";
+                  break;
                 }
                 if (!fullyRead || enoughSamples()) break;
                 if (pageNumber >= listing.totalPages) {
+                  sampling.exhausted = true;
                   next.modeIndex = [...candidates.values()].some((candidate) => candidate.verified)
                     ? 2
                     : modeIndex + 1;
@@ -640,20 +710,36 @@ export async function createPetGearSource(
             )
               halted = note;
           }
+          const samplingStopped =
+            !!next &&
+            [0, 1].some(
+              (mode) =>
+                [...seen].filter((key) => key.startsWith(mode + "|")).length >=
+                EQUIPMENT_QUOTE_LIMIT,
+            ) &&
+            next.modeIndex >= 2 &&
+            !failed &&
+            !refreshSkipped &&
+            !failedUrls.size &&
+            !orderChanged &&
+            ![...candidates.values()].some((candidate) => candidate.verified);
           const completed =
+            !samplingStopped &&
             !failed &&
             !refreshSkipped &&
             !failedUrls.size &&
             !!next &&
             ((queried && enoughSamples()) || next.modeIndex >= 2);
           if (!failed)
-            note = orderChanged
-              ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。"
-              : completed
-                ? enoughSamples()
-                  ? "已核验官网结果顺序中的前10件有效宝宝装备挂牌样本，采用算术平均价；有限样本不代表遍历全部在售商品。"
-                  : "本次筛选结果已读完，按实际有效样本数计算平均价；没有有效样本则保留未定价。"
-                : "本轮宝宝装备查询预算已用完，已保存筛选阶段、页码和行位置，下一轮继续补查。";
+            note = samplingStopped
+              ? "严格与相近筛选的有限范围内均无有效宝宝装备样本，按规则跳过；每条件最多前5条不同候选（拒项计入），搜索范围有限，不计价，市场售价未知。"
+              : orderChanged
+                ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。"
+                : completed
+                  ? enoughSamples()
+                    ? "已核验官网结果顺序中的前5条不同宝宝装备候选（拒项计入），采用有效样本最低挂牌价；搜索范围有限，未遍历全部商品。"
+                    : "本次筛选结果已读完或已核验前5条不同候选（拒项计入），采用实际有效样本最低挂牌价；搜索范围有限，没有有效样本则保留未定价。"
+                  : "本轮宝宝装备查询预算已用完，已保存筛选阶段、页码和行位置，下一轮继续补查。";
           if (Date.now() >= deadline) halted ||= note;
           const values = [...candidates.values()];
           result.items.push({
@@ -674,6 +760,7 @@ export async function createPetGearSource(
                   : "pending",
             ...(!completed && next ? { searchCursor: saveCursor() } : {}),
             ...(refreshSkipped ? { skipped: true } : {}),
+            ...(samplingStopped ? { samplingStopped: true } : {}),
             scopeEvidence: [...(item.scopeEvidence || []), ...scopeEvidence],
           });
         }

@@ -22,6 +22,18 @@ export const MAIN_TABS = [
   "玩家之家",
 ];
 
+function unidentifiedEquipmentLevel(text: string): number | null {
+  if (!text.split("\n").some((line) => line.trim() === "未鉴定物品")) return null;
+  const levels = [
+    ...new Set(
+      [...text.matchAll(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})(?=\s*(?:\n|$))/g)].map((match) =>
+        Number(match[1]),
+      ),
+    ),
+  ];
+  return levels.length === 1 ? levels[0] : null;
+}
+
 async function capture(page: Page, name: string): Promise<TabSnapshot> {
   return page.evaluate((tabName) => {
     const root = document.querySelector<HTMLElement>("[data-cbg-detail-root]");
@@ -57,7 +69,10 @@ async function capture(page: Page, name: string): Promise<TabSnapshot> {
           (element) =>
             /\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#].*)?$/i.test(
               element.getAttribute("src") || "",
-            ),
+            ) ||
+            // Observed official model 17320 is a task consumable, not role equipment.
+            (element.getAttribute("data_equip_type") === "17320" &&
+              element.getAttribute("data_equip_name") === "三界密令"),
         ),
       );
     return {
@@ -149,18 +164,30 @@ async function inspectItems(
     // 名称、技能类别或装备属性已在元素里时直接读取，不触发无意义的提示框。
     let item = itemFromAttributes(attrs, index);
     // 已明确不在人物装备计价范围内的物品不要求普通装备属性。
-    if (/^(?:法宝|灵宝|神器|道具 · 召唤兽技能书)$/.test(item.category || "")) {
+    if (/^(?:法宝|灵宝|神器|道具 · 召唤兽技能书|材料 · 精魄灵石)$/.test(item.category || "")) {
       snapshot.items!.push(item);
       continue;
     }
     const rawYupo =
       item.category === "上古玉魄" &&
       /^\s*\{\s*"minghun"\s*:\s*\{|<json>/i.test(attrs.data_equip_desc || "");
-    const incompleteEquipment =
+    const incompletePetEquipment =
+      petItems &&
       item.kind === "equipment" &&
-      /^道具\/法宝(?:\s*\/|$)/.test(snapshot.name) &&
-      !equipmentCaptureSummary([{ ...snapshot, items: [item] }], snapshot.collectedAt || "")
-        .complete;
+      item.location !== "RolePetShipin" &&
+      !/(?:命中(?:率)?|伤害|防御|气血|魔法|速度|敏捷|力量|体质|耐力|灵力|魔力|镶嵌)\s*[：:]?\s*[+＋−-]?\d/.test(
+        (item.description || "") +
+          "\n" +
+          Object.entries(item.attributes || {})
+            .map(([key, value]) => key + " " + value)
+            .join("\n"),
+      );
+    const incompleteEquipment =
+      incompletePetEquipment ||
+      (item.kind === "equipment" &&
+        /^道具\/法宝(?:\s*\/|$)/.test(snapshot.name) &&
+        !equipmentCaptureSummary([{ ...snapshot, items: [item] }], snapshot.collectedAt || "")
+          .complete);
     // 官网元素可能只有等级；缺属性时仍须悬停，不能把非空描述当作已读完整。
     if (
       (attrs.data_equip_desc?.trim() && !rawYupo && !incompleteEquipment) ||
@@ -170,22 +197,63 @@ async function inspectItems(
       continue;
     }
     // 头像仅用于切换，不作为一件待估价装备。
-    if (attrs.data_idx !== undefined && !attrs.data_equip_name) continue;
+    if (
+      attrs.data_idx !== undefined &&
+      !attrs.data_equip_name &&
+      !attrs.data_tip_box &&
+      !attrs.data_equip_desc
+    )
+      continue;
     await hoverForInspection(page, icon);
     await pace(signal, 300, 200);
     const tipId = attrs.data_tip_box;
-    if (tipId)
+    const levelText =
+      item.attributes?.等级 || item.description?.match(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})/)?.[1];
+    const expectedLevel = levelText && /^\d{1,3}$/.test(levelText) ? Number(levelText) : null;
+    if (tipId || incompleteEquipment)
       await page
         .waitForFunction(
-          ({ id, name }) => {
-            const box = document.getElementById(id);
-            return (
-              box?.checkVisibility() &&
-              box.innerText.trim() &&
-              (!name || box.innerText.includes(name))
-            );
+          ({ id, name, requireStats, expectedLevel }) => {
+            const boxes = id
+              ? [document.getElementById(id)]
+              : Array.from(
+                  document.querySelectorAll<HTMLElement>(
+                    '[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"], .tips, .tooltip, #tips_box, #role_tips_box, .equip_tips',
+                  ),
+                );
+            return boxes.some((box) => {
+              const text = box?.innerText.trim() || "";
+              const levels = [
+                ...new Set(
+                  [...text.matchAll(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})(?=\s*(?:\n|$))/g)].map(
+                    (match) => Number(match[1]),
+                  ),
+                ),
+              ];
+              const unidentified =
+                !!name &&
+                text.split("\n")[0].trim() === name &&
+                text.split("\n").some((line) => line.trim() === "未鉴定物品") &&
+                levels.length === 1 &&
+                (expectedLevel === null || levels[0] === expectedLevel);
+              return (
+                box?.checkVisibility() &&
+                text &&
+                (!name || text.includes(name)) &&
+                (!requireStats ||
+                  unidentified ||
+                  /(?:命中(?:率)?|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|抗物理暴击|抗法术暴击|抗固伤|固伤暴击|穿刺|狂暴|治疗能力|格挡|抵抗|抗封印)(?:等级|值)?\s*[：:]?\s*[+＋−-]?\d/.test(
+                    text,
+                  ))
+              );
+            });
           },
-          { id: tipId, name: attrs.data_equip_name || "" },
+          {
+            id: tipId || "",
+            name: attrs.data_equip_name || "",
+            requireStats: incompleteEquipment,
+            expectedLevel,
+          },
           { timeout: 4000 },
         )
         .catch((error: unknown) => {
@@ -210,6 +278,15 @@ async function inspectItems(
       ].join("\n");
     }, tipId || "");
     if (tooltip) {
+      if (tooltip.split("\n").some((line) => line.trim() === "未鉴定物品")) {
+        const level = unidentifiedEquipmentLevel(tooltip);
+        if (
+          tooltip.split("\n")[0].trim() !== attrs.data_equip_name ||
+          level === null ||
+          (expectedLevel !== null && level !== expectedLevel)
+        )
+          issues?.push(`${snapshot.name}：${item.name} 的未鉴定提示框名称或等级与物品不一致`);
+      }
       item = itemFromAttributes({ ...attrs, data_equip_desc: tooltip }, index);
       if (item.name.startsWith("图标 ")) item.name = tooltip.split("\n")[0];
     }
@@ -265,7 +342,9 @@ export function equipmentCaptureSummary(
       const category = observedEquipmentCategory(item.category, item.location, item.modelId);
       if (
         item.kind !== "equipment" ||
-        /法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(category || "")
+        /法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(category || "") ||
+        /召唤兽/.test(item.attributes?.装备对象 || "") ||
+        /装备对象[：:]?\s*召唤兽/.test(item.description || "")
       )
         continue;
       if (
@@ -285,7 +364,12 @@ export function equipmentCaptureSummary(
         /(?:^|\n|\s)(?:命中|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|抗物理暴击|抗法术暴击|抗固伤|固伤暴击|穿刺|狂暴|治疗能力|格挡|抵抗)(?:等级|值)?\s*[：:]?\s*[+＋−-]?\d/.test(
           item.description || "",
         );
-      if (!describedStats && !stats) issues.push(`${tab.name}：${item.name} 的装备属性未完整读取`);
+      const unidentifiedLevel = unidentifiedEquipmentLevel(item.description || "");
+      const completeUnidentified =
+        unidentifiedLevel !== null &&
+        (item.attributes?.等级 === undefined || Number(item.attributes.等级) === unidentifiedLevel);
+      if (!describedStats && !stats && !completeUnidentified)
+        issues.push(`${tab.name}：${item.name} 的装备属性未完整读取`);
       const level =
         /^\d{1,3}$/.test(item.attributes?.等级 || "") ||
         /(?:^|[\n\s【：:])等级\s*[：:]?\s*\d{1,3}/.test(

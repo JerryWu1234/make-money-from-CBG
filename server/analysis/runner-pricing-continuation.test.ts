@@ -10,10 +10,11 @@ import { petInventory } from "./pet-pricing";
 
 it.each([
   [2, false],
-  [9, false],
-  [9, true],
+  [6, false],
+  [6, true],
+  [16, false],
 ] as const)(
-  "游标持续前进时查完%s轮，重启恢复%s；不按固定轮数或累计时长提前停止",
+  "游标持续前进时查完%s轮，重启恢复%s；在查价预算内持续推进",
   async (finishAfter, restart) => {
     const crawl = new CrawlStore(":memory:");
     const record = valuationRecord("cursor-role");
@@ -63,7 +64,6 @@ it.each([
       },
       true,
       true,
-      false,
     );
     const inventory = equipmentInventory(record),
       pets = petInventory(record);
@@ -97,7 +97,7 @@ it.each([
       .mockImplementation(async (_record, _signal, _settings, previous) => {
         searches++;
         // Simulate successful long-running requests with a renewed service lease.
-        clock.mockReturnValue(startedAt + searches * 4 * 60_000);
+        clock.mockReturnValue(startedAt + searches * 60_000);
         const owner = String(store.db.prepare("SELECT owner FROM analysis_lock").get()!.owner);
         expect(store.acquire(owner)).toBe(true);
         if (searches > 1) expect(previous?.items[0].searchCursor?.rowIndex).toBe(rowIndex);
@@ -121,32 +121,50 @@ it.each([
           })),
         };
       });
+    const searchPets = vi.fn(async () => ({
+      ...snapshot,
+      inputHash: pets.inputHash,
+      items: [],
+      total: 0,
+      searchComplete: true,
+    }));
     const connect = async () => ({
       model: "test",
       analyze,
       searchEquipment,
-      searchPets: async () => ({
-        ...snapshot,
-        inputHash: pets.inputHash,
-        items: [],
-        total: 0,
-        searchComplete: true,
-      }),
+      searchPets,
     });
     const runner = new AnalysisRunner(store, connect);
     let reopened: AnalysisRunner | undefined;
     try {
       const id = await runner.start("codex", true, profile);
       await runner.settled();
+      if (finishAfter === 16) {
+        expect(store.run(id)).toMatchObject({ status: "paused", waitingPricing: 1, completed: 0 });
+        expect(searches).toBe(16);
+        expect(searchPets).not.toHaveBeenCalled();
+        await runner.resume(id, true);
+        await runner.settled();
+      }
       if (restart) {
-        expect(store.run(id)).toMatchObject({ status: "paused", queued: 1, completed: 0 });
-        expect(store.run(id)?.error).toContain("等待新的可核验数据");
-        expect(store.next(id)?.equipmentPricing?.items[0].searchCursor?.rowIndex).toBe(2);
+        expect(store.run(id)).toMatchObject({
+          status: "paused",
+          queued: 0,
+          completed: 0,
+          waitingPricing: 1,
+        });
+        expect(
+          store.detail(store.overview({ runId: id }).records.items[0].taskId!)?.error,
+        ).toContain("等待新的可核验数据");
+        expect(
+          store.detail(store.overview({ runId: id }).records.items[0].taskId!)?.equipmentPricing
+            ?.items[0].searchCursor?.rowIndex,
+        ).toBe(2);
         expect(analyze).not.toHaveBeenCalled();
         await runner.shutdown();
         const reloadedStore = new AnalysisStore(crawl.db);
         reopened = new AnalysisRunner(reloadedStore, connect);
-        await reopened.resume(id);
+        await reopened.resume(id, true);
         await reopened.settled();
       }
       expect(searches).toBe(finishAfter + Number(restart));

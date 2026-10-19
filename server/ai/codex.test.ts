@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 const mocks = vi.hoisted(() => ({
   spawn: vi.fn(),
   run: vi.fn(),
+  runStreamed: vi.fn(),
   startThread: vi.fn(),
   options: vi.fn(),
   mkdtemp: vi.fn(),
@@ -29,13 +30,20 @@ beforeEach(() => {
   mocks.mkdtemp.mockResolvedValue("/private/tmp/cbg-codex-fixture");
   mocks.rm.mockResolvedValue(undefined);
   mocks.run.mockResolvedValue({ finalResponse: "READY" });
-  mocks.startThread.mockReturnValue({ run: mocks.run });
+  mocks.runStreamed.mockResolvedValue({
+    events: (async function* () {
+      yield { type: "item.completed", item: { type: "agent_message", text: "READY" } };
+      yield { type: "turn.completed", usage: {} };
+    })(),
+  });
+  mocks.startThread.mockReturnValue({ run: mocks.run, runStreamed: mocks.runStreamed });
   requests = [];
   rpcResults = {
     "config/read": { config: { model: "configured-model" } },
     "model/list": {
       data: [
         { model: "configured-model", displayName: "当前默认模型", isDefault: true },
+        { model: "gpt-6-luna", displayName: "GPT-6-Luna" },
         { model: "other-model", displayName: "另一个模型" },
         { model: "hidden-model", displayName: "隐藏模型", hidden: true },
       ],
@@ -72,11 +80,12 @@ afterEach(async () => {
 });
 
 describe("官方 Codex 登录与 SDK", () => {
-  it("模型选择读取官方列表，默认沿用用户配置，不改写全局设置", async () => {
+  it("默认分析选择官方列表中的 Luna，不改写全局设置", async () => {
     const { codexModel, codexModels } = await import("./codex");
-    expect(await codexModel()).toBe("configured-model");
+    expect(await codexModel()).toBe("gpt-6-luna");
     expect(await codexModels()).toEqual([
       { id: "configured-model", name: "当前默认模型" },
+      { id: "gpt-6-luna", name: "GPT-6-Luna" },
       { id: "other-model", name: "另一个模型" },
     ]);
     expect(requests.find((request) => request.method === "model/list")?.params).toEqual({
@@ -88,8 +97,11 @@ describe("官方 Codex 登录与 SDK", () => {
         (request) => request.method.startsWith("config/") && request.method.endsWith("write"),
       ),
     ).toBe(false);
-    rpcResults["config/read"] = { config: { model: null } };
-    expect(await codexModel()).toBe("configured-model");
+    rpcResults["model/list"] = {
+      data: [{ model: "other-model", displayName: "另一个模型" }],
+      nextCursor: null,
+    };
+    await expect(codexModel()).rejects.toThrow("不在当前 Codex 模型列表");
   });
 
   it("发起官方浏览器登录，并接收完成通知", async () => {
@@ -132,8 +144,52 @@ describe("官方 Codex 登录与 SDK", () => {
         approvalPolicy: "never",
       }),
     );
-    expect(mocks.run).toHaveBeenCalledWith("Reply READY.", { signal });
+    expect(mocks.runStreamed).toHaveBeenCalledWith("Reply READY.", { signal });
   });
+
+  it("连接测试收到完整完成事件后关闭流，不等待进程的剩余退出时间", async () => {
+    const closed = vi.fn();
+    mocks.runStreamed.mockResolvedValue({
+      events: (async function* () {
+        try {
+          yield { type: "item.completed", item: { type: "agent_message", text: "READY" } };
+          yield { type: "turn.completed", usage: {} };
+          await new Promise(() => {});
+        } finally {
+          closed();
+        }
+      })(),
+    });
+    const { probeCodex } = await import("./codex");
+    expect(await probeCodex("连接测试", new AbortController().signal)).toBe("READY");
+    expect(closed).toHaveBeenCalledOnce();
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
+  it.each(["incomplete", "failed", "cancelled"])(
+    "连接测试%s时不接受已经收到的文本",
+    async (state) => {
+      const controller = new AbortController();
+      mocks.runStreamed.mockResolvedValue({
+        events: (async function* () {
+          yield { type: "item.completed", item: { type: "agent_message", text: "READY" } };
+          if (state === "failed") yield { type: "turn.failed", error: { message: "模型请求失败" } };
+          if (state === "cancelled") {
+            controller.abort(new Error("用户取消验证"));
+            yield { type: "turn.completed", usage: {} };
+          }
+        })(),
+      });
+      const { probeCodex } = await import("./codex");
+      await expect(probeCodex("连接测试", controller.signal)).rejects.toThrow(
+        state === "failed"
+          ? "模型请求失败"
+          : state === "cancelled"
+            ? "用户取消验证"
+            : "完整完成事件",
+      );
+    },
+  );
   it("完整商品调用传入固定模型、结构化输出约束并返回用量", async () => {
     mocks.run.mockResolvedValue({
       finalResponse: '{"summary":"fixture"}',
@@ -156,6 +212,23 @@ describe("官方 Codex 登录与 SDK", () => {
     );
     expect(mocks.run).toHaveBeenCalledWith("一件商品的完整原文", { signal, outputSchema: schema });
     expect(result.usage).toMatchObject({ input_tokens: 20, output_tokens: 10 });
+  });
+
+  it("Luna 分析向 SDK 传入 max 和 fast，连接验证保持轻量", async () => {
+    const { requestCodex, probeCodex } = await import("./codex");
+    const signal = new AbortController().signal;
+    await requestCodex("商品原文", signal, {
+      model: "gpt-6-luna",
+      outputSchema: { type: "object" },
+    });
+    expect(mocks.options.mock.calls[0][0].config.service_tier).toBe("fast");
+    expect(mocks.startThread.mock.calls[0][0]).toMatchObject({
+      model: "gpt-6-luna",
+      modelReasoningEffort: "max",
+    });
+    await probeCodex("Reply READY.", signal);
+    expect(mocks.options.mock.calls[1][0].config.service_tier).toBeUndefined();
+    expect(mocks.startThread.mock.calls[1][0].modelReasoningEffort).toBe("low");
   });
 
   it("装备查价启用实时搜索并返回真实搜索事件，不把模型文本当查询记录", async () => {

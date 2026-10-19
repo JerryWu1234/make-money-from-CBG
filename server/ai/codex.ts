@@ -194,17 +194,9 @@ export async function cancelCodexLogin(loginId: string) {
 }
 
 export async function codexModel() {
-  const rpc = await authServer();
-  const config = await rpc.request<{ config: { model?: string | null } }>("config/read", {
-    includeLayers: false,
-  });
-  if (config.config?.model) return config.config.model;
-  const result = await rpc.request<{ data: { model: string; isDefault: boolean }[] }>(
-    "model/list",
-    { limit: 100 },
-  );
-  const model = result.data?.find((item) => item.isDefault)?.model;
-  if (!model) throw new Error("无法确定当前 Codex 模型，请检查 ChatGPT 登录");
+  const model = "gpt-6-luna";
+  if (!(await codexModels()).some((item) => item.id === model))
+    throw new Error("默认分析模型 GPT-6-Luna 不在当前 Codex 模型列表中，请选择可用模型");
   return model;
 }
 
@@ -232,6 +224,7 @@ async function runCodexRequest(
   signal: AbortSignal,
   options?: { model: string; outputSchema: unknown },
   search = false,
+  probe = false,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
   try {
@@ -240,6 +233,7 @@ async function runCodexRequest(
       config: {
         forced_login_method: "chatgpt",
         model_provider: "openai",
+        ...(!probe && !search && options?.model === "gpt-6-luna" ? { service_tier: "fast" } : {}),
         ...(search
           ? {
               features: {
@@ -260,8 +254,23 @@ async function runCodexRequest(
       sandboxMode: "read-only",
       approvalPolicy: "never",
       webSearchMode: search ? "live" : "disabled",
-      modelReasoningEffort: "low",
+      modelReasoningEffort: !probe && !search && options?.model === "gpt-6-luna" ? "max" : "low",
     });
+    if (probe) {
+      const { events } = await thread.runStreamed(prompt, { signal });
+      let finalResponse = "";
+      for await (const event of events) {
+        signal.throwIfAborted();
+        if (event.type === "item.completed" && event.item.type === "agent_message")
+          finalResponse = event.item.text;
+        if (event.type === "turn.failed") throw new Error(event.error.message);
+        // Closing this completed stream also releases the SDK-owned process.
+        if (event.type === "turn.completed")
+          return { items: [], finalResponse, usage: event.usage };
+      }
+      signal.throwIfAborted();
+      throw new Error("Codex 连接验证未收到完整完成事件，请重试");
+    }
     return await thread.run(prompt, {
       signal,
       ...(options ? { outputSchema: options.outputSchema } : {}),
@@ -311,7 +320,7 @@ export async function requestCodexSearch(
 }
 
 export async function probeCodex(prompt: string, signal: AbortSignal) {
-  return (await requestCodex(prompt, signal)).text;
+  return (await runCodexRequest(prompt, signal, undefined, false, true)).finalResponse.trim();
 }
 
 export async function shutdownCodex() {

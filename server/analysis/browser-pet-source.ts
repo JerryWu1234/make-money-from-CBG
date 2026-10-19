@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import type { Page } from "playwright-core";
-import { createMarketScopeAudit, type GlobalMarketRequest } from "./market-scope";
+import {
+  assertMarketServerId,
+  createMarketScopeAudit,
+  selectMarketServer,
+  type GlobalMarketRequest,
+} from "./market-scope";
 import { hoverForInspection } from "../viewport";
 import { createHiddenPage, getBrowser } from "../session";
 import { assertAvailable, pace } from "../crawler/page";
@@ -275,6 +280,9 @@ export type PetSearchConfig = {
   traits?: Choices;
   officialTypeIds?: string[];
 };
+class NonSaleablePetTypeError extends Error {}
+class UnverifiablePetAccessoryError extends Error {}
+
 class UnsupportedPetDescriptionError extends Error {
   override name = "UnsupportedPetDescriptionError";
 }
@@ -294,12 +302,12 @@ export function petQuery(
     .map(([id]) => id);
   if (!ids.length) {
     if (config.officialTypeIds?.length)
-      throw new Error(
-        `官网类型目录确认“${item.name}”（${config.officialTypeIds.join(",")}），但没有独立可交易筛选定义；特殊类型保留未定价，不替换为其他宝宝`,
+      throw new NonSaleablePetTypeError(
+        `官网类型目录确认“${item.name}”（${config.officialTypeIds.join(",")}），但没有独立可交易筛选定义；特殊类型按规则跳过，不计入参考合计，不替换为其他宝宝`,
       );
     throw new Error("官网召唤兽类型目录未识别“" + item.name + "”，未发起宽泛查询");
   }
-  const args: Record<string, string | number> = { type: ids.join(","), server_type: "3" };
+  const args: Record<string, string | number> = { type: ids.join(",") };
   if (item.level !== null && item.level >= 0 && item.level <= 180)
     args.level_min = args.level_max = item.level;
   const fields = new Map(item.fields.map((field) => [field.name, field.value]));
@@ -501,6 +509,19 @@ export type PetUIEvidence = {
   submittedArgs?: Record<string, string | number>;
 };
 
+/** The legacy form truncates growth * 1000, so 1.009 would otherwise submit 1008. */
+export function petGrowthInput(growth: string | number): string {
+  const target = Number(growth);
+  if (!Number.isSafeInteger(target) || target < 0)
+    throw new Error("宝宝成长筛选值必须是非负整数千分值");
+  const decimal = target / 1000;
+  let value = decimal.toFixed(3);
+  if (Math.trunc(Number(value) * 1000) !== target)
+    value = (decimal + Number.EPSILON * Math.max(1, Math.abs(decimal))).toString();
+  if (Math.trunc(Number(value) * 1000) !== target) throw new Error("宝宝成长筛选值无法精确提交");
+  return value;
+}
+
 /** Check what the official click actually submitted, including unexpected restored filters. */
 export function assertPetUIArguments(
   expected: Record<string, string | number>,
@@ -514,14 +535,17 @@ export function assertPetUIArguments(
       .join(",");
   for (const [key, value] of Object.entries(expected))
     if (actual[key] === undefined || normalized(actual[key]) !== normalized(value))
-      throw new Error(
-        "宝宝官网表单实际条件与计划不一致：" +
-          key +
-          " (expected: " +
-          value +
-          ", actual: " +
-          actual[key] +
-          ")",
+      throw Object.assign(
+        new Error(
+          "宝宝官网表单实际条件与计划不一致：" +
+            key +
+            " (expected: " +
+            value +
+            ", actual: " +
+            actual[key] +
+            ")",
+        ),
+        key === "growth" ? { code: "PET_GROWTH_ARGUMENT_MISMATCH" } : {},
       );
   for (const [key, value] of Object.entries(actual))
     if (
@@ -542,8 +566,7 @@ export async function fillPetSearchForm(
   signal.throwIfAborted();
   await page.locator("#reset_all").click({ timeout: 10000 });
   await page.locator("#btn_reset_user_server").click({ timeout: 10000 });
-  await page.locator("#overall_sel_area").selectOption("");
-  await page.locator("#ovarall_sel_server").selectOption("");
+  const scope = await selectMarketServer(page, String(args.serverid || ""), signal);
   const inputs: PetUIEvidence["inputs"] = { pet_select_box: item.name };
   await page.locator("#pet_select_box").fill(item.name);
   for (const key of PET_UI_NUMBER_FIELDS) {
@@ -554,7 +577,7 @@ export async function fillPetSearchForm(
     inputs[id] = value;
   }
   if (args.growth !== undefined) {
-    const value = (Number(args.growth) / 1000).toFixed(3);
+    const value = petGrowthInput(args.growth);
     await page.locator("#txt_growth").fill(value);
     inputs.txt_growth = value;
   }
@@ -607,7 +630,8 @@ export async function fillPetSearchForm(
   };
   for (const key of ["high_neidan", "low_neidan", "texing"] as const)
     if (args[key] !== undefined) await selectChoices(key + "_panel", String(args[key]).split(","));
-  await selectChoices("server_type_panel", ["3"]);
+  selections.overall_sel_area = [scope.areaId];
+  selections.ovarall_sel_server = [scope.serverid];
   signal.throwIfAborted();
   return { method: "official-ui", inputs, selections, searchButton: "btn_pet_search" };
 }
@@ -979,12 +1003,39 @@ export function petRegionReady(excluded: string) {
     node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
     !node.closest(excluded);
   document
-    .querySelectorAll("[data-cbg-pet-main-panel]")
-    .forEach((node) => node.removeAttribute("data-cbg-pet-main-panel"));
-  const infos = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(visible);
-  const inputs = Array.from(
-    document.querySelectorAll<HTMLInputElement>("#equip_desc_value"),
+    .querySelectorAll(
+      "[data-cbg-pet-main-panel], [data-cbg-pet-main-info], [data-cbg-pet-main-description]",
+    )
+    .forEach((node) => {
+      node.removeAttribute("data-cbg-pet-main-panel");
+      node.removeAttribute("data-cbg-pet-main-info");
+      node.removeAttribute("data-cbg-pet-main-description");
+    });
+  let infos = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(visible);
+  let inputs = Array.from(
+    document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("#equip_desc_value"),
   ).filter((node) => !node.closest(excluded));
+  let legacyPanel: HTMLElement | undefined;
+  // Observed official prepay page: one direct pet panel in goodsInfo, with pet_desc textarea.
+  if (!infos.length && !inputs.length) {
+    const panels = Array.from(document.querySelectorAll<HTMLElement>("#pet_attr_panel")).filter(
+      visible,
+    );
+    const descriptions = Array.from(
+      document.querySelectorAll<HTMLTextAreaElement>("textarea#pet_desc"),
+    ).filter((node) => !node.closest(excluded));
+    const info = panels[0]?.parentElement;
+    if (
+      panels.length !== 1 ||
+      descriptions.length !== 1 ||
+      !info?.matches(".infoList.goodsInfo") ||
+      !visible(info)
+    )
+      return false;
+    legacyPanel = panels[0];
+    infos = [info];
+    inputs = descriptions;
+  }
   const g = window as unknown as Record<string, any>;
   if (
     !(g.equip || g.EquipInfo) ||
@@ -997,7 +1048,7 @@ export function petRegionReady(excluded: string) {
     visible,
   );
   if (panels.length > 1) return false;
-  let panel = panels[0];
+  let panel = panels[0] || legacyPanel;
   if (!panel) {
     const hasStats = (node: HTMLElement) => {
       const text = node.innerText.replace(/\s/g, "");
@@ -1052,7 +1103,11 @@ export function petRegionReady(excluded: string) {
       !node.closest("#equip_price_addon_info") &&
       (node.innerText.trim() || node.getAttribute("data_price") || node.getAttribute("data-price")),
   );
-  if (priceReady) panel.setAttribute("data-cbg-pet-main-panel", "true");
+  if (priceReady) {
+    panel.setAttribute("data-cbg-pet-main-panel", "true");
+    infos[0].setAttribute("data-cbg-pet-main-info", "true");
+    inputs[0].setAttribute("data-cbg-pet-main-description", "true");
+  }
   return priceReady;
 }
 
@@ -1139,6 +1194,14 @@ async function inspectMainPetEquipment(page: Page, signal: AbortSignal, excluded
           .split(/\r?\n/)
           .map((line) => line.trim())
           .filter(Boolean);
+        if (
+          /\/pet_shipin\//.test(icon.getAttribute("src") || "") &&
+          !name &&
+          !attrs.data_store_name?.trim() &&
+          lines.length === 1 &&
+          /^玄天灵力\s*\d+$/.test(lines[0])
+        )
+          return { skipCandidate: true as const };
         const visibleName = name || lines[0];
         if (!visibleName || !texts[0].includes(visibleName)) return false;
         const description = (lines[0] === visibleName ? lines.slice(1) : lines).join("\n");
@@ -1150,6 +1213,10 @@ async function inspectMainPetEquipment(page: Page, signal: AbortSignal, excluded
     try {
       const value = await handle.jsonValue();
       if (!value) throw new Error("宝宝装备提示框未完整显示");
+      if ("skipCandidate" in value)
+        throw new UnverifiablePetAccessoryError(
+          "官网未命名饰品仅显示玄天灵力，无法核验宝宝包价，已排除此候选",
+        );
       signal.throwIfAborted();
       await icon.evaluate((node, value) => {
         node.setAttribute("data_cbg_pet_gear_name", value.name);
@@ -1179,7 +1246,9 @@ async function readMainPet(page: Page, signal: AbortSignal) {
     const panels = Array.from(
       document.querySelectorAll<HTMLElement>("[data-cbg-pet-main-panel]"),
     ).filter(visible);
-    const infos = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(visible);
+    const infos = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-cbg-pet-main-info]"),
+    ).filter(visible);
     const panel = panels.length === 1 ? panels[0] : null;
     const info = infos.length === 1 ? infos[0] : null;
     let root = panel?.parentElement;
@@ -1201,7 +1270,9 @@ async function readMainPet(page: Page, signal: AbortSignal) {
     if (/加载中|正在加载|展开全部(?:技能|装备|内丹)/.test(panel.innerText))
       throw new Error("宝宝详情尚未展开完整");
     const inputs = Array.from(
-      document.querySelectorAll<HTMLInputElement>("#equip_desc_value"),
+      document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(
+        "[data-cbg-pet-main-description]",
+      ),
     ).filter((node) => !node.closest(excluded));
     const input = inputs.length === 1 ? inputs[0] : null;
     let pet: Record<string, any>;
@@ -1418,7 +1489,11 @@ async function readMainPet(page: Page, signal: AbortSignal) {
       productName: raw.equip_name,
       visibleName:
         info.innerText
-          .match(/(?:^|\s)ID\s*[：:]\s*(.+?)(?=\s+等级\s*[：:]|\r?\n|$)/i)?.[1]
+          .match(
+            input?.id === "pet_desc"
+              ? /(?:^|\s)名称\s*[：:]\s*(.+?)(?=\s+等级\s*[：:]|\r?\n|$)/
+              : /(?:^|\s)ID\s*[：:]\s*(.+?)(?=\s+等级\s*[：:]|\r?\n|$)/i,
+          )?.[1]
           ?.trim() || "",
       storageType: raw.storage_type,
       petStorageType: g.StorageStype?.pet,
@@ -1475,9 +1550,11 @@ export function petSourceFromPages(
   searchPage: Page,
   detailPage: Page,
   signal: AbortSignal,
+  serverId: string,
 ): PetSource & { close(): Promise<void>; discover(): Promise<PetSearchForm> } {
-  const cache = new Map<string, string>();
-  const marketScope = createMarketScopeAudit(searchPage);
+  assertMarketServerId(serverId);
+  const cache = new Map<string, string | UnverifiablePetAccessoryError>();
+  const marketScope = createMarketScopeAudit(searchPage, serverId);
   const deadline = Date.now() + 240_000;
   let closing: Promise<void> | undefined;
   const close = () => {
@@ -1498,13 +1575,23 @@ export function petSourceFromPages(
     requestSignal.throwIfAborted();
     if (closing) throw new Error("宝宝查询页面已关闭");
     const safe = safeEquipmentUrl(url);
-    if (cache.has(safe)) return cache.get(safe)!;
+    if (equipmentIdentity(safe).split(":")[0] !== serverId)
+      throw new Error("宝宝候选不属于目标单服，未采用报价");
+    const cached = cache.get(safe);
+    if (cached instanceof UnverifiablePetAccessoryError) throw cached;
+    if (cached !== undefined) return cached;
     await pace(requestSignal, 600, 400);
     await detailPage.goto(safe, { waitUntil: "domcontentloaded", timeout: 15000 });
     requestSignal.throwIfAborted();
     if (equipmentIdentity(detailPage.url()) !== equipmentIdentity(safe))
       throw new Error("宝宝详情跳转到另一商品，报价未采用");
-    const value = await petPageSource(detailPage, requestSignal);
+    let value: Awaited<ReturnType<typeof petPageSource>>;
+    try {
+      value = await petPageSource(detailPage, requestSignal);
+    } catch (error) {
+      if (error instanceof UnverifiablePetAccessoryError) cache.set(safe, error);
+      throw error;
+    }
     cache.set(safe, value.html);
     return value.html;
   };
@@ -1591,10 +1678,19 @@ export function petSourceFromPages(
         try {
           args = petQuery(item, config);
         } catch (error) {
+          const nonSaleable = error instanceof NonSaleablePetTypeError;
+          if (nonSaleable)
+            records.push({
+              key: item.key,
+              reason: "official_non_saleable_type",
+              name: item.name,
+              officialTypeIds: config.officialTypeIds,
+            });
           results.push({
             key: item.key,
             candidates: [],
-            searchState: "unsupported",
+            searchState: nonSaleable ? "skipped" : "unsupported",
+            ...(nonSaleable ? { skipReason: "官网无独立交易筛选的特殊宝宝，未计入参考合计" } : {}),
             note: error instanceof Error ? error.message : "官网宝宝类型未识别",
           });
           continue;
@@ -1605,11 +1701,15 @@ export function petSourceFromPages(
         const candidates: EquipmentCandidate[] = [],
           rejected: EquipmentCandidate[] = [],
           diagnosticSources: EquipmentCandidate[] = [];
-        const plans = petQueries(item, config);
+        const plans = petQueries(item, config).map((plan) => ({
+          ...plan,
+          args: { ...plan.args, serverid: serverId },
+        }));
         const planHash = petDigest({
+          serverId,
           resumePolicy: PRICING_RESUME_POLICY,
           policy: PET_COMPARISON_POLICY_VERSION,
-          method: "official-ui-v1",
+          method: "official-ui-first-five-per-condition-v3",
           priceMethod: EQUIPMENT_QUOTE_POLICY,
           description: item.description,
           fields: item.fields,
@@ -1705,13 +1805,20 @@ export function petSourceFromPages(
             return { candidate };
           } catch (error) {
             requestSignal.throwIfAborted();
-            if (error instanceof Error && /登录|安全验证|频繁|网站繁忙/.test(error.message))
+            if (
+              error instanceof Error &&
+              /登录|安全验证|频繁|网站繁忙|目标单服/.test(error.message)
+            )
               throw error;
             candidate = {
               ...candidate,
               reason: error instanceof Error ? error.message : "无法读取宝宝详情",
             };
             (matchType === "diagnostic" ? diagnosticSources : rejected).push(candidate);
+            if (error instanceof UnverifiablePetAccessoryError) {
+              failed.delete(url);
+              return { candidate };
+            }
             const failure = {
               url,
               reason: error instanceof Error ? error.message.split("\n")[0] : "无法读取宝宝详情",
@@ -1758,7 +1865,7 @@ export function petSourceFromPages(
           }
           for (const [url, modeIndex] of Array.from(failed)) {
             if (details >= MAX_DETAILS || Date.now() >= deadline) break;
-            if (cache.has(safeEquipmentUrl(url))) continue;
+            if (typeof cache.get(safeEquipmentUrl(url)) === "string") continue;
             await readCandidate(url, item.name, plans[modeIndex].matchType, modeIndex);
             refreshedDetails.push({
               url: safeEquipmentUrl(url),
@@ -1768,7 +1875,7 @@ export function petSourceFromPages(
           }
           if (refreshedDetails.length) {
             const refreshQuery =
-              "仅重读已保存的独立宝宝详情 / 沿用历史全服、3年以上服查询证据 / " + item.name;
+              "仅重读已保存的独立宝宝详情 / 目标单服 " + serverId + " / " + item.name;
             queries.push(refreshQuery);
             item.query = [item.query, refreshQuery].filter(Boolean).join("\n");
             records.push({
@@ -1802,20 +1909,38 @@ export function petSourceFromPages(
                   success?.(result);
                 },
                 onFailure(...values: unknown[]) {
-                  failure?.(...values);
                   g.__cbgPetResult = {
                     page: Number(options.data?.page),
                     ok: false,
                     error: "官网查询请求失败",
                   };
+                  failure?.(...values);
                 },
               },
               ...rest,
             );
           };
         });
+        // With no adopted quote, re-read the active first page from row zero.
+        // Completed conditions stay completed; no stale row position is reused.
+        // Adopted quotes and failed reads retain the full history guard.
+        if (
+          savedCursor &&
+          !item.candidates.some((candidate) => candidate.verified) &&
+          !candidates.length &&
+          !failed.size &&
+          next.pageNumber === 1
+        ) {
+          next.pageHistory = [];
+          next.historyIndex = 0;
+          next.rowIndex = 0;
+          next.pageRowsHash = "";
+          next.seen = [];
+          seenRows.clear();
+        }
+        const history = structuredClone(next.pageHistory || []);
         let orderChanged = false;
-        let historyValidated = !savedCursor?.pageHistory?.length;
+        let historyValidated = !history.length;
         queryStages: for (let modeIndex = 0; modeIndex < plans.length; modeIndex++) {
           const { matchType, args: queryArgs } = plans[modeIndex];
 
@@ -1828,7 +1953,9 @@ export function petSourceFromPages(
           }
           args = queryArgs;
           query =
-            "全服 / 3年以上服 / 综合排序 / " +
+            "目标单服 " +
+            serverId +
+            " / 综合排序 / " +
             item.name +
             " / " +
             matchType +
@@ -1860,15 +1987,9 @@ export function petSourceFromPages(
             lastPage = 0,
             stagePages = 0,
             exhausted = false;
-          const acceptedCount = () =>
-            matchType === "diagnostic"
-              ? diagnosticSources.length
-              : candidates.filter((candidate) =>
-                  matchType === "exact"
-                    ? candidate.matchType !== "similar"
-                    : candidate.matchType === "similar",
-                ).length;
-          const sampleLimit = matchType === "diagnostic" ? 3 : Infinity;
+          const sampleLimit = matchType === "diagnostic" ? 3 : EQUIPMENT_QUOTE_LIMIT;
+          let inspected = [...seenRows].filter((key) => key.startsWith(modeIndex + ":")).length;
+          let samplingComplete = false;
           const stageEnough = () => enoughSamples();
           const loadPage = async (pageNumber: number, replay = false) => {
             await pace(requestSignal);
@@ -1888,27 +2009,56 @@ export function petSourceFromPages(
               });
               await clickPetSearchPage(searchPage, pageNumber);
             }
-            await searchPage.waitForFunction(
-              (wanted) => {
-                const globals = window as unknown as Record<string, any>;
-                if (
-                  globals.CaptchaCheck?.need_captcha ||
-                  globals.IsLogin === 0 ||
-                  globals.LoginInfo?.login === 0 ||
-                  /show_login\.py/.test(location.pathname) ||
-                  Array.from(
-                    document.querySelectorAll(".yidun_popup, .geetest_panel, #captcha_container"),
-                  ).some((el) => el.checkVisibility()) ||
-                  /系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText)
-                )
-                  return true;
-                const result = globals.__cbgPetResult;
-                const loading = document.querySelector("#loading_img");
-                return result?.page === wanted && (!loading || !loading.checkVisibility());
-              },
-              pageNumber,
-              { timeout: 20000, polling: 200 },
-            );
+            try {
+              await searchPage.waitForFunction(
+                (wanted) => {
+                  const globals = window as unknown as Record<string, any>;
+                  if (
+                    globals.CaptchaCheck?.need_captcha ||
+                    globals.IsLogin === 0 ||
+                    globals.LoginInfo?.login === 0 ||
+                    /show_login\.py/.test(location.pathname) ||
+                    Array.from(
+                      document.querySelectorAll(".yidun_popup, .geetest_panel, #captcha_container"),
+                    ).some((el) => el.checkVisibility()) ||
+                    /系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText)
+                  )
+                    return true;
+                  const result = globals.__cbgPetResult;
+                  const loading = document.querySelector("#loading_img");
+                  return (
+                    result?.page === wanted &&
+                    (result.ok === false || !loading || !loading.checkVisibility())
+                  );
+                },
+                pageNumber,
+                { timeout: 20000, polling: 200 },
+              );
+            } catch (error) {
+              requestSignal.throwIfAborted();
+              if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+              await assertAvailable(searchPage);
+              const state = await searchPage
+                .evaluate(function readPetSearchWaitState() {
+                  const g = window as unknown as Record<string, any>;
+                  const result = g.__cbgPetResult;
+                  return {
+                    callbackReceived: !!result,
+                    callbackPage: Number.isFinite(result?.page) ? result.page : null,
+                    loadingVisible: !!document.querySelector("#loading_img")?.checkVisibility(),
+                  };
+                })
+                .catch(() => null);
+              const message =
+                `宝宝搜索结果等待超时：${item.name} · ${matchType} · 第${pageNumber}页；` +
+                (state
+                  ? `回调${state.callbackReceived ? "已收到" : "未收到"}，回调页${state.callbackPage ?? "未知"}，加载图标${state.loadingVisible ? "仍显示" : "已消失"}`
+                  : "等待状态读取失败");
+              throw Object.assign(new Error(message, { cause: error }), {
+                name: "TimeoutError",
+                code: "PET_SEARCH_RESULT_TIMEOUT",
+              });
+            }
             requestSignal.throwIfAborted();
             await assertAvailable(searchPage);
             const request = marketScope.confirm();
@@ -1985,9 +2135,12 @@ export function petSourceFromPages(
             const candidateServers: Record<string, number> = {};
             for (const row of listing.rows) {
               const server = equipmentIdentity(safeEquipmentUrl(row.url)).split(":")[0];
+              if (server !== serverId)
+                throw new Error("宝宝列表包含目标单服以外的商品，未采用报价");
               if (/^\d+$/.test(server))
                 candidateServers[server] = (candidateServers[server] || 0) + 1;
             }
+            lastPage = Math.max(lastPage, pageNumber);
             scopeEvidence.push({
               mode: matchType,
               request,
@@ -1997,7 +2150,6 @@ export function petSourceFromPages(
             });
             return { listing, request };
           };
-          const history = savedCursor?.pageHistory || [];
           let uiReady = false;
           while (
             (next.historyIndex || 0) < history.length &&
@@ -2056,13 +2208,20 @@ export function petSourceFromPages(
             }
           }
           next.historyIndex = 0;
+          if (inspected >= sampleLimit && !failed.size) {
+            samplingComplete = true;
+            next.modeIndex = candidates.length ? plans.length : modeIndex + 1;
+            next.pageNumber = 1;
+            next.rowIndex = 0;
+            next.pageRowsHash = "";
+          }
           for (
             let pageNumber = next.pageNumber;
             stagePages < MAX_PAGES &&
             count < MAX_ROWS &&
             details < MAX_DETAILS &&
             !stageEnough() &&
-            acceptedCount() < sampleLimit &&
+            inspected < sampleLimit &&
             Date.now() < deadline;
             pageNumber++
           ) {
@@ -2110,7 +2269,7 @@ export function petSourceFromPages(
                 next.rowIndex = rowIndex + 1;
                 continue;
               }
-              if (count >= MAX_ROWS || Date.now() >= deadline) {
+              if (count >= MAX_ROWS || inspected >= sampleLimit || Date.now() >= deadline) {
                 pageFullyRead = false;
                 break;
               }
@@ -2127,6 +2286,7 @@ export function petSourceFromPages(
               }
               if (row.type && !String(args.type).split(",").includes(row.type)) {
                 seenRows.add(seenKey);
+                inspected++;
                 next.rowIndex = rowIndex + 1;
                 if (count >= MAX_ROWS) {
                   pageFullyRead = rowIndex === listing.rows.length - 1;
@@ -2135,13 +2295,7 @@ export function petSourceFromPages(
                 continue;
               }
               const sourceCached = cache.has(safeEquipmentUrl(row.url));
-              if (
-                (!sourceCached &&
-                  (details >= MAX_DETAILS ||
-                    readDetails >=
-                      (matchType === "exact" ? 6 : matchType === "similar" ? 5 : 3))) ||
-                Date.now() >= deadline
-              ) {
+              if ((!sourceCached && details >= MAX_DETAILS) || Date.now() >= deadline) {
                 pageFullyRead = false;
                 break;
               }
@@ -2152,18 +2306,25 @@ export function petSourceFromPages(
                   result.failure,
                 );
               seenRows.add(seenKey);
+              inspected++;
               next.rowIndex = rowIndex + 1;
               if (result.failure) {
                 pageFullyRead = false;
                 break;
               }
-              if (count >= MAX_ROWS || stageEnough() || acceptedCount() >= sampleLimit) {
+              if (count >= MAX_ROWS || stageEnough() || inspected >= sampleLimit) {
                 pageFullyRead = rowIndex === listing.rows.length - 1;
                 break;
               }
             }
-            if (matchType === "diagnostic" && acceptedCount() >= sampleLimit) {
-              next.modeIndex = modeIndex + 1;
+            if (
+              inspected >= sampleLimit &&
+              !failed.size &&
+              !detailFailures.length &&
+              !unsupportedDescriptions.length
+            ) {
+              samplingComplete = true;
+              next.modeIndex = candidates.length ? plans.length : modeIndex + 1;
               next.pageNumber = 1;
               next.rowIndex = 0;
               next.pageRowsHash = "";
@@ -2185,7 +2346,11 @@ export function petSourceFromPages(
           }
           const note =
             `${matchType === "exact" ? "严格" : matchType === "similar" ? "相似" : "诊断"}筛选已查询${lastPage}页、${rows}个列表候选、${readDetails}个新详情；` +
-            (exhausted ? "本次筛选结果已读完" : "有限样本查询，未遍历全部在售商品") +
+            (exhausted
+              ? "本次筛选结果已读完"
+              : samplingComplete
+                ? `仅核验该条件前${sampleLimit}条候选，搜索范围有限，未遍历全部在售商品`
+                : "有限样本查询，未遍历全部在售商品") +
             "。";
           notes.push(note);
           records.push({
@@ -2200,6 +2365,9 @@ export function petSourceFromPages(
             rows,
             details: readDetails,
             exhausted,
+            sampleLimit,
+            sampled: inspected,
+            samplingComplete,
             detailFailures,
             unsupportedDetails: unsupportedDescriptions,
             candidates: [...candidates, ...rejected],
@@ -2229,6 +2397,7 @@ export function petSourceFromPages(
           similarAttempted,
           diagnosticSources,
           note:
+            "每个计价筛选条件只核验前5条候选或更少的实际结果，搜索范围有限；" +
             (orderChanged
               ? "官网结果身份或顺序已变化，旧候选和已读位置已清除，将从第一阶段第一页重新取样。 "
               : "") +
@@ -2246,7 +2415,8 @@ export function petSourceFromPages(
   };
 }
 
-export async function createPetSource(signal: AbortSignal) {
+export async function createPetSource(signal: AbortSignal, serverId: string) {
+  assertMarketServerId(serverId);
   signal.throwIfAborted();
   let searchPage: Page | undefined, detailPage: Page | undefined;
   try {
@@ -2256,7 +2426,7 @@ export async function createPetSource(signal: AbortSignal) {
     signal.throwIfAborted();
     detailPage = await createHiddenPage(browser);
     signal.throwIfAborted();
-    return petSourceFromPages(searchPage, detailPage, signal);
+    return petSourceFromPages(searchPage, detailPage, signal, serverId);
   } catch (error) {
     await Promise.allSettled([searchPage?.close(), detailPage?.close()]);
     throw error;

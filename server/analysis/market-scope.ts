@@ -1,6 +1,6 @@
 import type { Page, Request } from "playwright-core";
 
-export const GLOBAL_MARKET_SCOPE_VERSION = "global-older-servers-v1";
+export const GLOBAL_MARKET_SCOPE_VERSION = "role-server-v1";
 // Old snapshots did not reject all restored filters; their quotes need a fresh query.
 export const MARKET_SEARCH_UI_VERSION = "official-form-ui-v2";
 
@@ -96,7 +96,66 @@ export function marketRequestEvidence(
   };
 }
 
-export function assertGlobalMarketRequest(request: GlobalMarketRequest, act: string, page: number) {
+export function assertMarketServerId(serverId: string) {
+  if (typeof serverId !== "string" || !/^[1-9]\d*$/.test(serverId))
+    throw new Error("目标服务器 ID 缺失或无效，未发起单服查价");
+}
+
+/** Select public official controls; never change a hidden argument or use the login server. */
+export async function selectMarketServer(page: Page, serverId: string, signal: AbortSignal) {
+  assertMarketServerId(serverId);
+  signal.throwIfAborted();
+  const areaId = await page.evaluate(function marketServerArea(target) {
+    const directory = (window as unknown as { server_data?: Record<string, unknown> }).server_data;
+    const area = document.getElementById("overall_sel_area") as HTMLSelectElement | null;
+    if (!directory || typeof directory !== "object" || !area)
+      throw new Error("官网单服区服目录或选择控件缺失");
+    const available = new Set(Array.from(area.options, (option) => option.value));
+    for (const [id, group] of Object.entries(directory)) {
+      if (!available.has(id) || !Array.isArray(group) || !Array.isArray(group[1])) continue;
+      if (group[1].some((server: unknown) => Array.isArray(server) && String(server[0]) === target))
+        return id;
+    }
+    throw new Error("官网单服目录没有目标服务器，未采用报价");
+  }, serverId);
+  signal.throwIfAborted();
+  await page.locator("#overall_sel_area").selectOption(areaId);
+  await page.waitForFunction(
+    (target) => {
+      const server = document.getElementById("ovarall_sel_server") as HTMLSelectElement | null;
+      return !!server && Array.from(server.options).some((option) => option.value === target);
+    },
+    serverId,
+    { timeout: 10_000 },
+  );
+  signal.throwIfAborted();
+  await page.locator("#ovarall_sel_server").selectOption(serverId);
+  const selected = await page.evaluate(function selectedMarketServer() {
+    return {
+      areaId: (document.getElementById("overall_sel_area") as HTMLSelectElement | null)?.value,
+      serverid: (document.getElementById("ovarall_sel_server") as HTMLSelectElement | null)?.value,
+    };
+  });
+  signal.throwIfAborted();
+  if (selected.areaId !== areaId || selected.serverid !== serverId)
+    throw new Error("官网单服选择未生效，未采用报价");
+  return {
+    areaId,
+    serverid: serverId,
+    actions: [
+      { control: "overall_sel_area", value: areaId, method: "selectOption" },
+      { control: "ovarall_sel_server", value: serverId, method: "selectOption" },
+    ],
+  };
+}
+
+export function assertMarketRequest(
+  request: GlobalMarketRequest,
+  act: string,
+  page: number,
+  serverId: string,
+) {
+  assertMarketServerId(serverId);
   if (
     request.searchType !== act ||
     request.page !== page ||
@@ -104,16 +163,25 @@ export function assertGlobalMarketRequest(request: GlobalMarketRequest, act: str
     page < 1
   )
     throw new Error("实际市场查询的类别或页码不符，未采用报价");
-  if (request.serverType !== "3") throw new Error("实际市场查询未确认三年以上服，未采用报价");
-  if (Object.values(request.restrictions).some((value) => value.trim() !== "" && value !== "0"))
-    throw new Error("实际市场查询仍有单服或地区限制，未采用报价");
+  if (request.restrictions.serverid !== serverId)
+    throw new Error("实际市场查询未限定目标单服，未采用报价");
+  if (request.serverType !== "" && request.serverType !== "0")
+    throw new Error("实际单服查询仍有额外开服时间限制，未采用报价");
+  if (
+    Object.entries(request.restrictions).some(
+      ([key, value]) => key !== "serverid" && value.trim() !== "" && value !== "0",
+    )
+  )
+    throw new Error("实际单服查询仍有额外服务器或地区限制，未采用报价");
 }
 
 /** Observe the program's own final browser requests rather than a pre-helper argument object. */
 export function createMarketScopeAudit(
   page: Pick<Page, "on" | "off">,
+  serverId: string,
   observedSearchTypes: readonly string[] = [],
 ) {
+  assertMarketServerId(serverId);
   if (observedSearchTypes.some((act) => !/^(?!show_)[a-z_]*yuanshen[a-z_]*$/.test(act)))
     throw new Error("未确认元身页面的公开查询动作");
   let expected: { act: string; page: number } | undefined;
@@ -134,9 +202,9 @@ export function createMarketScopeAudit(
     },
     confirm(): GlobalMarketRequest {
       if (!expected || !requests.length)
-        throw new Error("尚未核验全服搜索的实际网络请求，未采用报价");
+        throw new Error("尚未核验单服搜索的实际网络请求，未采用报价");
       for (const request of requests)
-        assertGlobalMarketRequest(request, expected.act, expected.page);
+        assertMarketRequest(request, expected.act, expected.page, serverId);
       return structuredClone(requests[requests.length - 1]);
     },
     close() {

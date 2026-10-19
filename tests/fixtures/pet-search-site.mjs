@@ -31,6 +31,14 @@ export function petSearchDocument(options = {}) {
     .replace(/\/\* EQUIPMENT_UI_START \*\/[\s\S]*?\/\* EQUIPMENT_UI_END \*\//, "")
     .replace("官方装备搜索结构模拟页", "官方宝宝搜索结构模拟页")
     .replace(
+      "await fetch('/cgi-bin/recommend.py?'+new URLSearchParams(params));",
+      "if(settings.dropServerId || settings.dropServerPage===Number(params.page))delete params.serverid;await fetch('/cgi-bin/recommend.py?'+new URLSearchParams(params));",
+    )
+    .replace(
+      "onComplete(){document.querySelector('#loading_img').style.display='none';}",
+      "onComplete(){if(!settings.keepLoading)document.querySelector('#loading_img').style.display='none';}",
+    )
+    .replace(
       /window\.OverallSearchAct=[^;]+;/,
       `window.OverallSearchAct='overall_search_pet';window.SaleablePetNameInfo=${encoded(options.petNames || { 2001: "画魂", 3001: "幽灵" })};window.PetSkills=${encoded(
         options.petSkillChoices || [
@@ -67,7 +75,7 @@ export function petSearchDocument(options = {}) {
 ${(options.petStarChoices || [0, 1, 2, 3]).map((star) => `<label><input type="checkbox" value="${star}" class="js_super_sum_star">${["初始", "一星", "二星", "三星"][star]}</label>`).join("")}
 ${numberKeys.map((key) => `<label for="txt_${key}">${key}</label><input type="text" id="txt_${key}">`).join("")}
 <label><input id="chk_is_baobao" type="checkbox">只显示宝宝</label>
-<select id="overall_sel_area"><option value="">不限</option><option value="1" selected>旧地区</option></select>
+<select id="overall_sel_area"><option value="">不限</option><option value="1">目标区</option><option value="2" selected>旧地区</option></select>
 <select id="ovarall_sel_server"><option value="">不限</option><option value="33" selected>旧服务器</option></select>
 <input id="user_serverid" type="hidden" value="33"><input type="hidden" name="account-token" value="do-not-export">
 <button id="btn_reset_user_server">重置购入服</button><button id="reset_all">重置</button><button id="btn_all_skill">全部技能</button>
@@ -76,6 +84,10 @@ ${numberKeys.map((key) => `<label for="txt_${key}">${key}</label><input type="te
 <button id="btn_pet_search">全服搜索</button></div>
 <script>
 window.uiActions=[];
+window.server_data=${encoded(options.serverDirectory || { 1: [["目标区", ""], [[1, "目标服", 0]]], 2: [["旧地区", ""], [[33, "旧服务器", 0]]] })};
+const areaSelect=document.getElementById('overall_sel_area'),serverSelect=document.getElementById('ovarall_sel_server');
+areaSelect.addEventListener('change',()=>{const rows=window.server_data[areaSelect.value]?.[1]||[];serverSelect.replaceChildren(new Option('不限',''),...rows.map(([id,name])=>new Option(name,String(id))));document.querySelectorAll('#server_type_panel li.on').forEach(li=>li.classList.remove('on'));uiActions.push({action:'area-change',area:areaSelect.value,servers:rows.map(([id])=>String(id))});});
+serverSelect.addEventListener('change',()=>uiActions.push({action:'server-change',server:serverSelect.value}));
 if(settings.publicLogin===0)window.IsLogin=0;
 const root=document.getElementById('fixture_pet_controls');
 const menu=(id,choices,skills=false)=>{for(const [value,label] of choices){const li=document.createElement('li');li.retrieve=(key)=>key==='value'?value:null;li.title=label;if(skills){li.setAttribute('data-skill_id',value);li.innerHTML='<img alt="'+label+'" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" width="24" height="24">';}else li.textContent=label;li.addEventListener('click',()=>{li.classList.toggle('on');uiActions.push({action:'choice',panel:id,value:String(value)});});document.getElementById(id).append(li);}};
@@ -84,7 +96,7 @@ menu('pet_skill_special_panel',PetSkills,true);menu('high_neidan_panel',HighNeid
 menu('texing_panel',TexingTypes);
 root.querySelectorAll('.js_super_sum_star').forEach(input=>input.addEventListener('change',()=>uiActions.push({action:'star-check',value:input.value,checked:input.checked})));
 root.querySelectorAll('input:not([type=hidden])').forEach(input=>input.addEventListener('input',()=>uiActions.push({action:'input',id:input.id,value:input.value})));
-document.getElementById('reset_all').onclick=()=>{root.querySelectorAll('li.on').forEach(li=>li.classList.remove('on'));root.querySelectorAll('input:not([type=hidden])').forEach(input=>{if(input.type!=='checkbox')input.value='';input.checked=false;});uiActions.push({action:'reset'});};
+document.getElementById('reset_all').onclick=()=>{root.querySelectorAll('li.on').forEach(li=>li.classList.remove('on'));root.querySelectorAll('input:not([type=hidden])').forEach(input=>{if(input.type!=='checkbox')input.value='';input.checked=false;});areaSelect.value='';areaSelect.dispatchEvent(new Event('change'));uiActions.push({action:'reset'});};
 document.getElementById('btn_reset_user_server').onclick=()=>{if(!settings.stickyBuyServer)document.getElementById('user_serverid').value='';};
 document.getElementById('btn_all_skill').onclick=()=>uiActions.push({action:'expand-skills'});
 document.getElementById('btn_pet_search').onclick=()=>{
@@ -109,6 +121,7 @@ export function petDetailDocument(options = {}) {
     nickname: "宝宝昵称",
     rawName: "宝宝昵称",
     rawEid: null,
+    rawServerId: 1,
     selling: 1,
     status: "上架中",
     fields: petFields,
@@ -141,6 +154,7 @@ export function petDetailDocument(options = {}) {
     footerStatus: "",
     encodedJson: false,
     legacyDescription: false,
+    prepayTemplate: false,
     missingPetParser: false,
     petParserFailure: false,
     panelLevel: "119",
@@ -155,7 +169,7 @@ export function petDetailDocument(options = {}) {
   const pet = {
     type_id: 2001,
     pet_grade: "119",
-    growth: 1.28,
+    growth: s.rawGrowth ?? 1.28,
     attack_aptitude: 1550,
     attack_ext: 22,
     defence_aptitude: 1400,
@@ -243,8 +257,8 @@ export function petDetailDocument(options = {}) {
       return `<img width="40" height="40" src="${src}" ${inline} ${linked} onmouseenter="document.getElementById('${tipId}').style.display='block'" onmouseleave="document.getElementById('${tipId}').style.display='none'"><pre id="${tipId}" ${tipKind} style="display:none">${escape(text)}</pre>`;
     })
     .join("");
-  const info = `<ul id="info_panel"><li>服务器：测试区 ID：${escape(s.nickname)} 等级：${escape(s.infoLevel)}</li><li>状态：${escape(s.status)}</li><li>价格：<span class="price">￥${s.price}（元）</span><span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul>`;
-  const panel = `<div class="attribute"><div${s.noPanelId ? "" : ' id="equip_desc_panel"'}><p>名字：${escape(s.nickname)}${s.panelLevel === null ? "" : ` 等级：${escape(s.panelLevel)}`}</p><table>${table}</table><h4>赐福技能</h4>${previewImages}${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div></div>`;
+  const info = `<ul${s.prepayTemplate ? "" : ' id="info_panel"'}><li>服务器：测试区 ${s.prepayTemplate ? "名称" : "ID"}：${escape(s.nickname)} 等级：${escape(s.infoLevel)}</li><li>状态：${escape(s.status)}</li><li>价格：<span class="price">￥${s.price}（元）</span><span id="equip_price_addon_info">+ ￥999（元）(跨服交易费)</span></li></ul>`;
+  const panel = `${s.prepayTemplate ? "" : '<div class="attribute">'}<div${s.prepayTemplate ? ' id="pet_attr_panel" class="tabCont"' : s.noPanelId ? "" : ' id="equip_desc_panel"'}><p>名字：${escape(s.nickname)}${s.panelLevel === null ? "" : ` 等级：${escape(s.panelLevel)}`}</p><table>${table}</table><h4>赐福技能</h4>${previewImages}${s.cifuDecoration ? '<img width="40" height="40" src="https://xyq.cbg.163.com/images/skill/99.gif">' : ""}<h4>技能</h4>${skillImages}<h4>内丹</h4>${innerImages || "<p>无</p>"}<h4>宝宝装备</h4>${gearImages || "<p>无</p>"}</div>${s.prepayTemplate ? "" : "</div>"}`;
   const main = s.splitRegions
     ? `<section>${info}</section><section>${panel}</section>`
     : `<div class="${escape(s.wrapperClass)}">${info}${panel}${s.duplicatePanel ? panel : ""}${s.footerStatus ? `<footer>${escape(s.footerStatus)}</footer>` : ""}</div>`;
@@ -254,8 +268,8 @@ export function petDetailDocument(options = {}) {
   const visibleMain = s.panelDelay ? '<div id="delayed-main"></div>' : main;
   return `<meta charset="utf-8"><title>独立宝宝详情结构模拟页</title>
 ${s.recommendationFirst ? recommendation + visibleMain : visibleMain + recommendation}
-<input type="hidden" id="equip_desc_value" value="${escape(s.encodedJson ? "@Sfixture@" : description)}">
-<script>window.IsLogin=1;window.StorageStype={pet:2,role:3};window.equip={storage_type:2,equip_name:${encoded(s.rawName)},price:${encoded(s.rawPrice)},eid:${s.rawEid ? encoded(s.rawEid) : "new URL(location.href).searchParams.get('eid')"},server_id:1,is_selling:${encoded(s.selling)}};window.CBG_GAME_CONFIG=${encoded(gameConfig)};
+${s.prepayTemplate ? `<textarea id="pet_desc" style="display:none">${escape(s.encodedJson ? "@Sfixture@" : description)}</textarea>` : `<input type="hidden" id="equip_desc_value" value="${escape(s.encodedJson ? "@Sfixture@" : description)}">`}
+<script>window.IsLogin=1;window.StorageStype={pet:2,role:3};window.equip={storage_type:2,equip_name:${encoded(s.rawName)},price:${encoded(s.rawPrice)},eid:${s.rawEid ? encoded(s.rawEid) : "new URL(location.href).searchParams.get('eid')"},server_id:${encoded(s.rawServerId)},is_selling:${encoded(s.selling)}};window.CBG_GAME_CONFIG=${encoded(gameConfig)};
 ${s.encodedJson && !s.missingDecoder ? `window.decodeCalls=0;window.decode_desc=value=>{window.decodeCalls++;if(value!=='@Sfixture@' || ${encoded(s.decoderFailure)})throw new Error('SIMULATED decode failure');return ${encoded(s.malformedDecoded ? "not JSON" : description)};};` : ""}
 ${s.legacyDescription && !s.missingPetParser ? `window.petParseCalls=0;window.get_pet_attrs_info=(value, options)=>{window.petParseCalls++;if(value!==${encoded(legacy)} || !options.only_basic_attr || ${encoded(s.petParserFailure)})throw new Error('SIMULATED legacy parser failure');return ${encoded(pet)};};` : ""}
 ${s.jsonDelay ? `const json=document.getElementById('equip_desc_value'), jsonValue=json.value;json.value='';setTimeout(()=>json.value=jsonValue,${s.jsonDelay});` : ""}

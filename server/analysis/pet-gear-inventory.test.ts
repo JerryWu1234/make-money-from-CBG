@@ -45,17 +45,17 @@ const quote = (id: string, price = 200): EquipmentCandidate => ({
 
 describe("通用宝宝装备属性与估值证据", () => {
   it.each([
-    [[300, 100, 200], 200],
-    [[100, 200, 900], 400],
-    [[100.01, 200.04], 150.03],
-    [[1050.01, 1050.02], 1050.02],
+    [[300, 100, 200], 100],
+    [[100, 200, 900], 100],
+    [[100.01, 200.04], 100.01],
+    [[1050.01, 1050.02], 1050.01],
     [[245.5], 245.5],
-  ])("同配置有效挂牌按平均值取值 %j", (prices, expected) => {
+  ])("同配置有效挂牌按最低值取值 %j", (prices, expected) => {
     expect(
       petGearReference(prices.map((price, index) => quote("exact-" + index, price))).referencePrice,
     ).toBe(expected);
   });
-  it("同商品重复记录只占一个样本，避免偏移同配置平均值", () => {
+  it("同商品重复记录只占一个样本，避免偏移同配置最低值", () => {
     expect(
       petGearReference([
         quote("first", 100),
@@ -63,14 +63,14 @@ describe("通用宝宝装备属性与估值证据", () => {
         quote("second", 200),
         quote("third", 300),
       ]).referencePrice,
-    ).toBe(200);
+    ).toBe(100);
   });
   it.each([
     "pet-gear-trimmed-suit-v2",
     "pet-gear-trimmed-suit-median-v3",
     "pet-gear-trimmed-suit-cent-median-v4",
-  ])("十件均价策略不复用旧算法 %s 的输入hash", (comparisonVersion) => {
-    const record = { detail: null } as SavedRoleRecord;
+  ])("五件均价策略不复用旧算法 %s 的输入hash", (comparisonVersion) => {
+    const record = { listing: { serverId: "33" }, detail: null } as SavedRoleRecord;
     const pets = petInventory(record);
     const gear = petGearInventory(record);
     const previousHash = createHash("sha256")
@@ -168,7 +168,7 @@ describe("通用宝宝装备属性与估值证据", () => {
       ]).referencePrice,
     ).toBeNull();
   });
-  it("同商品冲突不取更低价；实际有效样本可计算平均值", () => {
+  it("同商品冲突不取更低价；实际有效样本取最低值", () => {
     expect(petGearReference([quote("same", 200), quote("same", 300)]).referencePrice).toBeNull();
     const similar = { ...quote("similar", 200), matchType: "similar" as const };
     expect(petGearReference([similar])).toMatchObject({
@@ -185,7 +185,7 @@ describe("通用宝宝装备属性与估值证据", () => {
         { ...quote("second", 220), matchType: "similar" },
         { ...quote("third", 240), matchType: "similar" },
       ]),
-    ).toMatchObject({ referencePrice: 220, similarEstimate: { status: "range", sampleCount: 3 } });
+    ).toMatchObject({ referencePrice: 200, similarEstimate: { status: "range", sampleCount: 3 } });
   });
   it("相近报价保留官网顺序，不按价格或属性距离删样本", () => {
     const candidates = [
@@ -195,7 +195,7 @@ describe("通用宝宝装备属性与估值证据", () => {
       { ...quote("close-c", 120), matchType: "similar" as const, similarityScore: 3 },
     ];
     expect(petGearReference(candidates)).toMatchObject({
-      referencePrice: 207.5,
+      referencePrice: 100,
       similarEstimate: { status: "range", sampleCount: 4, range: { min: 100, max: 500 } },
     });
   });
@@ -207,7 +207,7 @@ describe("通用宝宝装备属性与估值证据", () => {
       similarEstimate: { status: "insufficient", range: null },
     });
   });
-  it("持久候选保留各组前十件独立商品，始终按官网顺序", () => {
+  it("持久候选保留各组前五件独立商品，始终按官网顺序", () => {
     const exact = [100, 300, 200, 400].map((price, index) => quote("exact-" + index, price));
     const similar = [5, 1, 3, 2, 4].map((score) => ({
       ...quote("similar-" + score, 200 + score * 10),
@@ -223,7 +223,7 @@ describe("通用宝宝装备属性与估值证据", () => {
       matchType: "similar" as const,
     }));
     expect(selectPetGearCandidates(legacy)).toEqual(legacy);
-    expect(petGearReference(legacy).referencePrice).toBe(240);
+    expect(petGearReference(legacy).referencePrice).toBe(200);
   });
   it("最近候选同样逐条核验时效、官方身份、来源、挂牌金额，坏证据不挤掉有效样本", () => {
     const good = [100, 110, 120].map((price, index) => ({
@@ -248,7 +248,7 @@ describe("通用宝宝装备属性与估值证据", () => {
       ...change,
     }));
     expect(selectPetGearCandidates([...invalid, ...good])).toEqual(good);
-    expect(petGearReference([...invalid, ...good]).referencePrice).toBe(110);
+    expect(petGearReference([...invalid, ...good]).referencePrice).toBe(100);
   });
   it("报价冲突保留证据，价格分散也不重选更便宜的样本", () => {
     const closest = [100, 110, 120].map((price, index) => ({
@@ -267,7 +267,7 @@ describe("通用宝宝装备属性与估值证据", () => {
       referencePrice: null,
       similarEstimate: { status: "insufficient", range: null },
     });
-    expect(petGearReference([...retained.slice(0, 3), conflict[1]]).referencePrice).toBe(207.75);
+    expect(petGearReference([...retained.slice(0, 3), conflict[1]]).referencePrice).toBe(100);
     const dispersed = [100, 200, 401].map((price, index) => ({
       ...quote("dispersed-" + index, price),
       matchType: "similar" as const,
@@ -279,7 +279,7 @@ describe("通用宝宝装备属性与估值证据", () => {
         { ...quote("cheap-far", 110), matchType: "similar", similarityScore: 50 },
       ]),
     ).toMatchObject({
-      referencePrice: 202.75,
+      referencePrice: 100,
       similarEstimate: { status: "range", sampleCount: 4 },
     });
   });
@@ -303,7 +303,7 @@ describe("通用宝宝装备属性与估值证据", () => {
     const retained = selectPetGearCandidates([...exact, ...similar, ...conflict, ...laterConflict]);
     expect(retained).toEqual([...exact, ...similar, conflict[0], laterConflict[0], conflict[1]]);
     expect(petGearReference(retained).referencePrice).toBeNull();
-    expect(petGearReference([...exact, ...similar, conflict[1]]).referencePrice).toBe(200);
+    expect(petGearReference([...exact, ...similar, conflict[1]]).referencePrice).toBe(100);
     expect(
       selectPetGearCandidates([
         ...exact,
@@ -312,7 +312,7 @@ describe("通用宝宝装备属性与估值证据", () => {
       ]),
     ).toHaveLength(7);
   });
-  it("相似挂牌价分散时计算平均值并保留范围", () => {
+  it("相似挂牌价分散时取最低值并保留范围", () => {
     expect(
       petGearReference(
         [200, 300, 401].map((price, index) => ({
@@ -321,7 +321,7 @@ describe("通用宝宝装备属性与估值证据", () => {
         })),
       ),
     ).toMatchObject({
-      referencePrice: 300.33,
+      referencePrice: 200,
       similarEstimate: { status: "range", sampleCount: 3, range: { min: 200, max: 401 } },
     });
   });

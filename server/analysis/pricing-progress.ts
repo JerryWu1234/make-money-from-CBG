@@ -3,9 +3,18 @@ import type {
   EquipmentPricingSnapshot,
   EquipmentSearchCursor,
 } from "./equipment-pricing";
-import { unfinishedPricingSearch, validateExactPricing } from "./pricing-integrity";
+import {
+  unfinishedPricingSearch,
+  validateExactPricing,
+  pricingCandidatesFresh,
+} from "./pricing-integrity";
 
-export type PricingSearchState = "completed" | "pending" | "read_failed" | "unsupported";
+export type PricingSearchState =
+  | "completed"
+  | "pending"
+  | "read_failed"
+  | "unsupported"
+  | "skipped";
 export type PricingSearchAttempt = {
   searchedAt: string;
   requestText?: string;
@@ -17,6 +26,7 @@ export type PricingSearchAttempt = {
 
 /** Changed results invalidate both saved row positions and the adopted sample order. */
 export function resetPricingCursor(cursor: EquipmentSearchCursor) {
+  delete cursor.emptyFirstPageModes;
   Object.assign(cursor, {
     modeIndex: 0,
     pageNumber: 1,
@@ -85,16 +95,26 @@ export function resumePricingItems<T extends EquipmentPricingSnapshot>(
     snapshot.searchAttempts = [...(previous!.searchAttempts || [])];
   }
   snapshot.items = snapshot.items.map((item) => {
-    if (item.status !== "no_match" || item.baselineEstimate) return item;
+    if (item.status !== "no_match" || item.baselineEstimate || item.searchState === "skipped")
+      return item;
     const saved = reusable ? previous!.items.find((value) => value.key === item.key) : undefined;
     if (
       saved &&
-      ["completed", "unsupported", "pending", "read_failed"].includes(saved.searchState || "")
+      pricingCandidatesFresh(saved.candidates) &&
+      ["completed", "unsupported", "pending", "read_failed", "skipped"].includes(
+        saved.searchState || "",
+      )
     ) {
       const resumed = structuredClone(saved);
+      reconcilePricingCompletion(resumed, previous?.searchItems);
+      skipUnmatchedPricing(resumed);
       if (["pending", "read_failed"].includes(resumed.searchState || "")) {
         resumed.searchState = "pending";
         resumed.issues = [...item.issues];
+        if (resumed.samplingStopped) {
+          delete resumed.searchCursor;
+          delete resumed.samplingStopped;
+        }
       }
       return resumed;
     }
@@ -109,11 +129,33 @@ export function reconcilePricingCompletion(item: EquipmentPricingItem, records?:
   item.referencePrice = null;
   if (item.status === "priced") item.status = "no_match";
   delete item.exclusion;
-  item.issues.push("搜索记录显示结果尚未读完且有效样本不足10件，继续查价；不能按完成结果计价");
+  item.issues.push("搜索记录显示结果尚未读完且有效样本不足5件，继续查价；不能按完成结果计价");
+}
+
+/** A finished empty search is excluded from valuation, without assigning a zero price. */
+function skipUnmatchedPricing(item: EquipmentPricingItem) {
+  if (
+    item.status !== "no_match" ||
+    item.referencePrice !== null ||
+    item.baselineEstimate ||
+    item.candidates.some((candidate) => candidate.verified) ||
+    !(
+      item.searchState === "completed" ||
+      (item.searchState === "pending" && item.samplingStopped && !item.searchCursor?.failed.length)
+    )
+  )
+    return;
+  item.searchState = "skipped";
+  delete item.exclusion;
+  const note = "无样本，未计入参考合计；市场售价未知。";
+  if (!item.issues.includes(note)) item.issues.push(note);
 }
 
 export function finishPricingSearch<T extends EquipmentPricingSnapshot>(snapshot: T): T {
-  for (const item of snapshot.items) reconcilePricingCompletion(item, snapshot.searchItems);
+  for (const item of snapshot.items) {
+    reconcilePricingCompletion(item, snapshot.searchItems);
+    skipUnmatchedPricing(item);
+  }
   snapshot.knownTotal =
     Math.round(snapshot.items.reduce((sum, item) => sum + (item.referencePrice ?? 0), 0) * 100) /
     100;
@@ -154,11 +196,24 @@ export function pricingSearchAdvanced(
   previous: EquipmentPricingSnapshot | undefined,
   current: EquipmentPricingSnapshot,
 ) {
-  if (current.items.some((item) => item.searchState === "read_failed")) return false;
+  if (
+    current.items.some(
+      (item) =>
+        item.searchState === "read_failed" ||
+        (item.samplingStopped && item.searchState !== "skipped"),
+    )
+  )
+    return false;
   return current.items.some((item) => {
     const saved = previous?.items.find((value) => value.key === item.key);
     if (
-      ["completed", "unsupported"].includes(item.searchState || "") &&
+      item.searchState === "pending" &&
+      item.searchFailureCount === 1 &&
+      !saved?.searchFailureCount
+    )
+      return true;
+    if (
+      ["completed", "unsupported", "skipped"].includes(item.searchState || "") &&
       item.searchState !== saved?.searchState
     )
       return true;

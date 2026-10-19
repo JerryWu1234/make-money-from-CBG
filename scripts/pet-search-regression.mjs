@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ts from "typescript";
@@ -67,6 +67,7 @@ const matcher = await moduleUrl("server/analysis/equipment-match.ts", {
   "./equip-attributes": attributes,
 });
 const marketScope = await moduleUrl("server/analysis/market-scope.ts");
+const { marketRequestEvidence } = await import(marketScope);
 const specialMatcher = await moduleUrl("server/analysis/special-asset-match.ts", {
   "../crawler/compact": compact,
   "./equipment-match": matcher,
@@ -95,6 +96,9 @@ const pacedPage = inline(
 );
 const petMatcher = await moduleUrl("server/analysis/pet-match.ts");
 const petPricing = await moduleUrl("server/analysis/pet-pricing.ts", {
+  "./pet-gear-match": await moduleUrl("server/analysis/pet-gear-match.ts", {
+    "../crawler/compact": compact,
+  }),
   "./market-scope": marketScope,
   "./pet-match": petMatcher,
   "./pricing-progress": progress,
@@ -217,7 +221,9 @@ try {
   const context = browser.contexts()[0];
   let searchOptions = {},
     detailOptions = {},
-    detailVisits = [];
+    detailVisits = [],
+    clockOffset = 0,
+    marketRequests = [];
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.origin !== "https://xyq.cbg.163.com") return route.abort();
@@ -226,10 +232,16 @@ try {
         contentType: "image/gif",
         body: Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64"),
       });
+    if (url.pathname === "/cgi-bin/recommend.py") {
+      const evidence = marketRequestEvidence(url.href, route.request().postData());
+      if (evidence) marketRequests.push(evidence);
+      return route.fulfill({ contentType: "application/json", body: "{}" });
+    }
     let body;
     if (url.pathname === "/sentinel-role-list") body = roleSentinelDocument;
     else if (url.pathname === "/equip") {
       detailVisits.push(url.searchParams.get("eid"));
+      if (searchOptions.expireAfterDetails === detailVisits.length) clockOffset = 240001;
       body = petDetailDocument(
         typeof detailOptions === "function"
           ? detailOptions(url.searchParams.get("eid"))
@@ -255,18 +267,219 @@ try {
     searchOptions = search;
     detailOptions = detail;
     detailVisits = [];
+    marketRequests = [];
     const searchPage = await createHiddenPage(browser),
       detailPage = await createHiddenPage(browser),
       control = new AbortController();
-    const source = petSourceFromPages(bounded(searchPage), bounded(detailPage), control.signal);
+    const originalNow = Date.now;
+    clockOffset = 0;
+    if (search.expireAfterDetails) Date.now = () => originalNow() + clockOffset;
+    const source = petSourceFromPages(
+      bounded(searchPage),
+      bounded(detailPage),
+      control.signal,
+      "1",
+    );
     try {
       await run({ source, searchPage, detailPage, control });
     } finally {
+      Date.now = originalNow;
       await source.close();
     }
     assert.equal(searchPage.isClosed(), true);
     assert.equal(detailPage.isClosed(), true);
   };
+  await check("未命名饰品候选排除后仍只核验前5条，取其余4条最低价", () =>
+    withSource(
+      { pages: [Array.from({ length: 6 }, (_, i) => ({ eid: "unnamed-" + i, name: "画魂" }))] },
+      (id) =>
+        Number(id.split("-").at(-1)) === 0
+          ? {
+              equipment: [{ name: "", description: "玄天灵力 0", shipin: true }],
+              lazyGear: true,
+              price: 1,
+            }
+          : {
+              price: [1, 500, 300, 400, 600, 1][Number(id.split("-").at(-1))],
+              rawPrice: [1, 500, 300, 400, 600, 1][Number(id.split("-").at(-1))],
+            },
+      async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.searchComplete, true, JSON.stringify(result.searchItems));
+        assert.equal(result.items[0].referencePrice, 300);
+        assert.equal(result.items[0].candidates.filter((c) => c.verified).length, 4);
+        assert.match(
+          result.items[0].candidates.find((c) => c.url.includes("unnamed-0")).reason,
+          /未命名饰品/,
+        );
+        assert.deepEqual(detailVisits, [
+          "unnamed-0",
+          "unnamed-1",
+          "unnamed-2",
+          "unnamed-3",
+          "unnamed-4",
+        ]);
+        assert.ok(result.searchItems.every((r) => !r.detailFailures?.length));
+        if (process.env.CBG_UNNAMED_PROOF)
+          await writeFile(
+            process.env.CBG_UNNAMED_PROOF,
+            JSON.stringify(
+              { state: "passed", scenario: "first-five-minimum", snapshot: result, detailVisits },
+              null,
+              2,
+            ),
+          );
+      },
+    ),
+  );
+  await check("同次查询重复读取未命名饰品候选只打开一次详情", () =>
+    withSource(
+      { pages: [[{ eid: "unnamed-cached", name: "画魂" }]] },
+      { equipment: [{ name: "", description: "玄天灵力 0", shipin: true }], lazyGear: true },
+      async ({ source, control }) => {
+        const url = "https://xyq.cbg.163.com/equip?s=1&eid=unnamed-cached";
+        await assert.rejects(source.readSource(url, control.signal), /未命名饰品/);
+        await assert.rejects(source.readSource(url, control.signal), /未命名饰品/);
+        assert.deepEqual(detailVisits, ["unnamed-cached"]);
+      },
+    ),
+  );
+  await check("未命名饰品候选全部排除时宝宝跳过，保留未知价格", () =>
+    withSource(
+      { pages: [[{ eid: "unnamed-only", name: "画魂" }]] },
+      { equipment: [{ name: "", description: "玄天灵力 0", shipin: true }], lazyGear: true },
+      async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].searchState, "skipped");
+        assert.equal(result.items[0].referencePrice, null);
+        assert.equal(result.knownTotal, 0);
+        assert.ok(
+          result.items[0].candidates.every((c) => !c.verified && /未命名饰品/.test(c.reason)),
+        );
+      },
+    ),
+  );
+  await check("未命名饰品的旧失败游标恢复后排除候选，不读取第6条", async () => {
+    let loaded = false;
+    await withSource(
+      {
+        pages: [Array.from({ length: 6 }, (_, i) => ({ eid: "retry-unnamed-" + i, name: "画魂" }))],
+      },
+      (id) =>
+        Number(id.split("-").at(-1)) === 0
+          ? {
+              equipment: [
+                { name: "", description: loaded ? "玄天灵力 0" : "未加载", shipin: true },
+              ],
+              lazyGear: true,
+            }
+          : {
+              price: [1, 500, 300, 400, 600, 1][Number(id.split("-").at(-1))],
+              rawPrice: [1, 500, 300, 400, 600, 1][Number(id.split("-").at(-1))],
+            },
+      async ({ source, control }) => {
+        const first = await searchPetPricing(record(), control.signal, source);
+        assert.equal(first.items[0].searchState, "read_failed");
+        assert.equal(first.items[0].searchCursor.failed.length, 1);
+        loaded = true;
+        await assert.rejects(
+          source.readSource(first.items[0].searchCursor.failed[0].url, control.signal),
+          /未命名饰品/,
+        );
+        const result = await searchPetPricing(record(), control.signal, source, first);
+        assert.equal(result.searchComplete, true, JSON.stringify(result.searchItems));
+        assert.equal(result.items[0].referencePrice, 300);
+        assert.equal(result.items[0].searchCursor?.failed.length || 0, 0);
+        assert.ok(!detailVisits.includes("retry-unnamed-5"));
+        assert.ok(
+          result.searchItems.some(
+            (r) =>
+              r.kind === "saved_detail_refresh" &&
+              r.candidates.some((c) => /未命名饰品/.test(c.reason)),
+          ),
+        );
+      },
+    );
+  });
+
+  await check("宝宝结果等待超时能区分回调缺失与加载图标不消失", async () => {
+    for (const settings of [{ mode: "stalled" }, { keepLoading: true }]) {
+      await withSource(settings, {}, async ({ source, control }) => {
+        await assert.rejects(
+          () => searchPetPricing(record(), control.signal, source),
+          (error) => {
+            assert.equal(error.name, "TimeoutError");
+            assert.equal(error.code, "PET_SEARCH_RESULT_TIMEOUT");
+            assert.match(error.message, /宝宝搜索结果等待超时/);
+            assert.match(
+              error.message,
+              settings.keepLoading ? /回调已收到.*加载图标仍显示/ : /回调未收到.*加载图标已消失/,
+            );
+            return true;
+          },
+        );
+        assert.deepEqual(detailVisits, []);
+      });
+    }
+  });
+  await check("成长浮点截断边界通过真实表单提交，条件校验不放宽", async () => {
+    await withSource({}, {}, async ({ searchPage, control }) => {
+      await searchPage.goto(
+        "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=show_overall_search_pet",
+      );
+      const target = {
+        ...record().detail.tabs[0].pets[0],
+        name: "画魂",
+        level: 119,
+        skills: petSkills,
+      };
+      for (const growth of [1001, 1003, 1009, 1039, 1250, 1280]) {
+        const args = {
+          ...petQuery(target, {
+            names: { 2001: "画魂" },
+            skills: [
+              [1, "须弥真言"],
+              [2, "高级法术暴击"],
+            ],
+            highNeidans: [[9, "催心浪"]],
+            lowNeidans: [],
+          }),
+          growth,
+        };
+        args.serverid = "1";
+        const evidence = await fillPetSearchForm(searchPage, target, args, control.signal);
+        await searchPage.locator("#btn_pet_search").click();
+        const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
+        assert.equal(actual.growth, growth);
+        assertPetUIArguments(args, actual);
+        assert.equal(parseInt(parseFloat(evidence.inputs.txt_growth) * 1000, 10), growth);
+        assert.throws(
+          () => assertPetUIArguments(args, { ...actual, growth: growth - 1 }),
+          /growth/,
+        );
+      }
+    });
+  });
+  await check("成长1.009宝宝完整查价通过表单并取得可核验模拟样本", async () => {
+    const growthFields = petFields.map((field) =>
+      field.name === "成长" ? { ...field, value: "1.009" } : field,
+    );
+    const targetRecord = record();
+    targetRecord.detail.tabs[0].pets[0].fields = growthFields;
+    await withSource(
+      {},
+      { fields: growthFields, rawGrowth: 1.009 },
+      async ({ source, control }) => {
+        const result = await searchPetPricing(targetRecord, control.signal, source);
+        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].referencePrice, 368.6);
+        assert.ok(result.items[0].candidates.every((candidate) => candidate.verified));
+        const item = result.searchItems.find((entry) => entry.uiEvidence?.length);
+        assert.equal(item.uiEvidence[0].submittedArgs.growth, 1009);
+      },
+    );
+  });
   await check("相近分组保留须弥法宠核心，每组都有有限附近等级且同级优先", async () => {
     const skills = ["须弥真言", "高级法术连击", "高级魔之心", "法术暴击", "地狱烈火", "慧根"];
     const choices = skills.map((name, index) => [index + 1, name]);
@@ -301,13 +514,14 @@ try {
       const plan = similar.find(
         ({ args }) => args.level_min === 94 && String(args.skill).split(",").length === 4,
       );
+      plan.args.serverid = "1";
       await fillPetSearchForm(searchPage, target, plan.args, control.signal);
       await searchPage.locator("#btn_pet_search").click();
       assertPetUIArguments(plan.args, await searchPage.evaluate(() => window.CurSearchValue.arg));
     });
   });
   await check("详情预算耗尽自动保存官方表单游标，恢复后读取后面的有效宝宝报价", async () => {
-    const rows = Array.from({ length: 9 }, (_, index) => ({
+    const rows = Array.from({ length: 6 }, (_, index) => ({
       eid: `sample-${index}`,
       name: "画魂",
       type: "2001",
@@ -317,7 +531,7 @@ try {
       return {
         price: 300 + index * 10,
         rawPrice: 300 + index * 10,
-        ...(index < 6 ? { skills: [], parsedSkillIds: [] } : {}),
+        ...(index > 0 && index < 4 ? { skills: [], parsedSkillIds: [] } : {}),
       };
     };
     const target = {
@@ -336,30 +550,37 @@ try {
       issues: [],
       query: "",
     };
-    let cursor;
-    await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
-      const result = await source.findCandidates([target], control.signal);
-      assert.equal(result.items[0].searchState, "pending");
-      cursor = result.items[0].searchCursor;
-      assert.equal(cursor.rowIndex, 6);
-      assert.equal(detailVisits.length, 6);
-    });
+    let cursor, savedCandidates;
+    await withSource(
+      { pages: [rows], expireAfterDetails: 3 },
+      detail,
+      async ({ source, control }) => {
+        const result = await source.findCandidates([target], control.signal);
+        assert.equal(result.items[0].searchState, "pending");
+        cursor = result.items[0].searchCursor;
+        savedCandidates = result.items[0].candidates;
+        assert.equal(cursor.rowIndex, 3);
+        assert.equal(detailVisits.length, 3);
+      },
+    );
     await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
       const result = await source.findCandidates(
-        [{ ...target, searchCursor: cursor }],
+        [{ ...target, searchCursor: cursor, candidates: savedCandidates }],
         control.signal,
       );
       assert.equal(result.items[0].searchState, "completed");
-      assert.deepEqual(detailVisits, ["sample-6", "sample-7", "sample-8"]);
+      assert.deepEqual(detailVisits, ["sample-0", "sample-3", "sample-4"]);
       assert.deepEqual(
-        result.items[0].candidates.map(({ price }) => price),
-        [360, 370, 380],
+        result.items[0].candidates
+          .filter((candidate) => candidate.verified)
+          .map(({ price }) => price),
+        [300, 340],
       );
-      assert.ok(result.items[0].candidates.every(({ verified }) => verified));
+      assert.equal(result.items[0].candidates.filter((candidate) => candidate.verified).length, 2);
     });
   });
   await check("续查宝宝页面重排或清空时清除旧候选，重新按官网顺序收集", async () => {
-    const rows = Array.from({ length: 9 }, (_, index) => ({
+    const rows = Array.from({ length: 6 }, (_, index) => ({
       eid: `order-${index}`,
       name: "画魂",
       type: "2001",
@@ -369,7 +590,7 @@ try {
       return {
         price: 300 + index,
         rawPrice: 300 + index,
-        ...(index > 0 && index < 6 ? { skills: [], parsedSkillIds: [] } : {}),
+        ...(index > 0 && index < 4 ? { skills: [], parsedSkillIds: [] } : {}),
       };
     };
     const target = {
@@ -389,12 +610,16 @@ try {
       query: "",
     };
     let saved;
-    await withSource({ pages: [rows] }, detail, async ({ source, control }) => {
-      saved = (await source.findCandidates([target], control.signal)).items[0];
-      assert.equal(saved.searchState, "pending");
-      assert.equal(saved.candidates.filter((x) => x.verified).length, 1);
-    });
-    for (const changed of [[rows[8], ...rows.slice(0, 8)], []]) {
+    await withSource(
+      { pages: [rows], expireAfterDetails: 3 },
+      detail,
+      async ({ source, control }) => {
+        saved = (await source.findCandidates([target], control.signal)).items[0];
+        assert.equal(saved.searchState, "pending");
+        assert.equal(saved.candidates.filter((x) => x.verified).length, 1);
+      },
+    );
+    for (const changed of [[rows[5], ...rows.slice(0, 5)], []]) {
       await withSource({ pages: [changed] }, detail, async ({ source, control }) => {
         const result = await source.findCandidates([{ ...target, ...saved }], control.signal);
         const reset = result.items[0];
@@ -415,7 +640,7 @@ try {
             rebuilt.candidates
               .filter((x) => x.verified)
               .map((x) => new URL(x.url).searchParams.get("eid")),
-            ["order-8", "order-0", "order-6", "order-7"],
+            ["order-5", "order-0"],
           );
         }
       });
@@ -423,7 +648,7 @@ try {
   });
 
   await check("续查宝宝当前页未变也核验已读完前页", async () => {
-    const rows = Array.from({ length: 9 }, (_, index) => ({
+    const rows = Array.from({ length: 6 }, (_, index) => ({
       eid: `prefix-${index}`,
       name: "画魂",
       type: "2001",
@@ -431,7 +656,9 @@ try {
     const detail = (id) => ({
       price: 300,
       rawPrice: 300,
-      ...(id !== "prefix-new" && Number(id.split("-").at(-1)) < 6
+      ...(id !== "prefix-new" &&
+      Number(id.split("-").at(-1)) > 0 &&
+      Number(id.split("-").at(-1)) < 5
         ? { skills: [], parsedSkillIds: [] }
         : {}),
     });
@@ -453,7 +680,7 @@ try {
     };
     let saved;
     await withSource(
-      { pages: [rows.slice(0, 6), rows.slice(6)] },
+      { pages: [rows.slice(0, 2), rows.slice(2)], expireAfterDetails: 3 },
       detail,
       async ({ source, control }) => {
         saved = (await source.findCandidates([target], control.signal)).items[0];
@@ -463,8 +690,8 @@ try {
     await withSource(
       {
         pages: [
-          [{ eid: "prefix-new", name: "画魂", type: "2001" }, ...rows.slice(1, 6)],
-          rows.slice(6),
+          [{ eid: "prefix-new", name: "画魂", type: "2001" }, ...rows.slice(1, 2)],
+          rows.slice(2),
         ],
       },
       detail,
@@ -522,6 +749,7 @@ try {
             highNeidans: [],
             lowNeidans: [],
           });
+          args.serverid = "1";
           const evidence = await fillPetSearchForm(searchPage, target, args, control.signal);
           await searchPage.locator("#btn_pet_search").click();
           const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
@@ -530,8 +758,8 @@ try {
           assert.equal(await searchPage.locator("#txt_level_min").inputValue(), String(level));
           assert.equal(actual.level_min, level);
           assert.equal(actual.level_max, level);
-          assert.equal(actual.server_type, "3");
-          assert.equal(actual.serverid, undefined);
+          assert.equal(actual.server_type, undefined);
+          assert.equal(actual.serverid, "1");
           assert.equal(actual.cross_buy_serverid, undefined);
           assert.equal(evidence.inputs.pet_select_box, name);
           assert.equal(
@@ -580,6 +808,7 @@ try {
               { names, skills: [], highNeidans: [], lowNeidans: [], traits },
               mode,
             );
+            args.serverid = "1";
             const evidence = await fillPetSearchForm(searchPage, target, args, control.signal);
             await searchPage.locator("#btn_pet_search").click();
             const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
@@ -587,7 +816,7 @@ try {
             assert.equal(actual.super_sum_star, expectedStar);
             assert.equal(actual.texing, expectedTrait);
             assert.equal(actual.level_min, level);
-            assert.equal(actual.server_type, "3");
+            assert.equal(actual.server_type, undefined);
             assert.equal(actual.positive_effect, undefined);
             assert.equal(actual.negative_effect, undefined);
             assert.deepEqual(evidence.selections.super_sum_star, [expectedStar]);
@@ -617,6 +846,7 @@ try {
           lowNeidans: [],
           traits,
         });
+        args.serverid = "1";
         await fillPetSearchForm(searchPage, target, args, control.signal);
         await searchPage.locator("#btn_pet_search").click();
         const actual = await searchPage.evaluate(() => window.CurSearchValue.arg);
@@ -734,6 +964,41 @@ try {
         assert.equal(detailVisits.length, 0);
       });
   });
+  await check("公示期模板绑定主宝宝、公开描述与主价，推荐及费用不混入", async () => {
+    for (const detail of [
+      { prepayTemplate: true, legacyDescription: true, encodedJson: true },
+      {
+        prepayTemplate: true,
+        legacyDescription: true,
+        encodedJson: true,
+        recommendationFirst: true,
+        recommendationMainIds: true,
+      },
+    ])
+      await withSource({}, detail, async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.total, 368.6);
+        assert.equal(result.items[0].candidates[0].verified, true);
+        assert.equal(result.items[0].candidates[0].price, 368.6);
+      });
+    for (const detail of [
+      { duplicatePanel: true },
+      { wrapperClass: "unverified" },
+      { missingPetParser: true },
+      { rawEid: "other" },
+      { rawPrice: 36860 },
+      { status: "已下架", selling: 1 },
+    ])
+      await withSource(
+        {},
+        { prepayTemplate: true, legacyDescription: true, encodedJson: true, ...detail },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          assert.equal(result.total, null);
+          assert.equal(result.items[0].candidates[0].verified, false);
+        },
+      );
+  });
   await check("source→adapter等待主区域/主价/JSON，绑定新容器并排除先出现的同名推荐", async () => {
     for (const detail of [
       {},
@@ -762,8 +1027,8 @@ try {
         assert.equal(query.growth, 1280);
         assert.equal(query.attack_aptitude, 1550);
         assert.equal(query.skill, "1,2");
-        assert.equal(query.serverid, undefined);
-        assert.equal(query.server_type, "3");
+        assert.equal(query.serverid, "1");
+        assert.equal(query.server_type, undefined);
         assert.equal(await searchPage.evaluate(() => window.historyWrites), 1);
         assert.equal(
           await role.evaluate(() => localStorage.getItem("saved_overall_search_pet_query")),
@@ -780,15 +1045,17 @@ try {
           result.queries.length,
         );
         const [scope] = result.searchItems[0].scopeEvidence;
-        assert.equal(scope.request.serverType, "3");
+        assert.equal(scope.request.serverType, "");
         assert.equal(scope.request.searchType, "overall_search_pet");
-        assert.deepEqual(scope.request.restrictions, {});
+        assert.deepEqual(scope.request.restrictions, { serverid: "1" });
         assert.deepEqual(scope.candidateServers, { 1: 1 });
       });
   });
-  await check("最终市场请求仍为三年以上全服，helper污染、漏请求或错误页码拒绝计价", async () => {
+  await check("最终请求必须目标单服，helper漏服、错服、漏请求或错误页码拒绝计价", async () => {
     for (const search of [
-      { dropServerType: true },
+      { dropServerId: true },
+      { marketOverrides: { serverid: "" } },
+      { marketOverrides: { serverid: "1,33" } },
       { marketOverrides: { server_type: "2" } },
       { marketOverrides: { serverid: "33" } },
       { marketOverrides: { area_id: "1" } },
@@ -799,6 +1066,76 @@ try {
         await assert.rejects(() => searchPetPricing(record(), control.signal, source));
         assert.deepEqual(detailVisits, []);
       });
+  });
+  await check("当前角色单服选区、网络请求、翻页及错服停止证据", async () => {
+    const evidence = [];
+    await withSource(
+      { pages: [[{ eid: "one", name: "宝宝昵称" }], [{ eid: "two", name: "宝宝昵称" }]] },
+      {},
+      async ({ source, searchPage, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source);
+        assert.equal(result.searchComplete, true);
+        assert.ok(marketRequests.some((request) => request.page === 2));
+        assert.ok(
+          marketRequests.every(
+            (request) => request.restrictions.serverid === "1" && request.serverType === "",
+          ),
+        );
+        const actions = await searchPage.evaluate(() => window.uiActions);
+        assert.ok(
+          actions.some(
+            (action) =>
+              action.action === "area-change" &&
+              action.area === "1" &&
+              action.servers.includes("1"),
+          ),
+        );
+        assert.ok(
+          actions.some((action) => action.action === "server-change" && action.server === "1"),
+        );
+        evidence.push({
+          scenario: "target-server-pagination",
+          requests: [...marketRequests],
+          actions,
+          result,
+        });
+      },
+    );
+    for (const settings of [
+      { dropServerPage: 2 },
+      { pages: [[{ eid: "foreign", name: "宝宝昵称", serverId: "33" }]] },
+    ]) {
+      await withSource(
+        {
+          pages: [[{ eid: "one", name: "宝宝昵称" }], [{ eid: "two", name: "宝宝昵称" }]],
+          ...settings,
+        },
+        {},
+        async ({ source, control }) => {
+          let error;
+          await assert.rejects(async () => {
+            try {
+              await searchPetPricing(record(), control.signal, source);
+            } catch (failure) {
+              error = failure.message;
+              throw failure;
+            }
+          }, /单服/);
+          if (settings.pages) assert.deepEqual(detailVisits, []);
+          evidence.push({
+            scenario: settings.dropServerPage ? "pagination-drops-server" : "foreign-row",
+            requests: [...marketRequests],
+            detailVisits: [...detailVisits],
+            error,
+          });
+        },
+      );
+    }
+    await mkdir("data/pr27-fix-validation", { recursive: true });
+    await writeFile(
+      "data/pr27-fix-validation/pet-single-server-scope.json",
+      JSON.stringify({ simulated: true, targetServerId: "1", evidence }, null, 2),
+    );
   });
   await check("官网编码描述经页面解码器再解析，仍绑定可见主属性与价格", async () => {
     for (const detail of [
@@ -926,13 +1263,14 @@ try {
         const result = await searchPetPricing(record(), control.signal, source);
         assert.equal(result.total, null);
         assert.match(result.items[0].candidates[0].reason, /未来\/赐福技能描述结构/);
-        assert.equal(result.items[0].searchState, "unsupported");
-        assert.equal(result.items[0].status, "unsupported");
-        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].searchState, "read_failed");
+        assert.equal(result.items[0].status, "no_match");
+        assert.equal(result.searchComplete, false);
         assert.equal(result.items[0].referencePrice, null);
         assert.ok(!result.items[0].similarEstimate?.range);
         assert.ok(result.searchItems.some((item) => item.unsupportedDetails.length > 0));
         assert.ok(result.searchItems.every((item) => item.detailFailures.length === 0));
+        assert.ok(result.items[0].searchCursor.failed.length > 0);
       });
     await withSource({}, {}, async ({ source, control }) => {
       const input = record();
@@ -962,10 +1300,11 @@ try {
           const result = await searchPetPricing(record(), control.signal, source);
           assert.equal(result.total, null);
           assert.equal(result.items[0].referencePrice, null);
-          assert.equal(result.items[0].searchState, "unsupported");
-          assert.equal(result.searchComplete, true);
+          assert.equal(result.items[0].searchState, "read_failed");
+          assert.equal(result.searchComplete, false);
           assert.ok(result.searchItems.some((item) => item.unsupportedDetails.length > 0));
           assert.ok(result.searchItems.every((item) => item.detailFailures.length === 0));
+          assert.ok(result.items[0].searchCursor.failed.length > 0);
         },
       );
   });
@@ -1035,7 +1374,7 @@ try {
         await withSource({}, { ...configuration, ...broken }, async ({ source, control }) => {
           const result = await searchPetPricing(record(), control.signal, source);
           assert.equal(result.total, null);
-          assert.equal(result.items[0].searchState, "unsupported");
+          assert.equal(result.items[0].searchState, "read_failed");
         });
       await withSource(
         {},
@@ -1043,7 +1382,7 @@ try {
         async ({ source, control }) => {
           const result = await searchPetPricing(record(), control.signal, source);
           assert.equal(result.total, null);
-          assert.equal(result.items[0].searchState, "unsupported");
+          assert.equal(result.items[0].searchState, "read_failed");
           assert.match(result.items[0].candidates[0].reason, /未明之赐占位尚未揭示技能/);
         },
       );
@@ -1106,8 +1445,8 @@ try {
           const unsupported = rows[0].eid === "cifu";
           assert.equal(result.total, null);
           assert.equal(result.items[0].referencePrice, null);
-          assert.equal(result.items[0].searchState, unsupported ? "unsupported" : "read_failed");
-          assert.equal(result.searchComplete, unsupported);
+          assert.equal(result.items[0].searchState, "read_failed");
+          assert.equal(result.searchComplete, false);
           assert.deepEqual(detailVisits, [rows[0].eid]);
           assert.ok(
             result.searchItems.some(
@@ -1284,7 +1623,7 @@ try {
       assert.equal(result.queries.length, 1);
     }),
   );
-  await check("分页结果不足十件时去重后用实际样本均价，所有候选都经过主详情核对", () =>
+  await check("分页结果不足五件时去重后用实际样本最低价，所有候选都经过主详情核对", () =>
     withSource(
       {
         pages: [
@@ -1298,13 +1637,93 @@ try {
       (eid) => ({ price: eid === "a" ? 1000 : 1400, rawPrice: eid === "a" ? "1000" : "1400" }),
       async ({ source, control }) => {
         const result = await searchPetPricing(record(), control.signal, source);
-        assert.equal(result.total, 1200);
+        assert.equal(result.total, 1000);
         assert.deepEqual(detailVisits, ["a", "b"]);
         assert.equal(result.items[0].candidates.filter((value) => value.verified).length, 2);
       },
     ),
   );
-  await check("前十件宝宝跨页去重和断点续查后计算均价，不采用第十一件低价", async () => {
+  await check("每筛选条件只核验前五条：实际三件最低价，无有效样本跳过，不读取第六条", async () => {
+    const rows = Array.from({ length: 6 }, (_, i) => ({ eid: `bounded-${i}`, name: "宝宝昵称" }));
+    const evidence = [];
+    for (const validIndexes of [[0, 2, 4], [5]]) {
+      await withSource(
+        { pages: [rows] },
+        (eid) => {
+          const index = Number(eid.split("-").at(-1));
+          return {
+            price: 100 + index * 100,
+            rawPrice: 100 + index * 100,
+            ...(!validIndexes.includes(index) ? { skills: [], parsedSkillIds: [] } : {}),
+          };
+        },
+        async ({ source, control }) => {
+          const result = await searchPetPricing(record(), control.signal, source);
+          assert.equal(result.searchComplete, true);
+          assert.ok(!detailVisits.includes("bounded-5"));
+          assert.deepEqual(
+            [...new Set(detailVisits)],
+            rows.slice(0, 5).map((row) => row.eid),
+          );
+          if (validIndexes.length === 3) {
+            assert.equal(result.items[0].referencePrice, 100);
+            assert.equal(result.items[0].candidates.filter((x) => x.verified).length, 3);
+          } else {
+            assert.equal(result.items[0].searchState, "skipped");
+            assert.equal(result.items[0].referencePrice, null);
+          }
+          assert.ok(result.items[0].issues.some((x) => /范围有限/.test(x)));
+          evidence.push({ simulated: true, validIndexes, detailVisits: [...detailVisits], result });
+        },
+      );
+    }
+    await mkdir("data/pr27-fix-validation", { recursive: true });
+    await writeFile(
+      "data/pr27-fix-validation/pet-first-five-condition.json",
+      JSON.stringify(evidence, null, 2),
+    );
+  });
+  await check("第五条读取失败不按无样本跳过，修复后完成前五条范围而不读取第六条", async () => {
+    const rows = Array.from({ length: 6 }, (_, i) => ({ eid: `failure-${i}`, name: "宝宝昵称" }));
+    let previous;
+    await withSource(
+      { pages: [rows] },
+      (eid) => {
+        const index = Number(eid.split("-").at(-1));
+        return {
+          price: 100,
+          rawPrice: 100,
+          ...(index === 4
+            ? { duplicatePanel: true }
+            : index > 0
+              ? { skills: [], parsedSkillIds: [] }
+              : {}),
+        };
+      },
+      async ({ source, control }) => {
+        previous = await searchPetPricing(record(), control.signal, source);
+        assert.equal(previous.searchComplete, false);
+        assert.equal(previous.items[0].searchState, "read_failed");
+        assert.equal(previous.items[0].searchCursor.rowIndex, 5);
+      },
+    );
+    await withSource(
+      { pages: [rows] },
+      (eid) => ({
+        price: 100,
+        rawPrice: 100,
+        ...(eid !== "failure-0" ? { skills: [], parsedSkillIds: [] } : {}),
+      }),
+      async ({ source, control }) => {
+        const result = await searchPetPricing(record(), control.signal, source, previous);
+        assert.equal(result.searchComplete, true);
+        assert.equal(result.items[0].referencePrice, 100);
+        assert.equal(result.items[0].searchState, "completed");
+        assert.ok(!detailVisits.includes("failure-5"));
+      },
+    );
+  });
+  await check("前五件宝宝跨页去重和断点续查后取最低价，不采用第六件低价", async () => {
     const prices = [100, 110, 120, 130, 140, 150, 160, 170, 180, 900, 1];
     const rows = prices.map((_, index) => ({ eid: `ten-${index}`, name: "宝宝昵称" }));
     const pages = [rows.slice(0, 5), [rows[0], ...rows.slice(5)]];
@@ -1325,14 +1744,14 @@ try {
     }
     assert.equal(previous.searchComplete, true);
     assert.equal(previous.items[0].searchState, "completed");
-    assert.equal(previous.total, 216);
-    assert.equal(previous.items[0].priceMethod, "first-ten-average-v2");
+    assert.equal(previous.total, 100);
+    assert.equal(previous.items[0].priceMethod, "first-five-minimum-v4");
     assert.deepEqual(
       previous.items[0].candidates.map(({ price }) => price),
-      prices.slice(0, 10),
+      prices.slice(0, 5),
     );
     assert.ok(previous.items[0].candidates.every(({ verified }) => verified));
-    assert.ok(!visits.includes("ten-10"));
+    assert.ok(!visits.includes("ten-5"));
   });
   await check("官网空结果保留未定价，验证码/查询失败中止而非伪造无匹配", async () => {
     await withSource({ pages: [[]] }, {}, async ({ source, control }) => {

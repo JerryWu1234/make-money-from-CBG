@@ -115,6 +115,9 @@ try {
         contentType: "text/html; charset=utf-8",
         // Simulate the final URL/identity of a redirect without allowing redirect-chain network traffic.
         body:
+          (settings.detailLogin === id
+            ? "<script>history.replaceState(null,'','/cgi-bin/show_login.py');window.IsLogin=0</script>"
+            : "") +
           (settings.redirectFrom === id
             ? "<script>history.replaceState(null,'','/equip?s=1&eid=redirected-product')</script>"
             : "") +
@@ -157,7 +160,7 @@ try {
     formStates = [];
     detailVisits = [];
     navigationCount = 0;
-    const source = await createPetGearSource(new AbortController().signal, budgets);
+    const source = await createPetGearSource(new AbortController().signal, "1", budgets);
     try {
       return await source.findCandidates([target], new AbortController().signal);
     } finally {
@@ -231,9 +234,10 @@ try {
   };
   const assertClearedFilters = () => {
     for (const request of requests) {
+      assert.equal(request.serverid, "1");
+      assert.equal(request.server_type, undefined);
       for (const key of [
         "cross_buy_serverid",
-        "serverid",
         "areaid",
         "addon_sum_include_damage",
         "include_no_skill",
@@ -246,8 +250,8 @@ try {
     assert.equal(formStates.length, requests.length);
     for (const state of formStates)
       assert.deepEqual(state, {
-        area: "",
-        server: "",
+        area: "33",
+        server: "1",
         noSuit: false,
         coverSuit: false,
         includeDamage: false,
@@ -315,13 +319,14 @@ try {
           result.items[0].candidates.filter((candidate) => candidate.verified).length,
           3,
         );
-        assert.equal(petGearReference(result.items[0].candidates).referencePrice, 220);
+        assert.equal(petGearReference(result.items[0].candidates).referencePrice, 200);
         assert.deepEqual(
           requests.map((request) => request.page),
           ["1", "2"],
         );
         for (const request of requests) {
-          assert.equal(request.server_type, "3");
+          assert.equal(request.server_type, undefined);
+          assert.equal(request.serverid, "1");
           assert.equal(request.level_min, String(target.level));
           assert.equal(request.level_max, String(target.level));
           assert.equal(
@@ -342,6 +347,15 @@ try {
     );
   }
   const target = item("项圈", 25, "等级 25\n速度 +20\n耐久度 120");
+  await check("详情跳转登录时停止查询，保留失败断点，不按无样本跳过", async () => {
+    const target = item("护腕", 85, "等级 85\n装备对象 召唤兽\n防御 +45\n耐久度 100");
+    const result = await run(target, { detailLogin: "one" });
+    assert.equal(result.items[0].searchStatus, "read_failed");
+    assert.match(result.items[0].note, /登录/);
+    assert.equal(result.items[0].searchCursor.failed.length, 1);
+    assert.equal(result.items[0].candidates.filter((candidate) => candidate.verified).length, 0);
+    assert.deepEqual(detailVisits, ["one"]);
+  });
   await check("详情跳转到另一商品不能作为原链接报价", async () => {
     const result = await run(target, { pages: [["one"]], redirectFrom: "one" });
     assert.equal(result.items[0].searchStatus, "read_failed");
@@ -366,7 +380,99 @@ try {
       ),
     );
   });
-  await check("前十件宝宝装备跨页去重计算均价，不采用第十一件低价", async () => {
+  await check("前五候选：名称等级属性拒项占名额，不读取第六件低价", async () => {
+    const ids = ["bad-name", "bad-level", "bad-stat", "valid-four", "valid-five", "six-cheap"];
+    const result = await run(target, {
+      pages: [ids],
+      rowNames: { "bad-name": "另一件宝宝装备" },
+      rowLevels: { "bad-level": target.level + 10 },
+      descriptions: { "bad-stat": target.description.replace("+20", "+100") },
+      prices: { "valid-four": 100, "valid-five": 110, "six-cheap": 1 },
+    });
+    assert.equal(result.items[0].searchStatus, "completed", result.items[0].note);
+    assert.deepEqual(detailVisits, ["bad-stat", "valid-four", "valid-five"]);
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 100);
+    assert.ok(
+      result.searchItems.some((record) =>
+        record.modes?.some((mode) => mode.sampled === 5 && mode.samplingComplete === true),
+      ),
+    );
+    await mkdir("data/pr27-fix-validation", { recursive: true });
+    await writeFile(
+      "data/pr27-fix-validation/pet-gear-first-five-rejections.json",
+      JSON.stringify({ simulated: true, result, requests, detailVisits }, null, 2),
+    );
+  });
+  await check("前五候选：全拒时不采用第六件有效低价", async () => {
+    const ids = [
+      "reject-one",
+      "reject-two",
+      "reject-three",
+      "reject-four",
+      "reject-five",
+      "six-cheap",
+    ];
+    const result = await run(target, {
+      pages: [ids],
+      descriptions: Object.fromEntries(
+        ids.slice(0, 5).map((id) => [id, target.description.replace("+20", "+100")]),
+      ),
+      prices: { "six-cheap": 1 },
+    });
+    assert.deepEqual(detailVisits, ids.slice(0, 5));
+    assert.equal(result.items[0].samplingStopped, true, result.items[0].note);
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, null);
+    assert.ok(result.items[0].note.includes("范围有限"));
+  });
+  await check("前五候选：续跑保留拒项计数，重复URL不占新名额且不读第六", async () => {
+    const ids = ["one", "two", "two", "three", "four", "five", "six-cheap"];
+    const settings = {
+      pages: [ids],
+      descriptions: { one: target.description.replace("+20", "+100") },
+      prices: { "six-cheap": 1 },
+    };
+    const first = await run(target, settings, {}, { maxDetails: 2 });
+    assert.equal(first.items[0].searchStatus, "pending");
+    const second = await run({ ...target, ...first.items[0] }, settings);
+    assert.deepEqual(detailVisits, ["two", "three", "four", "five"]);
+    assert.equal(second.items[0].searchStatus, "completed", second.items[0].note);
+    assert.equal(petGearReference(second.items[0].candidates).referencePrice, 100);
+    assert.ok(
+      second.searchItems.some((record) =>
+        record.modes?.some((mode) => mode.sampled === 5 && mode.samplingComplete === true),
+      ),
+    );
+  });
+  await check("前五候选：全拒断点续跑不重置计数或重读已拒商品", async () => {
+    const ids = [
+      "reject-one",
+      "reject-two",
+      "reject-three",
+      "reject-four",
+      "reject-five",
+      "six-cheap",
+    ];
+    const settings = {
+      pages: [ids],
+      descriptions: Object.fromEntries(
+        ids.slice(0, 5).map((id) => [id, target.description.replace("+20", "+100")]),
+      ),
+      prices: { "six-cheap": 1 },
+    };
+    const first = await run(target, settings, {}, { maxDetails: 2 });
+    assert.equal(first.items[0].searchStatus, "pending");
+    assert.equal(first.items[0].searchCursor.seen.length, 2);
+    const second = await run({ ...target, ...first.items[0] }, settings);
+    assert.deepEqual(detailVisits, ids.slice(2, 5));
+    assert.equal(second.items[0].samplingStopped, true, second.items[0].note);
+    assert.equal(petGearReference(second.items[0].candidates).referencePrice, null);
+    const modes = second.searchItems.flatMap((record) => record.modes || []);
+    assert.deepEqual(
+      modes.map(({ sampled }) => sampled),
+      [5, 5],
+    );
+  });
+  await check("前五件宝宝装备跨页去重取最低价，不采用第六件低价", async () => {
     const prices = [100, 110, 120, 130, 140, 150, 160, 170, 180, 900, 1];
     const ids = prices.map((_, index) => `ten-${index}`);
     const result = await run(target, {
@@ -374,15 +480,15 @@ try {
       prices: Object.fromEntries(ids.map((id, index) => [id, prices[index]])),
     });
     assert.equal(result.items[0].searchStatus, "completed", result.items[0].note);
-    assert.deepEqual(detailVisits, ids.slice(0, 10));
+    assert.deepEqual(detailVisits, ids.slice(0, 5));
     assert.deepEqual(
       result.items[0].candidates.map(({ price }) => price),
-      prices.slice(0, 10),
+      prices.slice(0, 5),
     );
-    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 216);
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 100);
     assert.deepEqual(
       requests.map(({ page }) => page),
-      ["1", "2"],
+      ["1"],
     );
   });
   await check("游标续查：详情预算保留当前页行位置与候选", async () => {
@@ -398,9 +504,35 @@ try {
     assert.equal(second.items[0].searchStatus, "completed", second.items[0].note);
     assert.equal(second.items[0].searchCursor, undefined);
     assert.deepEqual(detailVisits, ["one", "two", "three"]);
-    assert.equal(petGearReference(second.items[0].candidates).referencePrice, 220);
+    assert.equal(petGearReference(second.items[0].candidates).referencePrice, 200);
     assertClearedFilters();
   });
+  await check("前五候选：第一页三拒项仍跨页补足五条，第六不读", async () => {
+    const ids = ["empty-one", "empty-two", "empty-three"];
+    const result = await run(target, {
+      pages: [ids, ["valid-four", "valid-five", "six-cheap"]],
+      descriptions: Object.fromEntries(
+        ids.map((id) => [id, target.description.replace("+20", "+100")]),
+      ),
+      prices: { "valid-four": 100, "valid-five": 110, "six-cheap": 1 },
+    });
+    assert.equal(result.items[0].searchStatus, "completed", result.items[0].note);
+    assert.deepEqual(detailVisits, [...ids, "valid-four", "valid-five"]);
+    assert.deepEqual(
+      requests.map(({ page }) => page),
+      ["1", "2"],
+    );
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 100);
+    assert.ok(
+      result.searchItems.every((record) => (record.modes || []).every((mode) => mode.sampled <= 5)),
+    );
+    await mkdir("data/pr27-fix-validation", { recursive: true });
+    await writeFile(
+      "data/pr27-fix-validation/pet-gear-first-five-cross-page.json",
+      JSON.stringify({ simulated: true, result, requests, detailVisits }, null, 2),
+    );
+  });
+
   await check("游标续查：页面重排或清空时废弃旧取样组，从第一页重建", async () => {
     const first = await run(target, { pages: [["one", "two", "three"]] }, {}, { maxDetails: 2 });
     for (const changed of [["three", "one", "two"], []]) {
@@ -420,7 +552,7 @@ try {
           rebuilt.items[0].candidates.map((x) => new URL(x.url).searchParams.get("eid")),
           changed,
         );
-        assert.equal(petGearReference(rebuilt.items[0].candidates).referencePrice, 220);
+        assert.equal(petGearReference(rebuilt.items[0].candidates).referencePrice, 200);
       }
     }
   });
@@ -429,7 +561,7 @@ try {
     const overrides = {
       pages: [["badOne"], ["badTwo"], ["good"]],
       descriptions: {
-        badOne: target.description.replace("+20", "+100"),
+        badOne: target.description,
         badTwo: target.description.replace("+20", "+100"),
       },
     };
@@ -443,12 +575,12 @@ try {
       requests.map((request) => request.page),
       ["1", "2"],
     );
-    assert.deepEqual(detailVisits, ["badTwo"]);
+    assert.deepEqual(detailVisits, ["badOne", "badTwo"]);
     assert.equal(second.searchItems[0].replay, true);
     assert.equal(second.searchItems[1].page, 2);
     assertClearedFilters();
   });
-  await check("官网顺序的六条相近报价全部计均价，价差与距离不删样本", async () => {
+  await check("官网顺序只取前五件相近报价最低价，不因距离或价差删除有效样本", async () => {
     const ids = ["farOne", "farTwo", "farThree", "nearOne", "nearTwo", "nearThree"];
     const result = await run(target, {
       pages: [ids],
@@ -460,9 +592,9 @@ try {
       ),
     });
     assert.equal(result.items[0].searchStatus, "completed", result.items[0].note);
-    assert.deepEqual(detailVisits, ids);
-    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 265);
-    assert.equal(result.items[0].candidates.filter((candidate) => candidate.verified).length, 6);
+    assert.deepEqual(detailVisits, ids.slice(0, 5));
+    assert.equal(petGearReference(result.items[0].candidates).referencePrice, 100);
+    assert.equal(result.items[0].candidates.filter((candidate) => candidate.verified).length, 5);
   });
   await check("游标续查：失败详情先重试，再继续保存行之后的商品", async () => {
     const first = await run(target, {}, { kindId: 1 });
@@ -525,15 +657,52 @@ try {
       },
     );
   }
-  for (const scopeOverrides of [{ server_type: "2" }, { serverid: "33" }, { areaid: "33" }]) {
-    await check("拒绝实际请求的服龄/单服限制：" + JSON.stringify(scopeOverrides), async () => {
+  for (const scopeOverrides of [
+    { server_type: "2" },
+    { serverid: "33" },
+    { serverid: "" },
+    { serverid: "1,33" },
+    { areaid: "33" },
+  ]) {
+    await check("拒绝实际请求的额外服龄/错服/空服：" + JSON.stringify(scopeOverrides), async () => {
       const result = await run(target, { scopeOverrides });
       assert.equal(result.items[0].searchStatus, "read_failed");
-      assert.match(result.items[0].note, /三年以上|单服或地区/);
+      assert.match(result.items[0].note, /单服|额外/);
       assert.equal(result.items[0].candidates.length, 0);
       assert.equal(detailVisits.length, 0);
     });
   }
+  await check("目标单服真实选区与翻页请求，漏服和外服行停止", async () => {
+    const evidence = [];
+    const result = await run(target);
+    assert.equal(result.items[0].searchStatus, "completed", result.items[0].note);
+    assertClearedFilters();
+    assert.ok(requests.some((request) => request.page === "2"));
+    evidence.push({
+      scenario: "target-server-pagination",
+      requests: [...requests],
+      formStates: [...formStates],
+      result,
+    });
+    for (const settings of [{ dropServerId: true }, { dropServerPage: 2 }, { rowServerId: 33 }]) {
+      const stopped = await run(target, settings);
+      assert.equal(stopped.items[0].searchStatus, "read_failed", stopped.items[0].note);
+      assert.match(stopped.items[0].note, /单服/);
+      if (settings.rowServerId) assert.deepEqual(detailVisits, []);
+      evidence.push({
+        scenario: settings,
+        requests: [...requests],
+        formStates: [...formStates],
+        detailVisits: [...detailVisits],
+        result: stopped,
+      });
+    }
+    await mkdir("data/pr27-fix-validation", { recursive: true });
+    await writeFile(
+      "data/pr27-fix-validation/pet-gear-single-server-scope.json",
+      JSON.stringify({ simulated: true, targetServerId: "1", evidence }, null, 2),
+    );
+  });
   await check("后续登录失效保留已完成gear，并停止未查询gear", async () => {
     settings = {
       name: target.name,
@@ -545,7 +714,7 @@ try {
     detailSettings = {};
     navigationCount = 0;
     requests = [];
-    const source = await createPetGearSource(new AbortController().signal);
+    const source = await createPetGearSource(new AbortController().signal, "1");
     try {
       const result = await source.findCandidates(
         [target, { ...target, key: "second" }, { ...target, key: "third" }],

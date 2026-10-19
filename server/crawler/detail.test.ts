@@ -9,6 +9,10 @@ import {
 } from "./detail";
 import { CAPTURE_VERSION, itemFromAttributes } from "./compact";
 import type { Listing, RoleDetail, TabSnapshot } from "./types";
+import { createCrawlSource } from "./source";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { equipmentInventory } from "../analysis/equipment-pricing";
 
 vi.mock("./page", async (original) => ({
   ...(await original<typeof import("./page")>()),
@@ -81,6 +85,116 @@ describe("装备局部补采", () => {
   });
   afterAll(async () => {
     await browser?.close();
+  });
+  it("同一采集流程先缺武器属性，自动重新打开并读全后才返回完成", async () => {
+    const page = await browser.newPage();
+    let visits = 0;
+    await page.route("**/*", async (route) => {
+      if (route.request().isNavigationRequest()) visits++;
+      await route.fulfill({
+        contentType: "text/html",
+        body: fixture(visits === 1, undefined, undefined, "", "等级 100"),
+      });
+    });
+    const progress: string[] = [];
+    try {
+      const source = createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        signal: new AbortController().signal,
+        savedRecord: () => ({ listing, detail: previous(), status: "complete", error: null }),
+        onDetailProgress: (message) => progress.push(message),
+        log: () => {},
+      });
+      const result = await source.detail(listing);
+      expect(visits).toBe(2);
+      expect(result.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      expect(result.petCapture).toMatchObject({ complete: true, issues: [] });
+      expect(result.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description).toContain(
+        "伤害 +420",
+      );
+      expect(progress.some((message) => message.includes("本轮内自动重读"))).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 20000);
+  it("宝宝饰品带切换索引但只有提示框时仍读取，不能误当头像跳过", async () => {
+    const page = await browser.newPage();
+    const pet = completePet()
+      .replace("装备（1）", "装备（2）")
+      .replace(
+        "<p>内丹（1）</p>",
+        `<div id="RolePetShipin" data_idx="0" data_tip_box="PetAccessoryTipsBox"><img width="30" height="30" src="/images/pet_shipin/small/1.gif" onmouseover="document.getElementById('PetAccessoryTipsBox').style.display='block'" onmouseout="document.getElementById('PetAccessoryTipsBox').style.display='none'"></div><div id="PetAccessoryTipsBox" style="display:none">雷龙饰品<br>装备对象：雷龙<br>完整的外观说明</div><p>内丹（1）</p>`,
+      );
+    await page.route("**/*", (route) =>
+      route.fulfill({ contentType: "text/html", body: fixture(false, pet) }),
+    );
+    try {
+      const result = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(result.petCapture).toMatchObject({ complete: true, issues: [] });
+      const captured = result.tabs.find((tab) => tab.name === "召唤兽/孩子")!.pets![0];
+      expect(captured.equipment).toHaveLength(2);
+      expect(captured.equipment[1]).toMatchObject({ name: "雷龙饰品", location: "RolePetShipin" });
+    } finally {
+      await page.close();
+    }
+  });
+  it("名称和等级已显示时仍等待延迟的完整属性，不能提前当作读全", async () => {
+    const page = await browser.newPage();
+    const original =
+      "document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'";
+    const html = fixture(false, undefined, undefined, "", "等级 100").replace(
+      original,
+      "document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100';setTimeout(()=>{document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'},800)",
+    );
+    await page.route("**/*", (route) => route.fulfill({ contentType: "text/html", body: html }));
+    try {
+      const result = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(result.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      expect(result.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description).toContain(
+        "伤害 +420",
+      );
+    } finally {
+      await page.close();
+    }
+  });
+  it("明确属于召唤兽的命中率护腕不要求人物装备属性，仍核验人物装备库存", () => {
+    const snapshot = {
+      ...tab("道具/法宝"),
+      items: [
+        {
+          index: 0,
+          name: "测试刀",
+          kind: "equipment" as const,
+          description: "等级 100\n伤害 +420",
+        },
+        {
+          index: 1,
+          name: "玳瑁护腕",
+          kind: "equipment" as const,
+          description: "等级 105\n命中率 +14%\n耐久度 500",
+          attributes: { 装备对象: "召唤兽" },
+        },
+      ],
+    };
+    expect(equipmentCaptureSummary([snapshot], "now")).toMatchObject({
+      complete: true,
+      issues: [],
+    });
+    snapshot.items.shift();
+    expect(equipmentCaptureSummary([snapshot], "now").issues).toContain(
+      "人物装备库存是否为空尚未核对，需确认穿戴与随身装备区域后再计价",
+    );
   });
   it.each([
     ["已上架", "已下架", true],
@@ -171,64 +285,82 @@ describe("装备局部补采", () => {
     }
   }, 15000);
 
-  it.each(["cash", "artifacts", "hidden", "empty", "explicit"])(
-    "空装备只有实际容器或明确文字可确认：%s",
-    async (kind) => {
-      const page = await browser.newPage();
-      try {
-        const artifacts =
-          '<div id="RoleUsingFabao"><img data_equip_name="法宝" data_equip_type="6033" src="/images/fabao.png"></div>';
-        const empty =
-          '<table id="RoleUsingEquips"><tbody><tr><td></td></tr></tbody></table><table id="RoleStoreEquips"><tbody><tr><td></td></tr></tbody></table>';
-        const body =
-          kind === "cash"
-            ? "<p>现金：100</p><p>存银：0</p>"
-            : kind === "artifacts"
-              ? artifacts
-              : kind === "hidden"
-                ? empty.replace('id="RoleStoreEquips"', 'id="RoleStoreEquips" style="display:none"')
+  it.each([
+    "cash",
+    "artifacts",
+    "hidden",
+    "empty",
+    "explicit",
+    "material",
+    "unknown-item",
+    "wrong-name",
+  ])("空装备只有实际容器或明确文字可确认：%s", async (kind) => {
+    const page = await browser.newPage();
+    try {
+      const artifacts =
+        '<div id="RoleUsingFabao"><img data_equip_name="法宝" data_equip_type="6033" src="/images/fabao.png"></div>';
+      const empty =
+        '<table id="RoleUsingEquips"><tbody><tr><td></td></tr></tbody></table><table id="RoleStoreEquips"><tbody><tr><td></td></tr></tbody></table>';
+      const material = `<img width="50" height="50" src="/images/equip/small/17320.gif" data_equip_name="${kind === "wrong-name" ? "未知物品" : "三界密令"}" data_equip_type="${kind === "unknown-item" ? "17321" : "17320"}" data_equip_desc="灵气：158" data_equip_type_desc="流传于三界之间的神秘信物，内藏乾坤，完成密令任务获得奖励（转换月卡可得，右键使用）">`;
+      const body =
+        kind === "cash"
+          ? "<p>现金：100</p><p>存银：0</p>"
+          : kind === "artifacts"
+            ? artifacts
+            : kind === "hidden"
+              ? empty.replace('id="RoleStoreEquips"', 'id="RoleStoreEquips" style="display:none"')
+              : ["material", "unknown-item", "wrong-name"].includes(kind)
+                ? empty.replace(
+                    '<table id="RoleStoreEquips"><tbody><tr><td>',
+                    `<table id="RoleStoreEquips"><tbody><tr><td>${material}`,
+                  )
                 : kind === "explicit"
                   ? "<p>没有装备</p>"
                   : empty + artifacts;
-        await page.route("**/images/**", (route) => route.abort());
-        await page.route(url, (route) =>
-          route.fulfill({
-            contentType: "text/html",
-            body: fixture(false, undefined, undefined, "", "", body),
-          }),
-        );
-        const captured = await collectValuationDetail(
-          page,
-          listing,
-          previous(),
-          new AbortController().signal,
-        );
-        const expected = ["empty", "explicit"].includes(kind);
-        expect(captured.equipmentCapture?.complete).toBe(expected);
-        expect(captured.equipmentCapture?.emptyProof).toBe(
-          kind === "empty"
-            ? "official-containers"
-            : kind === "explicit"
-              ? "explicit-text"
-              : undefined,
-        );
-        if (!expected)
-          expect(captured.equipmentCapture?.issues.join(" ")).toContain("库存是否为空尚未核对");
-      } finally {
-        await page.close();
-      }
-    },
-  );
+      await page.route("**/images/**", (route) => route.abort());
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, "", "", body),
+        }),
+      );
+      const captured = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      const expected = ["empty", "explicit", "material"].includes(kind);
+      expect(captured.equipmentCapture?.complete).toBe(expected);
+      expect(captured.equipmentCapture?.emptyProof).toBe(
+        ["empty", "material"].includes(kind)
+          ? "official-containers"
+          : kind === "explicit"
+            ? "explicit-text"
+            : undefined,
+      );
+      if (!expected)
+        expect(captured.equipmentCapture?.issues.join(" ")).toContain("库存是否为空尚未核对");
+    } finally {
+      await page.close();
+    }
+  });
 
-  it("新采保存官网模型号，玉魄和技能书不误报普通装备等级缺失", async () => {
+  it("新采保存官网模型号，玉魄、技能书和镶嵌材料不误报装备属性缺失", async () => {
     const page = await browser.newPage();
     try {
       const others =
         '<div id="store_equip_tips1"><img width="40" height="40" data_equip_name="上古玉魄·阴" data_equip_type="61717" data_equip_desc="防御 +25#r耐久度 102#r抵抗封印等级 +13 [+48]#r奇袭法术：弱点击破"></div><div id="store_equip_tips2"><img width="40" height="40" data_equip_name="魔兽要诀" data_equip_type="611" data_equip_desc="召唤兽技能：高级反震"></div>';
+      const materials = [4036, 4037, 4038]
+        .map(
+          (model) =>
+            `<div id="store_equip_tips${model}"><img width="40" height="40" data_equip_name="精魄灵石" data_equip_type="${model}" data_equip_desc="等级:7,增加10点伤害"></div>`,
+        )
+        .join("");
       await page.route(url, (route) =>
         route.fulfill({
           contentType: "text/html",
-          body: fixture(false, undefined, undefined, others),
+          body: fixture(false, undefined, undefined, others + materials),
         }),
       );
       const detail = await collectValuationDetail(
@@ -242,6 +374,11 @@ describe("装备局部补采", () => {
       expect(items[1]).toMatchObject({ modelId: "61717", category: "上古玉魄" });
       expect(items[1].description).toContain("奇袭法术：弱点击破");
       expect(items[2]).toMatchObject({ modelId: "611", category: "道具 · 召唤兽技能书" });
+      expect(items.slice(3)).toHaveLength(3);
+      for (const item of items.slice(3)) {
+        expect(item.category).toBe("材料 · 精魄灵石");
+        expect(item.description).toContain("增加10点伤害");
+      }
     } finally {
       await page.close();
     }
@@ -292,6 +429,67 @@ describe("装备局部补采", () => {
       await page.close();
     }
   }, 15000);
+  it.each([
+    { label: "complete", tooltip: "水晶棒\n等级 70\n未鉴定物品", complete: true },
+    { label: "wrong-name", tooltip: "另一把武器\n等级 70\n未鉴定物品", complete: false },
+    { label: "wrong-level", tooltip: "水晶棒\n等级 80\n未鉴定物品", complete: false },
+    { label: "missing-level", tooltip: "水晶棒\n未鉴定物品", complete: false },
+    { label: "identified-missing-stats", tooltip: "水晶棒\n等级 70", complete: false },
+  ])(
+    "未鉴定装备采集身份与未知价格边界：$label",
+    async ({ label, tooltip, complete }) => {
+      const page = await browser.newPage();
+      try {
+        const gear = `<p>道具和法宝</p><div id="store_equip_tips4"><img width="40" height="40" data_equip_name="水晶棒" data_equip_type="1808" data_equip_level="70" data_tip_box="UnidentifiedTipsBox" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseover="document.getElementById('UnidentifiedTipsBox').style.display='block'"><div id="UnidentifiedTipsBox" style="display:none;white-space:pre-line">${tooltip}</div></div>`;
+        await page.route(url, (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: fixture(false, undefined, undefined, "", "", gear),
+          }),
+        );
+        const detail = await collectValuationDetail(
+          page,
+          listing,
+          previous(),
+          new AbortController().signal,
+        );
+        expect(detail.equipmentCapture?.complete).toBe(complete);
+        const item = detail.tabs.find((entry) => entry.name === "道具/法宝")!.items![0];
+        const inventory = equipmentInventory({
+          listing,
+          detail,
+          status: complete ? "complete" : "failed",
+          error: null,
+        });
+        if (complete) {
+          expect(item.name).toBe("水晶棒");
+          expect(item.description).toContain("未鉴定物品");
+          expect(item.description).not.toMatch(/伤害|命中/);
+          expect(inventory.captureComplete).toBe(true);
+          expect(inventory.items[0]).toMatchObject({
+            referencePrice: null,
+            searchState: "skipped",
+            candidates: [],
+          });
+          expect(item.category).toBeUndefined();
+          expect(item.modelId).toBe("1808");
+          expect(item.location).toBe("store_equip_tips4");
+          expect(inventory.items[0].skipReason).toMatch(/未鉴定.*初始.*未知/);
+        } else expect(detail.equipmentCapture?.issues.length).toBeGreaterThan(0);
+        const directory = path.resolve("data/capture-regression/unidentified");
+        await mkdir(directory, { recursive: true });
+        await writeFile(
+          path.join(directory, label + ".json"),
+          JSON.stringify({ simulated: true, label, tooltip, detail, inventory }, null, 2),
+        );
+        await page.screenshot({ path: path.join(directory, label + ".png") });
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
+
   it.each([false, true])(
     "只有等级的非空描述仍读取提示框，提示框缺失=%s",
     async (missingTooltip) => {

@@ -35,8 +35,6 @@ import {
 import { createPetSource } from "./analysis/browser-pet-source";
 import { searchPetGearPricing } from "./analysis/pet-gear-search";
 import type { PetGearPricingSnapshot } from "./analysis/pet-gear-inventory";
-import { searchRolePricing } from "./analysis/role-search";
-import type { RolePricingSnapshot } from "./analysis/role-pricing";
 
 export { startCodexLogin, codexLoginStatus, cancelCodexLogin } from "./ai/codex";
 
@@ -164,7 +162,8 @@ export async function verifyAi(
     let response: string;
     let status: AiConnectionStatus;
     if (provider === "codex") {
-      if (before.state === "error") throw new Error(before.error || "Codex 登录服务不可用");
+      if (before.state === "error" && !before.account)
+        throw new Error(before.error || "Codex 登录服务不可用");
       if (!before.account) return (connections.codex = { state: "login_required" });
       response = await probeCodex(PROBE_PROMPT, signal);
       const account = await codexAccount();
@@ -227,6 +226,8 @@ async function searchEquipment(
   signal: AbortSignal,
   settings?: ValuationSettings,
   previous?: EquipmentPricingSnapshot,
+  onProgress?: (progress: import("./analysis/equipment-pricing").PricingSearchProgress) => void,
+  onCheckpoint?: (snapshot: EquipmentPricingSnapshot) => void,
 ) {
   try {
     signal.throwIfAborted();
@@ -235,11 +236,18 @@ async function searchEquipment(
       !equipmentCaptureSearchable(record, plan) ||
       !plan.items.some((item) => item.searchState === "pending")
     )
-      return await searchEquipmentPrices(record, signal, unusedEquipmentSource, settings, previous);
-    const source = await createEquipmentSource(signal);
+      return await searchEquipmentPrices(
+        record,
+        signal,
+        unusedEquipmentSource,
+        settings,
+        previous,
+        onCheckpoint,
+      );
+    const source = await createEquipmentSource(signal, record.listing.serverId, onProgress);
     try {
       signal.throwIfAborted();
-      return await searchEquipmentPrices(record, signal, source, settings, previous);
+      return await searchEquipmentPrices(record, signal, source, settings, previous, onCheckpoint);
     } finally {
       await source.close();
     }
@@ -268,7 +276,7 @@ async function searchPets(
       !inventory.items.some((item) => item.status === "no_match")
     )
       return await searchPetPricing(record, signal, unusedPetSource, previous);
-    const source = await createPetSource(signal);
+    const source = await createPetSource(signal, record.listing.serverId);
     try {
       signal.throwIfAborted();
       return await searchPetPricing(record, signal, source, previous);
@@ -285,21 +293,10 @@ async function searchPetGear(
   record: SavedRoleRecord,
   signal: AbortSignal,
   previous?: PetGearPricingSnapshot,
+  pets?: PetPricingSnapshot,
 ) {
   try {
-    return await searchPetGearPricing(record, signal, previous);
-  } catch (error) {
-    throw new Error(publicError(error));
-  }
-}
-
-async function searchRole(
-  record: SavedRoleRecord,
-  signal: AbortSignal,
-  previous?: RolePricingSnapshot,
-) {
-  try {
-    return await searchRolePricing(record, signal, previous);
+    return await searchPetGearPricing(record, signal, previous, pets);
   } catch (error) {
     throw new Error(publicError(error));
   }
@@ -317,7 +314,6 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
       searchEquipment,
       searchPets,
       searchPetGear,
-      searchRole,
       async analyze(prompt: string, schema: unknown, signal: AbortSignal) {
         const current = await codexAccount();
         if (!current || current.email !== account.email)
@@ -341,7 +337,6 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
     searchEquipment,
     searchPets,
     searchPetGear,
-    searchRole,
     async analyze(prompt: string, _schema: unknown, signal: AbortSignal) {
       try {
         return await requestDeepSeek(key, model, prompt, signal, 8192);

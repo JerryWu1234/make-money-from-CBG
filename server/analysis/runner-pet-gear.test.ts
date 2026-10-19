@@ -3,18 +3,18 @@ import { expect, it, vi } from "vite-plus/test";
 import { valuationRecord } from "../../tests/fixtures/analysis";
 import { CrawlStore } from "../crawler/store";
 import { AnalysisStore } from "./store";
-import { AnalysisRunner, type AnalysisClient } from "./runner";
+import { AnalysisRunner, MAX_PRICING_ROUNDS, type AnalysisClient } from "./runner";
 import { createProfile, PROMPT_FILE } from "./profile";
 import { equipmentInventory } from "./equipment-pricing";
 import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
-import { blockedRolePricing } from "./role-pricing";
+import { searchPetGearPricing } from "./pet-gear-search";
 import {
   PET_GEAR_ACCOUNTING,
   petGearInventory,
   type PetGearPricingSnapshot,
 } from "./pet-gear-inventory";
 
-function setup(captureComplete = true, roleSearch = false, petCount = 1) {
+function setup(captureComplete = true, petCount = 1) {
   const record = valuationRecord("generic-pet-gear");
   record.detail!.petCapture = {
     version: 1,
@@ -86,13 +86,7 @@ function setup(captureComplete = true, roleSearch = false, petCount = 1) {
   crawl.observe(record.listing);
   crawl.save(record.listing, record.detail!);
   const store = new AnalysisStore(crawl.db);
-  const profile = createProfile(
-    readFileSync(PROMPT_FILE, "utf8"),
-    undefined,
-    true,
-    true,
-    roleSearch,
-  );
+  const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), undefined, true, true);
   const base = {
     version: 1 as const,
     searchedAt: new Date().toISOString(),
@@ -121,9 +115,6 @@ function setup(captureComplete = true, roleSearch = false, petCount = 1) {
   const searchPetGear = vi
     .fn<NonNullable<AnalysisClient["searchPetGear"]>>()
     .mockResolvedValue(gear);
-  const searchRole = vi
-    .fn<NonNullable<AnalysisClient["searchRole"]>>()
-    .mockImplementation(async (target) => blockedRolePricing(target));
   const analyze = vi.fn<AnalysisClient["analyze"]>().mockResolvedValue({
     text: JSON.stringify({
       decision: "NEED_INFO",
@@ -137,7 +128,6 @@ function setup(captureComplete = true, roleSearch = false, petCount = 1) {
     searchEquipment,
     searchPets,
     searchPetGear,
-    searchRole,
   }));
   return {
     record,
@@ -151,14 +141,68 @@ function setup(captureComplete = true, roleSearch = false, petCount = 1) {
     searchEquipment,
     searchPets,
     searchPetGear,
-    searchRole,
   };
 }
+
+it("续跑已保存装备核验时，按宝宝跳过状态更新装备，再进入AI", async () => {
+  const c = setup();
+  c.pets.items = c.pets.items.map((pet) => ({
+    ...pet,
+    searchState: "skipped",
+    skipReason: "前5条无有效样本",
+  }));
+  c.pets.gearPricing = c.gear;
+  c.searchPetGear.mockImplementation(searchPetGearPricing);
+  try {
+    const id = c.store.createRun("codex", "test", true, c.profile);
+    const owner = "saved-parent-skip";
+    expect(c.store.acquire(owner)).toBe(true);
+    let task = c.store.next(id)!;
+    c.store.beginEquipmentSearch(task, owner);
+    task = c.store.saveEquipmentPricing(
+      task,
+      {
+        ...equipmentInventory(c.record),
+        version: 1,
+        searchedAt: new Date().toISOString(),
+        provider: "browser",
+        model: "browser",
+        searchComplete: true,
+        total: 0,
+        knownTotal: 0,
+        queries: [],
+        rawResponse: null,
+      },
+      owner,
+    );
+    c.store.beginPetSearch(task, owner);
+    c.store.savePetPricing(task, c.pets, owner);
+    c.store.setRun(id, "paused", null, owner);
+    c.store.release(owner);
+    await c.runner.resume(id);
+    await c.runner.settled();
+    expect(c.searchPets).not.toHaveBeenCalled();
+    expect(c.searchPetGear).toHaveBeenCalledOnce();
+    expect(c.searchPetGear.mock.calls[0][3]).toMatchObject(JSON.parse(JSON.stringify(c.pets)));
+    expect(
+      c.store.overview().results.items[0].result.valuation?.pet_pricing?.gearPricing?.items[0],
+    ).toMatchObject({
+      skippedWithPet: true,
+      referencePrice: null,
+      skipReason: expect.stringContaining("前5条无有效样本"),
+    });
+    expect(c.store.run(id)?.status).toBe("completed");
+    expect(c.analyze).toHaveBeenCalledOnce();
+  } finally {
+    await c.runner.shutdown();
+    c.crawl.db.close();
+  }
+});
 
 it.each(["pet", "pet-gear"] as const)(
   "%s 每轮完成一件时自动查完全部六件，保留已完成阶段且只分析一次",
   async (phase) => {
-    const c = setup(true, false, 6);
+    const c = setup(true, 6);
     let searches = 0;
     if (phase === "pet")
       c.searchPets.mockImplementation(async () => ({
@@ -188,6 +232,7 @@ it.each(["pet", "pet-gear"] as const)(
       expect(c.store.run(id)?.status).toBe("completed");
       expect(c.searchEquipment).toHaveBeenCalledOnce();
       expect(phase === "pet" ? c.searchPetGear : c.searchPets).toHaveBeenCalledOnce();
+      expect(c.searchPetGear.mock.calls[0][3]?.items).toMatchObject(c.pets.items);
       expect(c.analyze).toHaveBeenCalledOnce();
     } finally {
       await c.runner.shutdown();
@@ -196,13 +241,94 @@ it.each(["pet", "pet-gear"] as const)(
   },
 );
 
+// Failure cases: a fresh completed gear snapshot can still need reconciliation;
+// the 16th pet round must preserve it and pause, then explicit retry must finish gear only.
+it("第16轮宝宝完成后，父宝宝跳过状态变化的宠装等待显式重试，不执行第17轮", async () => {
+  const c = setup();
+  const previousGear: PetGearPricingSnapshot = {
+    ...c.gear,
+    items: c.gear.items.map((item) => ({
+      ...item,
+      searchState: "skipped",
+      searchStatus: "skipped",
+      skippedWithPet: true,
+      skipReason: "此前所属宝宝已跳过",
+    })),
+  };
+  let rounds = 0;
+  c.searchPets.mockImplementation(async () => ({
+    ...c.pets,
+    searchComplete: ++rounds === MAX_PRICING_ROUNDS,
+    items: c.pets.items.map((item) => ({
+      ...item,
+      searchState: rounds === MAX_PRICING_ROUNDS ? "completed" : "pending",
+      searchCursor: {
+        version: 1,
+        planHash: "parent-refresh",
+        modeIndex: 0,
+        pageNumber: 1,
+        rowIndex: rounds,
+        pageRowsHash: "same-market-page",
+        seen: [],
+        failed: [],
+      },
+    })),
+  }));
+  try {
+    const id = c.store.createRun("codex", "test", true, c.profile);
+    const owner = "saved-gear-before-pet-budget";
+    expect(c.store.acquire(owner)).toBe(true);
+    let task = c.store.next(id)!;
+    c.store.beginEquipmentSearch(task, owner);
+    task = c.store.saveEquipmentPricing(
+      task,
+      { ...c.pets, ...equipmentInventory(c.record), total: 0 },
+      owner,
+    );
+    c.store.beginPetSearch(task, owner);
+    c.store.savePetPricing(
+      task,
+      { ...c.pets, searchComplete: false, gearPricing: previousGear },
+      owner,
+    );
+    c.store.setRun(id, "paused", null, owner);
+    c.store.release(owner);
+
+    await c.runner.resume(id);
+    await c.runner.settled();
+    expect(c.searchPets).toHaveBeenCalledTimes(MAX_PRICING_ROUNDS);
+    expect(c.store.run(id)).toMatchObject({ status: "paused", waitingPricing: 1, completed: 0 });
+    expect(c.searchPetGear).not.toHaveBeenCalled();
+    expect(c.analyze).not.toHaveBeenCalled();
+    const saved = c.store.detail(c.store.overview({ runId: id }).records.items[0].taskId!)!;
+    expect(saved.petPricing?.gearPricing).toEqual(previousGear);
+    expect(saved.petPricing?.items[0].searchState).toBe("completed");
+
+    await c.runner.resume(id, true);
+    await c.runner.settled();
+    expect(c.store.run(id)).toMatchObject({ status: "completed", completed: 1, waitingPricing: 0 });
+    expect(c.searchPets).toHaveBeenCalledTimes(MAX_PRICING_ROUNDS);
+    expect(c.searchEquipment).not.toHaveBeenCalled();
+    expect(c.searchPetGear).toHaveBeenCalledOnce();
+    expect(c.searchPetGear.mock.calls[0][2]).toEqual(previousGear);
+    expect(c.analyze).toHaveBeenCalledOnce();
+  } finally {
+    await c.runner.shutdown();
+    c.crawl.db.close();
+  }
+});
+
 it.each([
   ["pet", "pending"],
   ["pet", "read_failed"],
   ["pet-gear", "pending"],
   ["pet-gear", "read_failed"],
-] as const)("%s 没有新进展或详情读取失败时保存暂停：%s", async (phase, state) => {
+] as const)("%s 没有新进展或详情读取失败时保存待补齐：%s", async (phase, state) => {
   const c = setup();
+  const next = structuredClone(c.record);
+  next.listing.key += "-next";
+  c.crawl.observe(next.listing);
+  c.crawl.save(next.listing, next.detail!);
   if (phase === "pet")
     c.searchPets.mockResolvedValue({
       ...c.pets,
@@ -218,11 +344,41 @@ it.each([
   try {
     const id = await c.runner.start("codex", true, c.profile);
     await c.runner.settled();
-    expect(c.store.run(id)?.status).toBe("paused");
+    expect(c.store.run(id)).toMatchObject({
+      status: "paused",
+      waitingPricing: 1,
+      completed: 0,
+      queued: 1,
+    });
     expect(phase === "pet" ? c.searchPets : c.searchPetGear).toHaveBeenCalledOnce();
     expect(c.analyze).not.toHaveBeenCalled();
-    const saved = c.store.next(id)!.petPricing!;
+    const saved = c.store.detail(
+      c.store.overview({ runId: id }).records.items[0].taskId!,
+    )!.petPricing!;
     expect((phase === "pet" ? saved : saved.gearPricing!).items[0].searchState).toBe(state);
+  } finally {
+    await c.runner.shutdown();
+    c.crawl.db.close();
+  }
+});
+
+it("宝宝装备部分完成仍优先处理仅searchStatus标记的读取失败", async () => {
+  const c = setup(true, 2);
+  c.searchPetGear.mockResolvedValueOnce({
+    ...c.gear,
+    searchComplete: false,
+    items: c.gear.items.map((item, index) => ({
+      ...item,
+      searchState: index ? "pending" : "completed",
+      searchStatus: index ? "read_failed" : "completed",
+    })),
+  });
+  try {
+    const id = await c.runner.start("codex", true, c.profile);
+    await c.runner.settled();
+    expect(c.store.run(id)).toMatchObject({ status: "paused", waitingPricing: 1, completed: 0 });
+    expect(c.searchPetGear).toHaveBeenCalledOnce();
+    expect(c.analyze).not.toHaveBeenCalled();
   } finally {
     await c.runner.shutdown();
     c.crawl.db.close();
@@ -239,13 +395,20 @@ it("宝宝装备自动查价，暂停和刷新后复用父宝宝进度，完成�
   try {
     const id = await c.runner.start("codex", false, c.profile);
     await c.runner.settled();
-    expect(c.store.run(id)?.status).toBe("paused");
+    expect(c.store.run(id)).toMatchObject({
+      status: "paused",
+      waitingPricing: 1,
+      completed: 0,
+      queued: 0,
+    });
     expect(c.analyze).not.toHaveBeenCalled();
-    expect(c.store.next(id)?.petPricing).toMatchObject({
+    expect(
+      c.store.detail(c.store.overview({ runId: id }).records.items[0].taskId!)?.petPricing,
+    ).toMatchObject({
       searchComplete: true,
       gearPricing: { searchComplete: false },
     });
-    await c.runner.resume(id);
+    await c.runner.resume(id, true);
     await c.runner.settled();
     expect(c.store.run(id)?.status).toBe("completed");
     expect(c.searchEquipment).toHaveBeenCalledTimes(1);
@@ -266,34 +429,28 @@ it("宝宝装备自动查价，暂停和刷新后复用父宝宝进度，完成�
   }
 });
 
-it("宠装暂停恢复后才整号、再AI，已完成父宝宝不重复查", async () => {
-  const c = setup(true, true);
+it("宠装暂停恢复后直接AI，已完成父宝宝不重复查", async () => {
+  const c = setup(true);
   c.searchPetGear.mockResolvedValueOnce({
     ...c.gear,
     searchComplete: false,
     items: c.gear.items.map((item) => ({ ...item, searchStatus: "read_failed" })),
   });
-  c.searchRole.mockImplementationOnce(async (record) => {
-    expect(c.searchPetGear).toHaveBeenCalledTimes(2);
-    expect(c.analyze).not.toHaveBeenCalled();
-    expect(c.store.activeRun()?.phase).toBe("role_search");
-    return blockedRolePricing(record);
-  });
   try {
     const id = await c.runner.start("codex", false, c.profile);
     await c.runner.settled();
-    expect(c.store.run(id)?.status).toBe("paused");
-    expect(c.searchRole).not.toHaveBeenCalled();
-    await c.runner.resume(id);
+    expect(c.store.run(id)).toMatchObject({
+      status: "paused",
+      waitingPricing: 1,
+      completed: 0,
+      queued: 0,
+    });
+    await c.runner.resume(id, true);
     await c.runner.settled();
     expect(c.store.run(id)?.status).toBe("completed");
     expect(c.searchEquipment).toHaveBeenCalledOnce();
     expect(c.searchPets).toHaveBeenCalledOnce();
-    expect(c.searchRole).toHaveBeenCalledOnce();
     expect(c.analyze).toHaveBeenCalledOnce();
-    expect(
-      c.store.overview().results.items[0].result.valuation?.role_pricing?.marketReference,
-    ).toMatchObject({ status: "insufficient", range: null, median: null });
   } finally {
     await c.runner.shutdown();
     c.crawl.db.close();
@@ -320,22 +477,16 @@ it.each(["identity", "total"])("拒绝不匹配或重复计价的宝宝装备快
   }
 });
 
-it("宝宝库存未采齐时输出缺项结果，不陷入无法恢复的市场查价暂停", async () => {
+it("宝宝库存未采齐时留在采集阶段，不调用市场查价或输出缺项分析", async () => {
   const c = setup(false);
   try {
-    const id = await c.runner.start("codex", false, c.profile);
-    await c.runner.settled();
-    expect(c.store.run(id)?.status).toBe("completed");
-    expect(c.analyze).toHaveBeenCalledTimes(1);
-    const result = c.store.overview().results.items[0].result.valuation!;
-    expect(result.decision).toBe("NEED_INFO");
-    expect(result.pet_pricing?.gearPricing).toMatchObject({
-      captureComplete: false,
-      total: null,
-      searchComplete: true,
-    });
-    expect(result.missing_fields.join("；")).toContain("补采");
-    expect(result.pet_value).toBeNull();
+    await expect(c.runner.start("codex", false, c.profile)).rejects.toThrow("暂无详情完整的商品");
+    expect(c.analyze).not.toHaveBeenCalled();
+    expect(c.searchEquipment).not.toHaveBeenCalled();
+    expect(c.searchPets).not.toHaveBeenCalled();
+    expect(c.searchPetGear).not.toHaveBeenCalled();
+    expect(c.store.counts()).toMatchObject({ complete: 0, waitingDetail: 1 });
+    expect(c.crawl.retryItems()).toHaveLength(1);
   } finally {
     await c.runner.shutdown();
     c.crawl.db.close();
@@ -398,3 +549,116 @@ it.each(["equipment", "pet", "pet-gear", "pet-and-gear", "fresh"] as const)(
     }
   },
 );
+
+// Failure cases: a new snapshot timestamp must not renew old verified evidence;
+// rejected evidence must not force a new lookup, and fresh stages must stay reusable.
+it("宠装返回已完成但内部候选仍过期时先重新查价，再进入AI", async () => {
+  const c = setup();
+  c.searchPetGear.mockResolvedValueOnce({
+    ...c.gear,
+    items: c.gear.items.map((item) => ({
+      ...item,
+      candidates: [
+        {
+          url: "https://xyq.cbg.163.com/equip?s=1&eid=expired-during-gear-query",
+          title: "查询期间过期的已核验样本",
+          price: 100,
+          priceType: "listing",
+          quote: "挂牌价：¥100",
+          verified: true,
+          reason: "已核验的相近样本",
+          fetchedAt: new Date(Date.now() - 24 * 60 * 60 * 1000 - 1000).toISOString(),
+          sourceHash: "saved-gear-evidence",
+          matchType: "similar",
+        },
+      ],
+    })),
+  });
+  c.analyze.mockImplementation(async () => {
+    expect(c.searchPetGear).toHaveBeenCalledTimes(2);
+    return {
+      text: JSON.stringify({
+        decision: "NEED_INFO",
+        reason: "重新查价没有可采用的匹配样本，保留未定价。",
+        extracted_facts: [],
+      }),
+    };
+  });
+  try {
+    const id = await c.runner.start("codex", true, c.profile);
+    await c.runner.settled();
+    expect(c.searchPetGear).toHaveBeenCalledTimes(2);
+    expect(c.searchPetGear.mock.calls[1][2]?.items[0].candidates[0].verified).toBe(true);
+    expect(c.searchEquipment).toHaveBeenCalledOnce();
+    expect(c.searchPets).toHaveBeenCalledOnce();
+    expect(c.analyze).toHaveBeenCalledOnce();
+    expect(c.store.run(id)?.status).toBe("completed");
+  } finally {
+    await c.runner.shutdown();
+    c.crawl.db.close();
+  }
+});
+
+it.each([
+  ["pet", true],
+  ["pet-gear", true],
+  ["pet", false],
+  ["pet-gear", false],
+] as const)("快照时间新但%s内部候选过期时按核验状态%s决定是否先重查", async (phase, verified) => {
+  const c = setup();
+  const staleCandidate = {
+    url: "https://xyq.cbg.163.com/equip?s=1&eid=old-internal-evidence",
+    title: "已保存的独立挂牌",
+    price: 100,
+    priceType: "listing" as const,
+    quote: "挂牌价：¥100",
+    verified,
+    reason: verified ? "已核验的相近样本" : "配置不匹配",
+    fetchedAt: new Date(Date.now() - 24 * 60 * 60 * 1000 - 1000).toISOString(),
+    sourceHash: "saved-market-evidence",
+    matchType: "similar" as const,
+  };
+  const pets = { ...structuredClone(c.pets), gearPricing: structuredClone(c.gear) };
+  const snapshot = phase === "pet" ? pets : pets.gearPricing;
+  snapshot.items[0].searchState = "completed";
+  snapshot.items[0].candidates = [staleCandidate];
+  const search = phase === "pet" ? c.searchPets : c.searchPetGear;
+  c.analyze.mockImplementation(async () => {
+    expect(search).toHaveBeenCalledTimes(Number(verified));
+    return {
+      text: JSON.stringify({
+        decision: "NEED_INFO",
+        reason: "没有可采用的匹配样本，保留未定价。",
+        extracted_facts: [],
+      }),
+    };
+  });
+  try {
+    const id = c.store.createRun("codex", "test", true, c.profile);
+    const owner = "fresh-snapshot-old-candidate";
+    expect(c.store.acquire(owner)).toBe(true);
+    let task = c.store.next(id)!;
+    c.store.beginEquipmentSearch(task, owner);
+    task = c.store.saveEquipmentPricing(
+      task,
+      { ...c.pets, ...equipmentInventory(c.record), total: 0 },
+      owner,
+    );
+    c.store.beginPetSearch(task, owner);
+    c.store.savePetPricing(task, pets, owner);
+    c.store.setRun(id, "paused", null, owner);
+    c.store.release(owner);
+
+    await c.runner.resume(id);
+    await c.runner.settled();
+    expect(search).toHaveBeenCalledTimes(Number(verified));
+    expect(c.searchEquipment).not.toHaveBeenCalled();
+    expect(phase === "pet" ? c.searchPetGear : c.searchPets).not.toHaveBeenCalled();
+    expect(c.analyze).toHaveBeenCalledOnce();
+    expect(c.store.run(id)?.status).toBe("completed");
+    if (verified) expect(search.mock.calls[0][2]?.items[0].candidates).toEqual([staleCandidate]);
+  } finally {
+    await c.runner.shutdown();
+    c.crawl.db.close();
+  }
+});

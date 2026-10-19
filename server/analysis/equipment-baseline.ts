@@ -56,7 +56,7 @@ const scalar = (values?: string[]): number | null => {
   const value = values[0].trim().match(/^[+＋]?(\d+(?:\.\d+)?)(?:点|级|次)?$/)?.[1];
   return value === undefined ? null : Number(value);
 };
-const slotFromCategory = (category: string): Slot | null => {
+export const slotFromCategory = (category: string): Slot | null => {
   if (/腰带/.test(category)) return "belt";
   if (/鞋|靴/.test(category)) return "shoe";
   if (/项链|饰品/.test(category)) return "neck";

@@ -4,7 +4,6 @@ import {
   EQUIPMENT_ATTRIBUTE_ABSOLUTE_TOLERANCES,
   equipmentAttributeLowerBound,
   equipmentAttributeTolerance,
-  equipmentEnhancementMismatch,
   matchComparableEquipmentAttributes,
   matchEquipmentAttributes,
 } from "./equipment-match";
@@ -120,15 +119,153 @@ describe("同核心装备粗略参考价匹配", () => {
       parseEquipmentAttributes(target),
       parseEquipmentAttributes(source),
     );
-  it("套装、宝石、熔炼和双加差异保留为相近配置，不能冒充同配置", () => {
+  it.each(["变身术之鬼将", "附加状态杀气诀", "附加状态变身术", ""])(
+    "完整套装附加状态变身不能用%s替代或缺失",
+    (suit) => {
+      for (const base of ["等级100\n防御50", "等级100\n精炼等级6\n防御50"]) {
+        const target = base + "\n套装效果：附加状态变身\n特技：晶清诀";
+        const source = base + (suit ? "\n套装效果：" + suit : "") + "\n特技：晶清诀";
+        expect(comparable(source, target).matchType).toBeNull();
+        expect(comparable(target, source).matchType).toBeNull();
+      }
+    },
+  );
+  it("完整类型与名称相同的套装可比较，列表缺省留完整详情核验", () => {
+    const target = parseEquipmentAttributes(
+      "等级100\n防御50\n套装效果：附加状态变身\n特技：晶清诀",
+    );
+    expect(matchComparableEquipmentAttributes(target, target).matchType).toBe("exact");
+    expect(
+      matchComparableEquipmentAttributes(target, parseEquipmentAttributes("等级100\n防御49"), true)
+        .reason,
+    ).toBeNull();
+    expect(
+      matchComparableEquipmentAttributes(
+        target,
+        parseEquipmentAttributes("等级100\n防御49\n套装效果：变身术之鬼将"),
+        true,
+      ).matchType,
+    ).toBeNull();
+  });
+  it.each(["晶清", "晶清诀·另一技", "四海升平", ""])(
+    "特技实际名字不一致或缺失仍拒绝：%s",
+    (skill) => {
+      const target = "等级100\n防御50\n特技：晶清诀";
+      expect(
+        comparable("等级100\n防御49" + (skill ? "\n特技：" + skill : ""), target).matchType,
+      ).toBeNull();
+    },
+  );
+  it("太阳石伤害全为宝石贡献时不误拒真实头盔样本", () => {
+    const target =
+      "等级80\n防御46 魔法87\n伤害40\n锻炼等级5\n宝石：太阳石\n套装效果：变身术之风伯\n装备角色：男";
+    const source = "等级80\n防御34 魔法80\n套装效果：变身术之风伯\n装备角色：男";
+    expect(comparable(source, target).reason).toBeNull();
+    expect(comparable(source.replace("防御34", "防御47"), target).matchType).toBeNull();
+    expect(comparable(source.replace("魔法80", "魔法88"), target).matchType).toBeNull();
+  });
+  it.each(["", "\n锻炼等级3\n宝石：红宝石"])(
+    "可靠太阳石零初伤在完整详情双方均不等同缺少原生属性：%s",
+    (gems) => {
+      const zero = "等级80\n防御34\n伤害40\n锻炼等级5\n宝石：太阳石";
+      const absent = "等级80\n防御34" + gems;
+      expect(comparable(absent, zero).reason).toBeNull();
+      expect(comparable(zero, absent).reason).toBeNull();
+    },
+  );
+  it.each([
+    "伤害41\n锻炼等级5\n宝石：太阳石",
+    "伤害40\n宝石：太阳石",
+    "伤害40\n锻炼等级5\n宝石：太阳石 红玛瑙",
+    "伤害40\n锻炼等级5\n宝石：未知宝石",
+    "伤害100001\n初始伤害0\n锻炼等级5\n宝石：太阳石",
+    "伤害40\n初始伤害1\n锻炼等级5\n宝石：太阳石",
+    "初始伤害0",
+  ])("正值或不可靠初伤不能等同未显示伤害：%s", (stats) => {
+    const plain = "等级80\n防御34";
+    expect(comparable(plain, plain + "\n" + stats).matchType).toBeNull();
+    expect(comparable(plain + "\n" + stats, plain).matchType).toBeNull();
+  });
+  it.each(["太阳石", "太阳石 红玛瑙", "未知宝石"])(
+    "缺伤害一方含%s时不能推断宝石贡献为零",
+    (gem) => {
+      const zero = "等级80\n防御34\n伤害40\n锻炼等级5\n宝石：太阳石";
+      expect(comparable("等级80\n防御34\n锻炼等级5\n宝石：" + gem, zero).matchType).toBeNull();
+    },
+  );
+  it("红宝石吸收贡献可靠时与相同初灵的舍利子样本双方可比较", () => {
+    const ruby =
+      "等级80\n灵力77\n锻炼等级3\n宝石：红宝石\n法术吸收率 火+12%\n套装效果：变身术之风伯";
+    const relic = "等级80\n灵力95\n锻炼等级3\n宝石：舍利子\n套装效果：变身术之风伯";
+    expect(comparable(relic, ruby).reason).toBeNull();
+    expect(comparable(ruby, relic).reason).toBeNull();
+    expect(comparable(relic.replace("灵力95", "灵力96"), ruby).matchType).toBeNull();
+    expect(comparable(relic.replace("风伯", "鬼将"), ruby).matchType).toBeNull();
+  });
+  it.each([
+    "锻炼等级3\n宝石：红宝石\n法术吸收率 火+11%",
+    "锻炼等级3\n宝石：红宝石\n法术吸收率 水+12%",
+    "锻炼等级3\n宝石：红宝石 蓝宝石\n法术吸收率 火+12%",
+    "锻炼等级3\n宝石：未知宝石\n法术吸收率 火+12%",
+    "宝石：红宝石\n法术吸收率 火+12%",
+    "锻炼等级0\n宝石：红宝石\n法术吸收率 火+12%",
+    "锻炼等级10001\n宝石：红宝石\n法术吸收率 火+40004%",
+    "锻炼等级3\n宝石：红宝石\n法术吸收率 火+12%\n抗未知属性+1",
+  ])("无法用单宝石等级解释或另有未知属性时保留拒绝：%s", (stats) => {
+    const source = "等级80\n灵力77";
+    const target = source + "\n" + stats;
+    expect(comparable(source, target).matchType).toBeNull();
+    expect(comparable(target, source).matchType).toBeNull();
+  });
+  it.each(["", "\n锻炼等级4\n宝石：月亮石"])(
+    "纯黑宝石可靠扣到速度0可与完整候选缺速度比较：%s",
+    (gems) => {
+      const target = "等级100\n敏捷40\n速度32\n锻炼等级4\n宝石：黑宝石";
+      const source = "等级100\n敏捷40" + gems;
+      expect(comparable(source, target).reason).toBeNull();
+      expect(comparable(target, source).reason).toBeNull();
+    },
+  );
+  it("列表初筛允许候选已可靠扣成0的宝石速度，正初速仍拒绝", () => {
+    const target = parseEquipmentAttributes("等级100\n敏捷40");
+    const zero = "等级100\n敏捷40\n速度32\n锻炼等级4\n宝石：黑宝石";
+    expect(
+      matchComparableEquipmentAttributes(target, parseEquipmentAttributes(zero), true).reason,
+    ).toBeNull();
+    expect(
+      matchComparableEquipmentAttributes(
+        target,
+        parseEquipmentAttributes(zero.replace("速度32", "速度33")),
+        true,
+      ).matchType,
+    ).toBeNull();
+  });
+  it.each([
+    "速度33\n锻炼等级4\n宝石：黑宝石",
+    "速度32\n宝石：黑宝石",
+    "速度32\n锻炼等级4\n宝石：黑宝石 月亮石",
+    "速度32\n锻炼等级4\n宝石：未知宝石",
+    "速度100001\n初始速度0\n锻炼等级4\n宝石：黑宝石",
+    "初始速度0",
+    "灵力0",
+  ])("正值、未知、混合和其他缺失字段不能当作宝石速度0：%s", (stats) => {
+    expect(comparable("等级100\n敏捷40", "等级100\n敏捷40\n" + stats).matchType).toBeNull();
+  });
+  it.each(["黑宝石", "黑宝石 月亮石", "未知宝石"])(
+    "候选缺速度但宝石%s不能证明无速度加成时不补0",
+    (gem) => {
+      const target = "等级100\n敏捷40\n速度32\n锻炼等级4\n宝石：黑宝石";
+      expect(comparable("等级100\n敏捷40\n锻炼等级4\n宝石：" + gem, target).matchType).toBeNull();
+    },
+  );
+  it("宝石、熔炼和双加差异保留为相近配置，不能冒充同配置", () => {
     const result = comparable(
-      gear
-        .replace("防御 +100", "防御 +120")
-        .replace("锻炼等级 8", "锻炼等级 7")
-        .replace("葫芦宝贝", "净瓶女娲") + "\n熔炼效果：+3防御\n力量 +10\n符石: 防御 +3",
+      gear.replace("防御 +100", "防御 +90").replace("锻炼等级 8", "锻炼等级 7") +
+        "\n熔炼效果：+3防御\n力量 +10\n符石: 防御 +3",
+      gear + "\n力量 +20",
     );
     expect(result.matchType).toBe("similar");
-    for (const field of ["防御", "锻炼等级", "套装", "熔炼", "力量", "符石"])
+    for (const field of ["初始防御", "锻炼等级", "熔炼", "力量", "符石"])
       expect(result.differences.some((difference) => difference.startsWith(field))).toBe(true);
   });
   it.each([
@@ -145,8 +282,7 @@ describe("同核心装备粗略参考价匹配", () => {
   it("灵饰相近数值和精炼差异可用，但完整详情不能漏词条", () => {
     const target = "等级80\n精炼等级7\n法术伤害16\n法术伤害8[+28]\n法术伤害9[+28]";
     expect(
-      comparable("等级80\n精炼等级6\n法术伤害16\n法术伤害9[+24]\n法术伤害10[+24]", target)
-        .matchType,
+      comparable("等级80\n精炼等级6\n法术伤害16\n法术伤害7[+24]\n法术伤害8[+24]", target).matchType,
     ).toBe("similar");
     expect(
       comparable("等级80\n精炼等级7\n法术伤害16\n法术伤害8[+28]", target).matchType,
@@ -187,17 +323,17 @@ describe("同核心装备粗略参考价匹配", () => {
 describe("角色上下文不会阻塞独立灵饰参考", () => {
   const description =
     "等级 80\n防御 +21\n耐久度 84\n精炼等级 5\n附加属性：\n法术伤害结果 +8 [+15]\n法术伤害 +8 [+20]\n法术暴击等级 +10 [+20]\n特效：健步如飞（2级）\n速度 +2\n速度+7（已生效）\n装备条件：等级80";
-  it("芙蓉戒8到10点法伤保留为相近报价，完整和列表属性采用同一有限容差", () => {
+  it("芙蓉戒8到6点法伤保留为相近报价，完整和列表都不能采用更高基础值", () => {
     const target = parseEquipmentAttributes(description);
-    const source = parseEquipmentAttributes(description.replace("法术伤害 +8", "法术伤害 +10"));
+    const source = parseEquipmentAttributes(description.replace("法术伤害 +8", "法术伤害 +6"));
     const result = matchComparableEquipmentAttributes(target, source);
     expect(result.matchType).toBe("similar");
-    expect(result.differences).toContain("法术伤害：+8 [+20] → +10 [+20]");
+    expect(result.differences).toContain("法术伤害：+8 [+20] → +6 [+20]");
     expect(matchEquipmentAttributes(target, source).matchType).toBeNull();
     expect(
       matchComparableEquipmentAttributes(
         target,
-        parseEquipmentAttributes("法术伤害 +10 [+20]"),
+        parseEquipmentAttributes("法术伤害 +6 [+20]"),
         true,
       ).reason,
     ).toBeNull();
@@ -210,8 +346,8 @@ describe("角色上下文不会阻塞独立灵饰参考", () => {
     expect(result.matchType).toBeNull();
     expect(result.reason).toContain("法术伤害");
   });
-  it("小数值容差不绕过零值、词条数量、特效和等级", () => {
-    const changed = description.replace("法术伤害 +8", "法术伤害 +10");
+  it("基础值上限不绕过词条数量、特效和等级", () => {
+    const changed = description.replace("法术伤害 +8", "法术伤害 +6");
     for (const source of [
       changed.replace("等级 80", "等级 60"),
       changed.replace("法术暴击等级 +10 [+20]\n", ""),
@@ -237,7 +373,7 @@ describe("角色上下文不会阻塞独立灵饰参考", () => {
           parseEquipmentAttributes(description.replace("法术伤害 +8", "法术伤害 +1")),
           parseEquipmentAttributes(description.replace("法术伤害 +8", "法术伤害 " + value)),
         ).matchType,
-      ).toBeNull();
+      ).not.toBeNull();
   });
   it("目标46377146芙蓉戒独立挂牌没有整套已生效速度时保留为相近差异", () => {
     const target = parseEquipmentAttributes(description);
@@ -270,56 +406,6 @@ describe("角色上下文不会阻塞独立灵饰参考", () => {
   });
 });
 
-describe("宝石及精炼逐级相近筛选", () => {
-  const target = parseEquipmentAttributes(
-    "等级70\n防御41 魔法73\n锻炼等级4 镶嵌宝石 太阳石\n伤害32",
-  );
-  const mismatch = (source: string, mode: "same-gems" | "near-gems", partial = false) =>
-    equipmentEnhancementMismatch(target, parseEquipmentAttributes(source), mode, partial);
-  it("保存的乾坤帽4段与6段差异不会冒充相邻段数，更不换算基础价格", () => {
-    const source = "等级70\n防御40 魔法75\n锻炼等级6 镶嵌宝石 太阳石\n伤害48";
-    expect(mismatch(source, "same-gems")).toContain("同段或相邻一段");
-    expect(mismatch(source, "near-gems")).toContain("同段或相邻一段");
-    expect(target.fields.伤害).toEqual(["32"]);
-    expect(parseEquipmentAttributes(source).fields.伤害).toEqual(["48"]);
-  });
-  it("同宝石相邻一段可搜索，不同种类和缺失段数不当同段证据", () => {
-    const same = "等级70\n锻炼等级4 镶嵌宝石 太阳石";
-    expect(mismatch(same, "same-gems")).toBeNull();
-    expect(mismatch(same.replace("等级4", "等级3"), "near-gems")).toBeNull();
-    expect(mismatch(same.replace("等级4", "等级5"), "near-gems")).toBeNull();
-    expect(mismatch(same.replace("太阳石", "月亮石"), "near-gems")).toContain("宝石种类");
-    expect(mismatch("等级70\n镶嵌宝石 太阳石", "near-gems")).toContain("完整证据");
-    expect(mismatch("等级70\n防御41", "near-gems", true)).toBeNull();
-  });
-  it("目标89级角色的灵饰5精炼仅允许4至6段，特效仍交给核心匹配核验", () => {
-    const jewelry = parseEquipmentAttributes(
-      "等级80\n精炼等级5\n防御21\n特效：健步如飞（2级）\n速度2",
-    );
-    const source = parseEquipmentAttributes(
-      "等级80\n精炼等级4\n防御21\n特效：健步如飞（2级）\n速度2",
-    );
-    expect(equipmentEnhancementMismatch(jewelry, source, "near-gems")).toBeNull();
-    expect(equipmentEnhancementMismatch(jewelry, source, "same-gems")).toContain("同段或相邻一段");
-    expect(matchComparableEquipmentAttributes(jewelry, source).matchType).toBe("similar");
-    source.fields.特效 = ["宿敌·神木林（2级）"];
-    expect(matchComparableEquipmentAttributes(jewelry, source).matchType).toBeNull();
-  });
-  it("相近样本优先邻近段数，保留所有实际宝石差异", () => {
-    const target = parseEquipmentAttributes(gear);
-    const nearby = matchComparableEquipmentAttributes(
-      target,
-      parseEquipmentAttributes(gear.replace("锻炼等级 8", "锻炼等级 7")),
-    );
-    const distant = matchComparableEquipmentAttributes(
-      target,
-      parseEquipmentAttributes(gear.replace("锻炼等级 8", "锻炼等级 12")),
-    );
-    expect(nearby.similarityScore).toBeLessThan(distant.similarityScore);
-    expect(distant.differences).toContain("锻炼等级：8 → 12");
-  });
-});
-
 describe("真实明月珰主副同名法伤分段", () => {
   const target =
     "等级 80\n法术伤害 +16\n耐久度 47\n精炼等级 5\n附加属性：\n法术伤害 +12 [+20]\n法术暴击等级 +8 [+20]\n特效：健步如飞（2级）\n速度 +2\n速度+7（已生效）\n装备条件：等级80";
@@ -328,26 +414,26 @@ describe("真实明月珰主副同名法伤分段", () => {
       parseEquipmentAttributes(target),
       parseEquipmentAttributes(source),
     );
-  it("主副数值互换不能通过排序变成相同配置或20%内差异", () => {
+  it("主副数值互换不能绕过各段基础值上限", () => {
     const source = target
       .replace("法术伤害 +16", "法术伤害 +12")
       .replace("法术伤害 +12 [+20]", "法术伤害 +16 [+20]");
-    expect(matching(source).reason).toMatch(/主属性.*法术伤害.*20%/);
+    expect(matching(source).reason).toMatch(/附加属性.*法术伤害.*高于目标/);
     expect(
       matchEquipmentAttributes(parseEquipmentAttributes(target), parseEquipmentAttributes(source))
         .matchType,
     ).toBeNull();
   });
-  it("每一段独立落在20%以内才采纳，并显示主属性和副属性各自差异", () => {
+  it("每一段基础值均不高于目标才采纳，并显示各自差异", () => {
     const source = target
       .replace("法术伤害 +16", "法术伤害 +14")
-      .replace("法术伤害 +12 [+20]", "法术伤害 +14 [+20]");
+      .replace("法术伤害 +12 [+20]", "法术伤害 +11 [+20]");
     const result = matching(source);
     expect(result.matchType).toBe("similar");
     expect(result.differences).toEqual(
       expect.arrayContaining([
         "主属性·法术伤害：+16 → +14",
-        "附加属性·法术伤害：+12 [+20] → +14 [+20]",
+        "附加属性·法术伤害：+12 [+20] → +11 [+20]",
       ]),
     );
   });

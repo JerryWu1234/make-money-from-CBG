@@ -99,6 +99,7 @@ describe("商品分析 HTTP 链路", () => {
       provider: "deepseek",
       page: 2,
       resultsPage: 1,
+      summary: true,
       search: "宝宝",
       filter: "failed",
       runId: undefined,

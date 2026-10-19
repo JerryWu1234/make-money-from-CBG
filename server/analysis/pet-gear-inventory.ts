@@ -18,7 +18,7 @@ import {
 import {
   candidateQuoteMatchesPrice,
   officialSourceIdentity,
-  priceAverage,
+  priceMinimum,
   EQUIPMENT_QUOTE_LIMIT,
   EQUIPMENT_QUOTE_POLICY,
   pricingTimestampFresh,
@@ -33,9 +33,11 @@ export type PetGearPricingItem = EquipmentPricingItem & {
   rawItem?: Pick<DetailItem, "index" | "modelId" | "kindId" | "location" | "attributes">;
   reason?: string;
   queriedAt?: string;
+  skippedWithPet?: boolean;
   searchStatus?:
     | "pending"
     | "completed"
+    | "skipped"
     | "read_failed"
     | "unsupported"
     | "incomplete"
@@ -51,49 +53,54 @@ export type PetGearPricingSnapshot = Omit<EquipmentPricingSnapshot, "items"> & {
 /** Gear references do not add to the parent pet's already inclusive listing price. */
 export function petGearInventory(record: SavedRoleRecord) {
   const inventory = petInventory(record);
-  const items: PetGearPricingItem[] = inventory.items.flatMap((pet) =>
-    pet.equipment.map((gear, index) => {
-      const rawPet = record.detail?.tabs
-        .find((tab) => pet.key.startsWith(tab.name + ":"))
-        ?.pets?.find((value) => pet.key === "召唤兽/孩子:" + value.index);
-      const raw = rawPet?.equipment[index];
-      const attributes = parsePetGearAttributes(gear.description);
-      const issues = gear.accessory
-        ? ["宝宝饰品不属于召唤兽装备搜索，保留未定价"]
-        : attributes.issues;
-      return {
-        key: pet.key + ":gear:" + index,
-        petKey: pet.key,
-        petName: pet.name,
-        name: gear.name,
-        description: gear.description,
-        level: attributes.level,
-        category: "召唤兽装备",
-        priceMethod: EQUIPMENT_QUOTE_POLICY,
-        accessory: !!gear.accessory,
-        ...(raw
-          ? {
-              rawItem: {
-                index: raw.index,
-                modelId: raw.modelId,
-                kindId: raw.kindId,
-                location: raw.location,
-                attributes: raw.attributes,
-              },
-            }
-          : {}),
-        status: attributes.restricted ? "untradable" : issues.length ? "unsupported" : "no_match",
-        issues: attributes.restricted ? [...issues, "绑定或专用宝宝装备不能套用交易价格"] : issues,
-        query: "",
-        referencePrice: null,
-        candidates: [],
-      };
-    }),
-  );
+  const items: PetGearPricingItem[] = inventory.items
+    .filter((pet) => !pet.skipReason)
+    .flatMap((pet) =>
+      pet.equipment.map((gear, index) => {
+        const rawPet = record.detail?.tabs
+          .find((tab) => pet.key.startsWith(tab.name + ":"))
+          ?.pets?.find((value) => pet.key === "召唤兽/孩子:" + value.index);
+        const raw = rawPet?.equipment[index];
+        const attributes = parsePetGearAttributes(gear.description);
+        const issues = gear.accessory
+          ? ["宝宝饰品不属于召唤兽装备搜索，保留未定价"]
+          : attributes.issues;
+        return {
+          key: pet.key + ":gear:" + index,
+          petKey: pet.key,
+          petName: pet.name,
+          name: gear.name,
+          description: gear.description,
+          level: attributes.level,
+          category: "召唤兽装备",
+          priceMethod: EQUIPMENT_QUOTE_POLICY,
+          accessory: !!gear.accessory,
+          ...(raw
+            ? {
+                rawItem: {
+                  index: raw.index,
+                  modelId: raw.modelId,
+                  kindId: raw.kindId,
+                  location: raw.location,
+                  attributes: raw.attributes,
+                },
+              }
+            : {}),
+          status: attributes.restricted ? "untradable" : issues.length ? "unsupported" : "no_match",
+          issues: attributes.restricted
+            ? [...issues, "绑定或专用宝宝装备不能套用交易价格"]
+            : issues,
+          query: "",
+          referencePrice: null,
+          candidates: [],
+        };
+      }),
+    );
   const inputHash = createHash("sha256")
     .update(
       JSON.stringify({
         marketScope: GLOBAL_MARKET_SCOPE_VERSION,
+        serverId: record.listing.serverId,
         searchUI: MARKET_SEARCH_UI_VERSION,
         comparisonVersion: "pet-gear-identity-checked-average-v7",
         priceMethod: EQUIPMENT_QUOTE_POLICY,
@@ -163,14 +170,14 @@ export function petGearReference(candidates: EquipmentCandidate[]) {
       };
     distinct.set(identity, candidate.price!);
   }
-  const average = priceAverage(
+  const minimum = priceMinimum(
     selected
       .filter((candidate) => candidate.matchType === "exact")
       .map((candidate) => candidate.price!),
   );
   return {
     referencePrice:
-      average !== null ? average : estimate.status === "range" ? estimate.average! : null,
+      minimum !== null ? minimum : estimate.status === "range" ? estimate.range!.min : null,
     similarEstimate: estimate,
   };
 }

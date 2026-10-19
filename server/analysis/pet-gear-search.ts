@@ -1,5 +1,7 @@
 import type { SavedRoleRecord } from "../crawler/types";
+import { pricingCandidatesFresh, pricingTimestampFresh } from "./pricing-integrity";
 import { createPetGearSource } from "./browser-pet-gear-source";
+import type { PetPricingSnapshot } from "./pet-pricing";
 import {
   PET_GEAR_ACCOUNTING,
   petGearInventory,
@@ -12,15 +14,12 @@ export async function searchPetGearPricing(
   record: SavedRoleRecord,
   signal: AbortSignal,
   previous?: PetGearPricingSnapshot,
+  pets?: PetPricingSnapshot,
 ): Promise<PetGearPricingSnapshot> {
   signal.throwIfAborted();
   const inventory = petGearInventory(record);
-  const previousAge = previous ? Date.now() - Date.parse(previous.searchedAt) : Infinity;
   const reusable =
-    previous?.inputHash === inventory.inputHash &&
-    Number.isFinite(previousAge) &&
-    previousAge >= -60_000 &&
-    previousAge < 24 * 60 * 60 * 1000;
+    previous?.inputHash === inventory.inputHash && pricingTimestampFresh(previous.searchedAt);
   const snapshot: PetGearPricingSnapshot = {
     version: 1,
     inputHash: inventory.inputHash,
@@ -38,10 +37,29 @@ export async function searchPetGearPricing(
     accounting: PET_GEAR_ACCOUNTING,
     issues: inventory.issues,
     items: inventory.items.map((item) => {
+      const parent = pets?.items.find(
+        (pet) => pet.key === item.petKey && pet.searchState === "skipped",
+      );
+      if (parent) {
+        const reason = `所属宝宝“${parent.name}”已跳过（${parent.skipReason || "无样本，未计入参考合计"}）；随身装备不再核验，市场售价未知`;
+        return {
+          ...item,
+          status: "no_match" as const,
+          searchStatus: "skipped" as const,
+          searchState: "skipped" as const,
+          skippedWithPet: true,
+          skipReason: reason,
+          reason,
+          queriedAt: new Date().toISOString(),
+          issues: [...item.issues, reason],
+        };
+      }
       const saved = reusable ? previous.items.find((value) => value.key === item.key) : undefined;
       const savedAge = saved?.queriedAt ? Date.now() - Date.parse(saved.queriedAt) : Infinity;
       return saved &&
-        ["completed", "pending", "read_failed"].includes(saved.searchStatus || "") &&
+        !saved.skippedWithPet &&
+        pricingCandidatesFresh(saved.candidates) &&
+        ["completed", "skipped", "pending", "read_failed"].includes(saved.searchStatus || "") &&
         savedAge >= -60_000 &&
         savedAge < 24 * 60 * 60 * 1000 &&
         (saved.searchStatus !== "completed" ||
@@ -67,10 +85,10 @@ export async function searchPetGearPricing(
   const pending = snapshot.items.filter(
     (item) =>
       !["unsupported", "untradable", "incomplete"].includes(item.status) &&
-      item.searchStatus !== "completed",
+      !["completed", "skipped"].includes(item.searchStatus || ""),
   );
   if (pending.length) {
-    const source = await createPetGearSource(signal);
+    const source = await createPetGearSource(signal, record.listing.serverId);
     try {
       const result = await source.findCandidates(pending, signal);
       signal.throwIfAborted();
@@ -99,6 +117,18 @@ export async function searchPetGearPricing(
         item.searchStatus = found.searchStatus;
         item.searchState = found.searchStatus;
         item.searchCursor = found.searchCursor;
+        if (
+          found.samplingStopped &&
+          found.searchStatus === "pending" &&
+          found.searchCursor?.modeIndex === 2 &&
+          !found.candidates.some((candidate) => candidate.verified) &&
+          !found.searchCursor?.failed.length
+        ) {
+          item.searchStatus = "skipped";
+          item.searchState = "skipped";
+          item.samplingStopped = true;
+          item.skipReason = "无样本，宝宝装备不计价；市场售价未知";
+        } else delete item.samplingStopped;
         item.queriedAt = new Date().toISOString();
         item.issues = [
           ...(reference.referencePrice === null ? reference.similarEstimate.issues : []),
@@ -111,7 +141,8 @@ export async function searchPetGearPricing(
   }
   snapshot.searchComplete = snapshot.items.every(
     (item) =>
-      item.searchStatus === "completed" || ["unsupported", "untradable"].includes(item.status),
+      ["completed", "skipped"].includes(item.searchStatus || "") ||
+      ["unsupported", "untradable"].includes(item.status),
   );
   snapshot.issues = [
     ...new Set([

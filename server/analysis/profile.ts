@@ -14,7 +14,7 @@ import {
 } from "./equipment-baseline";
 
 export const PROMPT_FILE = resolve("prompts/role-valuation.md");
-export const CALCULATION_VERSION = "price-comparison-v26";
+export const CALCULATION_VERSION = "price-comparison-v35";
 // Update alongside the calculator when changing pricing sections III through VIII.
 const PRICING_HASH = "0b29ddcd68d656a7749b447604eb1c5eae6903c72d74fc3cb1876336a55f5ddf";
 export const DEFAULT_SETTINGS: ValuationSettings = {
@@ -138,7 +138,6 @@ export function createProfile(
   settings: unknown = DEFAULT_SETTINGS,
   equipmentSearch = true,
   petSearch = equipmentSearch,
-  roleSearch = equipmentSearch,
 ): AnalysisProfile {
   if (!template.trim() || Buffer.byteLength(template, "utf8") > 64 * 1024)
     throw new Error("Prompt 不能为空或超过 64 KiB");
@@ -157,7 +156,6 @@ export function createProfile(
     equipmentSearch,
     petSearch,
     petGearSearch: petSearch,
-    roleSearch,
     template,
     promptHash,
     settings: normalized,
@@ -179,8 +177,6 @@ export function createProfile(
         equipmentSearch,
         petSearch,
         "pet-gear-ui-v1",
-        "whole-role-market-v1",
-        roleSearch,
       ]),
     ),
   };
@@ -229,7 +225,11 @@ export function loadProfile(db: DatabaseSync, file = PROMPT_FILE) {
     ...settings,
     servers: [...manual, ...available],
   });
-  return { ...profile, marketSources: available };
+  // A streaming batch must retain the original market facts for roles captured later.
+  return {
+    ...profile,
+    marketSources: market.filter((row) => !manual.some((item) => item.serverId === row.serverId)),
+  };
 }
 export function saveProfile(db: DatabaseSync, input: unknown, file = PROMPT_FILE) {
   if (!input || typeof input !== "object" || Array.isArray(input))

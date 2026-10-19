@@ -5,6 +5,7 @@ import {
   resumePricingItems,
   rememberPricingPage,
   validPricingPageHistory,
+  finishPricingSearch,
 } from "./pricing-progress";
 import type { EquipmentSearchCursor } from "./equipment-pricing";
 
@@ -185,4 +186,164 @@ it("结果变化清空旧取样位置，只允许一次自动重建，避免行�
   const repeated = structuredClone(current);
   resetPricingCursor(repeated.items[0].searchCursor!);
   expect(pricingSearchAdvanced(current, repeated)).toBe(false);
+});
+
+it("首屏无样本跳过单件，旧进度恢复后也不重查；价格仍未知", () => {
+  const initial: EquipmentPricingSnapshot = {
+    version: 1,
+    inputHash: "first-page",
+    searchedAt: new Date().toISOString(),
+    provider: "browser",
+    model: "browser",
+    captureComplete: true,
+    total: null,
+    knownTotal: 0,
+    queries: [],
+    rawResponse: null,
+    issues: [],
+    searchComplete: false,
+    items: [
+      {
+        key: "a",
+        name: "测试腰带",
+        category: "腰带",
+        level: 100,
+        description: "等级100",
+        query: "",
+        status: "no_match",
+        referencePrice: null,
+        candidates: [],
+        issues: [],
+        searchState: "pending",
+      },
+    ],
+  };
+  const stopped = structuredClone(initial);
+  stopped.items[0].samplingStopped = true;
+  stopped.items[0].searchCursor = {
+    version: 1,
+    planHash: "plan",
+    modeIndex: 2,
+    pageNumber: 1,
+    rowIndex: 0,
+    pageRowsHash: "",
+    seen: [],
+    failed: [],
+    emptyFirstPageModes: [0, 1],
+  };
+  const oldProgress = structuredClone(stopped);
+  finishPricingSearch(stopped);
+  expect(stopped.items[0].searchState).toBe("skipped");
+  expect(stopped.searchComplete).toBe(true);
+  expect(stopped.total).toBeNull();
+  expect(stopped.knownTotal).toBe(0);
+  expect(pricingSearchAdvanced(initial, stopped)).toBe(true);
+  const retried = resumePricingItems(structuredClone(initial), stopped);
+  expect(retried.items[0].searchState).toBe("skipped");
+  expect(retried.items[0].referencePrice).toBeNull();
+  expect(resumePricingItems(structuredClone(initial), oldProgress).items[0].searchState).toBe(
+    "skipped",
+  );
+  resetPricingCursor(stopped.items[0].searchCursor!);
+  expect(stopped.items[0].searchCursor!.emptyFirstPageModes).toBeUndefined();
+});
+
+it("无样本跳过规则不隐藏读取失败、未查完、有样本或未采齐的项目", () => {
+  const item = {
+    key: "a",
+    name: "装备",
+    category: "腰带",
+    level: 100,
+    description: "等级100",
+    query: "query",
+    status: "no_match" as const,
+    referencePrice: null,
+    candidates: [],
+    issues: [],
+    searchState: "completed" as const,
+  };
+  const snapshot = {
+    version: 1,
+    inputHash: "skip",
+    searchedAt: new Date().toISOString(),
+    provider: "browser",
+    model: "browser",
+    captureComplete: true,
+    total: null,
+    knownTotal: 0,
+    queries: ["query"],
+    rawResponse: null,
+    issues: [],
+    items: [item],
+  } as EquipmentPricingSnapshot;
+  expect(finishPricingSearch(structuredClone(snapshot)).items[0].searchState).toBe("skipped");
+  for (const change of [
+    { searchState: "pending" },
+    { searchState: "read_failed", samplingStopped: true },
+    { status: "incomplete" },
+    { candidates: [{ verified: true }] },
+  ]) {
+    const value = structuredClone(snapshot);
+    Object.assign(value.items[0], change);
+    expect(finishPricingSearch(value).items[0].searchState).not.toBe("skipped");
+  }
+  const unfinished = structuredClone(snapshot);
+  unfinished.searchItems = [{ key: "a", modes: [{ mode: "exact", exhausted: false }] }];
+  expect(finishPricingSearch(unfinished).items[0].searchState).toBe("pending");
+});
+
+it("新汇总时间不能让过期相近样本在续查中复用，其余已完成项保留", () => {
+  const inventory: EquipmentPricingSnapshot = {
+    version: 1,
+    inputHash: "candidate-expiry",
+    searchedAt: new Date().toISOString(),
+    provider: "browser",
+    model: "browser",
+    queries: [],
+    rawResponse: null,
+    captureComplete: true,
+    total: null,
+    knownTotal: 0,
+    issues: [],
+    items: ["old", "fresh"].map((key) => ({
+      key,
+      name: key,
+      level: 100,
+      category: "耳饰",
+      description: "等级100",
+      query: "",
+      status: "no_match",
+      referencePrice: null,
+      candidates: [],
+      issues: [],
+    })),
+  };
+  const previous = structuredClone(inventory);
+  previous.items = previous.items.map((item, index) => ({
+    ...item,
+    searchState: "completed",
+    candidates: [
+      {
+        url: `https://xyq.cbg.163.com/equip/1/${item.key}`,
+        title: item.name,
+        price: 100,
+        priceType: "listing",
+        quote: "挂牌价100",
+        verified: true,
+        reason: "已核验相近商品",
+        matchType: "similar",
+        sourceHash: item.key,
+        fetchedAt: new Date(Date.now() - (index ? 1000 : 24 * 3600_000)).toISOString(),
+      },
+    ],
+  }));
+  previous.searchItems = previous.items.map((item) => ({
+    key: item.key,
+    matchType: "similar",
+    exhausted: true,
+  }));
+  const resumed = resumePricingItems(inventory, previous);
+  expect(resumed.items[0]).toMatchObject({ searchState: "pending", candidates: [] });
+  expect(resumed.items[1]).toEqual(previous.items[1]);
+  expect(resumed.searchItems).toEqual(previous.searchItems);
 });

@@ -9,7 +9,8 @@
     "preview": "vp preview",
     "check": "vp check",
     "analysis:prepare": "node scripts/prepare-analysis-inputs.mjs",
-    "test:e2e": "vp run build && playwright test"
+    "test:e2e": "vp run build && playwright test",
+    "test:e2e:live": "playwright test --config playwright.live.config.ts"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.99.1",

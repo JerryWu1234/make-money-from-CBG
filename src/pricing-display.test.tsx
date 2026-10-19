@@ -8,9 +8,7 @@ import type { ValuationResult } from "../server/analysis/valuation-types";
 import { DEFAULT_EQUIPMENT_BASELINE_PRICES } from "../server/analysis/equipment-baseline";
 import { EquipmentBaselinePriceFields } from "./AnalysisSettings";
 import { EquipmentPricingView } from "./EquipmentPricingView";
-import { ValuationResultView, valuationSummaryText } from "./ValuationResultView";
-import type { RolePricingSnapshot } from "../server/analysis/role-pricing";
-import { valuationRecord } from "../tests/fixtures/analysis";
+import { ValuationResultView } from "./ValuationResultView";
 
 const baseline = (
   override: Partial<NonNullable<EquipmentPricingItem["baselineEstimate"]>> = {},
@@ -58,6 +56,16 @@ const snapshot = (items = [item()]): EquipmentPricingSnapshot => ({
   items,
   issues: [],
 });
+it("无样本的装备和宝宝显示跳过而不是待补齐或0元", () => {
+  const html = renderToStaticMarkup(
+    <EquipmentPricingView
+      snapshot={snapshot([{ ...item(), baselineEstimate: undefined, searchState: "skipped" }])}
+    />,
+  );
+  expect(html).toContain("无样本，未计入参考合计");
+  expect(html).not.toContain("查价未完成，继续时重试");
+  expect(html).not.toContain("¥0.00");
+});
 it.each(["pending", "read_failed"] as const)("页面将%s与未找到报价区分", (state) => {
   const html = renderToStaticMarkup(
     <EquipmentPricingView
@@ -83,14 +91,14 @@ it("逐件展示关联搜索页面和实际条件，继续查询的历史记录�
   expect(html).toContain("submittedArgs");
   expect(html).not.toContain("other-asset-search-must-not-appear");
 });
-it("装备不足十件时显示实际五件报价与均价；搜索中断时主金额保留待查", () => {
+it("装备取得五件时显示报价与均价；搜索中断时主金额保留待查", () => {
   const gear: EquipmentPricingItem = {
     ...item(),
     baselineEstimate: undefined,
-    priceMethod: "first-ten-average-v2",
+    priceMethod: "first-five-average-v3",
     searchState: "completed",
     similarEstimate: {
-      policyVersion: "bounded-attributes-first-ten-average-v7",
+      policyVersion: "bounded-attributes-first-five-average-v8",
       status: "range",
       average: 121,
       median: 120,
@@ -145,7 +153,7 @@ const valuation = (override: Partial<ValuationResult> = {}): ValuationResult => 
   ...override,
 });
 
-it("核算排除与特殊资产整号参考分别披露，分项不显示0元", () => {
+it("核算排除保留原因，分项不显示0元", () => {
   const excluded = {
     ...item(),
     baselineEstimate: undefined,
@@ -164,23 +172,9 @@ it("核算排除与特殊资产整号参考分别披露，分项不显示0元", 
         excluded_assets: [
           { key: excluded.key, name: excluded.name, reason: excluded.exclusion.label },
         ],
-        special_asset_reference: {
-          method: "whole-role-market",
-          assets: [
-            { key: "special", name: "专用剑", roleUse: "角色战斗装备", individualPrice: null },
-          ],
-          value: 5000,
-          range: { min: 4800, max: 5200 },
-          listingDifference: 100,
-          note: "整号参考独立展示，未与资产小计相加。",
-        },
       })}
     />,
   );
-  expect(html).toContain("分项价格未知");
-  expect(html).toContain("角色战斗装备");
-  expect(html).toContain("独立整号参考：¥5,000.00");
-  expect(html).toContain("未与资产小计相加");
   expect(html).toContain("市场售价未知");
 });
 
@@ -641,80 +635,5 @@ it("少样本显示已核实挂牌范围，并明确未计入估值", () => {
   const html = renderToStaticMarkup(<EquipmentPricingView snapshot={snapshot([gear])} />);
   expect(html).toContain("已核实样本挂牌范围：¥388.88—¥400.80");
   expect(html).toContain("未纳入估值");
-  expect(html).not.toContain("¥0.00");
-});
-
-const simulatedRolePricing = (): RolePricingSnapshot => ({
-  version: 1,
-  inputHash: "simulated-whole-role",
-  searchedAt: new Date().toISOString(),
-  searchComplete: true,
-  queried: true,
-  target: { key: "simulated-target", url: "", price: 800, sourceHash: "simulated-target-hash" },
-  marketReference: {
-    policyVersion: "simulated-whole-role-policy",
-    status: "range",
-    range: { min: 1600, max: 1700 },
-    median: 1650,
-    sampleCount: 3,
-    scope: "整号挂牌参考包含角色与附带资产，不与资产小计相加，不代表成交价",
-    issues: [],
-  },
-  candidates: [1600, 1650, 1700].map((price, index) => ({
-    key: "simulated-role-" + index,
-    url: "https://xyq.cbg.163.com/equip?s=1&eid=mock-full-role-" + index,
-    title: "模拟整号样本" + index,
-    price,
-    active: true,
-    serverAge: "older",
-    fetchedAt: new Date().toISOString(),
-    sourceHash: "simulated-source-" + index,
-    verified: true,
-    reasons: [],
-    differences: ["模拟强壮等级差异"],
-    record: valuationRecord("simulated-role-" + index),
-  })),
-  queryArgs: {},
-  actualRequests: [],
-  pageAudits: [],
-  pages: 1,
-  rows: 3,
-  details: 3,
-  exhausted: true,
-  skipped: [],
-  issues: [],
-});
-
-it("整号市场区间独立展示来源和差异，不重复加入资产估值", () => {
-  const original = valuation();
-  const result = { ...original, role_pricing: simulatedRolePricing() };
-  const html = renderToStaticMarkup(<ValuationResultView result={result} />);
-  expect(html).toContain('aria-label="整号市场参考"');
-  expect(html).toContain("¥1,600.00—¥1,700.00");
-  expect(html).toContain("相关样本挂牌中位数：¥1,650.00");
-  expect(html).toContain("有效整号样本：3 条");
-  expect(html).toContain('href="https://xyq.cbg.163.com/equip?s=1&amp;eid=mock-full-role-0"');
-  expect(html).toContain("模拟强壮等级差异");
-  expect(valuationSummaryText(result)).toBe(valuationSummaryText(original));
-  expect(html).not.toContain("¥2,651.10");
-});
-
-it("整号样本不足或分散显示具体原因，空价格不显示零元", () => {
-  const pricing = simulatedRolePricing();
-  pricing.candidates = [];
-  pricing.marketReference = {
-    ...pricing.marketReference,
-    status: "insufficient",
-    range: null,
-    median: null,
-    sampleCount: 2,
-    issues: ["相关且鲜活的整号在售样本不足3条"],
-  };
-  const html = renderToStaticMarkup(
-    <ValuationResultView result={valuation({ role_pricing: pricing })} />,
-  );
-  expect(html).toContain("样本不足，暂无法形成整号参考");
-  expect(html).toContain("相关且鲜活的整号在售样本不足3条");
-  expect(html).not.toContain("挂牌中位数");
   expect(html).not.toContain("¥0.00");
 });

@@ -1,6 +1,8 @@
 import {
   compareEquipmentAttributes,
-  equipmentInitialDefense,
+  equipmentInitialAttribute,
+  equipmentGemOnlyAttributeMatchesAbsent,
+  equipmentWithoutGemAbsorption,
   separateJewelryAttributes,
   type EquipmentAttributes,
 } from "./equip-attributes";
@@ -178,47 +180,8 @@ export function matchEquipmentAttributes(
   };
 }
 
-/** Search near the observed enhancement without converting it into a guessed base stat. */
-export function equipmentEnhancementMismatch(
-  target: EquipmentAttributes,
-  source: EquipmentAttributes,
-  mode: "same-gems" | "near-gems",
-  partial = false,
-): string | null {
-  const gemTokens = (values: string[] = []) =>
-    values
-      .flatMap((value) => value.split(/[、，,；;\s]+/))
-      .filter(Boolean)
-      .sort();
-  const targetGems = gemTokens(target.fields.宝石);
-  const sourceGems = gemTokens(source.fields.宝石);
-  if ((!partial || sourceGems.length) && JSON.stringify(targetGems) !== JSON.stringify(sourceGems))
-    return "宝石种类不符合当前相近筛选阶段";
-  for (const field of ["锻炼等级", "精炼等级"]) {
-    const left = target.fields[field],
-      right = source.fields[field];
-    if (partial && !right?.length) continue;
-    if (!left?.length && !right?.length) continue;
-    const targetLevel = left?.length === 1 ? numbers(left)?.[0] : undefined;
-    const sourceLevel = right?.length === 1 ? numbers(right)?.[0] : undefined;
-    if (targetLevel === undefined || sourceLevel === undefined)
-      return field + "没有完整证据，不能当作同段或邻近段数";
-    if (
-      !Number.isInteger(targetLevel) ||
-      !Number.isInteger(sourceLevel) ||
-      targetLevel < 0 ||
-      sourceLevel < 0
-    )
-      return field + "不符合有效段数";
-    if (Math.abs(targetLevel - sourceLevel) > (mode === "same-gems" ? 0 : 1))
-      return field + "不符合当前同段或相邻一段筛选";
-  }
-  return null;
-}
-
 const comparableDifferences = new Set([
   "五行",
-  "套装",
   "宝石",
   "锻炼等级",
   "精炼等级",
@@ -265,35 +228,55 @@ export function matchComparableEquipmentAttributes(
   target = separated.target;
   source = separated.source;
   if (separated.reason) return reject(separated.reason);
-  const strict = matchEquipmentAttributes(target, source, partial);
   const displayedDefense = [target.fields.防御?.join("、"), source.fields.防御?.join("、")];
-  if (
-    !target.fields.精炼等级 &&
-    !target.jewelrySections &&
-    (target.fields.防御 || target.fields.初始防御)
-  ) {
-    const initialTarget = equipmentInitialDefense(target);
-    const gemmedTarget =
-      target.fields.宝石?.some((value) => value.trim()) ||
-      target.fields.锻炼等级?.some((value) => Number(value) > 0);
-    const initialSource = equipmentInitialDefense(source, partial && !!gemmedTarget);
-    if (initialTarget === null) return reject("目标初始防御未确认，不能以总防御替代");
-    if (!partial && initialSource === null)
-      return reject("报价初始防御未确认，宝石种类/段数或初防证据缺失或冲突");
-    const normalized = (attributes: EquipmentAttributes, value: number | null) => ({
-      ...attributes,
-      fields: {
-        ...Object.fromEntries(
-          Object.entries(attributes.fields).filter(
-            ([name]) => !["防御", "初始防御"].includes(name),
-          ),
-        ),
-        ...(value !== null ? { 初始防御: [String(value)] } : {}),
-      },
-    });
-    target = normalized(target, initialTarget);
-    source = normalized(source, initialSource);
+  const initialFields = ["命中", "伤害", "防御", "灵力", "气血", "速度", "法术防御", "躲避"];
+  if (!target.jewelrySections && !target.fields.精炼等级) {
+    const normalizeInitial = (attributes: EquipmentAttributes, isPartial: boolean) => {
+      const fields = { ...attributes.fields };
+      for (const name of initialFields) {
+        if (!fields[name] && !fields["初始" + name]) continue;
+        const value = equipmentInitialAttribute(attributes, name, isPartial);
+        if (value === null && !isPartial)
+          return { reason: "初始" + name + "未确认，不能以含宝石值代替" };
+        delete fields[name];
+        delete fields["初始" + name];
+        if (value !== null) fields["初始" + name] = [String(value)];
+      }
+      return { attributes: { ...attributes, fields } };
+    };
+    const normalizedTarget = normalizeInitial(target, false);
+    const normalizedSource = normalizeInitial(source, partial);
+    if (normalizedTarget.reason) return reject("目标" + normalizedTarget.reason);
+    if (normalizedSource.reason) return reject("报价" + normalizedSource.reason);
+    for (const field of ["速度", "伤害"] as const) {
+      if (!partial && equipmentGemOnlyAttributeMatchesAbsent(target, source, field))
+        delete normalizedTarget.attributes!.fields["初始" + field];
+      if (equipmentGemOnlyAttributeMatchesAbsent(source, target, field))
+        delete normalizedSource.attributes!.fields["初始" + field];
+    }
+    target = equipmentWithoutGemAbsorption(normalizedTarget.attributes!);
+    source = equipmentWithoutGemAbsorption(normalizedSource.attributes!);
   }
+  const numericName = (name: string) =>
+    name.replace(/^(?:主属性|附加属性)·/, "").replace(/^初始/, "");
+  const comparableNames = partial
+    ? Object.keys(source.fields)
+    : [...new Set([...Object.keys(target.fields), ...Object.keys(source.fields)])];
+  for (const name of comparableNames) {
+    if (!smallNumericDifferences.has(numericName(name)) && numericName(name) !== "躲避") continue;
+    const a = baseNumbers(target.fields[name] || []),
+      b = baseNumbers(source.fields[name] || []);
+    if (!a?.length || !b?.length) {
+      if (b?.length && !a?.length) return reject("目标基础属性“" + name + "”缺失，不能核验上限");
+      continue;
+    }
+    if (b.length > a.length || (!partial && a.length !== b.length))
+      return reject("基础属性“" + name + "”条目结构不一致");
+    const upper = partial ? a.slice(-b.length) : a;
+    if (b.some((value, index) => value > upper[index]))
+      return reject("报价基础属性“" + name + "”高于目标，不作为参考");
+  }
+  const strict = matchEquipmentAttributes(target, source, partial);
   if (!strict.reason && !separated.reason) return strict;
   const restrictions = compareEquipmentAttributes(
     { ...target, fields: {}, ...(partial ? { unknownLines: [] } : {}) },
@@ -343,7 +326,7 @@ export function matchComparableEquipmentAttributes(
     }
     if (!left.length || !right.length)
       return reject("关键属性“" + name + "”缺失或多出，不能作为相近参考");
-    if (!smallNumericDifferences.has(name.replace(/^(?:主属性|附加属性)·/, "")))
+    if (!smallNumericDifferences.has(numericName(name)) && numericName(name) !== "躲避")
       return reject("关键属性“" + name + "”不匹配");
     let a = baseNumbers(left);
     const b = baseNumbers(right);
@@ -373,14 +356,6 @@ export function matchComparableEquipmentAttributes(
           ? Infinity
           : Math.abs(b[index] - value) / Math.abs(value),
     );
-    if (
-      a.some(
-        (value, index) =>
-          Math.sign(value) !== Math.sign(b[index]) ||
-          Math.abs(b[index] - value) > equipmentAttributeTolerance(name, value)! + 1e-10,
-      )
-    )
-      return reject("关键属性“" + name + "”差异超过20%与有限绝对差容差，不作为相近参考");
     differences.push(name + "：" + left.join("、") + " → " + right.join("、"));
     score += 1 + deltas.reduce((sum, delta) => sum + delta * 100, 0);
   }

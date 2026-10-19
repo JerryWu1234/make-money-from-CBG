@@ -24,7 +24,7 @@ export async function checkPet(input: Record<string, unknown>, requestSignal: Ab
   if (input.mode === "discover") {
     const signal = AbortSignal.any([requestSignal, AbortSignal.timeout(150_000)]);
     signal.throwIfAborted();
-    const source = await createPetSource(signal);
+    const source = await createPetSource(signal, record.listing.serverId);
     try {
       const form = await source.discover();
       signal.throwIfAborted();
@@ -45,7 +45,7 @@ export async function checkPet(input: Record<string, unknown>, requestSignal: Ab
   if (item.status !== "no_match") throw new Error("该宝宝暂不能查价：" + item.issues.join("；"));
   const signal = AbortSignal.any([requestSignal, AbortSignal.timeout(300_000)]);
   signal.throwIfAborted();
-  const source = await createPetSource(signal);
+  const source = await createPetSource(signal, record.listing.serverId);
   try {
     signal.throwIfAborted();
     const result = await source.findCandidates([item], signal);

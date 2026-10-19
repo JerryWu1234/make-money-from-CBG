@@ -10,6 +10,7 @@ import {
   validateExactPricing,
   EQUIPMENT_QUOTE_POLICY,
   priceAverage,
+  priceMinimum,
   unfinishedPricingSearch,
 } from "./pricing-integrity";
 
@@ -62,6 +63,55 @@ const priced = (key = "gear:0") => ({
 const complete = () => ({ ...snapshot([priced()]), knownTotal: 120, total: 120 });
 
 describe("精确查价快照完整性", () => {
+  it("基础上限策略从同值及较低值统一池复算最低价，旧快照身份不复用", () => {
+    const inventory: EquipmentPricingItem[] = [
+      {
+        ...item(),
+        priceMethod: EQUIPMENT_QUOTE_POLICY,
+        comparisonPolicy: "base-upper-bound-v1" as const,
+      },
+    ];
+    const row = {
+      ...inventory[0],
+      status: "priced" as const,
+      referencePrice: 100,
+      candidates: [
+        candidate(900, "equal"),
+        { ...candidate(100, "lower"), matchType: "similar" as const },
+      ],
+    };
+    const source = { ...snapshot([row]), total: 100, knownTotal: 100 };
+    expect(validateExactPricing(source, inventory, now)).toBe(true);
+    expect(
+      validateExactPricing(
+        { ...source, items: [{ ...row, referencePrice: 900 }], total: 900, knownTotal: 900 },
+        inventory,
+        now,
+      ),
+    ).toBe(false);
+    const { comparisonPolicy: _policy, ...legacy } = row;
+    expect(inventoryMatchesSnapshot(snapshot([legacy]), inventory)).toBe(false);
+    expect(inventoryMatchesSnapshot(source, [item()])).toBe(false);
+  });
+
+  it("统一池五件可完成，但未标志旧策略仍只按采用的同配组计数", () => {
+    const row = {
+      ...item(),
+      comparisonPolicy: "base-upper-bound-v1" as const,
+      candidates: Array.from({ length: 5 }, (_, index) => ({
+        ...candidate(100 + index, `pool-${index}`),
+        matchType: index < 2 ? ("exact" as const) : ("similar" as const),
+      })),
+    };
+    const records = [{ key: row.key, modes: [{ mode: "base-attributes", exhausted: false }] }];
+    expect(unfinishedPricingSearch(row, records)).toBe(false);
+    expect(
+      unfinishedPricingSearch({ ...row, candidates: row.candidates.slice(0, 4) }, records),
+    ).toBe(true);
+    const { comparisonPolicy: _policy, ...legacy } = row;
+    expect(unfinishedPricingSearch(legacy, records)).toBe(true);
+  });
+
   it("完成标记不能覆盖尚未穷尽的查询证据", () => {
     const source = complete();
     source.items[0].searchState = "completed";
@@ -85,16 +135,47 @@ describe("精确查价快照完整性", () => {
     expect(unfinishedPricingSearch(row, records)).toBe(true);
   });
 
-  it("零报价和URL别名不足十件不能冒充完成，十件不同商品允许结束", () => {
+  it("四件和URL别名不足五件不能冒充完成，五件不同商品允许结束", () => {
     const row = item();
     const records = [{ key: row.key, modes: [{ mode: "exact", exhausted: false }] }];
     expect(unfinishedPricingSearch(row, records)).toBe(true);
     row.candidates = Array.from({ length: 10 }, () => candidate(100, "same"));
     expect(unfinishedPricingSearch(row, records)).toBe(true);
-    row.candidates = Array.from({ length: 10 }, (_, index) => candidate(100, `sample-${index}`));
+    row.candidates = Array.from({ length: 4 }, (_, index) => candidate(100, `sample-${index}`));
+    expect(unfinishedPricingSearch(row, records)).toBe(true);
+    row.candidates.push(candidate(100, "sample-4"));
     expect(unfinishedPricingSearch(row, records)).toBe(false);
   });
 
+  it("核验前五条范围完成后采用实际两条报价，缺少范围证明或有读取错误仍待查", () => {
+    const row = { ...item(), candidates: [candidate(100, "one"), candidate(200, "two")] };
+    const bounded = {
+      key: row.key,
+      act: "overall_search_pet",
+      matchType: "exact",
+      exhausted: false,
+      sampleLimit: 5,
+      sampled: 5,
+      samplingComplete: true,
+      detailFailures: [],
+      unsupportedDetails: [],
+    };
+    expect(unfinishedPricingSearch(row, [bounded])).toBe(false);
+    expect(
+      unfinishedPricingSearch(row, [
+        { ...bounded, act: "overall_search_equip", modes: [{ ...bounded, mode: "exact" }] },
+      ]),
+    ).toBe(false);
+    for (const change of [
+      { sampled: 4 },
+      { sampleLimit: 10 },
+      { act: "overall_search_pet_equip" },
+      { samplingComplete: false },
+      { detailFailures: [{ reason: "登录失效" }] },
+      { unsupportedDetails: [{ reason: "描述未识别" }] },
+    ])
+      expect(unfinishedPricingSearch(row, [{ ...bounded, ...change }])).toBe(true);
+  });
   it("结果顺序变化后丢弃前次已穷尽证据", () => {
     const row = item();
     const records = [
@@ -116,13 +197,34 @@ describe("精确查价快照完整性", () => {
     ];
     expect(unfinishedPricingSearch(row, records)).toBe(true);
   });
+  it("同宝石阶段不足5条且未结束时，不能借之前空的严格条件冒充完成", () => {
+    const row = { ...item(), candidates: [candidate(100, "one"), candidate(200, "two")] };
+    const record = {
+      key: row.key,
+      act: "overall_search_equip",
+      modes: [
+        { mode: "exact", exhausted: true },
+        {
+          mode: "same-gems",
+          exhausted: false,
+          sampleLimit: 5,
+          sampled: 4,
+          samplingComplete: false,
+          detailFailures: [],
+        },
+      ],
+    };
+    expect(unfinishedPricingSearch(row, [record])).toBe(true);
+    Object.assign(record.modes[1], { sampled: 5, samplingComplete: true });
+    expect(unfinishedPricingSearch(row, [record])).toBe(false);
+  });
 
-  it("新的十件均价快照重算平均值，不能以中位数或旧计价策略冒充", () => {
+  it("五件最低价快照不能复用旧十件价格，第六件及以后不参与", () => {
     const inventory: EquipmentPricingItem[] = [{ ...item(), priceMethod: EQUIPMENT_QUOTE_POLICY }];
     const row: EquipmentPricingItem = {
       ...inventory[0],
       status: "priced" as const,
-      referencePrice: 226,
+      referencePrice: 100,
       candidates: [100, 110, 120, 130, 140, 150, 160, 170, 180, 1000, 1].map((price, index) =>
         candidate(price, `mean-${index}`),
       ),
@@ -131,14 +233,16 @@ describe("精确查价快照完整性", () => {
       ...candidate(100, "mean-0"),
       url: "https://xyq.cbg.163.com/equip/1/mean-0",
     });
-    const source = { ...snapshot([row]), total: 226, knownTotal: 226 };
+    const source = { ...snapshot([row]), total: 100, knownTotal: 100 };
     expect(validateExactPricing(source, inventory, now)).toBe(true);
-    row.referencePrice = source.total = source.knownTotal = 120;
+    row.referencePrice = source.total = source.knownTotal = 226;
     expect(validateExactPricing(source, inventory, now)).toBe(false);
     delete row.priceMethod;
     expect(inventoryMatchesSnapshot(source, inventory)).toBe(false);
     expect(priceAverage([100.01, 100.02])).toBe(100.02);
     expect(priceAverage([])).toBeNull();
+    expect(priceMinimum([300, 100.01, 200])).toBe(100.01);
+    expect(priceMinimum([])).toBeNull();
   });
   it("路径与查询身份冲突、非商品路径或带端口/凭据的链接不能支撑精确中位数", () => {
     for (const url of [
@@ -328,3 +432,53 @@ describe("精确查价快照完整性", () => {
     expect(validateExactPricing(expired, [item()], now)).toBe(false);
   });
 });
+
+it("首屏停止取样不能伪装成已完成或有价格的快照", () => {
+  const source: EquipmentPricingSnapshot = complete();
+  source.items[0].samplingStopped = true;
+  expect(validateExactPricing(source, [item()], now)).toBe(false);
+  source.items[0] = { ...item(), samplingStopped: true, searchState: "pending" };
+  source.total = null;
+  source.knownTotal = 0;
+  expect(validateExactPricing(source, [item()], now)).toBe(true);
+  source.items[0].searchState = "completed";
+  expect(validateExactPricing(source, [item()], now)).toBe(false);
+});
+
+it("跳过只允许无有效样本且金额未知的单件", () => {
+  const source = snapshot([{ ...item(), searchState: "skipped", samplingStopped: true }]);
+  source.total = null;
+  expect(validateExactPricing(source, [item()], now)).toBe(true);
+  for (const change of [
+    { status: "priced" },
+    { referencePrice: 0 },
+    { candidates: [candidate(100, "one")] },
+    { candidates: [{ ...candidate(100, "one"), matchType: "similar" }] },
+  ]) {
+    const invalid = structuredClone(source);
+    Object.assign(invalid.items[0], change);
+    expect(validateExactPricing(invalid, [item()], now)).toBe(false);
+  }
+});
+
+it.each(["exact", "similar"] as const)(
+  "基础上限宽搜的完成证据可用于%s报价，不足5条未完成仍续查",
+  (matchType) => {
+    const row = { ...item(), candidates: [{ ...candidate(100, "bounded"), matchType }] };
+    const mode = {
+      mode: "base-attributes",
+      exhausted: false,
+      sampleLimit: 5,
+      sampled: 5,
+      samplingComplete: true,
+      detailFailures: [],
+    };
+    const record = { key: row.key, act: "overall_search_equip", modes: [mode] };
+    expect(unfinishedPricingSearch(row, [record])).toBe(false);
+    expect(
+      unfinishedPricingSearch(row, [
+        { ...record, modes: [{ ...mode, sampled: 4, samplingComplete: false }] },
+      ]),
+    ).toBe(true);
+  },
+);

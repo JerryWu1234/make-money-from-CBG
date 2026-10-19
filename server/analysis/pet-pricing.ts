@@ -5,11 +5,12 @@ import { cleanDescription, coreEquipmentDescription, itemFromAttributes } from "
 import { compareListingPrice } from "./valuation-calculator";
 import {
   inventoryMatchesSnapshot,
-  priceAverage,
+  priceMinimum,
   validateExactPricing,
   EQUIPMENT_QUOTE_LIMIT,
   EQUIPMENT_QUOTE_POLICY,
   PRICING_RESUME_POLICY,
+  skippedPricingItem,
 } from "./pricing-integrity";
 import type { ValuationResult } from "./valuation-types";
 import { buildSimilarEstimate, SIMILAR_POLICY_VERSION } from "./pricing-estimate";
@@ -74,6 +75,8 @@ export type PetSource = {
       searchState?: PricingSearchState;
       searchCursor?: EquipmentSearchCursor;
       skipped?: boolean;
+      samplingStopped?: boolean;
+      skipReason?: string;
     }>;
     searchItems?: unknown[];
   }>;
@@ -141,6 +144,14 @@ const gearDescription = (item: DetailItem) =>
         .map(([key, value]) => key + "：" + value)
         .join("\n"),
   });
+
+function petPricingSkipReason(level: number | null, fields: PetPricingItem["fields"]) {
+  if (level === 0) return "0级宝宝，未计入参考合计";
+  const baby = fields.filter((field) => ["是否宝宝", "宝宝"].includes(field.name));
+  if (baby.length && baby.every((field) => /^(?:否|0|野生)$/.test(field.value)))
+    return "野生宝宝，未计入参考合计";
+  return undefined;
+}
 
 /** A complete capture can be empty; missing or partial capture is never an empty inventory. */
 export function petInventory(record: SavedRoleRecord) {
@@ -210,23 +221,42 @@ export function petInventory(record: SavedRoleRecord) {
           (equipment.map((item) => item.name + "\n" + item.description).join("\n") || "无"),
       ].join("\n");
       const bound = /不可交易|绑定|专用召唤兽/.test(description);
+      const skipReason = petPricingSkipReason(level, fields);
       items.push({
         key,
         name,
         level,
         category: "召唤兽（含已核对随身装备）",
         description,
-        query: "梦幻西游电脑版 藏宝阁 全服 召唤兽 " + name + " " + description.replace(/\n/g, " "),
-        status: bound ? "untradable" : itemIssues.length ? "incomplete" : "no_match",
+        query: skipReason
+          ? ""
+          : "梦幻西游电脑版 藏宝阁 目标单服 " +
+            record.listing.serverId +
+            " 召唤兽 " +
+            name +
+            " " +
+            description.replace(/\n/g, " "),
+        status: skipReason
+          ? "no_match"
+          : bound
+            ? "untradable"
+            : itemIssues.length
+              ? "incomplete"
+              : "no_match",
         referencePrice: null,
         priceMethod: EQUIPMENT_QUOTE_POLICY,
         candidates: [],
-        issues: bound ? [...itemIssues, "绑定或不可交易宝宝不能套用可交易价格"] : itemIssues,
+        issues: skipReason
+          ? [...itemIssues, skipReason]
+          : bound
+            ? [...itemIssues, "绑定或不可交易宝宝不能套用可交易价格"]
+            : itemIssues,
         fields,
         skills,
         ...(skillObservations.length ? { skillObservations } : {}),
         innerSkills,
         equipment,
+        ...(skipReason ? { searchState: "skipped", skipReason } : {}),
       });
     }
   }
@@ -234,6 +264,7 @@ export function petInventory(record: SavedRoleRecord) {
   const inputHash = hash(
     JSON.stringify({
       marketScope: GLOBAL_MARKET_SCOPE_VERSION,
+      serverId: record.listing.serverId,
       searchUI: MARKET_SEARCH_UI_VERSION,
       comparisonPolicy: PET_COMPARISON_POLICY_VERSION,
       queryPolicy: "pet-observed-star-trait-v1",
@@ -241,6 +272,7 @@ export function petInventory(record: SavedRoleRecord) {
       priceMethod: EQUIPMENT_QUOTE_POLICY,
       blessingPolicy: PET_BLESSING_POLICY_VERSION,
       resumePolicy: PRICING_RESUME_POLICY,
+      skipPolicy: "zero-level-or-explicit-wild-v1",
       collectedAt: capture?.collectedAt,
       captureComplete,
       issues,
@@ -677,6 +709,16 @@ export async function searchPetPricing(
     issues: inventory.issues,
   };
   resumePricingItems(snapshot, previous, true);
+  // Recheck a previously unsupported catalogue type so the confirmed skip policy can apply.
+  for (const item of snapshot.items)
+    if (
+      item.searchState === "unsupported" &&
+      item.issues.some((issue) => issue.includes("没有独立可交易筛选定义"))
+    ) {
+      item.status = "no_match";
+      item.searchState = "pending";
+      item.issues = [...inventory.items.find((original) => original.key === item.key)!.issues];
+    }
   signal.throwIfAborted();
   if (!petCaptureSearchable(record, inventory)) {
     for (const item of snapshot.items) {
@@ -699,14 +741,39 @@ export async function searchPetPricing(
   signal.throwIfAborted();
   snapshot.rawResponse = JSON.stringify(response);
   saveSearchAttempt(snapshot, response);
+  const specialSkipReason = "官网无独立交易筛选的特殊宝宝，未计入参考合计";
+  const markSpecialSkip = (item: PetPricingItem, result: Record<string, unknown>) => {
+    if (result.searchState !== "skipped" || result.skipReason !== specialSkipReason) return false;
+    item.status = "unsupported";
+    item.searchState = "skipped";
+    item.skipReason = specialSkipReason;
+    item.query = "";
+    item.referencePrice = null;
+    item.candidates = [];
+    delete item.similarEstimate;
+    delete item.searchCursor;
+    delete item.samplingStopped;
+    return true;
+  };
   if (!response.queries.some((query) => query.trim())) {
-    snapshot.issues.push("本次检索没有实际查询记录，宝宝价格未采纳");
+    const allSpecialSkipped =
+      response.items.length === searchable.length &&
+      searchable.every((item) =>
+        response.items.some(
+          (result) =>
+            result.key === item.key &&
+            result.searchState === "skipped" &&
+            result.skipReason === specialSkipReason,
+        ),
+      );
+    if (!allSpecialSkipped) snapshot.issues.push("本次检索没有实际查询记录，宝宝价格未采纳");
     for (const item of searchable) {
       const result = Array.isArray(response.items)
         ? response.items.find((entry) => entry?.key === item.key)
         : undefined;
       if (typeof result?.note === "string" && result.note.trim())
         item.issues.push(result.note.slice(0, 500));
+      if (result && markSpecialSkip(item, result)) continue;
       if (result?.searchState === "unsupported") {
         item.searchState = "unsupported";
         item.status = "unsupported";
@@ -735,11 +802,20 @@ export async function searchPetPricing(
   const pages = new Map<string, Promise<string>>();
   for (const item of searchable) {
     const result = results.get(item.key);
-    if (!result || !Array.isArray(result.candidates) || result.candidates.length > 10) {
+    if (
+      !result ||
+      !Array.isArray(result.candidates) ||
+      result.candidates.length > EQUIPMENT_QUOTE_LIMIT
+    ) {
       item.issues.push("未返回该宝宝的有效候选");
       continue;
     }
     if (result.skipped === true) continue;
+    if (markSpecialSkip(item, result)) {
+      if (typeof result.note === "string") item.issues.push(result.note.slice(0, 500));
+      continue;
+    }
+    item.samplingStopped = result.samplingStopped === true;
     item.query = typeof result.query === "string" ? result.query : "";
     item.searchCursor = result.searchCursor as EquipmentSearchCursor | undefined;
     item.candidates = [];
@@ -787,6 +863,10 @@ export async function searchPetPricing(
       try {
         candidate.url = safeEquipmentUrl(candidate.url);
         const identity = equipmentIdentity(candidate.url);
+        if (identity.split(":")[0] !== record.listing.serverId) {
+          readFailed = true;
+          throw new Error("宝宝候选不属于目标单服，未采用报价");
+        }
         if (seen.has(identity)) {
           if (!diagnostic && seen.get(identity) !== candidate.price) {
             readFailed = true;
@@ -830,7 +910,7 @@ export async function searchPetPricing(
     if (readFailed) item.searchState = "read_failed";
     reconcilePricingCompletion(item, snapshot.searchItems);
     if (verified.length && item.searchState === "completed") {
-      item.referencePrice = priceAverage(
+      item.referencePrice = priceMinimum(
         verified.slice(0, EQUIPMENT_QUOTE_LIMIT).map((candidate) => candidate.price!),
       );
       item.status = "priced";
@@ -838,7 +918,7 @@ export async function searchPetPricing(
       item.issues = verified.length === 1 ? ["仅1条挂牌样本，参考范围有限"] : [];
       if (verified.length < EQUIPMENT_QUOTE_LIMIT)
         item.issues.push(
-          `本次结果已读完，已核实${verified.length}件同配置宝宝；目标为${EQUIPMENT_QUOTE_LIMIT}件，均价使用实际样本数`,
+          `在各筛选条件前${EQUIPMENT_QUOTE_LIMIT}条候选或更少的实际结果中，已核实${verified.length}件同配置宝宝，参考价取实际有效样本的最低挂牌价，搜索范围有限`,
         );
     }
     if (
@@ -864,7 +944,7 @@ export async function searchPetPricing(
       if (readFailed && item.similarEstimate?.status !== "range") item.searchState = "read_failed";
       item.issues.push(
         item.similarEstimate?.status === "range"
-          ? "暂无完全同配置报价，采用相近宝宝挂牌平均价作为参考价，并保留报价范围和配置差异"
+          ? "暂无完全同配置报价，采用已核验相近宝宝样本最低挂牌价作为参考价，并保留报价范围和配置差异"
           : item.searchState === "read_failed"
             ? "宝宝独立详情读取失败，尚未完成查价；继续时重试"
             : item.searchState === "pending"
@@ -912,7 +992,7 @@ export function combinePetPricing(
     missing.push(
       ...snapshot.issues,
       ...snapshot.items
-        .filter((item) => item.status !== "priced")
+        .filter((item) => item.status !== "priced" && !skippedPricingItem(item))
         .map((item) => item.name + "：" + item.issues.join("；")),
     );
   if (snapshot && !fresh) missing.push("宝宝行情已过期，需要开始新批次重新联网查价");
@@ -941,14 +1021,18 @@ export function combinePetPricing(
     items: [
       ...result.items,
       ...(snapshot?.items || []).map((item, index) => ({
+        ...(fresh && verified && skippedPricingItem(item)
+          ? { referenceBasis: "excluded" as const }
+          : {}),
         name: "宝宝：" + item.name + "（" + item.key + "）",
         input: item.description,
-        formula:
-          "同配置宝宝（含匹配随身装备）挂牌平均价（" +
-          item.candidates.filter(
-            (candidate) => candidate.verified && candidate.matchType !== "similar",
-          ).length +
-          "条样本）；不另加装备价",
+        formula: skippedPricingItem(item)
+          ? (item.skipReason || "无样本，未计入参考合计") + "；市场售价未知，不记作0元。"
+          : "同配置宝宝（含匹配随身装备）最低挂牌价（" +
+            item.candidates.filter(
+              (candidate) => candidate.verified && candidate.matchType !== "similar",
+            ).length +
+            "条样本）；不另加装备价",
         amount: fresh && verified ? item.referencePrice : null,
         confirmed: fresh && verified && item.status === "priced",
         evidence: item.candidates

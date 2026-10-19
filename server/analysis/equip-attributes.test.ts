@@ -1,7 +1,46 @@
 import { describe, expect, it } from "vite-plus/test";
-import { compareEquipmentAttributes, parseEquipmentAttributes } from "./equip-attributes";
+import {
+  compareEquipmentAttributes,
+  equipmentInitialAttribute,
+  equipmentWithoutGemAbsorption,
+  parseEquipmentAttributes,
+} from "./equip-attributes";
 
 describe("装备价敏字段的结构化比较", () => {
+  it("只消解可靠红宝石吸收行，不修改原始证据或删除其它未知属性", () => {
+    const parsed = parseEquipmentAttributes(
+      "等级80\n灵力77\n锻炼等级3\n宝石：红宝石\n法术吸收率 火+12%\n抗未知属性+1",
+    );
+    const normalized = equipmentWithoutGemAbsorption(parsed);
+    expect(normalized.unknownLines).toEqual(["抗未知属性+1"]);
+    expect(normalized.fields).toEqual(parsed.fields);
+    expect(parsed.unknownLines).toEqual(["法术吸收率 火+12%", "抗未知属性+1"]);
+  });
+  it.each([
+    ["防御", 296, "月亮石", 8, 200],
+    ["伤害", 581, "太阳石", 10, 501],
+    ["命中", 750, "红玛瑙", 8, 550],
+    ["灵力", 232, "舍利子", 10, 172],
+    ["气血", 576, "光芒石", 10, 176],
+    ["速度", 80, "黑宝石", 10, 0],
+    ["法术防御", 196, "翡翠石", 8, 100],
+    ["敏捷", 40, "黑宝石", 10, 40],
+  ])("%s扣除对应宝石加成，熔炼独立保留", (field, shown, gem, grade, expected) => {
+    const parsed = parseEquipmentAttributes(
+      `等级100\n${field}${shown}\n锻炼等级${grade}\n镶嵌宝石 ${gem}\n熔炼效果：\n+10${field}`,
+    );
+    expect(equipmentInitialAttribute(parsed, field)).toBe(expected);
+    expect(parsed.fields.熔炼).toBeDefined();
+  });
+  it.each([
+    "伤害581\n镶嵌宝石 太阳石",
+    "伤害581\n锻炼等级10\n宝石 太阳石 红玛瑙",
+    "伤害581\n锻炼等级10\n宝石 未知宝石",
+    "伤害1\n锻炼等级10\n宝石 太阳石",
+    "初始伤害502\n伤害581\n锻炼等级10\n宝石 太阳石",
+  ])("证据缺失、混合分配未知或数值冲突时不猜初始伤害：%s", (description) => {
+    expect(equipmentInitialAttribute(parseEquipmentAttributes(description), "伤害")).toBeNull();
+  });
   it("符石和星相的加成保留在独立字段，不冒充装备基础属性或未知行", () => {
     const attributes = parseEquipmentAttributes(
       "等级60\n防御 +110\n符石: 敏捷 +1 防御 +3\n星相互合：力量 +2\n符石组合: 无懈可击\n门派条件：无\n部位条件：无\n遭受法术攻击时有20%几率抵挡20点伤害",

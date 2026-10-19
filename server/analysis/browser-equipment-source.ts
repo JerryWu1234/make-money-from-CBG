@@ -5,15 +5,10 @@ import { assertAvailable, pace } from "../crawler/page";
 import { hoverForInspection } from "../viewport";
 import { buildPageState } from "../page-state";
 import { readStableSnapshot } from "../workflow";
-import {
-  cleanDescription,
-  jewelryDescriptionSections,
-  observedEquipmentCategory,
-} from "../crawler/compact";
-import { equipmentInitialDefense, parseEquipmentAttributes } from "./equip-attributes";
+import { cleanDescription, observedEquipmentCategory } from "../crawler/compact";
+import { parseEquipmentAttributes } from "./equip-attributes";
 import {
   equipmentAttributeLowerBound,
-  equipmentEnhancementMismatch,
   matchComparableEquipmentAttributes,
 } from "./equipment-match";
 import { buildEquipmentEstimate } from "./pricing-estimate";
@@ -27,7 +22,12 @@ import {
   EQUIPMENT_QUOTE_POLICY,
   PRICING_RESUME_POLICY,
 } from "./pricing-integrity";
-import { createMarketScopeAudit, type GlobalMarketRequest } from "./market-scope";
+import {
+  assertMarketServerId,
+  createMarketScopeAudit,
+  selectMarketServer,
+  type GlobalMarketRequest,
+} from "./market-scope";
 import { jadeQuery, JADE_SEARCH_URL, type JadeSearchConfig } from "./jade-query";
 import {
   equipmentIdentity,
@@ -38,7 +38,9 @@ import {
   type EquipmentCandidate,
   type EquipmentPricingItem,
   type EquipmentSearchCursor,
+  equipmentCoreSkipReason,
   type EquipmentSource,
+  type PricingSearchProgress,
 } from "./equipment-pricing";
 
 export const EQUIPMENT_SEARCH_URL =
@@ -65,6 +67,26 @@ export type EquipmentSearchConfig = {
   suitTypes?: Partial<Record<SuitType, Choices>>;
 };
 type Query = Record<string, string | number>;
+
+function equipmentSuitControl(value: string, config: EquipmentSearchConfig) {
+  const matches = Object.entries(config.suitTypes || {}).flatMap(([type, choices]) =>
+    choices
+      .filter(([id]) => String(id) === value)
+      .map(([, name]) => ({ type: type as SuitType, name })),
+  );
+  if (matches.length === 1) {
+    const match = matches[0];
+    // The official text getter includes every name containing the input, not just an exact name.
+    const submitted = (config.suitTypes?.[match.type] || [])
+      .filter(([, name]) => name.includes(match.name))
+      .map(([id]) => String(id))
+      .join(",");
+    if (submitted === value) return match;
+  }
+  if (config.suits?.some(([id]) => String(id) === value))
+    return { type: "short_cut" as const, name: "" };
+  throw new Error("官网套装文本控件会匹配其他效果且无同ID快捷选项，无法精确搜索实际套装");
+}
 
 /** Verify every submitted public filter, including filters restored by the website. */
 export function assertEquipmentUIArguments(expected: Query, actual: Query) {
@@ -109,8 +131,10 @@ const isYuanshen = (item: EquipmentPricingItem) =>
 export function yuanshenQuery(
   item: EquipmentPricingItem,
   config: EquipmentSearchConfig,
+  serverId: string,
   similar = false,
 ) {
+  assertMarketServerId(serverId);
   const kind = [...config.kinds]
     .sort((a, b) => b[1].length - a[1].length)
     .find(([, name]) => item.name.includes(name));
@@ -124,7 +148,7 @@ export function yuanshenQuery(
   )[0];
   if (!attr) throw new Error("元身基础属性尚不能对应官网属性控件");
   const args: Query = {
-    server_type: "3",
+    serverid: serverId,
     type_choice: String(kind[0]),
     attr_type: String(attr[0]),
     txt_attr_value: similar
@@ -150,48 +174,13 @@ export function yuanshenQuery(
   return args;
 }
 
-function suitFilter(values: string[], config: EquipmentSearchConfig) {
-  const normalize = (value: string) => value.replace(/\s|[：:]/g, "");
-  const descriptions = [...new Set(values.map(normalize))];
-  if (descriptions.length !== 1) return undefined;
-  const value = descriptions[0];
-  const prefixes: Array<[string, SuitType]> = [
-    ["附加状态", "added_status"],
-    ["追加法术", "append_skill"],
-    ["追加技能", "append_skill"],
-    ["变身术之", "transform_skill"],
-    ["变化咒之", "transform_charm"],
-  ];
-  const explicit = prefixes.find(([prefix]) => value.startsWith(prefix));
-  const choices = explicit ? config.suitTypes?.[explicit[1]] || [] : config.suits || [];
-  const name = explicit ? value.slice(explicit[0].length) : value;
-  const matching = choices.filter(([, label]) => normalize(label) === name);
-  // The official chooser supports typed maps; an unqualified duplicate name is ambiguous.
-  if (
-    !explicit &&
-    Object.values(config.suitTypes || {})
-      .flat()
-      .some(
-        ([id, label]) =>
-          normalize(label) === name &&
-          !matching.some(([matchId]) => String(matchId) === String(id)),
-      )
-  )
-    return undefined;
-  const ids = [
-    ...new Set(
-      matching.map(([id]) => String(id)).filter((id) => /^\d+$/.test(id) && Number(id) > 0),
-    ),
-  ];
-  return ids.length === 1 ? ids[0] : undefined;
-}
-
 /** Official page fields are coarse filters; only detail verification establishes a match. */
 export function equipmentQuery(
   item: EquipmentPricingItem,
   config: EquipmentSearchConfig,
-  mode: "exact" | "similar" = "exact",
+  serverId: string,
 ) {
+  assertMarketServerId(serverId);
   if (item.level === null) throw new Error("装备等级缺失，不能查询");
   const unsupported = equipmentLevelUnsupportedReason(item);
   if (unsupported) throw new Error(unsupported);
@@ -202,13 +191,14 @@ export function equipmentQuery(
         equip_level_min: item.level,
         equip_level_max: item.level,
         pass_fair_show: "1",
-        server_type: "3",
+        serverid: serverId,
       }
     : {
         level_min: item.level,
         level_max: item.level,
         front_status: "pass_fair_show",
-        server_type: "3",
+        serverid: serverId,
+        attr_without_melt: 1,
       };
   let category = item.category.replace("配饰", "佩饰");
   const wearers = fields.装备角色?.join("、").trim();
@@ -223,16 +213,23 @@ export function equipmentQuery(
       .find(([, label]) => category.includes(label)) ||
     (config.namedKinds?.length === 1 ? config.namedKinds[0] : undefined);
   if (kind) args.kindid = String(kind[0]);
-  const integer = (field: string, parameter: string) => {
-    const values = fields[field];
-    const match =
-      values?.length === 1
-        ? values[0].match(field === "修理失败" ? /^\+?(\d+)\s*次?$/ : /^\+?(\d+)$/)
-        : null;
-    if (match) args[parameter] = Number(match[1]);
-  };
-  integer("修理失败", "repair_fail");
   if (jewelry) {
+    if (!kind) {
+      const primary = parseEquipmentAttributes(item.description).jewelrySections?.main || {};
+      const primaryKinds: Record<string, string[]> = {
+        戒指: ["伤害", "防御"],
+        耳饰: ["法术伤害", "法术防御"],
+        手镯: ["封印命中等级", "抵抗封印等级", "抗封印等级"],
+        佩饰: ["速度"],
+      };
+      const matches = config.kinds.filter(([, label]) =>
+        primaryKinds[label]?.some((field) => primary[field]?.length === 1),
+      );
+      if (matches.length === 1) {
+        kind = matches[0];
+        args.kindid = String(kind[0]);
+      }
+    }
     const effects = fields.特效 || [];
     if (effects.includes("简易")) args.special_effect = 1;
     const coreEffects = effects.filter((value) => value !== "简易");
@@ -248,200 +245,67 @@ export function equipmentQuery(
         args.suit_effect_level = Number(effect[2]);
       }
     }
-    integer("精炼等级", "jinglian_level");
-    if (Number(args.jinglian_level) > 16) delete args.jinglian_level;
-    const sections = jewelryDescriptionSections(item.description);
-    if (sections) {
-      const primary = parseEquipmentAttributes(sections.main).fields;
-      const primaryParameters: Record<string, Array<[string, string]>> = {
-        戒指: [
-          ["伤害", "damage"],
-          ["防御", "defense"],
-        ],
-        耳饰: [
-          ["法术伤害", "magic_damage"],
-          ["法术防御", "magic_defense"],
-        ],
-        手镯: [
-          ["封印命中等级", "fengyin"],
-          ["抵抗封印等级", "anti_fengyin"],
-          ["抗封印等级", "anti_fengyin"],
-        ],
-        佩饰: [["速度", "speed"]],
-      };
-      if (!kind) {
-        for (const [kLabel, params] of Object.entries(primaryParameters)) {
-          if (
-            params.some(([field]) => {
-              const v = primary[field];
-              return v?.length === 1 && /^\+?\d+$/.test(v[0]);
-            })
-          ) {
-            kind = config.kinds.find(([, label]) => label === kLabel);
-            if (kind) {
-              args.kindid = String(kind[0]);
-              break;
-            }
-          }
-        }
-      }
-      for (const [field, parameter] of primaryParameters[kind?.[1] || ""] || []) {
-        const values = primary[field];
-        if (values?.length === 1 && /^\+?\d+$/.test(values[0])) {
-          const value = Number(values[0]);
-          if (value > 0 && value <= 10000) args[parameter] = value;
-        }
-      }
-      const aliases: Record<string, string> = {
-        固定伤害: "固伤",
-        法术伤害: "法伤",
-        法术伤害结果: "法伤结果",
-        法术防御: "法防",
-        封印命中: "封印",
-        抵抗封印: "抗封",
-        抗封印: "抗封",
-        治疗能力: "治疗",
-        格挡值: "格挡",
-        气血回复效果: "回复",
-      };
-      const added = sections.added.map((line) => {
-        const name = line.match(/^(.+?)[：:\s]*[+＋]?\d/)?.[1]?.replace(/等级$/, "");
-        return config.addedAttrs?.find(([, label]) => label === (aliases[name || ""] || name));
-      });
-      if (added.every((choice) => choice !== undefined)) {
-        args.added_attr_logic = "detail";
-        args.added_attr_num = String(added.length);
-        for (const choice of added) {
-          const key = "added_attr." + choice![0];
-          args[key] = Number(args[key] || 0) + 1;
-        }
-      }
-    }
   } else {
-    const suit = suitFilter(fields.套装 || [], config);
-    if (suit) args.suit_effect = suit;
-    integer("伤害", "damage");
-    integer("灵力", "all_wakan");
-    // Descriptions retain melting separately; these bounds use the observed original values.
-    if (args.damage !== undefined || args.all_wakan !== undefined) args.attr_without_melt = 1;
-    integer("锻炼等级", "gem_level");
-    const holes =
-      fields.开运孔数?.length === 1
-        ? fields.开运孔数[0]
-            .replace(/\s/g, "")
-            .match(/^(\d+)(?:孔)?(?:\/(\d+)(?:孔)?)?(?:[（(]双\d+孔[）)])?$/)
-        : null;
-    if (
-      holes &&
-      Number(holes[1]) <= 5 &&
-      (holes[2] === undefined || (Number(holes[2]) <= 5 && Number(holes[1]) <= Number(holes[2])))
-    )
-      args.hole_num = Number(holes[1]);
-    const gemLevels = fields.锻炼等级;
-    const noGems =
-      !(fields.宝石 || []).some((value) => value.trim()) &&
-      (!gemLevels ||
-        (gemLevels.length === 1 && /^\+?\d+$/.test(gemLevels[0]) && Number(gemLevels[0]) === 0));
-    if (noGems) {
-      // The official init_* inputs are lower bounds. Only ungemmed, separately observed
-      // base values are usable here; do not convert total values or add melting effects.
-      for (const [field, parameter] of [
-        ["气血", "init_hp"],
-        ["敏捷", "init_dex"],
-      ] as const) {
-        if (field === "敏捷" && kind?.[1] !== "鞋子") continue;
-        const values = fields[field];
-        if (values?.length !== 1 || !/^\+?\d+$/.test(values[0])) continue;
-        const value = Number(values[0]);
-        if (value > 10000) continue;
-        args[parameter] = value;
-        args.attr_without_melt = 1;
-      }
-    }
-    const initialDefense = equipmentInitialDefense(parseEquipmentAttributes(item.description));
-    if (initialDefense !== null) {
-      args.init_defense = initialDefense;
-      args.attr_without_melt = 1;
-    }
     for (const [field, key, choices] of [
       ["特效", "special_effect", config.effects],
       ["特技", "special_skill", config.skills],
-      ["宝石", "gem_value", config.gems],
     ] as const) {
-      const values = (fields[field] || []).flatMap((value) =>
-        value.split(/[、，,；;\s]+/).map((part) => part.trim()),
-      );
+      const values = (fields[field] || [])
+        .flatMap((value) => value.split(/[、，,；;\s]+/).map((part) => part.trim()))
+        .filter(Boolean);
+      if (
+        field === "特技" &&
+        values.some((value) => choices.filter(([, label]) => value === label).length !== 1)
+      )
+        throw new Error("装备实际特技名称没有唯一可核对的官网映射，未提交不完整条件");
       const matched = values.flatMap((value) => choices.filter(([, label]) => value === label));
       if (matched.length) args[key] = matched.map(([id]) => String(id)).join(",");
     }
     if (args.special_effect) args.special_mode = "and";
-  }
-  if (mode === "similar") {
-    // Keep level, type and core skills/effects; rank optional configuration differences in details.
-    for (const key of ["gem_level", "gem_value", "jinglian_level", "repair_fail", "hole_num"])
-      delete args[key];
-    // Jewelry suit_effect describes the core single-item effect; ordinary gear suits are optional.
-    if (!jewelry) delete args.suit_effect;
-    for (const [key, field] of [
-      ["init_defense", "防御"],
-      ["init_hp", "气血"],
-      ["init_dex", "敏捷"],
-      ["all_wakan", "灵力"],
-      ["damage", "伤害"],
-      ["defense", "防御"],
-      ["magic_damage", "法术伤害"],
-      ["magic_defense", "法术防御"],
-      ["fengyin", "封印命中等级"],
-      ["anti_fengyin", "抵抗封印等级"],
-      ["speed", "速度"],
-    ]) {
-      const value = args[key];
-      if (typeof value === "number" && value > 0) {
-        const lower = equipmentAttributeLowerBound(field, value);
-        if (lower !== null) args[key] = Math.ceil(lower);
-      }
+    const suit = fields.套装 || [];
+    if (suit.length) {
+      const compact = (value: string) => value.replace(/[\s：:]/g, "");
+      const prefixes: Record<SuitType, string> = {
+        added_status: "附加状态",
+        append_skill: "追加法术",
+        transform_skill: "变身术之",
+        transform_charm: "变化咒之",
+      };
+      const fullName = suit.length === 1 ? compact(suit[0]) : "";
+      const complete = Object.values(prefixes).some(
+        (prefix) => fullName.startsWith(prefix) && fullName.length > prefix.length,
+      );
+      const matching = [
+        ...Object.entries(config.suitTypes || {}).flatMap(([type, choices]) =>
+          choices.filter(([, name]) => compact(prefixes[type as SuitType] + name) === fullName),
+        ),
+        ...(config.suits || []).filter(([, name]) => compact(name) === fullName),
+      ];
+      const ids = [...new Set(matching.map(([id]) => String(id)))];
+      if (!complete || ids.length !== 1 || !/^[1-9]\d*$/.test(ids[0]))
+        throw new Error("装备实际套装完整名称没有唯一可核对的官网映射，未提交不完整条件");
+      equipmentSuitControl(ids[0], config);
+      args.suit_effect = ids[0];
     }
   }
-  return { jewelry, args };
+  return {
+    jewelry,
+    args,
+    coreSkipReason: jewelry ? null : equipmentCoreSkipReason(item, kind?.[1] || item.category),
+  };
 }
 
-export type EquipmentQueryMode = "exact" | "same-gems" | "near-gems" | "similar";
+export type EquipmentQueryMode = "base-attributes" | "exact" | "similar";
 type EquipmentQueryStep = { mode: EquipmentQueryMode; args: Query };
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-/** Progressively widen optional configuration; each detail must still pass core matching. */
+/** The public form has only numeric lower bounds; verify target upper bounds in details. */
 export function equipmentQueryPlan(
   item: EquipmentPricingItem,
   config: EquipmentSearchConfig,
+  serverId: string,
 ): EquipmentQueryStep[] {
-  const exact = equipmentQuery(item, config).args;
-  const similar = equipmentQuery(item, config, "similar").args;
-  const sameGems = { ...similar };
-  for (const key of ["gem_level", "gem_value", "jinglian_level"])
-    if (exact[key] !== undefined) sameGems[key] = exact[key];
-  const nearGems = { ...sameGems };
-  for (const key of ["gem_level", "jinglian_level"])
-    if (typeof nearGems[key] === "number") nearGems[key] = Math.max(0, Number(nearGems[key]) - 1);
-  const hasEnhancement = ["gem_level", "gem_value", "jinglian_level"].some(
-    (key) => exact[key] !== undefined,
-  );
-  const steps: EquipmentQueryStep[] = [
-    { mode: "exact", args: exact },
-    ...(hasEnhancement
-      ? [
-          { mode: "same-gems" as const, args: sameGems },
-          { mode: "near-gems" as const, args: nearGems },
-        ]
-      : []),
-    { mode: "similar", args: similar },
-  ];
-  const seen = new Set<string>();
-  return steps.filter(({ args }) => {
-    const hash = digest(args);
-    if (seen.has(hash)) return false;
-    seen.add(hash);
-    return true;
-  });
+  return [{ mode: "base-attributes", args: equipmentQuery(item, config, serverId).args }];
 }
 
 export function equipmentCursorMatches(
@@ -511,6 +375,7 @@ export async function equipmentPageSource(
     return await readMainEquipment(page, signal, expectedKind);
   } catch (error) {
     signal.throwIfAborted();
+    await assertAvailable(page);
     const diagnostics = await page
       .evaluate(() => {
         const globals = window as unknown as {
@@ -555,7 +420,7 @@ export async function equipmentPageSource(
       })
       .catch(() => null);
     const failure =
-      error instanceof Error && error.name !== "TimeoutError"
+      error instanceof Error && (error.name !== "TimeoutError" || fatalEquipmentSearchError(error))
         ? error
         : new Error("主商品属性或价格区域未加载完成");
     throw Object.assign(failure, { equipmentDiagnostics: diagnostics });
@@ -588,6 +453,21 @@ async function readMainEquipment(
       excluded,
     );
   if (directPanel) {
+    const supported = await page.evaluate((excluded) => {
+      const panels = Array.from(document.querySelectorAll<HTMLElement>("#equip_desc_panel")).filter(
+        (node) => node.checkVisibility() && !node.closest(excluded),
+      );
+      return (
+        panels.length === 1 &&
+        !!(
+          panels[0].closest(".goodsInfo, .independent-product, #equip_detail") ||
+          Array.from(document.querySelectorAll("#info_panel")).find(
+            (node) => node.checkVisibility() && !node.closest(excluded),
+          )
+        )
+      );
+    }, excluded);
+    if (!supported) throw new Error("商品页结构不支持：无法定位主商品容器，已保留待补齐项");
     await page.waitForFunction(
       (excluded) => {
         const panels = Array.from(
@@ -596,13 +476,20 @@ async function readMainEquipment(
         const info = Array.from(document.querySelectorAll<HTMLElement>("#info_panel")).filter(
           (node) => node.checkVisibility() && !node.closest(excluded),
         );
+        const region =
+          info.length === 1
+            ? info[0]
+            : info.length === 0 && panels.length === 1
+              ? panels[0].closest<HTMLElement>(".goodsInfo, .independent-product, #equip_detail")
+              : null;
         return (
           panels.length === 1 &&
-          info.length === 1 &&
+          region?.checkVisibility() &&
+          !region.closest(excluded) &&
           panels[0].innerText.trim() &&
-          info[0].innerText.trim() &&
+          region.innerText.trim() &&
           Array.from(
-            info[0].querySelectorAll<HTMLElement>(".price, [data_price], [data-price]"),
+            region.querySelectorAll<HTMLElement>(".price, [data_price], [data-price]"),
           ).some(
             (node) =>
               node.checkVisibility() &&
@@ -680,7 +567,12 @@ async function readMainEquipment(
       const panels = directPanel ? visible("#equip_desc_panel") : [];
       const infos = directPanel ? visible("#info_panel") : [];
       const panel = panels.length === 1 ? panels[0] : null;
-      const info = infos.length === 1 ? infos[0] : null;
+      const info =
+        infos.length === 1
+          ? infos[0]
+          : infos.length === 0
+            ? panel?.closest<HTMLElement>(".goodsInfo, .independent-product, #equip_detail")
+            : null;
       let root = panel?.parentElement;
       while (root && root !== document.body && info && !root.contains(info))
         root = root.parentElement;
@@ -700,7 +592,10 @@ async function readMainEquipment(
       const name = directPanel
         ? info!.innerText
             .match(/(?:^|\s)ID\s*[：:]\s*(.+?)(?=\s+等级\s*[：:]|\r?\n|$)/i)?.[1]
-            ?.trim() || ""
+            ?.trim() ||
+          (typeof raw?.equip_name === "string" && info!.innerText.includes(raw.equip_name)
+            ? raw.equip_name
+            : "")
         : main!.getAttribute("data_equip_name") || main!.getAttribute("data-equip-name") || "";
       const tipId = main?.getAttribute("data_tip_box") || main?.getAttribute("data-tip-box");
       const tips = tipId
@@ -878,7 +773,7 @@ async function readMainEquipment(
   return {
     text,
     price,
-    html: `<main${metadata}><p>${escape(observed.name)}</p><pre data-cbg-equipment-description>${escape([description, ...restrictions].join("\n"))}</pre><p>${selling ? "在售" : "商品已下架"}\n挂牌价：¥${price}</p></main>`,
+    html: `<main${metadata}><h1>${escape(observed.name)}</h1><pre data-cbg-equipment-description>${escape([description, ...restrictions].join("\n"))}</pre><p>${selling ? "在售" : "商品已下架"}\n挂牌价：¥${price}</p></main>`,
   };
 }
 
@@ -1068,7 +963,7 @@ async function equipmentSearchDiagnostics(page: Page) {
 }
 const fatalEquipmentSearchError = (error: unknown) =>
   error instanceof Error &&
-  /登录|安全验证|验证码|人机验证|频繁|网站繁忙|系统繁忙|未采用报价|报价未采用|captcha/i.test(
+  /登录|安全验证|验证码|人机验证|频繁|网站繁忙|系统繁忙|权限|禁止|policy|security|unauth|forbidden|permission|access denied|\bHTTP\s*(?:401|403|429)\b|目标服务器|未采用报价|报价未采用|captcha/i.test(
     error.message,
   );
 type EquipmentUiAction = { control: string; value: string; method: string };
@@ -1186,6 +1081,7 @@ export async function applyEquipmentSearchForm(
   args: Query,
   config: EquipmentSearchConfig,
   type: "equipment" | "jewelry" | "jade" | "yuanshen",
+  signal: AbortSignal,
 ) {
   const actions: EquipmentUiAction[] = [];
   const control = async (id: string) => {
@@ -1219,9 +1115,8 @@ export async function applyEquipmentSearchForm(
   };
   await click("reset_all");
   await click("btn_reset_user_server");
-  await select("overall_sel_area", "");
-  await select("ovarall_sel_server", "");
-  await menu("server_type_panel", use("server_type"));
+  const selectedServer = await selectMarketServer(page, String(use("serverid")), signal);
+  actions.push(...selectedServer.actions);
   if (type === "equipment") {
     await slider("level_slider", Number(use("level_min")), Number(use("level_max")));
     await menu("fair_show_panel", use("front_status"));
@@ -1238,6 +1133,8 @@ export async function applyEquipmentSearchForm(
       "all_wakan",
       "gem_level",
       "init_defense",
+      "init_damage_raw",
+      "init_wakan",
       "init_hp",
       "init_dex",
       "hole_num",
@@ -1261,17 +1158,11 @@ export async function applyEquipmentSearchForm(
     }
     if (args.suit_effect !== undefined) {
       const value = String(use("suit_effect"));
-      if (config.suits?.some(([id]) => String(id) === value)) {
-        await (await control("radio_short_cut")).check({ timeout: 5000 });
-        await select("sel_short_cut", value);
-      } else {
-        const matches = Object.entries(config.suitTypes || {}).flatMap(([type, choices]) =>
-          choices.filter(([id]) => String(id) === value).map(([, name]) => ({ type, name })),
-        );
-        if (matches.length !== 1) throw new Error("官网套装控件无法唯一表达当前效果");
-        await (await control("radio_" + matches[0].type)).check({ timeout: 5000 });
-        await fill("txt_" + matches[0].type, matches[0].name);
-      }
+      const selected = equipmentSuitControl(value, config);
+      await (await control("radio_" + selected.type)).check({ timeout: 5000 });
+      actions.push({ control: "radio_" + selected.type, value: "true", method: "check" });
+      if (selected.type === "short_cut") await select("sel_short_cut", value);
+      else await fill("txt_" + selected.type, selected.name);
     }
   } else if (type === "jewelry") {
     await slider(
@@ -1405,6 +1296,8 @@ export function equipmentSourceFromPages(
   searchPage: Page,
   detailPage: Page,
   signal: AbortSignal,
+  serverId: string,
+  onProgress?: (progress: PricingSearchProgress) => void,
 ): EquipmentSource & {
   close(): Promise<void>;
   discover(
@@ -1412,8 +1305,20 @@ export function equipmentSourceFromPages(
     signal: AbortSignal,
   ): ReturnType<typeof readEquipmentSearchForm>;
 } {
+  assertMarketServerId(serverId);
+  const scopedUrl = (value: string) => {
+    const safe = safeEquipmentUrl(value);
+    if (!equipmentIdentity(safe).startsWith(serverId + ":"))
+      throw new Error("候选商品不属于目标服务器，未采用报价");
+    return safe;
+  };
   const cache = new Map<string, string>();
   const deadline = Date.now() + 180_000;
+  let progress: PricingSearchProgress = { assetName: "", page: 1, validSamples: 0, retryCount: 0 };
+  const report = (patch: Partial<PricingSearchProgress>) => {
+    progress = { ...progress, ...patch };
+    onProgress?.(progress);
+  };
   let closing: Promise<void> | undefined;
   let marketScope: ReturnType<typeof createMarketScopeAudit> | undefined;
   const close = () => {
@@ -1432,16 +1337,39 @@ export function equipmentSourceFromPages(
   const readSource = async (url: string, requestSignal: AbortSignal) => {
     requestSignal = AbortSignal.any([signal, requestSignal]);
     requestSignal.throwIfAborted();
-    const safe = safeEquipmentUrl(url);
+    const safe = scopedUrl(url);
     if (cache.has(safe)) return cache.get(safe)!;
-    await pace(requestSignal, 600, 400);
-    await detailPage.goto(safe, { waitUntil: "domcontentloaded", timeout: 15000 });
-    requestSignal.throwIfAborted();
-    if (equipmentIdentity(detailPage.url()) !== equipmentIdentity(safe))
-      throw new Error("装备详情跳转到另一商品，报价未采用");
-    const value = await equipmentPageSource(detailPage, requestSignal);
-    cache.set(safe, value.html);
-    return value.html;
+    for (let attempt = 0; ; attempt++) {
+      report({ retryCount: attempt });
+      try {
+        await pace(requestSignal, 600, 400);
+        const response = await detailPage.goto(safe, {
+          waitUntil: "domcontentloaded",
+          timeout: 15000,
+        });
+        requestSignal.throwIfAborted();
+        if ([401, 403, 429].includes(response?.status() || 0))
+          throw new Error(
+            "装备详情访问被拒绝（HTTP " + response!.status() + "），请核对登录或访问权限后继续",
+          );
+        if (equipmentIdentity(detailPage.url()) !== equipmentIdentity(safe))
+          throw new Error("装备详情跳转到另一商品，报价未采用");
+        const value = await equipmentPageSource(detailPage, requestSignal);
+        cache.set(safe, value.html);
+        return value.html;
+      } catch (error) {
+        requestSignal.throwIfAborted();
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          fatalEquipmentSearchError(error) ||
+          attempt >= 2 ||
+          Date.now() >= deadline ||
+          !/Timeout|timeout|net::ERR_|未加载完成|interrupted by another navigation/.test(message) ||
+          /登录|验证码|安全验证|频繁|繁忙|结构不支持/.test(message)
+        )
+          throw error;
+      }
+    }
   };
   return {
     close,
@@ -1511,6 +1439,12 @@ export function equipmentSourceFromPages(
       const results: Awaited<ReturnType<EquipmentSource["findCandidates"]>>["items"] = [];
       equipmentItems: for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
         const item = items[itemIndex];
+        report({
+          assetName: item.name,
+          page: item.searchCursor?.pageNumber || 1,
+          validSamples: 0,
+          retryCount: 0,
+        });
         requestSignal.throwIfAborted();
         const unsupported = equipmentLevelUnsupportedReason(item);
         if (unsupported) {
@@ -1544,6 +1478,7 @@ export function equipmentSourceFromPages(
         let currentCandidates = () => item.candidates.filter((candidate) => candidate.verified);
         let currentCounts = () => ({ pages: 0, rows: 0, details: 0 });
         let currentRecord: Record<string, unknown> = { key: item.key };
+        let resolvedTargetKind: string | undefined;
         try {
           const jewelry = isJewelry(item),
             jade = item.category === "上古玉魄",
@@ -1644,10 +1579,16 @@ export function equipmentSourceFromPages(
                     ? (g.EquipKinds || []).filter(([id]) => namedIds.has(String(id)))
                     : [],
                 addedAttrs: [...(g.AddedAttr1 || []), ...(g.AddedAttr2 || [])],
-                suits:
-                  !jewelry && Array.isArray(g.SuitEffects) && g.SuitEffects.every(Array.isArray)
-                    ? (g.SuitEffects as Choices)
-                    : [],
+                suits: !jewelry
+                  ? Array.from(
+                      document.querySelectorAll<HTMLOptionElement>("#sel_short_cut option"),
+                    )
+                      .map((option): [string, string] => [
+                        option.value,
+                        option.textContent?.trim() || "",
+                      ])
+                      .filter(([value]) => /^[1-9]\d*$/.test(value))
+                  : [],
                 jewelrySuitEffects:
                   jewelry && Array.isArray(g.SuitEffects)
                     ? g.SuitEffects.map((name) => (typeof name === "string" ? name : ""))
@@ -1702,12 +1643,41 @@ export function equipmentSourceFromPages(
             : null;
           const exactArgs: Query = {
             ...(yuanshen
-              ? yuanshenQuery(item, config)
+              ? yuanshenQuery(item, config, serverId)
               : jade
                 ? jadeQuery(item, jadeConfig!).args
-                : equipmentQuery(item, config).args),
-            server_type: "3",
+                : equipmentQuery(item, config, serverId).args),
+            serverid: serverId,
           };
+          delete exactArgs.server_type;
+          const coreSkipReason =
+            !jewelry && !jade && !yuanshen
+              ? equipmentQuery(item, config, serverId).coreSkipReason
+              : null;
+          if (coreSkipReason) {
+            records.push({
+              key: item.key,
+              reason: "unknown_core_initial_attribute",
+              note: coreSkipReason,
+              kind: config.kinds.find(([id]) => String(id) === String(exactArgs.kindid)),
+            });
+            results.push({
+              key: item.key,
+              candidates: [],
+              searchState: "skipped",
+              skipReason: coreSkipReason,
+              note: coreSkipReason,
+            });
+            continue;
+          }
+          if (!jade && !yuanshen && exactArgs.kindid === undefined)
+            throw new Error("装备类型无法对应官网筛选，未猜测基础属性或查询类型");
+          if (!jade && !yuanshen) {
+            const kind = String(exactArgs.kindid);
+            if (!/^[1-9]\d*$/.test(kind))
+              throw new Error("装备类型缺少明确官网编号，未猜测查询类型");
+            resolvedTargetKind = kind;
+          }
           const act = yuanshen
             ? await searchPage.evaluate(() => {
                 const globals = window as unknown as {
@@ -1735,16 +1705,18 @@ export function equipmentSourceFromPages(
                     args: {
                       ...(jade
                         ? jadeQuery(item, jadeConfig!, true).args
-                        : yuanshenQuery(item, config, true)),
-                      server_type: "3",
+                        : yuanshenQuery(item, config, serverId, true)),
+                      serverid: serverId,
                     },
                   },
                 ]
-              : equipmentQueryPlan(item, config);
+              : equipmentQueryPlan(item, config, serverId);
+          for (const step of queryModes) delete step.args.server_type;
           marketScope?.close();
-          marketScope = createMarketScopeAudit(searchPage, yuanshen ? [act] : []);
+          marketScope = createMarketScopeAudit(searchPage, serverId, yuanshen ? [act] : []);
           const planHash = digest({
             resumePolicy: PRICING_RESUME_POLICY,
+            firstPagePolicy: "first-five-per-condition-v2",
             name: item.name,
             level: item.level,
             category: item.category,
@@ -1774,6 +1746,10 @@ export function equipmentSourceFromPages(
             args: Query;
             pages: number;
             exhausted: boolean;
+            sampleLimit: number;
+            sampled: number;
+            samplingComplete: boolean;
+            detailFailures: unknown[];
           }> = [];
           const itemQueries: string[] = [];
           const scopeEvidence: Array<{
@@ -1787,36 +1763,36 @@ export function equipmentSourceFromPages(
             ? item.candidates.filter((value) => value.verified)
             : [];
           const candidates: EquipmentCandidate[] = [],
+            accepted: EquipmentCandidate[] = [],
             similar: EquipmentCandidate[] = [],
             rejected: EquipmentCandidate[] = [];
-          const detailFailures: Array<{ url: string; reason: string; diagnostics: unknown }> = [];
+          const detailFailures: Array<{
+            url: string;
+            modeIndex: number;
+            reason: string;
+            diagnostics: unknown;
+          }> = [];
           const seen = new Set(next.seen);
           const failed = new Map(next.failed.map((value) => [value.url, value.modeIndex]));
           const attemptedDetails = new Set<string>();
-          const enhancementMode = (mode: EquipmentQueryMode) =>
-            mode === "same-gems" || mode === "near-gems"
-              ? mode
-              : mode === "exact" &&
-                  ["gem_level", "gem_value", "jinglian_level"].some(
-                    (key) => exactArgs[key] !== undefined,
-                  )
-                ? "same-gems"
-                : null;
           // Preserve official result order; each independently verified listing counts once.
           const closestSimilar = () => similar.slice(0, EQUIPMENT_QUOTE_LIMIT);
           const enoughSamples = () =>
+            (!jade && !yuanshen && accepted.length >= EQUIPMENT_QUOTE_LIMIT) ||
             candidates.length >= EQUIPMENT_QUOTE_LIMIT ||
             (!candidates.length &&
               closestSimilar().length >= EQUIPMENT_QUOTE_LIMIT &&
               buildEquipmentEstimate(closestSimilar()).status === "range");
           const returnedCandidates = () =>
-            [
-              ...(candidates.length ? candidates : closestSimilar()),
-              // Stage-rejected details remain audit evidence, not a second pricing cohort.
-              ...(!candidates.length && !enoughSamples() && next.modeIndex < queryModes.length
-                ? rejected
-                : []),
-            ].slice(0, EQUIPMENT_QUOTE_LIMIT);
+            !jade && !yuanshen
+              ? (accepted.length ? accepted : rejected).slice(0, EQUIPMENT_QUOTE_LIMIT)
+              : [
+                  ...(candidates.length ? candidates : closestSimilar()),
+                  // Stage-rejected details remain audit evidence, not a second pricing cohort.
+                  ...(!candidates.length && !enoughSamples() && next.modeIndex < queryModes.length
+                    ? rejected
+                    : []),
+                ].slice(0, EQUIPMENT_QUOTE_LIMIT);
           const listingRejected: Array<{
             url: string;
             reason: string;
@@ -1868,7 +1844,7 @@ export function equipmentSourceFromPages(
                   ? JEWELRY_SEARCH_URL
                   : EQUIPMENT_SEARCH_URL,
             act,
-            serverAge: "3年以上服",
+            serverId,
             args: exactArgs,
             modes: actualModes,
             scopeEvidence,
@@ -1928,16 +1904,17 @@ export function equipmentSourceFromPages(
             try {
               const html = await readSource(url, requestSignal);
               const text = html
-                .replace(/<\/(?:p|pre|main|div)>|<br\s*\/?\s*>/gi, "\n")
+                .replace(/<\/(?:h1|p|pre|main|div)>|<br\s*\/?\s*>/gi, "\n")
                 .replace(/<[^>]+>/g, "")
                 .replace(/&amp;/g, "&")
                 .replace(/&lt;/g, "<")
                 .replace(/&gt;/g, ">");
               const price = text.match(/挂牌价：¥(\d+(?:\.\d+)?)/)?.[1];
               candidate = verifyEquipmentCandidate(
-                item,
+                resolvedTargetKind ? { ...item, kindId: resolvedTargetKind } : item,
                 {
                   ...candidate,
+                  title: text.split(/\r?\n/)[0].trim(),
                   price: price ? Number(price) : null,
                   priceType: "listing",
                   quote: text,
@@ -1945,31 +1922,22 @@ export function equipmentSourceFromPages(
                 html,
                 new Date().toISOString(),
               );
-              const restrictedMode = enhancementMode(queryModes[modeIndex].mode);
-              const mismatch = restrictedMode
-                ? equipmentEnhancementMismatch(
-                    parseEquipmentAttributes(item.description),
-                    parseEquipmentAttributes(text),
-                    restrictedMode,
-                  )
-                : null;
-              if (candidate.verified && mismatch)
-                candidate = { ...candidate, verified: false, reason: mismatch };
               if (
                 (jade || yuanshen) &&
                 queryModes[modeIndex].mode === "exact" &&
                 candidate.matchType === "similar"
               )
                 return false; // Retry this identity under the explicit similar stage.
+              if (candidate.verified) accepted.push(candidate);
               if (candidate.verified && candidate.matchType === "similar") similar.push(candidate);
               else if (candidate.verified) candidates.push(candidate);
               else rejected.push(candidate);
+              report({ validSamples: candidates.length + similar.length });
               failed.delete(url);
-              return !mismatch;
+              return true;
             } catch (error) {
               requestSignal.throwIfAborted();
-              if (error instanceof Error && /登录|安全验证|频繁|网站繁忙/.test(error.message))
-                throw error;
+              if (fatalEquipmentSearchError(error)) throw error;
               rejected.push({
                 ...candidate,
                 reason: error instanceof Error ? error.message : "无法读取装备详情",
@@ -1977,6 +1945,7 @@ export function equipmentSourceFromPages(
               failed.set(url, modeIndex);
               detailFailures.push({
                 url,
+                modeIndex,
                 reason: error instanceof Error ? error.message.split("\n")[0] : "无法读取装备详情",
                 diagnostics:
                   error && typeof error === "object" && "equipmentDiagnostics" in error
@@ -1989,7 +1958,7 @@ export function equipmentSourceFromPages(
           // Re-read saved quotations once so verification after this call uses the same page cache.
           stage = "saved_quotes";
           if (savedCandidates.length) {
-            const query = "继续核验已保存的3年以上服相近报价 / " + item.name;
+            const query = "继续核验已保存的本服报价 / " + item.name;
             queries.push(query);
             itemQueries.push(query);
             const broadMode = queryModes.findIndex(({ mode }) => mode === "similar");
@@ -2009,6 +1978,7 @@ export function equipmentSourceFromPages(
               });
               results.push({
                 key: item.key,
+                ...(resolvedTargetKind ? { kindId: resolvedTargetKind } : {}),
                 candidates: savedCandidates,
                 searchState: "pending",
                 ...(item.searchCursor ? { searchCursor: item.searchCursor } : {}),
@@ -2020,21 +1990,22 @@ export function equipmentSourceFromPages(
           }
           // Failed detail URLs are retried once in this round; successful/ruled-out rows stay read.
           if (failed.size) {
-            const retryQuery = "按已保存的3年以上服筛选条件重试装备详情 / " + item.name;
+            const retryQuery = "按已保存的本服筛选条件重试装备详情 / " + item.name;
             queries.push(retryQuery);
             itemQueries.push(retryQuery);
             for (const [url, modeIndex] of failed) {
               if (attemptedDetails.has(url)) continue;
               if (details >= MAX_DETAILS || Date.now() >= deadline) break;
-              if (!(await readCandidate(safeEquipmentUrl(url), modeIndex))) {
-                seen.delete(equipmentIdentity(url));
-              }
+              await readCandidate(safeEquipmentUrl(url), modeIndex);
             }
           }
           let orderChanged = false;
           let historyValidated = !savedCursor?.pageHistory?.length;
           queryStages: for (let modeIndex = 0; modeIndex < queryModes.length; modeIndex++) {
             const { mode, args } = queryModes[modeIndex];
+            const sampleLimit = EQUIPMENT_QUOTE_LIMIT;
+            let inspected = [...seen].filter((key) => key.startsWith(modeIndex + "|")).length;
+            let samplingComplete = false;
             if (failed.size) break;
             if (
               count >= MAX_ROWS ||
@@ -2044,7 +2015,9 @@ export function equipmentSourceFromPages(
             )
               break;
             const query =
-              "全服 / 3年以上服 / 综合排序 / " +
+              "目标服" +
+              serverId +
+              " / 综合排序 / " +
               item.name +
               " / " +
               mode +
@@ -2076,6 +2049,11 @@ export function equipmentSourceFromPages(
               submittedArgs?: Query;
             }>;
             const loadPage = async (pageNumber: number, first: boolean, replay = false) => {
+              report({
+                page: pageNumber,
+                validSamples: candidates.length + similar.length,
+                retryCount: 0,
+              });
               await pace(requestSignal);
               let form: Awaited<ReturnType<typeof applyEquipmentSearchForm>> | undefined;
               if (first) {
@@ -2085,9 +2063,10 @@ export function equipmentSourceFromPages(
                   args,
                   config,
                   yuanshen ? "yuanshen" : jade ? "jade" : jewelry ? "jewelry" : "equipment",
+                  requestSignal,
                 );
               }
-              marketScope ||= createMarketScopeAudit(searchPage);
+              marketScope ||= createMarketScopeAudit(searchPage, serverId);
               marketScope.begin(act, pageNumber);
               stage = "query_submit";
               await searchPage.evaluate(function prepareEquipmentUiResult(wantedAct) {
@@ -2179,7 +2158,9 @@ export function equipmentSourceFromPages(
                     if (selected.sort().join(",") !== String(value).split(",").sort().join(","))
                       throw new Error("元身筛选未生效：" + panel);
                   } else if (
-                    form.controls.find((control) => control.id === id)?.value !== String(value)
+                    form.controls.find(
+                      (control) => control.id === (id === "serverid" ? "ovarall_sel_server" : id),
+                    )?.value !== String(value)
                   )
                     throw new Error("元身筛选未生效：" + id);
                 }
@@ -2205,8 +2186,6 @@ export function equipmentSourceFromPages(
                 };
                 const result = (window as unknown as Record<string, any>).__cbgEquipmentResult;
                 if (!result?.ok) throw new Error(result?.error || "官网装备查询未成功");
-                if (result.serverType !== "3")
-                  throw new Error("装备查询未确认3年以上服条件，报价未采用");
                 const root = document.querySelector<HTMLElement>("#search_result");
                 if (!root?.checkVisibility()) throw new Error("装备列表尚未加载");
                 const rows = Array.from(root.querySelectorAll<HTMLAnchorElement>("a.soldImg[href]"))
@@ -2297,7 +2276,7 @@ export function equipmentSourceFromPages(
                 discardedCandidates: [...candidates, ...similar],
               });
               resetPricingCursor(next);
-              candidates.length = similar.length = rejected.length = 0;
+              candidates.length = accepted.length = similar.length = rejected.length = 0;
               seen.clear();
               failed.clear();
               break queryStages;
@@ -2308,6 +2287,14 @@ export function equipmentSourceFromPages(
             if (roundPages >= MAX_PAGES) break;
             // A new scan starts a fresh validation cycle for the next continuation.
             next.historyIndex = 0;
+            if (inspected >= sampleLimit && !failed.size) {
+              samplingComplete = true;
+              next.modeIndex =
+                candidates.length || similar.length ? queryModes.length : modeIndex + 1;
+              next.pageNumber = 1;
+              next.rowIndex = 0;
+              next.pageRowsHash = "";
+            }
             for (
               let pageNumber = next.pageNumber;
               next.modeIndex === modeIndex &&
@@ -2315,6 +2302,7 @@ export function equipmentSourceFromPages(
               count < MAX_ROWS &&
               details < MAX_DETAILS &&
               !enoughSamples() &&
+              inspected < sampleLimit &&
               Date.now() < deadline;
               pageNumber++
             ) {
@@ -2328,7 +2316,7 @@ export function equipmentSourceFromPages(
                     discardedCandidates: [...candidates, ...similar],
                   });
                   resetPricingCursor(next);
-                  candidates.length = similar.length = rejected.length = 0;
+                  candidates.length = accepted.length = similar.length = rejected.length = 0;
                   seen.clear();
                   failed.clear();
                   orderChanged = true;
@@ -2354,7 +2342,7 @@ export function equipmentSourceFromPages(
                   discardedCandidates: [...candidates, ...similar],
                 });
                 resetPricingCursor(next);
-                candidates.length = similar.length = rejected.length = 0;
+                candidates.length = accepted.length = similar.length = rejected.length = 0;
                 seen.clear();
                 failed.clear();
                 orderChanged = true;
@@ -2378,47 +2366,43 @@ export function equipmentSourceFromPages(
                 const row = rankedRows[rowIndex];
                 requestSignal.throwIfAborted();
                 const identity = equipmentIdentity(safeEquipmentUrl(row.url));
-                if (seen.has(identity)) {
+                const seenKey = modeIndex + "|" + identity;
+                if (seen.has(seenKey)) {
                   next.rowIndex = rowIndex + 1;
                   continue;
                 }
-                if (count >= MAX_ROWS || Date.now() >= deadline) {
+                if (count >= MAX_ROWS || inspected >= sampleLimit || Date.now() >= deadline) {
                   pageFullyRead = false;
                   break;
                 }
                 count++;
-                if (row.name !== item.name) {
+                if (!resolvedTargetKind && row.name !== item.name) {
                   skipListing(row, "装备名称不匹配");
-                  seen.add(identity);
+                  seen.add(seenKey);
+                  inspected++;
                   next.rowIndex = rowIndex + 1;
-                  if (count >= MAX_ROWS) {
+                  if (count >= MAX_ROWS || inspected >= sampleLimit) {
                     pageFullyRead = rowIndex === rankedRows.length - 1;
                     break;
                   }
                   continue;
                 }
-                const mismatch =
-                  item.modelId && row.modelId && Number(item.modelId) !== Number(row.modelId)
+                const mismatch = !equipmentIdentity(safeEquipmentUrl(row.url)).startsWith(
+                  serverId + ":",
+                )
+                  ? "候选商品不属于目标服务器"
+                  : !resolvedTargetKind &&
+                      item.modelId &&
+                      row.modelId &&
+                      Number(item.modelId) !== Number(row.modelId)
                     ? "装备型号不匹配"
-                    : equipmentListingMismatch(item, row, args) ||
-                      (enhancementMode(mode) && row.description
-                        ? equipmentEnhancementMismatch(
-                            parseEquipmentAttributes(item.description),
-                            parseEquipmentAttributes(
-                              row.description
-                                .replace(/<br\s*\/?\s*>/gi, "\n")
-                                .replace(/<[^>]+>/g, ""),
-                            ),
-                            enhancementMode(mode)!,
-                            true,
-                          )
-                        : null);
+                    : equipmentListingMismatch(item, row, args);
                 if (mismatch) {
-                  // Enhancement-stage mismatches may become valid in a later, wider stage.
-                  if (!/宝石种类|同段或相邻一段|没有完整证据/.test(mismatch)) seen.add(identity);
+                  seen.add(seenKey);
+                  inspected++;
                   next.rowIndex = rowIndex + 1;
                   skipListing(row, mismatch);
-                  if (count >= MAX_ROWS) {
+                  if (count >= MAX_ROWS || inspected >= sampleLimit) {
                     pageFullyRead = rowIndex === rankedRows.length - 1;
                     break;
                   }
@@ -2429,17 +2413,28 @@ export function equipmentSourceFromPages(
                   break;
                 }
                 stage = "candidate_read";
-                if (await readCandidate(row.url, modeIndex)) seen.add(identity);
+                await readCandidate(row.url, modeIndex);
+                seen.add(seenKey);
+                inspected++;
                 stage = "listing_read";
                 next.rowIndex = rowIndex + 1;
                 if (failed.size) {
                   pageFullyRead = false;
                   break;
                 }
-                if (count >= MAX_ROWS || enoughSamples()) {
+                if (count >= MAX_ROWS || enoughSamples() || inspected >= sampleLimit) {
                   pageFullyRead = rowIndex === rankedRows.length - 1;
                   break;
                 }
+              }
+              if (inspected >= sampleLimit && !failed.size && !detailFailures.length) {
+                samplingComplete = true;
+                next.modeIndex =
+                  candidates.length || similar.length ? queryModes.length : modeIndex + 1;
+                next.pageNumber = 1;
+                next.rowIndex = 0;
+                next.pageRowsHash = "";
+                break;
               }
               if (!pageFullyRead || failed.size) break;
               if (!listing.hasNext) {
@@ -2457,7 +2452,16 @@ export function equipmentSourceFromPages(
               next.rowIndex = 0;
               next.pageRowsHash = "";
             }
-            actualModes.push({ mode, args, pages: modePages, exhausted });
+            actualModes.push({
+              mode,
+              args,
+              pages: modePages,
+              exhausted,
+              sampleLimit,
+              sampled: inspected,
+              samplingComplete,
+              detailFailures: detailFailures.filter((failure) => failure.modeIndex === modeIndex),
+            });
             if (next.modeIndex >= queryModes.length || next.modeIndex === modeIndex) break;
           }
           const query = itemQueries.join("\n");
@@ -2481,14 +2485,14 @@ export function equipmentSourceFromPages(
               (completed && exhausted
                 ? "本次筛选结果已读完"
                 : completed
-                  ? "有限样本查询，未遍历全部在售商品"
+                  ? "每个筛选条件仅核验前5条不同候选，搜索范围有限，未遍历全部在售商品；有样本按实际数量报价，无样本则跳过，市场售价未知"
                   : "未遍历全部在售商品，本轮预算已用完，已保存筛选阶段、页码和行位置；继续查询剩余商品") +
               "。";
           records.push({
             key: item.key,
             searchUrl: currentRecord.searchUrl,
             act,
-            serverAge: "3年以上服",
+            serverId,
             args: exactArgs,
             modes: actualModes,
             scopeEvidence,
@@ -2502,11 +2506,15 @@ export function equipmentSourceFromPages(
             comparableCandidates: similar,
             rejectedCandidates: rejected,
             detailFailures,
+            ...(next.emptyFirstPageModes?.length
+              ? { emptyFirstPageModes: next.emptyFirstPageModes }
+              : {}),
             ...(!completed || failed.size ? { cursor: next } : {}),
           });
           const itemSearchState = failed.size ? "read_failed" : completed ? "completed" : "pending";
           results.push({
             key: item.key,
+            ...(resolvedTargetKind ? { kindId: resolvedTargetKind } : {}),
             query,
             searchState: itemSearchState,
             ...(!completed || failed.size ? { searchCursor: next } : {}),
@@ -2540,6 +2548,7 @@ export function equipmentSourceFromPages(
           });
           results.push({
             key: item.key,
+            ...(resolvedTargetKind ? { kindId: resolvedTargetKind } : {}),
             query: currentQueries.join("\n"),
             searchState: "read_failed",
             candidates: currentCandidates(),
@@ -2563,7 +2572,12 @@ export function equipmentSourceFromPages(
   };
 }
 
-export async function createEquipmentSource(signal: AbortSignal) {
+export async function createEquipmentSource(
+  signal: AbortSignal,
+  serverId: string,
+  onProgress?: (progress: PricingSearchProgress) => void,
+) {
+  assertMarketServerId(serverId);
   signal.throwIfAborted();
   let searchPage: Page | undefined, detailPage: Page | undefined;
   try {
@@ -2573,7 +2587,7 @@ export async function createEquipmentSource(signal: AbortSignal) {
     signal.throwIfAborted();
     detailPage = await createHiddenPage(browser);
     signal.throwIfAborted();
-    return equipmentSourceFromPages(searchPage, detailPage, signal);
+    return equipmentSourceFromPages(searchPage, detailPage, signal, serverId, onProgress);
   } catch (error) {
     await Promise.allSettled([searchPage?.close(), detailPage?.close()]);
     throw error;

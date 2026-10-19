@@ -69,6 +69,9 @@ export function savedDetail(key: string) {
 export function crawlDatabase() {
   return store().db;
 }
+export function captureRetryItems(keys?: string[]) {
+  return store().retryItems(keys);
+}
 export function savedRecords(page: number, pageSize: number) {
   return store().records(page, pageSize);
 }
@@ -152,7 +155,14 @@ export async function startCrawl(
         db,
         control.signal,
         (update) => {
+          const captured = (update.saved || 0) > status.saved;
           status = { ...status, ...update };
+          if (captured)
+            void import("../analysis/controller")
+              .then((analysis) => analysis.appendCapturedAnalysis())
+              .catch((error: unknown) =>
+                diagnostics.record("analysis.capture_enqueue_failed", { error }),
+              );
         },
         options,
       );
