@@ -2,12 +2,12 @@ import type { AnalysisOverview } from "../../server/analysis/types";
 
 export function streamingRoleCount(value?: string): number {
   const count = value === undefined ? 10 : Number(value);
-  if (!Number.isInteger(count) || count < 2 || count > 50)
-    throw new Error("CBG_LIVE_ROLE_COUNT 必须是 2 到 50 的整数");
+  if (!Number.isInteger(count) || count < 2 || count > 100)
+    throw new Error("CBG_LIVE_ROLE_COUNT 必须是 2 到 100 的整数");
   return count;
 }
 
-/** The status endpoint returns 20 records per page, including during a 50-role run. */
+/** The status endpoint returns 20 records per page, including during a 100-role run. */
 export async function allAnalysisRecords(
   read: (page: number) => Promise<AnalysisOverview>,
 ): Promise<AnalysisOverview> {

@@ -115,7 +115,6 @@ describe("裸号专用 AI 请求", () => {
     );
     expect(prompt.startsWith(template)).toBe(true);
     expect(prompt.split(doc.text)).toHaveLength(2);
-    expect(prompt).toContain("core-initial-first-five-v3");
     expect(prompt).not.toContain(BARE_ROLE_TEMPLATE);
   });
 

@@ -12,12 +12,12 @@ import { validateExactPricing } from "./pricing-integrity";
 import { equipmentWeaponTotalDamage, parseEquipmentAttributes } from "./equip-attributes";
 import { matchInitialSearchEquipmentAttributes } from "./equipment-match";
 
-it("前五条口径不额外排除未搜索的套装或较高防御，已填写套装仍须匹配", () => {
+it("特技特效套装保持一致，候选基础属性不能高于目标", () => {
   const target = parseEquipmentAttributes("等级70\n气血140\n防御38");
   const quoted = parseEquipmentAttributes("等级70\n气血140\n防御55\n套装效果：变身术之如意仙子");
-  expect(matchInitialSearchEquipmentAttributes(target, quoted).reason).toBeNull();
+  expect(matchInitialSearchEquipmentAttributes(target, quoted).reason).toContain("高于目标");
   const suited = parseEquipmentAttributes("等级70\n气血140\n套装效果：变身术之如意仙子");
-  expect(matchInitialSearchEquipmentAttributes(suited, quoted).reason).toBeNull();
+  expect(matchInitialSearchEquipmentAttributes(suited, quoted).reason).not.toBeNull();
   expect(matchInitialSearchEquipmentAttributes(suited, target).reason).toContain("套装");
   expect(
     matchInitialSearchEquipmentAttributes(
@@ -230,7 +230,7 @@ it.each([
   ["项链", "灵力190\n宝石：舍利子\n锻炼等级5", "init_wakan", "初灵", 160],
   ["腰带", "气血500\n宝石：光芒石\n锻炼等级5", "init_hp", "初血", 300],
   ["鞋子", "敏捷40\n速度40\n宝石：黑宝石\n锻炼等级5", "init_dex", "初敏", 40],
-] as const)("%s使用扣宝石后的%s作为唯一核心下限", (category, stats, control, label, initial) => {
+] as const)("%s识别扣宝石后的%s初始值并以0宽搜", (category, stats, control, label, initial) => {
   const target = {
     ...equipmentInventory(record()).items[0],
     category,
@@ -243,11 +243,11 @@ it.each([
     { kinds: [[6, category]], effects: [], skills: [], gems: [] },
     "1",
   );
-  expect(query.args[control]).toBe(initial);
+  expect(query.args[control]).toBe(0);
   expect(query.args).not.toHaveProperty("gem_level");
 });
 
-it.each([591, 592, 593, 594, 595])("下限592只采用至594的详情：初伤%s", (initial) => {
+it.each([591, 592, 593, 594, 595])("初伤目标592只接受相等或更低值：样品%s", (initial) => {
   const item = equipmentInventory(record()).items[0];
   const text = `测试剑\n等级100\n伤害${initial}\n挂牌价：¥100\n在售`;
   const result = verifyEquipmentCandidate(
@@ -266,7 +266,7 @@ it.each([591, 592, 593, 594, 595])("下限592只采用至594的详情：初伤%s
     `<main data-cbg-kind-id="6"><h1>测试剑</h1><pre>${text}</pre></main>`,
     new Date().toISOString(),
   );
-  expect(result.verified, result.reason).toBe(initial >= 592 && initial <= 594);
+  expect(result.verified, result.reason).toBe(initial <= 592);
 });
 
 it.each([55, 56, 57, 58, 59])("黑魔冠目标初防56，2点差值边界：样品%s", (initial) => {
@@ -278,7 +278,7 @@ it.each([55, 56, 57, 58, 59])("黑魔冠目标初防56，2点差值边界：样�
     level: 80,
     description: "等级 80\n魔法 +86 防御 +128\n锻炼等级 6 镶嵌宝石 月亮石",
   };
-  const text = `黑魔冠\n等级80\n防御${initial}\n挂牌价：¥888\n在售`;
+  const text = `黑魔冠\n等级80\n魔法 +86\n防御${initial}\n挂牌价：¥888\n在售`;
   const result = verifyEquipmentCandidate(
     target,
     {
@@ -295,7 +295,7 @@ it.each([55, 56, 57, 58, 59])("黑魔冠目标初防56，2点差值边界：样�
     `<main data-cbg-kind-id="17"><h1>黑魔冠</h1><pre>${text}</pre></main>`,
     new Date().toISOString(),
   );
-  expect(result.verified, result.reason).toBe(initial >= 56 && initial <= 58);
+  expect(result.verified, result.reason).toBe(initial <= 56);
 });
 
 it.each([
@@ -311,7 +311,8 @@ it.each([
     { kinds: [[6, "剑"]], effects: [], skills: [], gems: [] },
     "1",
   );
-  expect(args).toMatchObject({ init_damage_raw: raw, all_damage: 500 });
+  expect(args).toMatchObject({ init_damage_raw: 0 });
+  expect(args).not.toHaveProperty("all_damage");
   expect(args).not.toHaveProperty("damage");
   expect(args).not.toHaveProperty("init_damage");
 });
@@ -320,7 +321,7 @@ it("命中未知时不按零计算或编造总伤", () => {
   expect(equipmentWeaponTotalDamage(parseEquipmentAttributes("等级100\n伤害388"))).toBeNull();
 });
 
-it("初伤423与总伤519.25含义分开，两个条件同时提交而总伤下限取整", () => {
+it("武器查询填写扣宝石后的初伤宽搜条件，不填写总伤下限", () => {
   const item = {
     ...equipmentInventory(record()).items[0],
     description: "等级100\n伤害503\n命中385\n锻炼等级10\n镶嵌宝石 太阳石",
@@ -329,10 +330,13 @@ it("初伤423与总伤519.25含义分开，两个条件同时提交而总伤下�
   expect(equipmentWeaponTotalDamage(parseEquipmentAttributes(item.description))).toBe(519.25);
   expect(
     equipmentQuery(item, { kinds: [[6, "剑"]], effects: [], skills: [], gems: [] }, "1").args,
-  ).toMatchObject({ init_damage_raw: 423, all_damage: 519 });
+  ).toMatchObject({ init_damage_raw: 0 });
+  expect(
+    equipmentQuery(item, { kinds: [[6, "剑"]], effects: [], skills: [], gems: [] }, "1").args,
+  ).not.toHaveProperty("all_damage");
 });
 
-it.each([450, 451, 459, 460])("武器未取整的总伤也执行2点范围：命中%s", (hit) => {
+it.each([450, 451, 459, 460])("武器参考命中不高于目标：命中%s", (hit) => {
   const target = {
     ...equipmentInventory(record()).items[0],
     description: "等级100\n伤害388\n命中451",
@@ -354,7 +358,7 @@ it.each([450, 451, 459, 460])("武器未取整的总伤也执行2点范围：命
     `<main data-cbg-kind-id="6"><h1>测试剑</h1><pre>${text}</pre></main>`,
     new Date().toISOString(),
   );
-  expect(result.verified, result.reason).toBe(hit >= 451 && hit <= 459);
+  expect(result.verified, result.reason).toBe(hit <= 451);
 });
 
 it("人物装备范围冻结配置，灵饰待查且不调用其查询；恢复全范围时重新查询", async () => {

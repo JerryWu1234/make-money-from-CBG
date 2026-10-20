@@ -276,14 +276,18 @@ function canonicalValues(value: string): string[] {
 }
 
 /** Parse observed fields only. Repeated jewelry lines remain separate values. */
-export function parseEquipmentAttributes(description: string): EquipmentAttributes {
+export function parseEquipmentAttributes(
+  description: string,
+  knownJewelry = false,
+): EquipmentAttributes {
   const text = cleanDescription(description);
   const fields: Record<string, string[]> = {};
   const unknownLines: string[] = [];
   let refining = false;
   let runeCombination = false;
   // Jewelry set bonuses follow its named effect, not its primary/added stat rows.
-  const jewelry = /精炼等级/.test(text);
+  const observedSections = jewelryDescriptionSections(description, knownJewelry);
+  const jewelry = knownJewelry || /精炼等级/.test(text) || !!observedSections;
   let effectBonus = false;
   for (const line of text
     .split(/\n/)
@@ -374,7 +378,7 @@ export function parseEquipmentAttributes(description: string): EquipmentAttribut
   ].map((match) => normalize(match[0]));
   const levels = fields.等级?.map((value) => canonical(value));
   const level = levels?.length === 1 && /^\d+$/.test(levels[0]) ? Number(levels[0]) : null;
-  let sections = jewelry ? jewelryDescriptionSections(description) : null;
+  let sections = observedSections;
   if (jewelry && !sections) {
     // Independent listings often omit the color-derived header in innerText. The observed
     // bracketed refinement bonuses identify their contiguous two/three added stat rows.

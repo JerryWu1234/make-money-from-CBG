@@ -18,17 +18,16 @@ import {
   pricingTimestampFresh,
 } from "../../server/analysis/pricing-integrity";
 import { startWorkPageEvidence } from "./work-page-evidence";
+import { startSynchronousWorkEvidence } from "./synchronous-work-evidence";
 import {
   allAnalysisRecords,
   hasSearchParameterCapture,
   streamingRoleCount,
 } from "./streaming-options";
 
-const roleCount = streamingRoleCount(process.env.CBG_LIVE_ROLE_COUNT);
-
 // Isolated workflow failures are listed in docs/live-valuation-e2e.md.
 // No website, quote, capture detail, or AI response is mocked in this test.
-test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析，后续自动入队并保存${roleCount}份报价`, async ({
+test("真实官网按顺序采集角色，第1个采齐即分析，后续自动入队并保存全部裸号报价", async ({
   page,
   request,
 }) => {
@@ -50,16 +49,26 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
       path.join(directory, "prompts/role-valuation.md"),
     );
   }
-  const baseURL = "http://127.0.0.1:5187";
   const kind = "real-cbg-codex-streaming-e2e";
   const prior = resume
     ? JSON.parse(await readFile(path.join(directory, "manifest.json"), "utf8"))
     : null;
+  const roleCount = streamingRoleCount(
+    process.env.CBG_LIVE_ROLE_COUNT || (prior ? String(prior.roleCount) : undefined),
+  );
+  const port = Number(process.env.CBG_LIVE_PORT || (prior ? new URL(prior.baseURL).port : 5187));
+  if (!Number.isInteger(port) || port < 1024 || port > 65535)
+    throw new Error("CBG_LIVE_PORT 须为1024至65535的整数");
+  const baseURL = `http://127.0.0.1:${port}`;
   if (
     prior &&
-    (prior.kind !== kind || prior.roleCount !== roleCount || prior.analysisStartsAfter !== 1)
+    (prior.kind !== kind ||
+      prior.roleCount !== roleCount ||
+      prior.analysisStartsAfter !== 1 ||
+      prior.bareRoleOnly !== true ||
+      prior.baseURL !== baseURL)
   )
-    throw new Error(`不能将其他数量或类型的测试数据当作本轮${roleCount}角色续跑`);
+    throw new Error(`续跑必须保留本批的数量、裸号范围和本地地址（${roleCount}个角色）`);
   const verifiedEvidenceFile = async (entry: { name: string; sha256: string }) => {
     const file = path.resolve(directory, entry.name);
     if (!file.startsWith(directory + path.sep)) throw new Error("续跑证据路径超出运行目录");
@@ -89,6 +98,7 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
     state: "running",
     resumed: !!resume,
     roleCount,
+    bareRoleOnly: true,
     analysisStartsAfter: 1,
     testMinimumAskingPrice: null,
     baseURL,
@@ -97,6 +107,7 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
     excludedProductKeys: [...excluded],
     error: "",
     workPageEvidence: { state: "not_started", error: "" },
+    synchronousEvidence: prior?.synchronousEvidence || { state: "not_started", error: "" },
     files: [...(prior?.files || [])] as { name: string; sha256: string }[],
   };
   const registerFile = (entry: { name: string; sha256: string }) => {
@@ -179,6 +190,11 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
         ),
       });
       await attention(stage, message);
+      if (synchronousEvidence) {
+        const session = await server.ssrLoadModule("/server/session.ts");
+        await synchronousEvidence.rearm(await session.getBrowser(false));
+        manifest.synchronousEvidence = { state: "recording", error: "" };
+      }
       if (manifest.runId) await api("/api/analysis/retry", { runId: manifest.runId });
       await event("repair_resume", { stage, runId: manifest.runId });
     })().finally(() => {
@@ -209,12 +225,13 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
   let stopping = false;
   let producer: Promise<void> | undefined;
   let evidence: Awaited<ReturnType<typeof startWorkPageEvidence>> | undefined;
+  let synchronousEvidence: Awaited<ReturnType<typeof startSynchronousWorkEvidence>> | undefined;
   console.log(`CBG_LIVE_RUN ${directory}\n${baseURL}`);
   process.chdir(directory);
   const server = await createServer({
     root: repository,
     configFile: path.join(repository, "vite.config.ts"),
-    server: { host: "127.0.0.1", port: 5187, strictPort: true, open: false },
+    server: { host: "127.0.0.1", port, strictPort: true, open: false },
   });
   try {
     await server.listen();
@@ -349,6 +366,25 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
       }
       await pause();
     }
+    // Polling is supplemental only; stop it before wrapping evaluate to avoid self-recording.
+    if (evidence) {
+      manifest.files.push(await evidence.stop());
+      manifest.workPageEvidence.state = "indexed_review_required";
+      evidence = undefined;
+    }
+    const session = await server.ssrLoadModule("/server/session.ts");
+    synchronousEvidence = await startSynchronousWorkEvidence(
+      directory,
+      await session.getBrowser(false),
+      (reason) => {
+        manifest.synchronousEvidence = { state: "audit_blocked", error: reason };
+        void stopForRepair("audit", "同步截图审核受阻：" + reason).catch((error) => {
+          producerFailure = error;
+        });
+      },
+    );
+    manifest.synchronousEvidence.state = "recording";
+    await save("manifest.json", manifest);
     if (!alreadyCaptured) {
       const session = await server.ssrLoadModule("/server/session.ts");
       listPage = session.getCbgPage();
@@ -369,6 +405,14 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
       let next: AnalysisRun;
       if (!run) {
         expect(overview.counts.complete).toBe(1);
+        const settings = await api<{
+          profile: { equipmentSearch: boolean; petSearch: boolean; petGearSearch: boolean };
+        }>("/api/analysis/settings");
+        expect(settings.profile).toMatchObject({
+          equipmentSearch: false,
+          petSearch: false,
+          petGearSearch: false,
+        });
         next = await api<AnalysisRun>("/api/analysis/start", { provider: "codex" });
         expect(next.model).toBe("gpt-6-luna");
         expect(next.total).toBe(1);
@@ -638,8 +682,14 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
       expect(detail.state).toBe("completed");
       expect(detail.runId).toBe(manifest.runId);
       expect(detail.model).toBe("gpt-6-luna");
-      expect(detail.equipmentPricing?.searchComplete).toBe(true);
-      expect(detail.petPricing?.searchComplete).toBe(true);
+      expect(detail.profile).toMatchObject({
+        equipmentSearch: false,
+        petSearch: false,
+        petGearSearch: false,
+      });
+      expect(detail.equipmentPricing ?? null).toBeNull();
+      expect(detail.petPricing ?? null).toBeNull();
+      expect(detail.promptText).toContain("裸号核对专用模板");
       const serverId = String(item.serverId);
       for (const [asset, snapshot] of [
         ["装备", detail.equipmentPricing],
@@ -724,7 +774,8 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
         ),
       ).toBe(true);
       const value = detail.result!.valuation!;
-      const quote = value.model_value ?? value.estimated_value;
+      expect(value.asset_scope).toBe("body");
+      const quote = value.bare_role_value ?? value.model_value ?? value.estimated_value;
       expect(typeof quote).toBe("number");
       expect(quote).toBeGreaterThanOrEqual(0);
       expect(value.estimate_missing_count || 0).toBe(0);
@@ -734,12 +785,22 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
         server: item.serverName,
         asking: value.asking_price,
         reference: quote,
+        bareRoleReference: value.bare_role_value ?? value.model_value,
         range: value.estimated_value_range,
         excluded: value.excluded_assets,
       });
     }
+    expect(quotes).toHaveLength(roleCount);
+    expect(quotes.every((quote) => Number.isFinite(quote.bareRoleReference))).toBe(true);
     await save("quotations.json", quotes);
+    await save("completion.json", {
+      requiredRoles: roleCount,
+      pricedBareRoles: quotes.length,
+      complete: quotes.length === roleCount,
+      finishedAt: new Date().toISOString(),
+    });
     await save("pricing-policy-proof.json", pricingProof);
+    expect(synchronousEvidence.auditBlocked).toBeUndefined();
     await page.reload();
     await page.getByRole("tab", { name: /^分析记录/ }).click();
     await expect(page.getByLabel("分析页面概览")).toContainText(`${roleCount} 件已有结果`);
@@ -753,8 +814,11 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
       name: "final-results.png",
       sha256: createHash("sha256").update(screenshot).digest("hex"),
     });
-    if (!evidence) throw new Error("搜索参数截图未启动，不能通过真实验收");
-    const evidenceIndex = await evidence.stop();
+    const activeEvidence = evidence as
+      | Awaited<ReturnType<typeof startWorkPageEvidence>>
+      | undefined;
+    if (!activeEvidence) throw new Error("搜索参数截图未启动，不能通过真实验收");
+    const evidenceIndex = await activeEvidence.stop();
     evidence = undefined;
     registerFile(evidenceIndex);
     manifest.workPageEvidence.state = "indexed_review_required";
@@ -778,6 +842,20 @@ test(`真实官网按顺序采集${roleCount}个角色，第1个采齐即分析�
       .catch(() => {});
     await producer?.catch(() => {});
     await eventWrites;
+    if (synchronousEvidence) {
+      try {
+        manifest.files.push(await synchronousEvidence.stop());
+        manifest.synchronousEvidence.state = synchronousEvidence.auditBlocked
+          ? "audit_blocked"
+          : "indexed_review_required";
+      } catch (error) {
+        manifest.synchronousEvidence = { state: "index_failed", error: String(error) };
+        if (manifest.state === "passed") {
+          manifest.state = "incomplete";
+          manifest.error = "同步截图索引保存失败";
+        }
+      }
+    }
     if (evidence) {
       try {
         registerFile(await evidence.stop());

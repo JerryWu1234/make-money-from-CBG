@@ -95,13 +95,7 @@ export function matchInitialSearchEquipmentAttributes(
         };
     }
   }
-  const difference = compareEquipmentAttributes(target, source);
-  return {
-    matchType: difference ? "similar" : "exact",
-    similarityScore: 0,
-    differences: difference ? [difference + "；未作为额外搜索条件"] : [],
-    reason: null,
-  };
+  return matchComparableEquipmentAttributes(target, source, partial);
 }
 const empty = { level: null, fields: {}, restrictions: [], unknownLines: [] };
 const sameField = (name: string, left: string[], right: string[]) =>

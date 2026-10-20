@@ -371,3 +371,68 @@ it("普通分析在采集仍进行时立即处理已采齐角色，不等待后�
   expect(controller.analysisOverview({}).capturePreparation).toBeUndefined();
   expect(controller.appendCapturedAnalysis()).toBe(0);
 });
+
+it("只查装备批次冻结关闭宝宝查价，续跑不重新启用且不改通用设置", async () => {
+  const { record, analyze } = captureFixture();
+  crawl.save(record.listing, record.detail!);
+  const original = mocks.profile();
+  const client = await mocks.connect();
+  const searchPets = vi.fn(client.searchPets);
+  const searchPetGear = vi.fn();
+  mocks.connect.mockResolvedValue({ ...client, searchPets, searchPetGear });
+  const controller = await import("./controller");
+  const run = (await controller.startAnalysis(
+    "codex",
+    false,
+    false,
+    undefined,
+    1,
+    undefined,
+    true,
+  ))!;
+  await vi.waitFor(() => expect(analyze).toHaveBeenCalledOnce());
+  const frozen = JSON.parse(
+    String(
+      crawl.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(run.id)!
+        .profile_json,
+    ),
+  );
+  expect(frozen).toMatchObject({ equipmentSearch: true, petSearch: false, petGearSearch: false });
+  expect(frozen.hash).toBe(createProfile(original.template, original.settings, true, false).hash);
+  expect(mocks.profile()).toBe(original);
+  expect(original.petSearch).toBe(true);
+  expect(searchPets).not.toHaveBeenCalled();
+  expect(searchPetGear).not.toHaveBeenCalled();
+  await controller.pauseAnalysis(run.id);
+  await controller.resumeAnalysis(run.id);
+  await vi.waitFor(() => expect(analyze).toHaveBeenCalledTimes(2));
+  expect(searchPets).not.toHaveBeenCalled();
+  expect(searchPetGear).not.toHaveBeenCalled();
+  expect(
+    JSON.parse(
+      String(
+        crawl.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(run.id)!
+          .profile_json,
+      ),
+    ),
+  ).toEqual(frozen);
+});
+
+it("已有普通批次时不能静默把只查装备请求当作已生效", async () => {
+  const { record, analyze } = captureFixture();
+  crawl.save(record.listing, record.detail!);
+  const controller = await import("./controller");
+  const run = (await controller.startAnalysis("codex"))!;
+  await vi.waitFor(() => expect(analyze).toHaveBeenCalledOnce());
+  await expect(
+    controller.startAnalysis("codex", false, false, undefined, 1, undefined, true),
+  ).rejects.toThrow("当前运行批次不是只查装备");
+  const frozen = JSON.parse(
+    String(
+      crawl.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(run.id)!
+        .profile_json,
+    ),
+  );
+  expect(frozen.petSearch).toBe(true);
+  expect(crawl.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n).toBe(1);
+});

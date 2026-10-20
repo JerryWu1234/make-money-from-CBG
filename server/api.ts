@@ -161,6 +161,8 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
           return;
         }
         case "/api/analysis/start": {
+          if (input.equipmentOnly !== undefined && typeof input.equipmentOnly !== "boolean")
+            throw new Error("只查装备选项必须为布尔值");
           if (
             input.sampleSize !== undefined &&
             (input.sample !== true ||
@@ -187,6 +189,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             (input.model as string | undefined) || undefined,
             (input.sampleSize as number | undefined) ?? 1,
             productKeys,
+            input.equipmentOnly === true,
           );
           break;
         }

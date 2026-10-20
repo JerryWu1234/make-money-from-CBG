@@ -12,7 +12,7 @@ import {
 import { AnalysisRunner, pricingUntilAborted } from "./runner";
 import { AnalysisStore } from "./store";
 import { refreshMarket, marketServers } from "./market";
-import { loadProfile, saveProfile, PROMPT_FILE } from "./profile";
+import { createProfile, loadProfile, saveProfile, PROMPT_FILE } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
 import { reconcileCapturedEquipmentCategories } from "./equipment-category-evidence";
 
@@ -179,6 +179,7 @@ export async function startAnalysis(
   model?: string,
   sampleSize = 1,
   productKeys?: string[],
+  equipmentOnly = false,
 ) {
   validateSampleSelection(sample, sampleSize, productKeys);
   const analysis = service();
@@ -201,7 +202,13 @@ export async function startAnalysis(
   } catch {
     /* 缺失行情仍可分析，结果明确列出缺项。 */
   }
-  const profile = loadProfile(service().store.db);
+  const currentProfile = loadProfile(service().store.db);
+  const profile = equipmentOnly
+    ? {
+        ...createProfile(currentProfile.template, currentProfile.settings, true, false),
+        marketSources: currentProfile.marketSources,
+      }
+    : currentProfile;
   const id = await service().runner.start(
     provider,
     force || sample,
@@ -211,6 +218,14 @@ export async function startAnalysis(
     sampleSize,
     productKeys,
   );
+  if (equipmentOnly) {
+    const frozen = service()
+      .store.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?")
+      .get(id);
+    const saved = frozen?.profile_json ? JSON.parse(String(frozen.profile_json)) : null;
+    if (!saved?.equipmentSearch || saved.petSearch !== false || saved.petGearSearch !== false)
+      throw new Error("当前运行批次不是只查装备，请先暂停，再按本次范围开始新分析");
+  }
   return service().store.run(id);
 }
 export async function resumeAnalysis(id: string, retry = false) {

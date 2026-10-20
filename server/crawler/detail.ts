@@ -7,6 +7,7 @@ import {
   equipmentEmptyProof,
   hasUnconfirmedEmptyEquipment,
   itemFromAttributes,
+  preserveJewelryTooltipSections,
   observedEquipmentCategory,
 } from "./compact";
 import { collectPets, petCaptureSummary } from "./pets";
@@ -194,7 +195,9 @@ async function inspectItems(
     // 名称、技能类别或装备属性已在元素里时直接读取，不触发无意义的提示框。
     let item = itemFromAttributes(attrs, index);
     // 已明确不在人物装备计价范围内的物品不要求普通装备属性。
-    if (/^(?:法宝|灵宝|神器|道具 · 召唤兽技能书|材料 · 精魄灵石)$/.test(item.category || "")) {
+    if (
+      /^(?:法宝|灵宝|神器|道具 · 召唤兽(?:技能书|内丹)|材料 · 精魄灵石)$/.test(item.category || "")
+    ) {
       snapshot.items!.push(item);
       continue;
     }
@@ -280,7 +283,7 @@ async function inspectItems(
           },
           {
             id: tipId || "",
-            name: attrs.data_equip_name || "",
+            name: attrs.data_equip_name?.trim() || "",
             requireStats: incompleteEquipment,
             expectedLevel,
           },
@@ -317,7 +320,13 @@ async function inspectItems(
         )
           issues?.push(`${snapshot.name}：${item.name} 的未鉴定提示框名称或等级与物品不一致`);
       }
-      item = itemFromAttributes({ ...attrs, data_equip_desc: tooltip }, index);
+      item = itemFromAttributes(
+        {
+          ...attrs,
+          data_equip_desc: preserveJewelryTooltipSections(tooltip, item.description || ""),
+        },
+        index,
+      );
       if (item.name.startsWith("图标 ")) item.name = tooltip.split("\n")[0];
     }
     if (!item.description && !item.attributes && item.name.startsWith("图标 "))

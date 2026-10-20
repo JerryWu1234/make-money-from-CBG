@@ -7,35 +7,36 @@ import {
 } from "./streaming-options";
 
 describe("真实角色批次数量与分页", () => {
-  it("默认保留十角色，可显式选择五十角色，拒绝无效规模", () => {
+  it("默认十角色，支持最多一百角色并拒绝越界数量", () => {
     expect(streamingRoleCount()).toBe(10);
     expect(streamingRoleCount("50")).toBe(50);
-    for (const value of ["", "0", "1", "2.5", "51", "NaN", "Infinity"])
-      expect(() => streamingRoleCount(value)).toThrow("2 到 50");
+    expect(streamingRoleCount("100")).toBe(100);
+    for (const value of ["", "0", "1", "2.5", "101", "NaN", "Infinity"])
+      expect(() => streamingRoleCount(value)).toThrow("2 到 100");
   });
 
-  it("读取全部三页五十角色，末页失败不会伪装成完整结果", async () => {
+  it("读取全部五页一百角色，末页失败不会伪装成完整结果", async () => {
     const pages: number[] = [];
     const read = async (page: number) => {
       pages.push(page);
       return {
         records: {
           page,
-          total: 50,
-          totalPages: 3,
-          items: Array.from({ length: page === 3 ? 10 : 20 }, (_, index) => ({
+          total: 100,
+          totalPages: 5,
+          items: Array.from({ length: 20 }, (_, index) => ({
             key: String((page - 1) * 20 + index),
           })),
         },
       } as AnalysisOverview;
     };
     const overview = await allAnalysisRecords(read);
-    expect(pages).toEqual([1, 2, 3]);
-    expect(overview.records.items).toHaveLength(50);
-    expect(overview.records.items.at(-1)?.key).toBe("49");
+    expect(pages).toEqual([1, 2, 3, 4, 5]);
+    expect(overview.records.items).toHaveLength(100);
+    expect(overview.records.items.at(-1)?.key).toBe("99");
     await expect(
       allAnalysisRecords(async (page) => {
-        if (page === 3) throw new Error("last page failed");
+        if (page === 5) throw new Error("last page failed");
         return read(page);
       }),
     ).rejects.toThrow("last page failed");

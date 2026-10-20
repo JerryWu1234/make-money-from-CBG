@@ -145,6 +145,59 @@ describe("装备局部补采", () => {
       await page.close();
     }
   }, 20000);
+  it.each([
+    {
+      label: "名称尾部空格",
+      name: "新武器 ",
+      tooltip: "新武器\n等级 100\n伤害 +420",
+      complete: true,
+    },
+    {
+      label: "名称首尾空白",
+      name: "　新武器\t ",
+      tooltip: "新武器\n等级 100\n伤害 +420",
+      complete: true,
+    },
+    {
+      label: "不同物品名称",
+      name: "新武器 ",
+      tooltip: "另一把武器\n等级 100\n伤害 +420",
+      complete: false,
+    },
+    { label: "相同名称缺属性", name: "新武器 ", tooltip: "新武器\n等级 100", complete: false },
+  ])(
+    "提示框名称首尾空白匹配边界：$label",
+    async ({ name, tooltip, complete }) => {
+      const page = await browser.newPage();
+      const gear = `<div id="RoleEquip"><img width="40" height="40" data_kindid="999" data_equip_name="${name}" data_equip_desc="等级 100" data_equip_category="武器" data_tip_box="WhitespaceTipsBox" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseover="document.getElementById('WhitespaceTipsBox').style.display='block'"><div id="WhitespaceTipsBox" style="display:none;white-space:pre-line">${tooltip}</div></div>`;
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, "", "", gear),
+        }),
+      );
+      try {
+        const detail = await collectValuationDetail(
+          page,
+          listing,
+          previous(),
+          new AbortController().signal,
+        );
+        expect(detail.equipmentCapture?.complete).toBe(complete);
+        const captured = detail.tabs.find((entry) => entry.name === "道具/法宝")!.items![0];
+        expect(captured.name).toBe(name);
+        expect(captured.description).toContain(tooltip.split("\n").slice(1).join("\n"));
+        if (complete) expect(detail.equipmentCapture?.issues).toEqual([]);
+        else
+          expect(
+            detail.equipmentCapture?.issues.some((issue) => issue.includes("提示框未完整显示")),
+          ).toBe(true);
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
   it("宝宝饰品带切换索引但只有提示框时仍读取，不能误当头像跳过", async () => {
     const page = await browser.newPage();
     const pet = completePet()
@@ -441,6 +494,36 @@ describe("装备局部补采", () => {
       await page.close();
     }
   }, 15000);
+  it("官网4103内丹只有技能说明时完整采集，不要求人物装备等级和数值", async () => {
+    const page = await browser.newPage();
+    try {
+      const innerdan =
+        '<img width="40" height="40" data_equip_name="高级召唤兽内丹" data_equip_type="4103" data_equip_desc="所带内丹技能：血债偿#r本方召唤兽被击飞时提升法术伤害">';
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, innerdan),
+        }),
+      );
+      const detail = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(detail.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      const items = detail.tabs.find((tab) => tab.name === "道具/法宝")!.items!;
+      expect(items[1]).toMatchObject({
+        name: "高级召唤兽内丹",
+        modelId: "4103",
+        category: "道具 · 召唤兽内丹",
+      });
+      expect(items[1].description).toContain("血债偿");
+    } finally {
+      await page.close();
+    }
+  }, 15000);
+
   it("空描述也读取提示框，新装备和宝宝替换旧快照，其余资料保留", async () => {
     const page = await browser.newPage();
     try {

@@ -5,12 +5,15 @@ import { assertAvailable, pace } from "../crawler/page";
 import { hoverForInspection } from "../viewport";
 import { buildPageState } from "../page-state";
 import { readStableSnapshot } from "../workflow";
-import { cleanDescription, observedEquipmentCategory } from "../crawler/compact";
-import { parseEquipmentAttributes } from "./equip-attributes";
+import {
+  cleanDescription,
+  observedEquipmentCategory,
+  preserveJewelryTooltipSections,
+} from "../crawler/compact";
+import { equipmentInitialAttribute, parseEquipmentAttributes } from "./equip-attributes";
 import {
   equipmentAttributeLowerBound,
   matchComparableEquipmentAttributes,
-  matchInitialSearchEquipmentAttributes,
 } from "./equipment-match";
 import { buildEquipmentEstimate } from "./pricing-estimate";
 import {
@@ -40,8 +43,7 @@ import {
   type EquipmentPricingItem,
   type EquipmentSearchCursor,
   equipmentCoreSkipReason,
-  equipmentCoreInitial,
-  equipmentCoreMismatch,
+  equipmentCoreInitialField,
   EQUIPMENT_CORE_INITIAL_POLICY,
   EQUIPMENT_WEAPON_QUERY_POLICY,
   type EquipmentSource,
@@ -59,6 +61,8 @@ const MAX_PAGES = 10,
   MAX_DETAILS = 100;
 type Choices = Array<[string | number, string]>;
 type SuitType = "added_status" | "append_skill" | "transform_skill" | "transform_charm";
+const initialSortLabel = (field: string) =>
+  ({ 伤害: "初伤", 防御: "初防", 灵力: "初灵", 敏捷: "初敏", 气血: "初血" })[field] || field;
 export type EquipmentSearchConfig = {
   kinds: Choices;
   effects: Choices;
@@ -69,6 +73,8 @@ export type EquipmentSearchConfig = {
   suits?: Choices;
   jewelrySuitEffects?: string[];
   jewelrySuitChoices?: Choices;
+  jewelryPrimaryAttrs?: Choices;
+  jewelryAddedAttrs?: Choices;
   suitTypes?: Partial<Record<SuitType, Choices>>;
 };
 type Query = Record<string, string | number>;
@@ -148,13 +154,29 @@ export function assertEquipmentUIArguments(expected: Query, actual: Query) {
           .sort()
           .join(",");
   };
+  // A zero jewelry minimum is returned under the generic key, or omitted entirely.
+  const zeroPrimary =
+    expected.equip_level_min === undefined
+      ? undefined
+      : [
+          "damage",
+          "defense",
+          "magic_damage",
+          "magic_defense",
+          "fengyin",
+          "anti_fengyin",
+          "speed",
+        ].find((key) => String(expected[key]) === "0");
   const different = Object.keys(expected).filter(
-    (key) => actual[key] === undefined || normalized(actual[key]) !== normalized(expected[key]),
+    (key) =>
+      !(key === zeroPrimary && actual[key] === undefined) &&
+      (actual[key] === undefined || normalized(actual[key]) !== normalized(expected[key])),
   );
   if (different.length) throw new Error("官网 UI 查询字段未生效：" + different.join(","));
   const extra = Object.keys(actual).filter(
     (key) =>
       expected[key] === undefined &&
+      !(zeroPrimary && key === "basic_attr_value" && String(actual[key]) === "0") &&
       !(key === "sum_attr_without_melt" && String(actual[key]) === "1") &&
       key !== "cross_buy_serverid" &&
       String(actual[key]) !== "",
@@ -163,6 +185,64 @@ export function assertEquipmentUIArguments(expected: Query, actual: Query) {
 }
 
 const isJewelry = isJewelryEquipment;
+// Translate observed description labels to the exact labels in the public selects.
+const jewelryAttributeLabels: Record<string, string> = {
+  固定伤害: "固伤",
+  法术伤害: "法伤",
+  法术防御: "法防",
+  法术防御等级: "法防",
+  狂暴等级: "狂暴",
+  物理暴击等级: "物理暴击",
+  法术暴击等级: "法术暴击",
+  封印命中等级: "封印",
+  封印命中: "封印",
+  法术伤害结果: "法伤结果",
+  穿刺等级: "穿刺",
+  治疗能力: "治疗",
+  抗物理暴击等级: "抗物理暴击",
+  抗法术暴击等级: "抗法术暴击",
+  抵抗封印等级: "抗封",
+  抗封印等级: "抗封",
+  格挡值: "格挡",
+  气血回复效果: "回复",
+};
+
+function jewelryAttributeQuery(item: EquipmentPricingItem, config: EquipmentSearchConfig) {
+  const sections = parseEquipmentAttributes(item.description).jewelrySections;
+  if (!sections) throw new Error("灵饰主属性与附加属性缺少分段证据，未提交不完整条件");
+  const label = (name: string) => jewelryAttributeLabels[name] || name;
+  const primary = Object.entries(sections.main).flatMap(([name, values]) =>
+    (config.jewelryPrimaryAttrs || [])
+      .filter(([, option]) => option.split("·").at(-1) === label(name))
+      .map(([key]) => ({ key, values })),
+  );
+  const number = primary[0]?.values[0]?.match(/^\+?(\d+)$/)?.[1];
+  if (
+    primary.length !== 1 ||
+    primary[0].values.length !== 1 ||
+    number === undefined ||
+    Number(number) > 10000
+  )
+    throw new Error("灵饰基础属性没有唯一可靠数值或官网控件映射，未提交不完整条件");
+  const args: Query = { [primary[0].key]: 0 };
+  let count = 0;
+  for (const [name, values] of Object.entries(sections.added)) {
+    const choices = (config.jewelryAddedAttrs || []).filter(([, option]) => option === label(name));
+    if (
+      choices.length !== 1 ||
+      !values.length ||
+      values.some((value) => !/^\+?\d+(?:\s*\[\+?\d+\])?$/.test(value))
+    )
+      throw new Error("灵饰附加属性没有唯一可靠数值或官网控件映射，未提交不完整条件");
+    const key = "added_attr." + choices[0][0];
+    args[key] = Number(args[key] || 0) + values.length;
+    count += values.length;
+  }
+  if (![2, 3].includes(count))
+    throw new Error("灵饰附加属性条数不能对应官网控件，未提交不完整条件");
+  return { ...args, added_attr_num: count, added_attr_logic: "detail" };
+}
+
 const isYuanshen = (item: EquipmentPricingItem) =>
   /(?:^|[·/\s])元身(?:$|[·/\s])/.test(observedEquipmentCategory(item.category, "", item.modelId));
 /** Values come from the live public menus/select, never guessed query parameter codes. */
@@ -251,13 +331,8 @@ export function equipmentQuery(
       .find(([, label]) => category.includes(label)) ||
     (config.namedKinds?.length === 1 ? config.namedKinds[0] : undefined);
   if (kind) args.kindid = String(kind[0]);
-  if (!jewelry) {
-    const core = equipmentCoreInitial(item, kind?.[1] || item.category);
-    if (core) args[core.control] = core.value;
-    // The public form accepts integers only. The exact unrounded value is verified in detail.
-    if (core?.combinedValue !== undefined) args.all_damage = Math.floor(core.combinedValue);
-  }
   if (jewelry) {
+    Object.assign(args, jewelryAttributeQuery(item, config));
     if (!kind) {
       const primary = parseEquipmentAttributes(item.description).jewelrySections?.main || {};
       const primaryKinds: Record<string, string[]> = {
@@ -290,6 +365,19 @@ export function equipmentQuery(
       }
     }
   } else {
+    const attributes = parseEquipmentAttributes(item.description);
+    const core = equipmentCoreInitialField(kind?.[1] || item.category);
+    for (const [field, key] of [
+      ["防御", "init_defense"],
+      ["伤害", "init_damage_raw"],
+      ["灵力", "init_wakan"],
+      ["气血", "init_hp"],
+      ["敏捷", "init_dex"],
+    ]) {
+      if (field !== core) continue;
+      const value = equipmentInitialAttribute(attributes, field);
+      if (value !== null) args[key] = 0;
+    }
     for (const [field, key, choices] of [
       ["特效", "special_effect", config.effects],
       ["特技", "special_skill", config.skills],
@@ -343,7 +431,7 @@ export type EquipmentQueryMode = "base-attributes" | "exact" | "similar";
 type EquipmentQueryStep = { mode: EquipmentQueryMode; args: Query };
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-/** Search from the reliable initial value, then verify equality in each detail. */
+/** Never exclude authorized lower bases with a target-valued minimum; details enforce the target maximum. */
 export function equipmentQueryPlan(
   item: EquipmentPricingItem,
   config: EquipmentSearchConfig,
@@ -461,17 +549,12 @@ export function equipmentListingMismatch(
     return "装备等级不匹配";
   if (!row.description?.trim()) return null;
   if (isYuanshen(item) || item.category === "上古玉魄") return null; // Dedicated full-description verification preserves special slots and restrictions.
-  const target = parseEquipmentAttributes(item.description);
+  const target = parseEquipmentAttributes(item.description, isJewelry(item));
   const source = parseEquipmentAttributes(
     row.description.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]+>/g, ""),
+    isJewelry(item),
   );
-  const coreMismatch = equipmentCoreMismatch(item, source, true);
-  if (coreMismatch) return coreMismatch;
-  return (
-    item.comparisonPolicy === "core-initial-first-five-v3"
-      ? matchInitialSearchEquipmentAttributes(target, source, true)
-      : matchComparableEquipmentAttributes(target, source, true)
-  ).reason;
+  return matchComparableEquipmentAttributes(target, source, true).reason;
 }
 
 /** Read only the principal equipment description and price, never recommendations. */
@@ -790,8 +873,16 @@ async function readMainEquipment(
     equipmentIdentity(page.url()) !== serverId + ":" + productId
   )
     throw new Error("无法把主商品属性绑定到当前商品ID，报价未采用");
-  const rawAttributes = parseEquipmentAttributes(observed.description);
-  const tipAttributes = parseEquipmentAttributes(observed.tooltip);
+  const knownJewelry = isJewelry({
+    category: observed.typeDescription,
+    description: observed.description,
+    kindId:
+      typeof observed.kindId === "string" || typeof observed.kindId === "number"
+        ? String(observed.kindId)
+        : undefined,
+  });
+  const rawAttributes = parseEquipmentAttributes(observed.description, knownJewelry);
+  const tipAttributes = parseEquipmentAttributes(observed.tooltip, knownJewelry);
   const size = (attributes: typeof rawAttributes) =>
     Object.values(attributes.fields).reduce((total, values) => total + values.length, 0);
   if (rawAttributes.level && tipAttributes.level && rawAttributes.level !== tipAttributes.level)
@@ -799,11 +890,15 @@ async function readMainEquipment(
   const jade = ["61717", "61718"].includes(String(observed.modelId));
   const yuanshen = observed.name.endsWith("元身");
   const description = cleanDescription(
-    (tipAttributes.level !== null || jade || yuanshen) &&
-      size(tipAttributes) >= size(rawAttributes) &&
-      observed.tooltip
-      ? observed.tooltip
-      : observed.description,
+    preserveJewelryTooltipSections(
+      (tipAttributes.level !== null || jade || yuanshen) &&
+        size(tipAttributes) >= size(rawAttributes) &&
+        observed.tooltip
+        ? observed.tooltip
+        : observed.description,
+      observed.description,
+      knownJewelry,
+    ),
   );
   if (
     expectedKind === "pet-gear" &&
@@ -1716,6 +1811,26 @@ export function equipmentSourceFromPages(
                       ])
                       .filter(([value]) => value !== "" && value !== "0")
                   : [],
+                jewelryPrimaryAttrs: jewelry
+                  ? Array.from(
+                      document.querySelectorAll<HTMLOptionElement>("#sel_basic_attr_type option"),
+                    )
+                      .filter((option) => option.value !== "")
+                      .map((option): [string, string] => [
+                        option.value,
+                        option.textContent?.trim() || "",
+                      ])
+                  : [],
+                jewelryAddedAttrs: jewelry
+                  ? Array.from(
+                      document.querySelectorAll<HTMLOptionElement>("#sel_add_attr1 option"),
+                    )
+                      .filter((option) => option.value !== "" && option.value !== "0")
+                      .map((option): [string, string] => [
+                        option.value,
+                        option.textContent?.trim() || "",
+                      ])
+                  : [],
                 suitTypes: {
                   added_status: typedSuits(g.SuitAddedStatus),
                   append_skill: typedSuits(g.SuitAppendSkills),
@@ -1795,7 +1910,7 @@ export function equipmentSourceFromPages(
           resolvedKindName = kindName;
           const core =
             !jewelry && !jade && !yuanshen
-              ? equipmentCoreInitial(item, kindName || item.category)
+              ? equipmentCoreInitialField(kindName || item.category)
               : null;
           if (!jewelry && !jade && !yuanshen && !core)
             throw new Error("人物装备核心初始属性无法对应官网类型，未采用报价");
@@ -1804,7 +1919,7 @@ export function equipmentSourceFromPages(
                 ...item,
                 kindId: resolvedTargetKind,
                 category: kindName || item.category,
-                comparisonPolicy: "core-initial-first-five-v3" as const,
+                comparisonPolicy: "base-upper-bound-v1" as const,
               }
             : resolvedTargetKind
               ? { ...item, kindId: resolvedTargetKind }
@@ -1848,7 +1963,7 @@ export function equipmentSourceFromPages(
           const planHash = digest({
             resumePolicy: PRICING_RESUME_POLICY,
             firstPagePolicy: core
-              ? "core-initial-query-first-five-tolerance2-v6"
+              ? "core-initial-wide-search-zero-minimum-upper-bound-v1"
               : "first-five-per-condition-v2",
             name: item.name,
             level: item.level,
@@ -2152,7 +2267,7 @@ export function equipmentSourceFromPages(
             const query =
               "目标服" +
               serverId +
-              (core ? ` / ${core.label}升序 / ` : " / 综合排序 / ") +
+              (core ? ` / ${initialSortLabel(core)}升序 / ` : " / 综合排序 / ") +
               item.name +
               " / " +
               mode +
@@ -2330,7 +2445,7 @@ export function equipmentSourceFromPages(
                 stage = "initial_attribute_sort";
                 const sorted = await sortEquipmentInitialAscending(
                   searchPage,
-                  core.label,
+                  initialSortLabel(core),
                   requestSignal,
                   () => marketScope!.begin(act, 1),
                   () => marketScope!.confirm(),

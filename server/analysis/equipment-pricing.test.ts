@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { valuationRecord } from "../../tests/fixtures/analysis";
-import type { SavedRoleRecord } from "../crawler/types";
+import { itemFromAttributes } from "../crawler/compact";
+import type { DetailItem, SavedRoleRecord } from "../crawler/types";
 import {
   combineEquipmentPricing,
   equipmentInventory,
@@ -623,6 +624,64 @@ describe("装备联网查价的来源核对", () => {
     );
     expect(recovered).toMatchObject({ total: 100, searchComplete: true });
   });
+  it("漏填基础条件的旧完成快照必须重查，新条件完成快照才可复用", async () => {
+    const record = recordWithEquipment();
+    const inventory = equipmentInventory(record);
+    const legacyHash = createHash("sha256")
+      .update(
+        JSON.stringify({
+          scopeVersion: "role-server-v1",
+          searchUI: "official-form-ui-v2",
+          comparisonVersion: "same-kind-exact-suit-v5",
+          coreInitialPolicy: "required-slot-initial-attribute-v1",
+          specialAssetPolicy: "ordered-special-slots-base-values-v1",
+          exclusionPolicy: "exhausted-plain-equipment-up-to-80-v1",
+          queryPolicy: "first-five-minimum-v4",
+          resumePolicy: "revalidate-pages-and-completion-evidence-v3",
+          serverId: record.listing.serverId,
+          collectedAt: record.detail!.equipmentCapture!.collectedAt,
+          captureComplete: inventory.captureComplete,
+          issues: inventory.issues,
+          items: inventory.items.map(
+            ({ key, name, level, category, kindId, modelId, description, comparisonPolicy }) => ({
+              key,
+              name,
+              level,
+              category,
+              ...(kindId ? { kindId } : {}),
+              ...(modelId ? { modelId } : {}),
+              description,
+              ...(comparisonPolicy ? { comparisonPolicy } : {}),
+            }),
+          ),
+        }),
+      )
+      .digest("hex");
+    const { pricing: previous } = await matchedPricing(record);
+    const findCandidates = vi.fn().mockResolvedValue(searchResponse([candidate(900)]));
+    const readSource = vi.fn().mockResolvedValue(sourcePage(900));
+    const fresh = await searchEquipmentPrices(
+      record,
+      new AbortController().signal,
+      { findCandidates, readSource },
+      undefined,
+      { ...previous, inputHash: legacyHash },
+    );
+    expect(findCandidates).toHaveBeenCalledOnce();
+    expect(fresh.total).toBe(900);
+    findCandidates.mockClear();
+    readSource.mockClear();
+    const resumed = await searchEquipmentPrices(
+      record,
+      new AbortController().signal,
+      { findCandidates, readSource },
+      undefined,
+      fresh,
+    );
+    expect(findCandidates).not.toHaveBeenCalled();
+    expect(readSource).not.toHaveBeenCalled();
+    expect(resumed.total).toBe(900);
+  });
   it.each(["无全服范围", "旧全服范围", "旧熔炼规则", "旧表单字段规则", "旧额外条件核验"])(
     "%s报价必须重查，当前查询规则的报价仍可复用",
     async (version) => {
@@ -820,7 +879,7 @@ describe("装备联网查价的来源核对", () => {
     expect(JSON.parse(result.rawResponse!).items[0].candidates).toHaveLength(5);
   });
 
-  it("离线重放历史样本，只采用核心初始值在目标至目标+2范围内的样本", () => {
+  it("离线重放历史样本，只采用基础值不高于目标且配置合格的样本", () => {
     const record = recordWithEquipment();
     record.detail!.tabs.at(-1)!.items = savedComparables.items.map(({ target }) => ({
       ...target,
@@ -845,17 +904,17 @@ describe("装备联网查价的来源核对", () => {
         );
       });
       const expected: Record<string, number[]> = {
-        水晶帽: [350, 370],
+        水晶帽: [],
         神火扇: [],
-        八卦坠: [1350],
-        龙骨甲: [788, 599, 1055],
+        八卦坠: [1194.4, 1045, 1192, 888],
+        龙骨甲: [],
       };
-      const prices = verified.filter((row) => row.verified).map((row) => row.price);
+      const prices = verified.filter((row) => row.verified).map((row) => row.price!);
       expect(prices, item.name).toEqual(expected[item.name]);
       if (item.name === "龙骨甲")
         for (const row of verified.filter((row) => [2299, 611].includes(row.price!))) {
           expect(row.verified).toBe(false);
-          expect(row.reason).toMatch(/多出目标没有的特[技效]/);
+          expect(row.reason).toContain("高于目标");
         }
       const estimate = buildEquipmentEstimate(verified);
       if (!prices.length) {
@@ -863,7 +922,7 @@ describe("装备联网查价的来源核对", () => {
         expect(estimate.range).toBeNull();
       } else {
         expect(estimate.sampleCount).toBe(prices.length);
-        expect(estimate.range?.min).toBe(Math.min(...expected[item.name]));
+        expect(estimate.range?.min).toBe(Math.min(...prices));
       }
     }
   });
@@ -1113,6 +1172,109 @@ describe("装备联网查价的来源核对", () => {
     expect(equipmentInventory(record).items[0]).toMatchObject({ category: "人物装备 · 腰带" });
     expect(equipmentInventory(record).items[0].kindId).toBeUndefined();
   });
+  function sameRoleModelRecord() {
+    const record = recordWithEquipment(true);
+    const items = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items!;
+    items.push(
+      {
+        index: 0,
+        name: "双魂引",
+        kind: "equipment",
+        category: "人物装备",
+        modelId: "2911",
+        location: "RoleEquipList:0",
+        description: "等级：60\n防御：25\n气血：180\n特技：破血狂攻",
+      },
+      {
+        index: 1,
+        name: "双魂引",
+        kind: "equipment",
+        category: "人物装备",
+        modelId: "2911",
+        location: "role_using_equip_5",
+        description: "等级：60\n防御：26\n气血：183\n特效：愤怒",
+      },
+    );
+    return { record, items };
+  }
+
+  it.each([false, true])("同角色精确型号复用实际佩戴槽位，顺序倒置=%s也保留各自属性", (reverse) => {
+    const { record, items } = sameRoleModelRecord();
+    const untyped = structuredClone(record);
+    untyped.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![1].location =
+      "RoleEquipList:1";
+    const oldHash = equipmentInventory(untyped).inputHash;
+    if (reverse) items.reverse();
+    const before = JSON.stringify(record);
+    const inventory = equipmentInventory(record);
+    const bag = inventory.items.find((item) => item.key === "道具/法宝:0")!;
+    expect(bag).toMatchObject({
+      name: "双魂引",
+      modelId: "2911",
+      level: 60,
+      category: "人物装备 · 腰带",
+      description: "等级：60\n防御：25\n气血：180\n特技：破血狂攻",
+      status: "no_match",
+    });
+    expect(bag.kindId).toBeUndefined();
+    expect(JSON.stringify(record)).toBe(before);
+    expect(inventory.inputHash).not.toBe(oldHash);
+  });
+
+  it.each<Partial<DetailItem>>([
+    { modelId: "2910" },
+    { name: "攫魂铃" },
+    { description: "等级：70\n防御：26\n气血：183" },
+    { modelId: undefined },
+    { description: "防御：26\n气血：183" },
+    { location: "RoleEquipList:1", category: "人物装备 · 腰带" },
+  ])("类型证据不精确或不是佩戴位置时保持未知：%j", (changes) => {
+    const { record, items } = sameRoleModelRecord();
+    Object.assign(items[1], changes);
+    expect(
+      equipmentInventory(record).items.find((item) => item.key === "道具/法宝:0")!.category,
+    ).toBe("人物装备");
+  });
+
+  it.each<Partial<DetailItem>>([{ category: "人物装备 · 饰品" }, { kindId: "21" }])(
+    "来源有明确类别或未经核对的独立kind时不传播槽位推断：%j",
+    (changes) => {
+      const { record, items } = sameRoleModelRecord();
+      Object.assign(items[1], changes);
+      expect(equipmentInventory(record).items[0].category).toBe("人物装备");
+    },
+  );
+
+  it("精确键的佩戴槽位冲突时不复用，也不跨角色复用", () => {
+    const { record, items } = sameRoleModelRecord();
+    items.push({ ...items[1], index: 2, location: "role_using_equip_4" });
+    expect(equipmentInventory(record).items[0].category).toBe("人物装备");
+    const other = sameRoleModelRecord();
+    other.items.pop();
+    expect(equipmentInventory(other.record).items[0].category).toBe("人物装备");
+  });
+
+  it.each<Partial<DetailItem>>([{ category: "人物装备 · 饰品" }, { kindId: "21" }])(
+    "明确类别或官网kind不被同角色型号覆盖：%j",
+    (changes) => {
+      const { record, items } = sameRoleModelRecord();
+      Object.assign(items[0], changes);
+      expect(equipmentInventory(record).items[0]).toMatchObject(changes);
+      expect(equipmentInventory(record).items[0].category).toBe(changes.category || "人物装备");
+    },
+  );
+
+  it("复用佩戴类型后仍拒绝核心初始值缺失，不能只按特技查价", () => {
+    const { record, items } = sameRoleModelRecord();
+    items[0].description = "等级：60\n防御：25\n特技：破血狂攻";
+    expect(equipmentInventory(record).items[0]).toMatchObject({
+      category: "人物装备 · 腰带",
+      status: "unsupported",
+      searchState: "skipped",
+      skipReason: expect.stringContaining("核心初始气血"),
+    });
+  });
+
   it("采齐的法宝灵宝神器不误报漏采或计装备价，混入真实装备仍正常查价", async () => {
     const record = recordWithEquipment();
     record
@@ -1595,6 +1757,91 @@ describe("装备联网查价的来源核对", () => {
     },
   );
 
+  it.each(["修理失败：3", "修理失败 3次", "耐久度 300 修理失败 3 次"])(
+    "明确%s的装备直接跳过，不发查询且不当0元计价",
+    async (repairs) => {
+      const record = recordWithEquipment();
+      record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description =
+        description.replace("修理失败：0", repairs);
+      const findCandidates = vi.fn(),
+        readSource = vi.fn();
+      const pricing = await searchEquipmentPrices(record, new AbortController().signal, {
+        findCandidates,
+        readSource,
+      });
+      expect(pricing.items[0]).toMatchObject({
+        status: "unsupported",
+        searchState: "skipped",
+        referencePrice: null,
+        skipReason: expect.stringContaining("修理失败3次"),
+      });
+      expect(pricing.total).toBeNull();
+      expect(pricing.knownTotal).toBe(0);
+      expect(findCandidates).not.toHaveBeenCalled();
+      expect(readSource).not.toHaveBeenCalled();
+      const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), DEFAULT_SETTINGS, false);
+      const report = combineEquipmentPricing(calculateValuation(record, profile), record, pricing);
+      const equipmentLine = report.items.find((item) => item.name.startsWith("装备："));
+      expect(equipmentLine).toMatchObject({
+        amount: null,
+        confirmed: false,
+        referenceBasis: "excluded",
+      });
+      expect(equipmentLine?.formula).toContain("修理失败3次");
+    },
+  );
+
+  it.each([
+    "修理失败：0",
+    "修理失败1次",
+    "修理失败：2",
+    "",
+    "修理失败：未知",
+    "修理失败：3次\n修理失败：0次",
+  ])("%s不属于明确修理失败3次，保留正常查价资格", (repairs) => {
+    const record = recordWithEquipment();
+    record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description =
+      description.replace("修理失败：0", repairs);
+    expect(equipmentInventory(record).items[0]).toMatchObject({
+      status: "no_match",
+      referencePrice: null,
+    });
+    expect(equipmentInventory(record).items[0].searchState).toBeUndefined();
+  });
+
+  it("参考品明确修理失败3次时拒绝，不能拉低正常装备报价", () => {
+    const item = equipmentInventory(recordWithEquipment()).items[0];
+    const exhausted = description.replace("修理失败：0", "修理失败：3次");
+    const result = verifyEquipmentCandidate(
+      item,
+      { ...candidate(), quote: quote(100, exhausted) },
+      sourcePage(100, exhausted),
+      new Date().toISOString(),
+    );
+    expect(result).toMatchObject({
+      verified: false,
+      reason: expect.stringContaining("修理失败3次"),
+    });
+  });
+
+  it("官网实际内丹图标保留原说明但不进入人物装备库存或制造漏采", () => {
+    const record = recordWithEquipment();
+    const raw = itemFromAttributes(
+      {
+        data_equip_name: "高级召唤兽内丹",
+        data_equip_type: "4103",
+        data_equip_desc: "所带内丹技能：血债偿#r本方召唤兽被击飞时提升法术伤害",
+      },
+      1,
+    );
+    record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items!.push(raw);
+    const inventory = equipmentInventory(record);
+    expect(inventory.captureComplete).toBe(true);
+    expect(inventory.issues).toEqual([]);
+    expect(inventory.items.map((item) => item.name)).toEqual([equipmentName]);
+    expect(raw.description).toContain("血债偿");
+  });
+
   it("程序未给单件实际筛选条件时留空，不把建议关键词冒充实际查询", async () => {
     const response = searchResponse([candidate()]);
     response.items[0].query = "";
@@ -1833,7 +2080,7 @@ describe("装备联网查价的来源核对", () => {
     expect(verified).toMatchObject({ verified: false, price: 100 });
     expect(verified.reason).toContain("力量");
     const broken = description.replace("耐久：300", "耐久：0");
-    const changed = broken.replace("修理失败：0", "修理失败：3");
+    const changed = broken.replace("修理失败：0", "修理失败：2");
     const rejected = verifyEquipmentCandidate(
       { ...item, description: broken },
       { ...candidate(), quote: quote(100, changed) },
