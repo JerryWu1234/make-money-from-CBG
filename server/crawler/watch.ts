@@ -43,7 +43,7 @@ export async function watchCrawl(
   const running = { new: 0, old: 0 };
   const inFlight = new Map<string, Promise<void>>();
   const runningItems = new Map<string, Listing>();
-  const failedKeys = new Set<string>();
+  const failedVersions = new Map<string, Listing["sellingTime"]>();
   const historyPoints = new Map<string, { point: Checkpoint; index: number }>();
   let failure: { error: unknown } | undefined;
   let wake: (() => void) | undefined;
@@ -64,7 +64,10 @@ export async function watchCrawl(
   const queued = () => {
     const queues: Record<CrawlLane, Listing[]> = { new: [], old: [] };
     for (const item of store.retryItems())
-      if (!inFlight.has(item.key) && !failedKeys.has(item.key))
+      if (
+        !inFlight.has(item.key) &&
+        (!failedVersions.has(item.key) || failedVersions.get(item.key) !== item.sellingTime)
+      )
         queues[store.captureLane(item.key)].push(item);
     return queues;
   };
@@ -89,7 +92,7 @@ export async function watchCrawl(
       historyDone &&
       !running.old &&
       !queues.old.length &&
-      ![...failedKeys].some((key) => store.captureLane(key) === "old") &&
+      ![...failedVersions.keys()].some((key) => store.captureLane(key) === "old") &&
       !store.backfillComplete()
     )
       store.markBackfillComplete();
@@ -116,6 +119,7 @@ export async function watchCrawl(
           name: "IncompleteDetailError",
         });
       saved++;
+      failedVersions.delete(item.key);
       if (advance) {
         savedHistoryIndex = history.index;
         publish({ checkpoint });
@@ -125,7 +129,7 @@ export async function watchCrawl(
         if (error instanceof IncompleteCaptureError) store.save(item, error.detail);
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
-        failedKeys.add(item.key);
+        failedVersions.set(item.key, item.sellingTime);
         failed++;
         publish({ failed, lastItemError: `商品 ${item.key}：${message}` });
         if (!(error instanceof Error && error.name === "IncompleteDetailError"))
@@ -181,6 +185,8 @@ export async function watchCrawl(
       if (active && (active.sellingTime !== item.sellingTime || active.price !== item.price))
         throw new ListingChangedError();
       if (store.observe(item, lane)) skipped++;
+      // 真正重新上架后，不沿用本轮旧版本的失败排除。
+      if (failedVersions.get(item.key) !== item.sellingTime) failedVersions.delete(item.key);
       return item;
     } catch (error) {
       failure ??= { error };
@@ -262,18 +268,28 @@ export async function watchCrawl(
     const point = store.checkpoint();
     if (!historyDone && point)
       historyPage = (await locateCheckpoint(source, first, point, signal)) ?? 1;
-    let previousSignature = "";
+    let previousSignature = "",
+      previousHeadSignature = first.items.map((item) => item.key).join("|");
     while (true) {
       check();
       pump();
       publish({ nextHeadCheckAt: new Date(nextHeadCheck).toISOString() });
       if (Date.now() >= nextHeadCheck) {
         nextHeadCheck = Date.now() + interval;
+        const headPointBefore = JSON.stringify(store.headCheckpoint());
         const refreshed = await source.prepare(ORDER);
         check();
         checkPage(refreshed, 1);
         totalPages = refreshed.totalPages;
         await discoverHead(refreshed);
+        const headSignature = refreshed.items.map((item) => item.key).join("|");
+        // 首页商品确有位移时，历史重叠页才需重建比较；相同首页不能掩盖重复页。
+        if (
+          headSignature !== previousHeadSignature ||
+          JSON.stringify(store.headCheckpoint()) !== headPointBefore
+        )
+          previousSignature = "";
+        previousHeadSignature = headSignature;
       } else if (!historyDone && queued().old.length < Math.max(1, limits.old)) {
         const page = await source.page(historyPage);
         check();

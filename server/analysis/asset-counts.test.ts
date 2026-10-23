@@ -4,6 +4,7 @@ import { capturedAssetCounts, capturedAssetSummary } from "./asset-counts";
 import { CrawlStore } from "../crawler/store";
 import { AnalysisStore } from "./store";
 import { createProfile } from "./profile";
+import type { PetSnapshot } from "../crawler/types";
 
 function recordWithAssets() {
   const record = valuationRecord();
@@ -227,4 +228,69 @@ it("榜单摘要不把未采齐资料或旧裸号采集当成空库存", () => {
   record.detail!.petCapture!.complete = true;
   record.detail!.captureMode = "body";
   expect(capturedAssetSummary(record)).toBeNull();
+});
+
+// 失败场景：全未知技能被说成0技能；有条件技能被计入或泄露名称；
+// 未来技能错误触发待核实；确定的空技能被说成未知。
+it.each<{
+  label: string;
+  skills: PetSnapshot["skills"];
+  expected: string;
+  hidden: string[];
+}>([
+  {
+    label: "全unknown",
+    skills: [
+      {
+        index: 0,
+        name: "须弥真言",
+        skillObservation: { rawName: "须弥真言", type: "normal", state: "unknown" },
+      },
+    ],
+    expected: "当前已确认0技能，另有技能待核实",
+    hidden: ["须弥真言"],
+  },
+  {
+    label: "current加conditional",
+    skills: [
+      {
+        index: 0,
+        name: "高级魔之心",
+        skillObservation: { rawName: "高级魔之心", type: "normal", state: "current" },
+      },
+      {
+        index: 1,
+        name: "须弥真言",
+        skillObservation: { rawName: "须弥真言", type: "normal", state: "conditional" },
+      },
+    ],
+    expected: "当前已确认1技能：高级魔之心，另有技能待核实",
+    hidden: ["须弥真言", "2技能"],
+  },
+  {
+    label: "单独future",
+    skills: [
+      {
+        index: 0,
+        name: "进化技能",
+        skillObservation: { rawName: "进化技能", type: "evolution", state: "future" },
+      },
+    ],
+    expected: "0技能",
+    hidden: ["进化技能", "待核实", "当前已确认"],
+  },
+  {
+    label: "确定空技能",
+    skills: [],
+    expected: "0技能",
+    hidden: ["待核实", "当前已确认"],
+  },
+])("宝宝摘要区分已确认与待核实技能：$label", ({ skills, expected, hidden }) => {
+  const record = recordWithAssets();
+  const pet = record.detail!.tabs.find((tab) => tab.name === "召唤兽/孩子")!.pets![0];
+  pet.fields.push({ name: "等级", value: "175" }, { name: "是否宝宝", value: "是" });
+  pet.skills = skills;
+  const summary = capturedAssetSummary(record)!;
+  expect(summary.pets).toContain(`画魂 / 175级 / ${expected}`);
+  for (const value of hidden) expect(summary.pets).not.toContain(value);
 });

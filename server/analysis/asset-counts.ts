@@ -1,6 +1,6 @@
 import type { SavedRoleRecord } from "../crawler/types";
 import type { AnalysisItem, CapturedAssetCounts } from "./types";
-import { currentPetSkills, prioritizePetSkills } from "./pet-match";
+import { currentPetSkills, petSkillState, prioritizePetSkills } from "./pet-match";
 import { equipmentInventory, isJewelryEquipment } from "./equipment-pricing";
 import { petInventory } from "./pet-pricing";
 import { parseEquipmentAttributes } from "./equip-attributes";
@@ -104,10 +104,14 @@ export function capturedAssetSummary(record: SavedRoleRecord): AnalysisItem["ass
   const unknown = nonWild.length - zero.length - babies.length;
   const petPreviews = babies.slice(0, 2).map((pet) => {
     const skills = prioritizePetSkills(currentPetSkills(pet));
+    const pendingSkills = pet.skills.some((name) =>
+      ["unknown", "conditional"].includes(petSkillState(name, pet)),
+    );
+    const skillSummary = `${skills.length}技能${skills.length ? `：${skills.slice(0, 3).join("、")}${skills.length > 3 ? "等" : ""}` : ""}`;
     return [
       pet.name,
       pet.level === null ? "等级未读取" : `${pet.level}级`,
-      `${skills.length}技能${skills.length ? `：${skills.slice(0, 3).join("、")}${skills.length > 3 ? "等" : ""}` : ""}`,
+      pendingSkills ? `当前已确认${skillSummary}，另有技能待核实` : skillSummary,
       pet.status === "untradable" ? "专用/绑定" : "",
     ]
       .filter(Boolean)

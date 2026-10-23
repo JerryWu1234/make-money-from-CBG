@@ -349,6 +349,158 @@ describe("持续发现新号和历史详情共享采集池", () => {
     await outcome;
   });
 
+  // 失败方式：正常整页上新使历史页后移，却被跨首页刷新保留的签名误判成重复页。
+  it.each([false, true])("首页整页上新后历史重叠去重继续（同秒跨页=%s）", async (sameSecond) => {
+    vi.useFakeTimers();
+    const db = memory(),
+      fresh = [1, 2, 3, 4].map((id) => item(id, sameSecond ? 1000 : undefined)),
+      old = [item(20), item(21), item(22), item(23)],
+      tail = item(40),
+      pages = [fresh, old, [tail]],
+      src = source(pages),
+      active = holdDetails(src),
+      control = new AbortController();
+    const outcome = crawl(src, db, control.signal, vi.fn(), {
+      watch: true,
+      headIntervalMs: 100,
+    }).catch((error: unknown) => error);
+    await flush();
+    expect(src.page).toHaveBeenCalledWith(2);
+    expect(src.page).not.toHaveBeenCalledWith(3);
+    if (sameSecond)
+      pages.splice(
+        1,
+        0,
+        [100, 101, 102, 103].map((id) => item(id, 1000)),
+      );
+    else pages.unshift([item(0, 1004), item(100, 1003), item(101, 1002), item(102, 1001)]);
+    await vi.advanceTimersByTimeAsync(100);
+    await flush();
+    expect(src.prepare).toHaveBeenCalledTimes(2);
+    if (sameSecond) expect(db.headCheckpoint()?.keys).toHaveLength(8);
+    fresh.forEach((row) => active.get(row.key)!());
+    await flush();
+    const runningOld = old.filter((row) => active.has(row.key));
+    expect(runningOld).toHaveLength(2);
+    active.get(runningOld[0]!.key)!();
+    await flush();
+    expect(src.page).toHaveBeenCalledWith(3);
+    expect(src.page).toHaveBeenCalledWith(4);
+    expect(db.detail(tail.key)).not.toBeNull();
+    expect(
+      vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old[0]!.key),
+    ).toHaveLength(1);
+    control.abort(new Error("暂停"));
+    active.forEach((release) => release());
+    expect(await outcome).toMatchObject({ message: "暂停" });
+  });
+
+  it("同一次首页刷新周期内的真实重复历史页仍安全停止", async () => {
+    const db = memory(),
+      old = item(20),
+      src = source([[item(1)], [old], [old]]);
+    await expect(
+      crawl(src, db, new AbortController().signal, vi.fn(), { watch: true }),
+    ).rejects.toThrow("连续两页返回相同商品");
+    expect(src.page).toHaveBeenCalledWith(3);
+    expect(db.backfillComplete()).toBe(false);
+  });
+
+  // 失败方式：首页没变，但慢历史读取跨过巡检周期后清空签名，重复页被误标历史补齐。
+  it("首页不变时，历史读取跨巡检周期仍识别真正重复页", async () => {
+    vi.useFakeTimers();
+    const db = memory(),
+      old = item(20),
+      src = source([[item(1), item(2)], [old], [old]]),
+      readPage = src.page,
+      control = new AbortController();
+    src.page = vi.fn(async (number) => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 110));
+      return readPage(number);
+    });
+    let failure: unknown;
+    const outcome = crawl(src, db, control.signal, vi.fn(), {
+      watch: true,
+      headIntervalMs: 100,
+    }).catch((error: unknown) => {
+      failure = error;
+      return error;
+    });
+    try {
+      await flush();
+      await vi.advanceTimersByTimeAsync(400);
+      await flush();
+      expect(failure).toMatchObject({ message: "连续两页返回相同商品，已暂停，避免循环翻页" });
+      expect(db.backfillComplete()).toBe(false);
+      expect(src.prepare).toHaveBeenCalledTimes(3);
+      expect(src.page).toHaveBeenCalledWith(3);
+    } finally {
+      control.abort(new Error("暂停"));
+      await vi.runOnlyPendingTimersAsync();
+      await outcome;
+    }
+  });
+
+  // 失败方式：失败排除只看 key，重上架仍不派发；解除过宽使同版本或仅改价反复重试。
+  it("失败商品同版本不重试，真正重上架后重新采集并解除历史失败门槛", async () => {
+    vi.useFakeTimers();
+    const db = memory(),
+      old = item(20, 999),
+      fresh = item(1),
+      pages = [[fresh]],
+      src = source(pages),
+      control = new AbortController();
+    db.observe(old, "old");
+    src.detail = vi.fn(async (row) => {
+      if (row.key === old.key && row.sellingTime === old.sellingTime)
+        throw Object.assign(new Error("资料缺项"), { name: "IncompleteDetailError" });
+      return detail(row);
+    });
+    const outcome = crawl(src, db, control.signal, vi.fn(), {
+      watch: true,
+      headIntervalMs: 100,
+    }).catch((error: unknown) => error);
+    await flush();
+    expect(db.backfillComplete()).toBe(false);
+    pages[0] = [fresh, { ...old, price: "200" }];
+    await vi.advanceTimersByTimeAsync(200);
+    await flush();
+    expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old.key)).toHaveLength(1);
+    expect(readSaved(db, old.key)?.listing.price).toBe("200");
+    const relisted = { ...item(20, 1001), price: "200" };
+    pages[0] = [relisted, fresh];
+    await vi.advanceTimersByTimeAsync(100);
+    await flush();
+    expect(readSaved(db, old.key)?.status).toBe("complete");
+    expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old.key)).toHaveLength(2);
+    expect(db.backfillComplete()).toBe(true);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old.key)).toHaveLength(2);
+    control.abort(new Error("暂停"));
+    expect(await outcome).toMatchObject({ message: "暂停" });
+  });
+
+  it("旧库缺上架时间的待补项不因空失败表被排除，页面仍使用可靠上架时间", async () => {
+    const db = memory(),
+      old = item(20),
+      src = source([[item(1)]]),
+      control = new AbortController();
+    db.observe(old, "old");
+    db.db
+      .prepare(
+        "UPDATE listings SET selling_time=NULL,listing_json=json_remove(listing_json,'$.sellingTime') WHERE key=?",
+      )
+      .run(old.key);
+    const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true }).catch(
+      (error: unknown) => error,
+    );
+    await flush();
+    expect(src.detail).toHaveBeenCalledWith(expect.objectContaining({ key: old.key }));
+    expect(readSaved(db, old.key)?.status).toBe("complete");
+    control.abort(new Error("暂停"));
+    expect(await outcome).toMatchObject({ message: "暂停" });
+  });
+
   it("跨页时间倒序失效时保留旧头水位并等在途结束", async () => {
     const db = memory(),
       oldPoint = { time: item(1, 100).sellingTime!, keys: ["1:1"] },
