@@ -107,6 +107,7 @@ export function AnalysisSettings({
     setSettings((current) => (current ? { ...current, [key]: value } : current));
   const choice = (
     key:
+      | "pricingScope"
       | "strengthMode"
       | "capMode"
       | "capTie"
@@ -225,7 +226,7 @@ export function AnalysisSettings({
       </header>
       <p>
         每次开始分析都会冻结这份 Prompt
-        和参数。新批次使用新设置，历史结果保留。先核对装备和宝宝，再联网查价，比较挂牌差异；区服金价和热度自动匹配。
+        和参数。新批次使用新设置，历史结果保留。采集始终保存完整角色和资产资料，装备开关只控制分析时是否核价；区服金价和热度自动匹配。
       </p>
       {error && (
         <p role="alert" className="analysis-pending-note">
@@ -236,6 +237,10 @@ export function AnalysisSettings({
       {source && settings && (
         <>
           <h3>计价方式</h3>
+          <p className="analysis-pending-note">
+            装备总开关：{settings.analyzeEquipment ? "已开启" : "已关闭，仅分析裸号"}。
+            <a href="/">前往采集工作台修改</a>，新任务使用此设置。
+          </p>
           <p className="analysis-pending-note">
             装备、灵饰和宝宝查角色本服同类挂牌，每个条件核验前5条候选，采用合格样本最低价。强壮神速按当前等级计价，参考依据和采用的价格会保存在结果里。
           </p>
@@ -254,6 +259,10 @@ export function AnalysisSettings({
               建议方案：强壮神速计算一次；攻法上限取有效项，同级选攻击；化圣不叠加等级溢价；69级机缘用公式；坐骑边界取下档、多只分别求和；区服比例相加，只调整角色本体。20及以下修炼上限没有额外溢价。
             </p>
             <div className="analysis-settings-grid">
+              {choice("pricingScope", "本轮查价范围", [
+                ["all", "全部资产"],
+                ["equipment", "人物装备；灵饰和宝宝待查"],
+              ])}
               {choice("strengthMode", "强壮、神速", [
                 ["single", "按当前等级计算一次"],
                 ["cumulative", "从1级逐级累加"],

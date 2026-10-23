@@ -173,7 +173,7 @@ export function applyValuationRange(
       );
   };
   if (profile.equipmentSearch) {
-    const inventory = equipmentInventory(record);
+    const inventory = equipmentInventory(record, profile.settings);
     include(
       result.equipment_pricing,
       inventory.inputHash,

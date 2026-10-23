@@ -127,7 +127,9 @@ export function SavedRoleList({
                         {item.status === "complete"
                           ? item.valuationReady === false
                             ? "估值资料待补齐"
-                            : "已采集"
+                            : item.captureMode === "body"
+                              ? "裸号资料已采集"
+                              : "已采集"
                           : item.status === "failed"
                             ? "待重试"
                             : running

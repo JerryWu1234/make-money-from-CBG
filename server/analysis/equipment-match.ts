@@ -60,6 +60,43 @@ type Match = {
   differences: string[];
   reason: string | null;
 };
+
+/** Special skills/effects must match both ways; rejected rows still count in the first five. */
+export function matchInitialSearchEquipmentAttributes(
+  target: EquipmentAttributes,
+  source: EquipmentAttributes,
+  partial = false,
+): Match {
+  for (const name of ["套装", "特技", "特效"]) {
+    const values = (fields: EquipmentAttributes["fields"]) =>
+      (fields[name] || []).flatMap((value) =>
+        name === "套装" ? [value] : value.split(/[、，,；;\s]+/).filter(Boolean),
+      );
+    const expected = values(target.fields);
+    const actual = values(source.fields);
+    if (partial && !actual.length) continue;
+    if (expected.some((value) => !actual.some((other) => sameField(name, [value], [other]))))
+      return {
+        matchType: null,
+        similarityScore: Infinity,
+        differences: [],
+        reason: "报价不符合已填写的" + name + "搜索条件",
+      };
+    if (name !== "套装") {
+      const extra = actual.filter(
+        (value) => !expected.some((other) => sameField(name, [value], [other])),
+      );
+      if (extra.length)
+        return {
+          matchType: null,
+          similarityScore: Infinity,
+          differences: [],
+          reason: `报价多出目标没有的${name}：${extra.join("、")}，不能作为估价样本`,
+        };
+    }
+  }
+  return matchComparableEquipmentAttributes(target, source, partial);
+}
 const empty = { level: null, fields: {}, restrictions: [], unknownLines: [] };
 const sameField = (name: string, left: string[], right: string[]) =>
   !compareEquipmentAttributes(

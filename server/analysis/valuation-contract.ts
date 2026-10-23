@@ -7,9 +7,33 @@ import { validateValuationFacts } from "./valuation-facts";
 import { combineEquipmentPricing, type EquipmentPricingSnapshot } from "./equipment-pricing";
 import { combinePetPricing, type PetPricingSnapshot } from "./pet-pricing";
 import { applyValuationRange } from "./valuation-range";
+import { bareRolePrompt } from "./bare-role-prompt";
 
 const nullableNumber = { type: ["number", "null"] };
 const strings = { type: "array", items: { type: "string" } };
+function disclosePricingScope(result: ValuationResult, profile: AnalysisProfile): ValuationResult {
+  if (!profile.equipmentSearch && !profile.petSearch) {
+    const notice =
+      "本轮仅分析裸号本体；装备、灵饰、宝宝及宝宝装备、上古玉魄、锦衣和其他道具未核价、未计入。裸号估值不代表整号总价。";
+    return {
+      ...result,
+      asset_scope: "body",
+      price_comparison_scope: notice,
+      reason: result.reason + notice,
+    };
+  }
+  if (profile.settings.pricingScope !== "equipment") return result;
+  const notice =
+    "本轮仅核算裸号本体与人物装备；灵饰、宝宝及宝宝装备" +
+    (profile.settings.deferJade ? "、上古玉魄" : "") +
+    "待查，未计入参考合计，市场售价未知。";
+  return {
+    ...result,
+    price_comparison_scope: notice,
+    reason: result.reason + notice,
+    suggestions: [...(result.suggestions || []), notice],
+  };
+}
 const LEGACY_VALUATION_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -85,6 +109,53 @@ export const VALUATION_SCHEMA = {
     extracted_facts: LEGACY_VALUATION_SCHEMA.properties.extracted_facts,
   },
 };
+function computedValuation(
+  record: SavedRoleRecord,
+  profile: AnalysisProfile,
+  equipmentPricing?: EquipmentPricingSnapshot,
+  petPricing?: PetPricingSnapshot,
+  facts?: Parameters<typeof calculateValuation>[2],
+) {
+  const bare = calculateValuation(record, profile, facts);
+  const withEquipment = profile.equipmentSearch
+    ? combineEquipmentPricing(bare, record, equipmentPricing, profile.settings)
+    : bare;
+  const withPets = profile.petSearch
+    ? combinePetPricing(withEquipment, record, petPricing)
+    : withEquipment;
+  return disclosePricingScope(applyValuationRange(withPets, bare, record, profile), profile);
+}
+
+/** A price-only refresh reuses source-bound facts, never the former prices or decision. */
+export function recalculateValuation(
+  previous: ProductAnalysis,
+  document: ProductDocument,
+  record: SavedRoleRecord,
+  profile: AnalysisProfile,
+  equipmentPricing?: EquipmentPricingSnapshot,
+  petPricing?: PetPricingSnapshot,
+) {
+  if (
+    previous.productKey !== document.productKey ||
+    previous.inputHash !== document.contentHash ||
+    previous.valuation?.calculation_version !== profile.calculationVersion
+  )
+    throw new Error("复用本体的来源或规则版本已变化");
+  const facts = validateValuationFacts(previous.valuation.extracted_facts, record);
+  const expected = computedValuation(record, profile, equipmentPricing, petPricing, facts);
+  return validateValuation(
+    JSON.stringify({
+      decision: expected.decision,
+      reason: expected.reason,
+      extracted_facts: facts,
+    }),
+    document,
+    record,
+    profile,
+    equipmentPricing,
+    petPricing,
+  );
+}
 export function valuationPrompt(
   document: ProductDocument,
   record: SavedRoleRecord,
@@ -92,14 +163,9 @@ export function valuationPrompt(
   equipmentPricing?: EquipmentPricingSnapshot,
   petPricing?: PetPricingSnapshot,
 ) {
-  const bare = calculateValuation(record, profile);
-  const withEquipment = profile.equipmentSearch
-    ? combineEquipmentPricing(bare, record, equipmentPricing, profile.settings)
-    : bare;
-  const withPets = profile.petSearch
-    ? combinePetPricing(withEquipment, record, petPricing)
-    : withEquipment;
-  const computed = applyValuationRange(withPets, bare, record, profile);
+  const computed = computedValuation(record, profile, equipmentPricing, petPricing);
+  if (!profile.equipmentSearch && !profile.petSearch)
+    return bareRolePrompt(document, record, profile, computed, VALUATION_SCHEMA);
   const {
     b: _b,
     a: _a,
@@ -118,6 +184,9 @@ export function valuationPrompt(
   } = computed;
   return [
     profile.template,
+    !profile.equipmentSearch && !profile.petSearch
+      ? "【本轮范围】装备总开关已关闭，只核算裸号本体。忽略模板中要求装备、灵饰、宝宝、玉魄查价的部分，不将这些主动排除项列为待补齐，不把裸号价值称为整号总价。"
+      : "【本轮范围】装备总开关已开启，按本批次冻结的查价范围处理资产。",
     "【本平台的程序化输出要求】金额、明细及挂牌差额由服务端计算。AI只核对资料、解释价格关系，返回三个字段JSON，不返回金额和items，不输出Markdown或代码围栏。此结构取代模板中的完整报告格式。",
     "商品 ID：" +
       document.productKey +
@@ -138,7 +207,9 @@ export function valuationPrompt(
       JSON.stringify(
         (profile.marketSources || []).filter((value) => value.serverId === record.listing.serverId),
       ),
-    "detail.valuation.fields 是已经从网页角色数据核对的字段，直接使用，不能重复补提或用标签原文覆盖。只有程序未识别的缺失事实才可补提；装备和宝宝参考价采用下方已保存的查价快照。以下查价范围取代模板中的旧样本口径：人物装备、灵饰、宝宝和宝宝装备每个计价筛选条件仅核验前5条不同候选，拒项也占名额。有效样本取人民币最低挂牌价；不足5件须确认结果已读完或授权的前5条候选范围已核验完成，再注明实际样本数。samplingComplete=true且sampleLimit=sampled=5表示用户授权的有限范围核验完成，不表示整个市场已读完。所有计价条件在有限范围内都没有有效样本时跳过，注明搜索范围有限和未计价；读取失败不能伪装无样本；普通装备和灵饰累计第2次失败按规则跳过，保留失败原因与未知价格。comparisonPolicy为base-upper-bound-v1的装备和灵饰，将基础值相等与较低的合格样本合并，采用referencePrice中的最低价；matchType仅保留属性差异，不另要求similarEstimate，不重复加总。其它相近资产使用similarEstimate.range.min最低价并披露配置差异及范围；average和median仅用于审计，不作为当前参考价；pending或read_failed表示搜索未完成，不能称已补齐；skipped表示按用户规则跳过，skipReason保留具体原因，包括规则排除或装备累计两次失败；没有skipReason时表示查询无有效样本。跳过项目不计入价格，市场售价仍未知。宝宝装备只作包价核对，不与宝宝价格重复相加。baselineEstimate仅为旧报告保存的默认参考价或低值排除政策，新搜索不以预设价跳过普通装备查询；金额为空仍是缺价，不能补成0或自行联网猜价。存在baselineInvalidReason的默认价已失效，只说明原因，不采用其中金额。所有需要的角色事实都已核对时 extracted_facts 必须是空数组。",
+    "detail.valuation.fields 是已经从网页角色数据核对的字段，直接使用，不能重复补提或用标签原文覆盖。只有程序未识别的缺失事实才可补提；装备和宝宝参考价采用下方已保存的查价快照。以下查价范围取代模板中的旧样本口径：人物装备与灵饰必须同等级。按等级、类型及目标显示的特技、特效、套装宽搜；初始属性数值框填0，避免排除较低基础值。扣除宝石还原基础值后，只采用小于或等于目标的前5条候选，较高值拒绝；不同名称或型号在官方类型相同且其他条件符合时可作参考。武器初始伤害也按扣宝石后的基础值核对。人物装备、灵饰、宝宝和宝宝装备每个计价筛选条件仅核验前5条不同候选，拒项也占名额。有效样本取人民币最低挂牌价；不足5件须确认结果已读完或授权的前5条候选范围已核验完成，再注明实际样本数。samplingComplete=true且sampleLimit=sampled=5表示用户授权的有限范围核验完成，不表示整个市场已读完。所有计价条件在有限范围内都没有有效样本时跳过，注明搜索范围有限和未计价；读取失败不能伪装无样本；普通装备和灵饰累计第2次失败按规则跳过，保留失败原因与未知价格。comparisonPolicy为base-upper-bound-v1的装备和灵饰，将基础值相等与较低的合格样本合并，采用referencePrice中的最低价；matchType仅保留属性差异，不另要求similarEstimate，不重复加总。其它相近资产使用similarEstimate.range.min最低价并披露配置差异及范围；average和median仅用于审计，不作为当前参考价；pending或read_failed表示搜索未完成，不能称已补齐；skipped表示按用户规则跳过，skipReason保留具体原因，包括规则排除或装备累计两次失败；没有skipReason时表示查询无有效样本。跳过项目不计入价格，市场售价仍未知。宝宝装备只作包价核对，不与宝宝价格重复相加。baselineEstimate仅为旧报告保存的默认参考价或低值排除政策，新搜索不以预设价跳过普通装备查询；金额为空仍是缺价，不能补成0或自行联网猜价。存在baselineInvalidReason的默认价已失效，只说明原因，不采用其中金额。所有需要的角色事实都已核对时 extracted_facts 必须是空数组。",
+    "comparisonPolicy为base-upper-bound-v1的装备和灵饰均按扣除宝石后的基础属性核验：等级必须相同，基础属性等于或低于目标才可参考，高于目标拒绝。搜索框最低值填0；前5条候选按官网顺序核验，拒项占名额，不为凑样品继续翻页。",
+    "武器采用用户指定的4点命中折1点伤害：分别扣除宝石后，初伤=原始伤害；总伤=初伤+原始命中/4。初伤和总伤都必须作为筛选条件，不能将总伤称为初伤。按用户确认方案：官网“初伤（不含命中）”输入初伤，“总伤”输入用户4:1口径总伤，“初伤（包含命中）”留空；总伤框仅接受整数，下限向下取整，详情仍须匹配未取整的总伤，不能把向下取整后的数值当作精确总伤。结果仍点击官网“初伤↑”排序，该列实际字段为init_damage，不能声称是纯原始伤害排序；不将官网总伤算法与用户4:1公式等同。命中未知时不按0推算。",
     "本轮人物装备和灵饰按实际显示的完整套装效果、特技、特效名称核验一致，包括无这些属性的情况。附加状态变身不能用变身术之鬼将或其他套装替代；已保存快照为本轮实际采用的价格，不能套用旧的套装差异放宽规则。",
     "下方是初步计算，尚未识别的原文资料可通过 extracted_facts 补提后重新计算；不要仅复述待确认。补提仅支持神器套数、坐骑总数、进阶状态、主属性百分比，以及神器1至3的满槽/类型/总分、坐骑1至9的成长/进阶状态/主属性百分比。",
     "exclusion表示已核验穷尽证据后的核算排除；excluded_assets也包含按规则或无样本而跳过的项目。须按reason披露跳过原因及未计入合计，价格仍未知，不能写0元或称全部资产都有实价，也不能把skipped要求补价。专用或绑定装备、官网检索不支持的等级装备、官网确认但无独立交易筛选定义的特殊宝宝按用户规则跳过，不发起查价、不计入参考合计，须披露排除原因；其市场售价仍未知。",
@@ -210,14 +281,7 @@ export function validateValuation(
     throw new Error("估值结果格式错误");
   const result = parsed as Record<string, unknown>;
   const facts = validateValuationFacts(result.extracted_facts, record);
-  const bare = calculateValuation(record, profile, facts);
-  const withEquipment = profile.equipmentSearch
-    ? combineEquipmentPricing(bare, record, equipmentPricing, profile.settings)
-    : bare;
-  const withPets = profile.petSearch
-    ? combinePetPricing(withEquipment, record, petPricing)
-    : withEquipment;
-  const expected = applyValuationRange(withPets, bare, record, profile);
+  const expected = computedValuation(record, profile, equipmentPricing, petPricing, facts);
   const money = [
     "asking_price",
     "extra_cost",

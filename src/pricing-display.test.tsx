@@ -9,6 +9,7 @@ import { DEFAULT_EQUIPMENT_BASELINE_PRICES } from "../server/analysis/equipment-
 import { EquipmentBaselinePriceFields } from "./AnalysisSettings";
 import { EquipmentPricingView } from "./EquipmentPricingView";
 import { ValuationResultView } from "./ValuationResultView";
+import { AssetCounts } from "./AssetCounts";
 
 const baseline = (
   override: Partial<NonNullable<EquipmentPricingItem["baselineEstimate"]>> = {},
@@ -91,6 +92,26 @@ it("逐件展示关联搜索页面和实际条件，继续查询的历史记录�
   expect(html).toContain("submittedArgs");
   expect(html).not.toContain("other-asset-search-must-not-appear");
 });
+it("初始属性方案说明升序和五个有效样品，不沿用较低核心值取样说明", () => {
+  const pricing = snapshot([
+    {
+      ...item(),
+      baselineEstimate: undefined,
+      comparisonPolicy: "core-initial-first-five-v3",
+      priceMethod: "first-five-minimum-v4",
+      status: "priced",
+      referencePrice: 100,
+      searchState: "completed",
+    },
+  ]);
+  pricing.queries = ["初伤592升序"];
+  const html = renderToStaticMarkup(<EquipmentPricingView snapshot={pricing} />);
+  expect(html).toContain("仅核验前5条不同商品");
+  expect(html).toContain("拒项占名额，不继续翻页补足");
+  expect(html).toContain("核心初始值在目标至目标+2范围内的最低挂牌价");
+  expect(html).not.toContain("基础值相等或较低样本");
+  expect(html).not.toContain("拒项也占名额");
+});
 it("装备取得五件时显示报价与均价；搜索中断时主金额保留待查", () => {
   const gear: EquipmentPricingItem = {
     ...item(),
@@ -151,6 +172,46 @@ const valuation = (override: Partial<ValuationResult> = {}): ValuationResult => 
   estimated_value_range: { min: 1001.1, max: 1001.1 },
   estimated_sources: ["baseline"],
   ...override,
+});
+
+it("裸号显示已采数量与装备简要配置，隐藏未检测和未计价状态", () => {
+  const counts = {
+    equipment: 1,
+    jewelry: 2,
+    pets: 3,
+    equipmentItems: [
+      {
+        name: "测试头盔",
+        level: 80,
+        gemLevel: 6,
+        specialSkills: ["破甲术"],
+        specialEffects: [],
+        sets: [],
+      },
+    ],
+  };
+  const result = valuation({
+    asset_scope: "body",
+    model_value: 1000,
+    estimated_sources: undefined,
+    estimated_value_range: undefined,
+  });
+  const html = renderToStaticMarkup(<ValuationResultView result={result} assetCounts={counts} />);
+  const overview = html.split('<details class="analysis-valuation-details">')[0];
+  expect(overview).toContain("<dt>装备</dt><dd>1件</dd>");
+  expect(overview).toContain("<dt>灵饰</dt><dd>2件</dd>");
+  expect(overview).toContain("<dt>宝宝</dt><dd>3只</dd>");
+  expect(overview).toContain("测试头盔 · 80级 · 宝石6段 · 特技：破甲术");
+  expect(overview).not.toMatch(/未检测|未计价|本轮不分析/);
+  expect(renderToStaticMarkup(<AssetCounts counts={counts} />)).toContain(
+    "装备 1件 · 灵饰 2件 · 宝宝 3只",
+  );
+  expect(renderToStaticMarkup(<AssetCounts counts={null} />)).toBe("");
+  const unclassified = renderToStaticMarkup(
+    <AssetCounts counts={{ equipment: null, jewelry: null, equipmentTotal: 1, pets: 0 }} />,
+  );
+  expect(unclassified).toContain("装备/灵饰 1件");
+  expect(unclassified).not.toContain("装备 1件");
 });
 
 it("核算排除保留原因，分项不显示0元", () => {

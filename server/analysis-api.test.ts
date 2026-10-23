@@ -38,6 +38,35 @@ function response() {
 }
 beforeEach(() => vi.resetAllMocks());
 describe("商品分析 HTTP 链路", () => {
+  it("只查装备的启动选项必须是布尔值并传入批次", async () => {
+    const { apiMiddleware } = await import("./api");
+    await apiMiddleware(
+      request("/api/analysis/start", { provider: "codex", equipmentOnly: true }),
+      response() as unknown as ServerResponse,
+      vi.fn(),
+    );
+    expect(mocks.startAnalysis).toHaveBeenCalledWith(
+      "codex",
+      false,
+      false,
+      undefined,
+      1,
+      undefined,
+      true,
+      10,
+    );
+    mocks.startAnalysis.mockClear();
+    for (const equipmentOnly of ["true", 1, null, {}]) {
+      const invalid = response();
+      await apiMiddleware(
+        request("/api/analysis/start", { provider: "codex", equipmentOnly }),
+        invalid as unknown as ServerResponse,
+        vi.fn(),
+      );
+      expect(invalid.statusCode).toBe(500);
+    }
+    expect(mocks.startAnalysis).not.toHaveBeenCalled();
+  });
   it("设置接口接收完整中文Prompt，其他操作保留小请求限制", async () => {
     const { apiMiddleware } = await import("./api");
     const input = { template: "估值规则".repeat(2000), settings: {}, baseHash: "current" };
@@ -70,7 +99,16 @@ describe("商品分析 HTTP 链路", () => {
       response() as unknown as ServerResponse,
       vi.fn(),
     );
-    expect(mocks.startAnalysis).toHaveBeenCalledWith("codex", false, true, undefined, 1, undefined);
+    expect(mocks.startAnalysis).toHaveBeenCalledWith(
+      "codex",
+      false,
+      true,
+      undefined,
+      1,
+      undefined,
+      false,
+      10,
+    );
   });
   it("开始请求指定提供方，刷新状态不会启动 SDK", async () => {
     mocks.startAnalysis.mockResolvedValue({ id: "run", provider: "deepseek" });
@@ -89,6 +127,8 @@ describe("商品分析 HTTP 链路", () => {
       undefined,
       1,
       undefined,
+      false,
+      10,
     );
     await apiMiddleware(
       request("/api/analysis/status?provider=deepseek&page=2&search=宝宝&filter=failed"),
@@ -100,6 +140,7 @@ describe("商品分析 HTTP 链路", () => {
       page: 2,
       resultsPage: 1,
       summary: true,
+      showViewed: false,
       search: "宝宝",
       filter: "failed",
       runId: undefined,
@@ -120,6 +161,8 @@ describe("商品分析 HTTP 链路", () => {
       "other-model",
       1,
       undefined,
+      false,
+      10,
     );
     mocks.startAnalysis.mockClear();
     const invalid = response();
@@ -150,6 +193,8 @@ describe("商品分析 HTTP 链路", () => {
       "gpt-6-luna",
       3,
       undefined,
+      false,
+      10,
     );
     mocks.startAnalysis.mockClear();
     for (const sampleSize of [0, 4, 1.5, "3", null]) {
@@ -194,13 +239,13 @@ describe("商品分析 HTTP 链路", () => {
       response() as unknown as ServerResponse,
       vi.fn(),
     );
-    expect(mocks.resumeAnalysis).toHaveBeenLastCalledWith("run");
+    expect(mocks.resumeAnalysis).toHaveBeenLastCalledWith("run", false, undefined);
     await apiMiddleware(
       request("/api/analysis/retry", { runId: "run" }),
       response() as unknown as ServerResponse,
       vi.fn(),
     );
-    expect(mocks.resumeAnalysis).toHaveBeenLastCalledWith("run", true);
+    expect(mocks.resumeAnalysis).toHaveBeenLastCalledWith("run", true, undefined);
   });
   it("导出的是数据库中的当次完整原文和完整请求", async () => {
     mocks.analysisDetail.mockReturnValue({

@@ -143,6 +143,7 @@ function fixture(serverRank = 10) {
   });
   const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), {
     ...DEFAULT_SETTINGS,
+    analyzeEquipment: true,
     servers: [
       {
         serverId: record.listing.serverId,
@@ -203,6 +204,7 @@ function baselineFixture(level = 70, withGold = true) {
   ];
   const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), {
     ...DEFAULT_SETTINGS,
+    analyzeEquipment: true,
     servers: [
       {
         serverId: value.record.listing.serverId,

@@ -16,6 +16,9 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     if (key === "a" || key === "b") crawl.save(record.listing, record.detail!);
   }
   const store = new AnalysisStore(crawl.db);
+  // This legacy finite-batch UI regression keeps its manual increment controls.
+  // The continuous queue and waiting UI are exercised separately below.
+  store.followsCapture = () => false;
   let automatic = false;
   let calls = 0;
   let starts = 0;
@@ -197,13 +200,14 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     expect(store.overview().run?.model).toBe("deepseek-v4-pro");
     await page.getByRole("tab", { name: /推荐榜/ }).click();
     await expect(page.getByRole("tabpanel", { name: "推荐榜" }).getByRole("article")).toHaveCount(
-      2,
+      0,
     );
     await page.screenshot({
       path: testInfo.outputPath("analysis-completed-fixture.png"),
       fullPage: true,
     });
-    await page.getByRole("button", { name: "查看分析依据" }).first().click();
+    await page.getByRole("tab", { name: /全部商品/ }).click();
+    await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
     const drawer = page.getByRole("dialog", { name: "角色a" });
     await expect(drawer.getByRole("heading", { name: "评分字段依据" })).toBeVisible();
     await drawer.getByText("查看完整商品原文", { exact: true }).click();
@@ -495,3 +499,147 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
     }
   });
 }
+
+test("空库先启动等待：首个角色采齐自动分析，刷新保留等待，新角色自动接续且可暂停", async ({
+  page,
+}, testInfo) => {
+  const crawl = new CrawlStore(":memory:");
+  const store = new AnalysisStore(crawl.db);
+  const add = (key: string, complete = true) => {
+    const record = analysisRecord(key);
+    crawl.observe(record.listing);
+    if (complete) crawl.save(record.listing, record.detail!);
+    return record;
+  };
+  let calls = 0;
+  let connects = 0;
+  const runner = new AnalysisRunner(store, async () => {
+    connects++;
+    return {
+      model: "waiting-fixture-model",
+      analyze: async (prompt) => {
+        calls++;
+        const key = prompt.match(/商品 ID：([^。]+)。/)![1];
+        return { text: JSON.stringify(analysisResponse(crawl.detail(key) as SavedRoleRecord)) };
+      },
+    };
+  });
+  try {
+    await page.context().route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.origin !== "http://cbg-waiting.test") return route.abort();
+      if (url.pathname.startsWith("/api/")) {
+        const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
+        let body: unknown;
+        switch (url.pathname) {
+          case "/api/ai/status":
+            body = {
+              codex: { state: "configured" },
+              deepseek: { state: "unconfigured" },
+              deepseekModels: [],
+            };
+            break;
+          case "/api/ai/models":
+            body = {
+              provider: "codex",
+              defaultModel: "waiting-fixture-model",
+              models: [{ id: "waiting-fixture-model", name: "等待状态测试模型" }],
+            };
+            break;
+          case "/api/analysis/status":
+            body = store.overview();
+            break;
+          case "/api/analysis/start":
+            body = store.run(await runner.start("codex"));
+            break;
+          case "/api/analysis/pause":
+            await runner.pause(input.runId);
+            body = store.run(input.runId);
+            break;
+          case "/api/analysis/resume":
+            body = store.run(await runner.resume(input.runId));
+            break;
+          default:
+            throw new Error(`未模拟接口：${url.pathname}`);
+        }
+        return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
+      }
+      const file = path.join(
+        "dist",
+        url.pathname === "/analysis-preview" ? "index.html" : url.pathname,
+      );
+      return route.fulfill({
+        contentType: file.endsWith(".js")
+          ? "application/javascript"
+          : file.endsWith(".css")
+            ? "text/css"
+            : "text/html",
+        body: await readFile(file),
+      });
+    });
+    await page.goto("http://cbg-waiting.test/analysis-preview");
+    const start = page.getByRole("button", { name: "开始分析并等待采集", exact: true });
+    await expect(start).toBeEnabled();
+    await start.click();
+    const waiting = page.getByRole("button", { name: "等待新角色…", exact: true });
+    await expect(waiting).toBeDisabled();
+    await expect(page.getByText(/正在等待首个角色资料采集完整/)).toBeVisible();
+    const id = store.activeRun()!.id;
+    expect(store.activeRun()).toMatchObject({ total: 0, phase: "waiting_capture" });
+    expect(calls).toBe(0);
+    await page.reload();
+    await expect(waiting).toBeDisabled();
+    await expect(page.getByText(/正在等待首个角色资料采集完整/)).toBeVisible();
+    expect(store.activeRun()!.id).toBe(id);
+    const first = add("a", false);
+    expect(runner.appendCaptured()).toBe(0);
+    expect(calls).toBe(0);
+    crawl.save(first.listing, first.detail!);
+    await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
+      1,
+    );
+    await expect(page.getByText(/现有角色已处理完，等待新角色/)).toBeVisible();
+    await expect(page.getByText("等待新角色资料采集完整", { exact: true })).toBeVisible();
+    expect(calls).toBe(1);
+    const pending = add("b", false);
+    await page.reload();
+    await expect(waiting).toBeDisabled();
+    await expect(page.getByLabel("分析模型")).toHaveValue("waiting-fixture-model");
+    expect(calls).toBe(1);
+    expect(connects).toBe(1);
+    await page.screenshot({
+      path: testInfo.outputPath("waiting-for-new-roles.png"),
+      fullPage: true,
+    });
+    crawl.save(pending.listing, pending.detail!);
+    await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
+      2,
+    );
+    await expect(waiting).toBeDisabled();
+    expect(store.activeRun()).toMatchObject({ id, completed: 2, phase: "waiting_capture" });
+    expect(calls).toBe(2);
+    expect(connects).toBe(1);
+    await page.getByRole("button", { name: "暂停分析", exact: true }).click();
+    await expect(page.getByRole("button", { name: "继续分析", exact: true })).toBeEnabled();
+    add("c");
+    await page.reload();
+    await expect(page.getByRole("button", { name: "继续分析", exact: true })).toBeEnabled();
+    expect(calls).toBe(2);
+    await page.getByRole("button", { name: "继续分析", exact: true }).click();
+    await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
+      3,
+    );
+    await expect(waiting).toBeDisabled();
+    expect(store.activeRun()).toMatchObject({
+      id,
+      completed: 3,
+      total: 3,
+      phase: "waiting_capture",
+    });
+    expect(calls).toBe(3);
+    await page.screenshot({ path: testInfo.outputPath("new-roles-resumed.png"), fullPage: true });
+  } finally {
+    await runner.shutdown();
+    crawl.close();
+  }
+});

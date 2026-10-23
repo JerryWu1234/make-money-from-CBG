@@ -4,7 +4,7 @@ import path from "node:path";
 import type { Browser, Page } from "playwright-core";
 
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
-const accountRegions = "#userinfo,.userInfo,.user-info,.login-info,.account-info,#user_name";
+export const accountRegions = "#userinfo,.userInfo,.user-info,.login-info,.account-info,#user_name";
 export function isEvidencePage(url: string) {
   try {
     return new URL(url).origin === "https://xyq.cbg.163.com";
@@ -13,13 +13,13 @@ export function isEvidencePage(url: string) {
   }
 }
 
-async function bounded<T>(work: Promise<T>) {
+async function bounded<T>(work: Promise<T>, timeoutMs = 2000) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       work,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("evidence_read_timeout")), 2000);
+        timer = setTimeout(() => reject(new Error("evidence_read_timeout")), timeoutMs);
       }),
     ]);
   } finally {
@@ -27,7 +27,7 @@ async function bounded<T>(work: Promise<T>) {
   }
 }
 
-async function observe(page: Page) {
+export async function observeWorkPage(page: Pick<Page, "evaluate">, timeoutMs = 2000) {
   return bounded(
     page.evaluate(
       ({ accountRegions }) => {
@@ -96,6 +96,14 @@ async function observe(page: Page) {
           .map((node) => ({
             id: node.id,
             name: node.name,
+            label:
+              node.getAttribute("aria-label") ||
+              Array.from(node.labels || [])
+                .map((label) => label.textContent?.trim())
+                .join(" ") ||
+              node.getAttribute("placeholder") ||
+              node.getAttribute("title") ||
+              "",
             type: node.type,
             value: node.value.slice(0, 4000),
             visible: visible(node),
@@ -120,9 +128,11 @@ async function observe(page: Page) {
           .map((node) => node.innerText)
           .join("\n");
         const tooltips = Array.from(
-          document.querySelectorAll<HTMLElement>('[role=tooltip],[id$="TipsBox"],.equip_tips'),
+          document.querySelectorAll<HTMLElement>(
+            '[data-cbg-hover-tip],[role=tooltip],[id$="TipsBox"],.equip_tips,.tips,.tooltip,#tips_box,#role_tips_box',
+          ),
         )
-          .filter(visible)
+          .filter((node) => visible(node) && !node.closest(accountRegions))
           .map((node) => node.innerText.slice(0, 20000));
         const description = Array.from(
           document.querySelectorAll<HTMLElement>(
@@ -149,6 +159,7 @@ async function observe(page: Page) {
       },
       { accountRegions },
     ),
+    timeoutMs,
   );
 }
 
@@ -219,7 +230,7 @@ export async function startWorkPageEvidence(directory: string, getBrowser: () =>
           if (page.isClosed() || !isEvidencePage(page.url())) continue;
           try {
             const observedAt = new Date().toISOString(),
-              before = await observe(page);
+              before = await observeWorkPage(page);
             if (before.gate) {
               failure("login_or_verification_visible");
               continue;
@@ -235,7 +246,7 @@ export async function startWorkPageEvidence(directory: string, getBrowser: () =>
               mask: [page.locator(accountRegions)],
               maskColor: "#20394b",
             });
-            const after = await observe(page);
+            const after = await observeWorkPage(page);
             if (after.gate || JSON.stringify(before) !== JSON.stringify(after)) {
               failure("page_changed_during_screenshot");
               continue;

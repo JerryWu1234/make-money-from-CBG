@@ -1,3 +1,10 @@
+export const DEFAULT_CRAWL_CONCURRENCY = 4;
+export type CrawlLane = "new" | "old";
+export interface HeadCheckpoint {
+  time: string;
+  keys: string[];
+}
+
 export interface Listing {
   key: string;
   serverId: string;
@@ -28,7 +35,7 @@ export interface ListingPage {
   items: Listing[];
 }
 export interface CrawlSource {
-  prepare: () => Promise<ListingPage>;
+  prepare: (order?: string) => Promise<ListingPage>;
   page: (number: number) => Promise<ListingPage>;
   onShelf: (item: Listing) => Promise<boolean>;
   hover: (item: Listing) => Promise<Listing>;
@@ -47,6 +54,12 @@ export interface TabSnapshot {
   pets?: PetSnapshot[];
   petCount?: number;
   equipmentEmptyProof?: "official-containers";
+  equipmentContainers?: Array<{
+    id: string;
+    present: boolean;
+    visible: boolean;
+    icons: Array<{ name: string; modelId: string }>;
+  }>;
 }
 export interface PetSnapshot {
   index: number;
@@ -67,6 +80,20 @@ export interface DetailItem {
   kindId?: string;
   /** Original official data_equip_type model number, not a search category ID. */
   modelId?: string;
+  categoryConfirmation?: {
+    source: "user";
+    category: string;
+    confirmedAt: string;
+  };
+  categoryEvidence?: {
+    version: 1;
+    modelId: string;
+    name: string;
+    category: string;
+    roleKey: string;
+    location: string;
+    collectedAt: string;
+  };
   location?: string;
   level?: string;
   skillObservation?: {
@@ -84,6 +111,8 @@ export interface ValuationCapture {
   source: Record<string, unknown>;
 }
 export interface RoleDetail {
+  /** Legacy body-only captures require full recapture before reuse. */
+  captureMode?: "body" | "all";
   valuation?: ValuationCapture;
   equipmentCapture?: {
     version: 1;
@@ -120,6 +149,18 @@ export interface Checkpoint {
   savedAt: string;
 }
 export interface CrawlStatus {
+  concurrency?: number;
+  newRunning?: number;
+  oldRunning?: number;
+  newQueued?: number;
+  oldQueued?: number;
+  newLimit?: number;
+  oldLimit?: number;
+  headCheckedAt?: string;
+  nextHeadCheckAt?: string;
+  headPage?: number;
+  historyPage?: number;
+  includeAssets?: boolean;
   running: boolean;
   phase: "idle" | "locating" | "retrying" | "collecting" | "paused" | "completed" | "error";
   message: string;
@@ -162,6 +203,7 @@ export interface SavedListingPage {
     attemptCount: number;
     status: string;
     valuationReady?: boolean;
+    captureMode?: "body" | "all";
     error: string | null;
   }[];
 }

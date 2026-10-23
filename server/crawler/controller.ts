@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
+import type { Page } from "playwright-core";
 import { getBrowser, getCbgPage, createHiddenPage } from "../session";
 import { checkCbgStatus } from "../cbg";
 import { crawl, validateCrawlOptions, type CrawlOptions } from "./runner";
 import { createCrawlSource } from "./source";
 import { CrawlStore } from "./store";
-import type { CrawlStatus, SavedRoleRecord } from "./types";
+import { DEFAULT_CRAWL_CONCURRENCY, type CrawlStatus, type SavedRoleRecord } from "./types";
 import { diagnostics, watchWorkPage } from "../diagnostics";
+import { loadProfile, saveProfile } from "../analysis/profile";
 
 let storage: CrawlStore | undefined;
 const store = () => (storage ||= new CrawlStore());
@@ -72,6 +74,19 @@ export function crawlDatabase() {
 export function captureRetryItems(keys?: string[]) {
   return store().retryItems(keys);
 }
+export function equipmentAnalysisSettings() {
+  return { analyzeEquipment: loadProfile(store().db).settings.analyzeEquipment === true };
+}
+export function setEquipmentAnalysis(value: unknown) {
+  if (typeof value !== "boolean") throw new Error("装备分析开关无效");
+  const profile = loadProfile(store().db);
+  saveProfile(store().db, {
+    template: profile.template,
+    baseHash: profile.hash,
+    settings: { ...profile.settings, analyzeEquipment: value },
+  });
+  return equipmentAnalysisSettings();
+}
 export function savedRecords(page: number, pageSize: number) {
   return store().records(page, pageSize);
 }
@@ -102,14 +117,22 @@ export async function startCrawl(
   const preferredOrder = db.checkpoint()?.order;
   if (!db.acquire(owner)) throw new Error("已有另一个本地服务正在采集，请先暂停它");
   const started = Date.now();
+  const concurrency = options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
   const log = (event: string, data: Record<string, unknown> = {}) =>
     diagnostics.record(event, { crawlId: owner, ...data });
-  log("crawl.start", { checkpoint: db.checkpoint(), totalSaved: db.count() });
+  log("crawl.start", {
+    checkpoint: db.checkpoint(),
+    totalSaved: db.count(),
+    includeAssets: true,
+    concurrency,
+  });
   const control = new AbortController();
   abort = control;
   status = {
     ...status,
     running: true,
+    concurrency,
+    includeAssets: true,
     phase: "locating",
     message: "正在创建隐藏详情页并读取断点…",
     saved: 0,
@@ -132,15 +155,23 @@ export async function startCrawl(
     }
   }, 30000);
   const runningTask = (async () => {
-    const detailPage = await createHiddenPage(await getBrowser(true));
-    watchWorkPage(detailPage, "detail");
-    log("page.ready", { kind: "detail" });
-    detailPage.setDefaultTimeout(15000);
+    const detailPages: Page[] = [];
+    const createDetailPage = async () => {
+      control.signal.throwIfAborted();
+      const detailPage = await createHiddenPage(await getBrowser(true));
+      detailPages.push(detailPage);
+      watchWorkPage(detailPage, "detail");
+      log("page.ready", { kind: "detail" });
+      detailPage.setDefaultTimeout(15000);
+      return detailPage;
+    };
     try {
+      const detailPage = await createDetailPage();
       await crawl(
         createCrawlSource({
           listPage: page,
           detailPage,
+          createDetailPage,
           signal: control.signal,
           preferredOrder,
           savedRecord:
@@ -164,10 +195,10 @@ export async function startCrawl(
                 diagnostics.record("analysis.capture_enqueue_failed", { error }),
               );
         },
-        options,
+        { ...options, watch: options.watch ?? !options.backfillOnly },
       );
     } finally {
-      await detailPage.close().catch(() => {});
+      await Promise.allSettled(detailPages.map((page) => page.close()));
     }
   })()
     .catch((error: unknown) => {

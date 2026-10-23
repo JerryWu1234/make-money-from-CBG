@@ -540,8 +540,8 @@ body:has(.analysis-page) #root {
 }
 .analysis-list-intro {
   display: flex;
-  justify-content: space-between;
-  gap: 1rem;
+  flex-direction: column;
+  gap: 0.4rem;
   padding: 1rem 0;
   color: #8fa4b7;
   font-size: 0.76rem;
@@ -602,6 +602,21 @@ body:has(.analysis-page) #root {
   color: #a9bbca;
   font-size: 0.78rem;
   line-height: 1.55;
+}
+.analysis-rank-assets {
+  margin-top: 0.65rem;
+  padding: 0.55rem 0.7rem;
+  border-left: 2px solid #4c9e94;
+  background: rgba(45, 212, 191, 0.04);
+  overflow-wrap: anywhere;
+}
+.analysis-rank-assets p {
+  margin: 0;
+  color: #c1d9df;
+  font-size: 0.74rem;
+}
+.analysis-rank-assets p + p {
+  margin-top: 0.35rem;
 }
 .analysis-tags {
   display: flex;
@@ -1771,6 +1786,15 @@ body:has(.analysis-page) #root {
 .analysis-valuation-scope {
   color: #8da2b5;
 }
+.analysis-equipment-summary {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.75rem 0;
+  padding-left: 1.2rem;
+  color: #adbdce;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
 .analysis-valuation-details {
   padding-top: 0.5rem;
 }
@@ -1792,4 +1816,18 @@ body:has(.analysis-page) #root {
   .analysis-valuation-metrics {
     grid-template-columns: 1fr;
   }
+}
+.analysis-concurrency {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.analysis-concurrency input {
+  width: 5rem;
+  padding: 9px;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  background: #0f172a;
+  color: var(--text-primary);
+  font: inherit;
 }

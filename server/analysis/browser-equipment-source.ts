@@ -5,8 +5,12 @@ import { assertAvailable, pace } from "../crawler/page";
 import { hoverForInspection } from "../viewport";
 import { buildPageState } from "../page-state";
 import { readStableSnapshot } from "../workflow";
-import { cleanDescription, observedEquipmentCategory } from "../crawler/compact";
-import { parseEquipmentAttributes } from "./equip-attributes";
+import {
+  cleanDescription,
+  observedEquipmentCategory,
+  preserveJewelryTooltipSections,
+} from "../crawler/compact";
+import { equipmentInitialAttribute, parseEquipmentAttributes } from "./equip-attributes";
 import {
   equipmentAttributeLowerBound,
   matchComparableEquipmentAttributes,
@@ -39,6 +43,9 @@ import {
   type EquipmentPricingItem,
   type EquipmentSearchCursor,
   equipmentCoreSkipReason,
+  equipmentCoreInitialField,
+  EQUIPMENT_CORE_INITIAL_POLICY,
+  EQUIPMENT_WEAPON_QUERY_POLICY,
   type EquipmentSource,
   type PricingSearchProgress,
 } from "./equipment-pricing";
@@ -54,6 +61,8 @@ const MAX_PAGES = 10,
   MAX_DETAILS = 100;
 type Choices = Array<[string | number, string]>;
 type SuitType = "added_status" | "append_skill" | "transform_skill" | "transform_charm";
+const initialSortLabel = (field: string) =>
+  ({ 伤害: "初伤", 防御: "初防", 灵力: "初灵", 敏捷: "初敏", 气血: "初血" })[field] || field;
 export type EquipmentSearchConfig = {
   kinds: Choices;
   effects: Choices;
@@ -64,9 +73,44 @@ export type EquipmentSearchConfig = {
   suits?: Choices;
   jewelrySuitEffects?: string[];
   jewelrySuitChoices?: Choices;
+  jewelryPrimaryAttrs?: Choices;
+  jewelryAddedAttrs?: Choices;
   suitTypes?: Partial<Record<SuitType, Choices>>;
 };
 type Query = Record<string, string | number>;
+type EquipmentEvidence = {
+  screenshot: string;
+  parameters: string;
+  screenshotSha256: string;
+  parametersSha256: string;
+};
+export type EquipmentEvidenceCapture = (
+  page: Page,
+  input: {
+    stage: "filled" | "results" | "sorting" | "submitted";
+    initialPolicy: string;
+    weaponQueryPolicy?: string;
+    equipmentKey: string;
+    equipmentName: string;
+    description: string;
+    mode: EquipmentQueryMode;
+    page: number;
+    plannedArgs: Query;
+    submittedArgs?: Query;
+    request?: GlobalMarketRequest;
+    form: Awaited<ReturnType<typeof readEquipmentSearchForm>>;
+    resultHeaders?: Array<{ text: string; tag: string; visible: boolean }>;
+    resultRows?: Array<{
+      identity: string;
+      name: string;
+      kindId: string;
+      modelId: string;
+      level: string;
+      descriptionHash: string;
+    }>;
+  },
+  verifyStable: () => Promise<void>,
+) => Promise<EquipmentEvidence>;
 
 function equipmentSuitControl(value: string, config: EquipmentSearchConfig) {
   const matches = Object.entries(config.suitTypes || {}).flatMap(([type, choices]) =>
@@ -110,13 +154,29 @@ export function assertEquipmentUIArguments(expected: Query, actual: Query) {
           .sort()
           .join(",");
   };
+  // A zero jewelry minimum is returned under the generic key, or omitted entirely.
+  const zeroPrimary =
+    expected.equip_level_min === undefined
+      ? undefined
+      : [
+          "damage",
+          "defense",
+          "magic_damage",
+          "magic_defense",
+          "fengyin",
+          "anti_fengyin",
+          "speed",
+        ].find((key) => String(expected[key]) === "0");
   const different = Object.keys(expected).filter(
-    (key) => actual[key] === undefined || normalized(actual[key]) !== normalized(expected[key]),
+    (key) =>
+      !(key === zeroPrimary && actual[key] === undefined) &&
+      (actual[key] === undefined || normalized(actual[key]) !== normalized(expected[key])),
   );
   if (different.length) throw new Error("官网 UI 查询字段未生效：" + different.join(","));
   const extra = Object.keys(actual).filter(
     (key) =>
       expected[key] === undefined &&
+      !(zeroPrimary && key === "basic_attr_value" && String(actual[key]) === "0") &&
       !(key === "sum_attr_without_melt" && String(actual[key]) === "1") &&
       key !== "cross_buy_serverid" &&
       String(actual[key]) !== "",
@@ -125,6 +185,64 @@ export function assertEquipmentUIArguments(expected: Query, actual: Query) {
 }
 
 const isJewelry = isJewelryEquipment;
+// Translate observed description labels to the exact labels in the public selects.
+const jewelryAttributeLabels: Record<string, string> = {
+  固定伤害: "固伤",
+  法术伤害: "法伤",
+  法术防御: "法防",
+  法术防御等级: "法防",
+  狂暴等级: "狂暴",
+  物理暴击等级: "物理暴击",
+  法术暴击等级: "法术暴击",
+  封印命中等级: "封印",
+  封印命中: "封印",
+  法术伤害结果: "法伤结果",
+  穿刺等级: "穿刺",
+  治疗能力: "治疗",
+  抗物理暴击等级: "抗物理暴击",
+  抗法术暴击等级: "抗法术暴击",
+  抵抗封印等级: "抗封",
+  抗封印等级: "抗封",
+  格挡值: "格挡",
+  气血回复效果: "回复",
+};
+
+function jewelryAttributeQuery(item: EquipmentPricingItem, config: EquipmentSearchConfig) {
+  const sections = parseEquipmentAttributes(item.description).jewelrySections;
+  if (!sections) throw new Error("灵饰主属性与附加属性缺少分段证据，未提交不完整条件");
+  const label = (name: string) => jewelryAttributeLabels[name] || name;
+  const primary = Object.entries(sections.main).flatMap(([name, values]) =>
+    (config.jewelryPrimaryAttrs || [])
+      .filter(([, option]) => option.split("·").at(-1) === label(name))
+      .map(([key]) => ({ key, values })),
+  );
+  const number = primary[0]?.values[0]?.match(/^\+?(\d+)$/)?.[1];
+  if (
+    primary.length !== 1 ||
+    primary[0].values.length !== 1 ||
+    number === undefined ||
+    Number(number) > 10000
+  )
+    throw new Error("灵饰基础属性没有唯一可靠数值或官网控件映射，未提交不完整条件");
+  const args: Query = { [primary[0].key]: 0 };
+  let count = 0;
+  for (const [name, values] of Object.entries(sections.added)) {
+    const choices = (config.jewelryAddedAttrs || []).filter(([, option]) => option === label(name));
+    if (
+      choices.length !== 1 ||
+      !values.length ||
+      values.some((value) => !/^\+?\d+(?:\s*\[\+?\d+\])?$/.test(value))
+    )
+      throw new Error("灵饰附加属性没有唯一可靠数值或官网控件映射，未提交不完整条件");
+    const key = "added_attr." + choices[0][0];
+    args[key] = Number(args[key] || 0) + values.length;
+    count += values.length;
+  }
+  if (![2, 3].includes(count))
+    throw new Error("灵饰附加属性条数不能对应官网控件，未提交不完整条件");
+  return { ...args, added_attr_num: count, added_attr_logic: "detail" };
+}
+
 const isYuanshen = (item: EquipmentPricingItem) =>
   /(?:^|[·/\s])元身(?:$|[·/\s])/.test(observedEquipmentCategory(item.category, "", item.modelId));
 /** Values come from the live public menus/select, never guessed query parameter codes. */
@@ -214,6 +332,7 @@ export function equipmentQuery(
     (config.namedKinds?.length === 1 ? config.namedKinds[0] : undefined);
   if (kind) args.kindid = String(kind[0]);
   if (jewelry) {
+    Object.assign(args, jewelryAttributeQuery(item, config));
     if (!kind) {
       const primary = parseEquipmentAttributes(item.description).jewelrySections?.main || {};
       const primaryKinds: Record<string, string[]> = {
@@ -246,6 +365,19 @@ export function equipmentQuery(
       }
     }
   } else {
+    const attributes = parseEquipmentAttributes(item.description);
+    const core = equipmentCoreInitialField(kind?.[1] || item.category);
+    for (const [field, key] of [
+      ["防御", "init_defense"],
+      ["伤害", "init_damage_raw"],
+      ["灵力", "init_wakan"],
+      ["气血", "init_hp"],
+      ["敏捷", "init_dex"],
+    ]) {
+      if (field !== core) continue;
+      const value = equipmentInitialAttribute(attributes, field);
+      if (value !== null) args[key] = 0;
+    }
     for (const [field, key, choices] of [
       ["特效", "special_effect", config.effects],
       ["特技", "special_skill", config.skills],
@@ -299,7 +431,7 @@ export type EquipmentQueryMode = "base-attributes" | "exact" | "similar";
 type EquipmentQueryStep = { mode: EquipmentQueryMode; args: Query };
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-/** The public form has only numeric lower bounds; verify target upper bounds in details. */
+/** Never exclude authorized lower bases with a target-valued minimum; details enforce the target maximum. */
 export function equipmentQueryPlan(
   item: EquipmentPricingItem,
   config: EquipmentSearchConfig,
@@ -341,6 +473,65 @@ export function equipmentCursorMatches(
   );
 }
 
+/** Click the public initial-stat header; the submitted network order must prove ASC. */
+export async function sortEquipmentInitialAscending(
+  page: Page,
+  label: string,
+  signal: AbortSignal,
+  beforeClick: () => void,
+  confirm: () => GlobalMarketRequest,
+  afterClick?: (request: GlobalMarketRequest) => Promise<void>,
+) {
+  const actions: EquipmentUiAction[] = [];
+  const requests: GlobalMarketRequest[] = [];
+  // Always click once to bind the sort key to this exact visible header.
+  let key: string | undefined;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    signal.throwIfAborted();
+    const cell = page.locator("#search_result th:visible").filter({
+      hasText: new RegExp("^\\s*" + label + "\\s*[↑↓▲▼△▽]?\\s*$"),
+    });
+    if ((await cell.count()) !== 1) throw new Error(`官网${label}排序表头不可唯一核对，未采用报价`);
+    const link = cell.locator("a:visible");
+    const header = (await link.count()) === 1 ? link : cell;
+    beforeClick();
+    await page.evaluate(() => {
+      (window as unknown as Record<string, unknown>).__cbgEquipmentResult = null;
+    });
+    await header.click({ timeout: 5000 });
+    await page.waitForFunction(
+      () => {
+        const g = window as unknown as Record<string, any>;
+        return (
+          g.__cbgEquipmentResult?.page === 1 &&
+          !document.querySelector("#loading_img")?.checkVisibility()
+        );
+      },
+      undefined,
+      { timeout: 20000, polling: 200 },
+    );
+    signal.throwIfAborted();
+    await assertAvailable(page);
+    const request = confirm();
+    requests.push(request);
+    await afterClick?.(request);
+    const order = await page.evaluate(() => {
+      const value = (
+        window as unknown as { CurSearchValue?: { order_by?: { key?: string; sort?: string } } }
+      ).CurSearchValue?.order_by;
+      return { key: value?.key, sort: value?.sort };
+    });
+    if (!order.key || (key && order.key !== key))
+      throw new Error(`官网${label}排序字段未确认，未采用报价`);
+    actions.push({ control: label, value: String(order.sort).toUpperCase(), method: "click" });
+    key = order.key;
+    if (!request.orderBy || request.orderBy.toUpperCase() !== `${key} ${order.sort}`.toUpperCase())
+      throw new Error(`官网${label}实际请求与排序控件不一致，未采用报价`);
+    if (String(order.sort).toUpperCase() === "ASC") return { actions, request, requests };
+  }
+  throw new Error(`官网${label}未切换为从低到高，未采用报价`);
+}
+
 /** A partial list description may rule an item out, but never establishes a valid quotation. */
 export function equipmentListingMismatch(
   item: EquipmentPricingItem,
@@ -358,9 +549,10 @@ export function equipmentListingMismatch(
     return "装备等级不匹配";
   if (!row.description?.trim()) return null;
   if (isYuanshen(item) || item.category === "上古玉魄") return null; // Dedicated full-description verification preserves special slots and restrictions.
-  const target = parseEquipmentAttributes(item.description);
+  const target = parseEquipmentAttributes(item.description, isJewelry(item));
   const source = parseEquipmentAttributes(
     row.description.replace(/<br\s*\/?\s*>/gi, "\n").replace(/<[^>]+>/g, ""),
+    isJewelry(item),
   );
   return matchComparableEquipmentAttributes(target, source, true).reason;
 }
@@ -681,8 +873,16 @@ async function readMainEquipment(
     equipmentIdentity(page.url()) !== serverId + ":" + productId
   )
     throw new Error("无法把主商品属性绑定到当前商品ID，报价未采用");
-  const rawAttributes = parseEquipmentAttributes(observed.description);
-  const tipAttributes = parseEquipmentAttributes(observed.tooltip);
+  const knownJewelry = isJewelry({
+    category: observed.typeDescription,
+    description: observed.description,
+    kindId:
+      typeof observed.kindId === "string" || typeof observed.kindId === "number"
+        ? String(observed.kindId)
+        : undefined,
+  });
+  const rawAttributes = parseEquipmentAttributes(observed.description, knownJewelry);
+  const tipAttributes = parseEquipmentAttributes(observed.tooltip, knownJewelry);
   const size = (attributes: typeof rawAttributes) =>
     Object.values(attributes.fields).reduce((total, values) => total + values.length, 0);
   if (rawAttributes.level && tipAttributes.level && rawAttributes.level !== tipAttributes.level)
@@ -690,11 +890,15 @@ async function readMainEquipment(
   const jade = ["61717", "61718"].includes(String(observed.modelId));
   const yuanshen = observed.name.endsWith("元身");
   const description = cleanDescription(
-    (tipAttributes.level !== null || jade || yuanshen) &&
-      size(tipAttributes) >= size(rawAttributes) &&
-      observed.tooltip
-      ? observed.tooltip
-      : observed.description,
+    preserveJewelryTooltipSections(
+      (tipAttributes.level !== null || jade || yuanshen) &&
+        size(tipAttributes) >= size(rawAttributes) &&
+        observed.tooltip
+        ? observed.tooltip
+        : observed.description,
+      observed.description,
+      knownJewelry,
+    ),
   );
   if (
     expectedKind === "pet-gear" &&
@@ -1133,7 +1337,9 @@ export async function applyEquipmentSearchForm(
       "all_wakan",
       "gem_level",
       "init_defense",
+      "init_damage",
       "init_damage_raw",
+      "all_damage",
       "init_wakan",
       "init_hp",
       "init_dex",
@@ -1298,6 +1504,7 @@ export function equipmentSourceFromPages(
   signal: AbortSignal,
   serverId: string,
   onProgress?: (progress: PricingSearchProgress) => void,
+  onEvidence?: EquipmentEvidenceCapture,
 ): EquipmentSource & {
   close(): Promise<void>;
   discover(
@@ -1479,6 +1686,7 @@ export function equipmentSourceFromPages(
         let currentCounts = () => ({ pages: 0, rows: 0, details: 0 });
         let currentRecord: Record<string, unknown> = { key: item.key };
         let resolvedTargetKind: string | undefined;
+        let resolvedKindName: string | undefined;
         try {
           const jewelry = isJewelry(item),
             jade = item.category === "上古玉魄",
@@ -1603,6 +1811,26 @@ export function equipmentSourceFromPages(
                       ])
                       .filter(([value]) => value !== "" && value !== "0")
                   : [],
+                jewelryPrimaryAttrs: jewelry
+                  ? Array.from(
+                      document.querySelectorAll<HTMLOptionElement>("#sel_basic_attr_type option"),
+                    )
+                      .filter((option) => option.value !== "")
+                      .map((option): [string, string] => [
+                        option.value,
+                        option.textContent?.trim() || "",
+                      ])
+                  : [],
+                jewelryAddedAttrs: jewelry
+                  ? Array.from(
+                      document.querySelectorAll<HTMLOptionElement>("#sel_add_attr1 option"),
+                    )
+                      .filter((option) => option.value !== "" && option.value !== "0")
+                      .map((option): [string, string] => [
+                        option.value,
+                        option.textContent?.trim() || "",
+                      ])
+                  : [],
                 suitTypes: {
                   added_status: typedSuits(g.SuitAddedStatus),
                   append_skill: typedSuits(g.SuitAppendSkills),
@@ -1678,6 +1906,24 @@ export function equipmentSourceFromPages(
               throw new Error("装备类型缺少明确官网编号，未猜测查询类型");
             resolvedTargetKind = kind;
           }
+          const kindName = config.kinds.find(([id]) => String(id) === resolvedTargetKind)?.[1];
+          resolvedKindName = kindName;
+          const core =
+            !jewelry && !jade && !yuanshen
+              ? equipmentCoreInitialField(kindName || item.category)
+              : null;
+          if (!jewelry && !jade && !yuanshen && !core)
+            throw new Error("人物装备核心初始属性无法对应官网类型，未采用报价");
+          const referenceTarget = core
+            ? {
+                ...item,
+                kindId: resolvedTargetKind,
+                category: kindName || item.category,
+                comparisonPolicy: "base-upper-bound-v1" as const,
+              }
+            : resolvedTargetKind
+              ? { ...item, kindId: resolvedTargetKind }
+              : item;
           const act = yuanshen
             ? await searchPage.evaluate(() => {
                 const globals = window as unknown as {
@@ -1716,7 +1962,9 @@ export function equipmentSourceFromPages(
           marketScope = createMarketScopeAudit(searchPage, serverId, yuanshen ? [act] : []);
           const planHash = digest({
             resumePolicy: PRICING_RESUME_POLICY,
-            firstPagePolicy: "first-five-per-condition-v2",
+            firstPagePolicy: core
+              ? "core-initial-wide-search-zero-minimum-upper-bound-v1"
+              : "first-five-per-condition-v2",
             name: item.name,
             level: item.level,
             category: item.category,
@@ -1749,6 +1997,7 @@ export function equipmentSourceFromPages(
             sampleLimit: number;
             sampled: number;
             samplingComplete: boolean;
+            samplingBasis: "first-candidates";
             detailFailures: unknown[];
           }> = [];
           const itemQueries: string[] = [];
@@ -1911,7 +2160,7 @@ export function equipmentSourceFromPages(
                 .replace(/&gt;/g, ">");
               const price = text.match(/挂牌价：¥(\d+(?:\.\d+)?)/)?.[1];
               candidate = verifyEquipmentCandidate(
-                resolvedTargetKind ? { ...item, kindId: resolvedTargetKind } : item,
+                referenceTarget,
                 {
                   ...candidate,
                   title: text.split(/\r?\n/)[0].trim(),
@@ -1979,6 +2228,7 @@ export function equipmentSourceFromPages(
               results.push({
                 key: item.key,
                 ...(resolvedTargetKind ? { kindId: resolvedTargetKind } : {}),
+                ...(resolvedKindName ? { kindName: resolvedKindName } : {}),
                 candidates: savedCandidates,
                 searchState: "pending",
                 ...(item.searchCursor ? { searchCursor: item.searchCursor } : {}),
@@ -2017,7 +2267,7 @@ export function equipmentSourceFromPages(
             const query =
               "目标服" +
               serverId +
-              " / 综合排序 / " +
+              (core ? ` / ${initialSortLabel(core)}升序 / ` : " / 综合排序 / ") +
               item.name +
               " / " +
               mode +
@@ -2027,6 +2277,7 @@ export function equipmentSourceFromPages(
             exhausted = false;
             let modePages = 0;
             let uiPage = 0;
+            let sortedKey: string | undefined;
             let cachedListing:
               | {
                   rows: Array<{
@@ -2047,8 +2298,64 @@ export function equipmentSourceFromPages(
               page: number;
               actions: EquipmentUiAction[];
               submittedArgs?: Query;
+              sortRequests?: GlobalMarketRequest[];
+              evidence?: EquipmentEvidence[];
             }>;
             const loadPage = async (pageNumber: number, first: boolean, replay = false) => {
+              const captureEvidence = async (
+                phase: "filled" | "results" | "sorting" | "submitted",
+                submittedArgs?: Query,
+                request?: GlobalMarketRequest,
+                resultRows?: Parameters<EquipmentEvidenceCapture>[1]["resultRows"],
+              ) => {
+                if (!onEvidence) return undefined;
+                const form = await readEquipmentSearchForm(searchPage);
+                try {
+                  return await onEvidence(
+                    searchPage,
+                    {
+                      stage: phase,
+                      initialPolicy: EQUIPMENT_CORE_INITIAL_POLICY,
+                      ...(args.init_damage_raw !== undefined
+                        ? { weaponQueryPolicy: EQUIPMENT_WEAPON_QUERY_POLICY }
+                        : {}),
+                      equipmentKey: item.key,
+                      equipmentName: item.name,
+                      description: item.description,
+                      mode,
+                      page: pageNumber,
+                      plannedArgs: args,
+                      submittedArgs,
+                      request,
+                      resultRows,
+                      form,
+                      ...(phase !== "filled"
+                        ? {
+                            resultHeaders: await searchPage
+                              .locator("#search_result th, #search_result thead td")
+                              .evaluateAll((nodes) =>
+                                nodes.map((node) => ({
+                                  text: node.textContent?.trim() || "",
+                                  tag: node.tagName,
+                                  visible: node.checkVisibility(),
+                                })),
+                              ),
+                          }
+                        : {}),
+                    },
+                    async () => {
+                      const after = await readEquipmentSearchForm(searchPage);
+                      if (JSON.stringify(form) !== JSON.stringify(after))
+                        throw new Error("截图时表单发生变化");
+                    },
+                  );
+                } catch (error) {
+                  throw new Error(
+                    "装备查价截图记录失败，未采用报价：" +
+                      (error instanceof Error ? error.message : String(error)),
+                  );
+                }
+              };
               report({
                 page: pageNumber,
                 validSamples: candidates.length + similar.length,
@@ -2056,6 +2363,7 @@ export function equipmentSourceFromPages(
               });
               await pace(requestSignal);
               let form: Awaited<ReturnType<typeof applyEquipmentSearchForm>> | undefined;
+              let filledEvidence: EquipmentEvidence | undefined;
               if (first) {
                 stage = "ui_controls";
                 form = await applyEquipmentSearchForm(
@@ -2065,6 +2373,7 @@ export function equipmentSourceFromPages(
                   yuanshen ? "yuanshen" : jade ? "jade" : jewelry ? "jewelry" : "equipment",
                   requestSignal,
                 );
+                filledEvidence = await captureEvidence("filled");
               }
               marketScope ||= createMarketScopeAudit(searchPage, serverId);
               marketScope.begin(act, pageNumber);
@@ -2090,7 +2399,11 @@ export function equipmentSourceFromPages(
                 itemQueries.push(query);
                 queryRecorded = true;
               }
-              recordedUi.push({ mode, ...uiActions[uiActions.length - 1] });
+              recordedUi.push({
+                mode,
+                ...uiActions[uiActions.length - 1],
+                ...(filledEvidence ? { evidence: [filledEvidence] } : {}),
+              });
               stage = "query_wait";
               await searchPage.waitForFunction(
                 (wanted) => {
@@ -2116,7 +2429,39 @@ export function equipmentSourceFromPages(
               requestSignal.throwIfAborted();
               await assertAvailable(searchPage);
               stage = "scope_confirm";
-              const request = marketScope.confirm();
+              let request = marketScope.confirm();
+              if (
+                core &&
+                first &&
+                (await searchPage.evaluate(
+                  () =>
+                    Number((window as unknown as Record<string, any>).__cbgEquipmentResult?.count) >
+                    0,
+                ))
+              ) {
+                const resultEvidence = await captureEvidence("results", undefined, request);
+                if (resultEvidence)
+                  (recordedUi[recordedUi.length - 1].evidence ||= []).push(resultEvidence);
+                stage = "initial_attribute_sort";
+                const sorted = await sortEquipmentInitialAscending(
+                  searchPage,
+                  initialSortLabel(core),
+                  requestSignal,
+                  () => marketScope!.begin(act, 1),
+                  () => marketScope!.confirm(),
+                  async (sortRequest) => {
+                    const evidence = await captureEvidence("sorting", undefined, sortRequest);
+                    if (evidence)
+                      (recordedUi[recordedUi.length - 1].evidence ||= []).push(evidence);
+                  },
+                );
+                request = sorted.request;
+                sortedKey = request.orderBy;
+                recordedUi[recordedUi.length - 1].actions.push(...sorted.actions);
+                recordedUi[recordedUi.length - 1].sortRequests = sorted.requests;
+              }
+              if (core && !first && sortedKey && request.orderBy !== sortedKey)
+                throw new Error("翻页后初始属性升序失效，未采用报价");
               stage = "ui_condition_verify";
               const submitted = await searchPage.evaluate(function readEquipmentSubmittedFilters() {
                 const args = (
@@ -2223,6 +2568,23 @@ export function equipmentSourceFromPages(
                 );
                 return { rows, empty, hasNext };
               }, pageNumber);
+              const submittedEvidence = await captureEvidence(
+                "submitted",
+                submitted,
+                request,
+                onEvidence
+                  ? listing.rows.map((row) => ({
+                      identity: equipmentIdentity(row.url),
+                      name: row.name,
+                      kindId: row.kindId,
+                      modelId: row.modelId,
+                      level: row.level,
+                      descriptionHash: digest(row.description),
+                    }))
+                  : undefined,
+              );
+              if (submittedEvidence)
+                (recordedUi[recordedUi.length - 1].evidence ||= []).push(submittedEvidence);
               const candidateServers: Record<string, number> = {};
               for (const row of listing.rows) {
                 const server = equipmentIdentity(row.url).split(":")[0];
@@ -2244,6 +2606,8 @@ export function equipmentSourceFromPages(
             // Validate every saved page, including exhausted earlier stages, before continuing.
             // The replay position survives a three-page budget so long histories can progress.
             const history = savedCursor?.pageHistory || [];
+            const rememberPage = (page: number, rowsHash: string) =>
+              rememberPricingPage(next, modeIndex, page, rowsHash);
             while (
               (next.historyIndex || 0) < history.length &&
               history[next.historyIndex || 0].modeIndex === modeIndex
@@ -2308,7 +2672,7 @@ export function equipmentSourceFromPages(
             ) {
               if (!uiPage && pageNumber > 1) {
                 const first = await loadPage(1, true, true);
-                if (!rememberPricingPage(next, modeIndex, 1, digest(first.rows))) {
+                if (!rememberPage(1, digest(first.rows))) {
                   records.push({
                     key: item.key,
                     reason: "result_order_changed",
@@ -2331,7 +2695,7 @@ export function equipmentSourceFromPages(
               modePages++;
               const pageRowsHash = digest(listing.rows);
               if (
-                !rememberPricingPage(next, modeIndex, pageNumber, pageRowsHash) ||
+                !rememberPage(pageNumber, pageRowsHash) ||
                 (next.pageRowsHash && next.pageRowsHash !== pageRowsHash)
               ) {
                 records.push({
@@ -2396,7 +2760,7 @@ export function equipmentSourceFromPages(
                       row.modelId &&
                       Number(item.modelId) !== Number(row.modelId)
                     ? "装备型号不匹配"
-                    : equipmentListingMismatch(item, row, args);
+                    : equipmentListingMismatch(referenceTarget, row, args);
                 if (mismatch) {
                   seen.add(seenKey);
                   inspected++;
@@ -2460,6 +2824,7 @@ export function equipmentSourceFromPages(
               sampleLimit,
               sampled: inspected,
               samplingComplete,
+              samplingBasis: "first-candidates",
               detailFailures: detailFailures.filter((failure) => failure.modeIndex === modeIndex),
             });
             if (next.modeIndex >= queryModes.length || next.modeIndex === modeIndex) break;
@@ -2485,7 +2850,7 @@ export function equipmentSourceFromPages(
               (completed && exhausted
                 ? "本次筛选结果已读完"
                 : completed
-                  ? "每个筛选条件仅核验前5条不同候选，搜索范围有限，未遍历全部在售商品；有样本按实际数量报价，无样本则跳过，市场售价未知"
+                  ? "每个筛选条件仅核验排序后的前5条不同商品，取可核验样品最低挂牌价；未遍历全部在售商品"
                   : "未遍历全部在售商品，本轮预算已用完，已保存筛选阶段、页码和行位置；继续查询剩余商品") +
               "。";
           records.push({
@@ -2515,6 +2880,7 @@ export function equipmentSourceFromPages(
           results.push({
             key: item.key,
             ...(resolvedTargetKind ? { kindId: resolvedTargetKind } : {}),
+            ...(resolvedKindName ? { kindName: resolvedKindName } : {}),
             query,
             searchState: itemSearchState,
             ...(!completed || failed.size ? { searchCursor: next } : {}),
@@ -2549,6 +2915,7 @@ export function equipmentSourceFromPages(
           results.push({
             key: item.key,
             ...(resolvedTargetKind ? { kindId: resolvedTargetKind } : {}),
+            ...(resolvedKindName ? { kindName: resolvedKindName } : {}),
             query: currentQueries.join("\n"),
             searchState: "read_failed",
             candidates: currentCandidates(),
@@ -2576,6 +2943,7 @@ export async function createEquipmentSource(
   signal: AbortSignal,
   serverId: string,
   onProgress?: (progress: PricingSearchProgress) => void,
+  productKey?: string,
 ) {
   assertMarketServerId(serverId);
   signal.throwIfAborted();
@@ -2587,7 +2955,14 @@ export async function createEquipmentSource(
     signal.throwIfAborted();
     detailPage = await createHiddenPage(browser);
     signal.throwIfAborted();
-    return equipmentSourceFromPages(searchPage, detailPage, signal, serverId, onProgress);
+    const evidence = productKey
+      ? (await import("./equipment-search-evidence")).equipmentSearchEvidence(
+          productKey,
+          serverId,
+          signal,
+        )
+      : undefined;
+    return equipmentSourceFromPages(searchPage, detailPage, signal, serverId, onProgress, evidence);
   } catch (error) {
     await Promise.allSettled([searchPage?.close(), detailPage?.close()]);
     throw error;

@@ -13,7 +13,7 @@ import { valuationRecord } from "../fixtures/analysis";
 // Failure cases: a failed first role starts the next role; ordinary resume bypasses it;
 // refresh loses the stop; explicit retry loses progress/order or cannot reach two quotes.
 // Only market/AI responses are simulated. Runner, storage, controls and rendering are real.
-test("查价失败立即停队，刷新后显式重试，按顺序完成两个报价", async ({ page }, testInfo) => {
+test("并发1时查价失败立即停队，刷新后显式重试，按顺序完成两个报价", async ({ page }, testInfo) => {
   const crawl = new CrawlStore(":memory:");
   const records = ["stop-first", "stop-second"].map((key) => {
     const record = valuationRecord(key);
@@ -89,6 +89,7 @@ test("查价失败立即停队，刷新后显式重试，按顺序完成两个�
         try {
           let body: unknown;
           const run = store.overview().run;
+          const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
           switch (url.pathname) {
             case "/api/ai/status":
               body = {
@@ -111,13 +112,24 @@ test("查价失败立即停队，刷新后显式重试，按顺序完成两个�
               body = { ...store.overview({ provider: "codex", currentProfile: profile }), profile };
               break;
             case "/api/analysis/start":
-              body = store.run(await runner.start("codex", true, profile));
+              body = store.run(
+                await runner.start(
+                  "codex",
+                  true,
+                  profile,
+                  false,
+                  undefined,
+                  1,
+                  undefined,
+                  input.concurrency,
+                ),
+              );
               break;
             case "/api/analysis/resume":
-              body = store.run(await runner.resume(run!.id));
+              body = store.run(await runner.resume(run!.id, false, input.concurrency));
               break;
             case "/api/analysis/retry":
-              body = store.run(await runner.resume(run!.id, true));
+              body = store.run(await runner.resume(run!.id, true, input.concurrency));
               break;
             case "/api/analysis/detail":
               body = store.detail(url.searchParams.get("taskId")!, profile);
@@ -148,6 +160,7 @@ test("查价失败立即停队，刷新后显式重试，按顺序完成两个�
       });
     });
     await page.goto("http://cbg-stop.test/analysis-preview");
+    await page.getByRole("spinbutton", { name: "分析并发数" }).fill("1");
     await page.getByRole("button", { name: "开始分析已有商品", exact: true }).click();
     const retry = page.getByRole("button", { name: "重试失败及待补齐的 1 件", exact: true });
     await expect(retry).toBeVisible();
@@ -163,13 +176,22 @@ test("查价失败立即停队，刷新后显式重试，按顺序完成两个�
     await page.screenshot({ path: testInfo.outputPath("stopped.png"), fullPage: true });
     await page.reload();
     await expect(retry).toBeVisible();
-    await page.getByRole("button", { name: "继续分析", exact: true }).click();
-    await expect(
-      page.getByText("请先重试失败或待补齐的商品，再继续分析", { exact: true }),
-    ).toBeVisible();
+    const resume = await page.evaluate(async (runId) => {
+      const response = await fetch("/api/analysis/resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ runId }),
+      });
+      return { status: response.status, body: await response.json() };
+    }, before.run!.id);
+    expect(resume).toEqual({
+      status: 400,
+      body: { error: "请先重试失败或待补齐的商品，再继续分析" },
+    });
     expect(searches).toEqual(["stop-first"]);
+    await page.getByRole("spinbutton", { name: "分析并发数" }).fill("1");
     await retry.click();
-    await runner.settled();
+    await expect.poll(() => store.overview().run?.completed).toBe(2);
     await writeFile(
       testInfo.outputPath("retry-state.json"),
       JSON.stringify(
@@ -185,7 +207,8 @@ test("查价失败立即停队，刷新后显式重试，按顺序完成两个�
     );
     await expect(page.getByLabel("分析页面概览")).toContainText("2 件已有结果");
     expect(store.overview().run).toMatchObject({
-      status: "completed",
+      status: "running",
+      phase: "waiting_capture",
       completed: 2,
       waitingPricing: 0,
       failed: 0,

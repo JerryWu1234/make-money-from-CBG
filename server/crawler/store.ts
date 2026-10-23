@@ -9,7 +9,14 @@ import {
   compactListing,
   hasUnconfirmedEmptyEquipment,
 } from "./compact";
-import type { Checkpoint, Listing, RoleDetail, SavedListingPage } from "./types";
+import type {
+  Checkpoint,
+  CrawlLane,
+  HeadCheckpoint,
+  Listing,
+  RoleDetail,
+  SavedListingPage,
+} from "./types";
 import { captureIssues } from "./capture-readiness";
 
 export class CrawlStore {
@@ -34,7 +41,9 @@ export class CrawlStore {
       CREATE TABLE IF NOT EXISTS role_source_history (source_hash TEXT PRIMARY KEY, listing_key TEXT NOT NULL, source_gzip BLOB NOT NULL, archived_at TEXT NOT NULL);`);
     this.ensureListingColumn("attempt_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureListingColumn("last_attempt_at", "TEXT");
+    this.ensureListingColumn("capture_lane", "TEXT NOT NULL DEFAULT 'old'");
     this.ensureCrawlStateColumn("backfill_complete", "INTEGER NOT NULL DEFAULT 0");
+    this.ensureCrawlStateColumn("head_checkpoint_json", "TEXT");
     this.compactExisting();
     for (const row of this.db
       .prepare(
@@ -71,6 +80,31 @@ export class CrawlStore {
       ? (JSON.parse(String(row.checkpoint_json)) as Checkpoint)
       : undefined;
   }
+  headCheckpoint(): HeadCheckpoint | undefined {
+    const row = this.db.prepare("SELECT head_checkpoint_json FROM crawl_state WHERE id=1").get();
+    return row?.head_checkpoint_json
+      ? (JSON.parse(String(row.head_checkpoint_json)) as HeadCheckpoint)
+      : undefined;
+  }
+  setHeadCheckpoint(point: HeadCheckpoint) {
+    if (
+      !Number.isFinite(Date.parse(point.time)) ||
+      !point.keys.length ||
+      point.keys.some((key) => typeof key !== "string" || !key.trim()) ||
+      new Set(point.keys).size !== point.keys.length
+    )
+      throw new Error("首页巡检边界无效");
+    this.db
+      .prepare(`INSERT INTO crawl_state(id,head_checkpoint_json) VALUES(1,?)
+      ON CONFLICT(id) DO UPDATE SET head_checkpoint_json=excluded.head_checkpoint_json`)
+      .run(JSON.stringify(point));
+  }
+  captureLane(key: string): CrawlLane {
+    return this.db.prepare("SELECT capture_lane FROM listings WHERE key=?").get(key)
+      ?.capture_lane === "new"
+      ? "new"
+      : "old";
+  }
   backfillComplete(): boolean {
     return !!this.db.prepare("SELECT backfill_complete FROM crawl_state WHERE id=1").get()
       ?.backfill_complete;
@@ -82,7 +116,8 @@ export class CrawlStore {
       )
       .run();
   }
-  observe(item: Listing): boolean {
+  observe(item: Listing, lane: CrawlLane = "old"): boolean {
+    if (lane !== "new" && lane !== "old") throw new Error("采集任务来源无效");
     const now = new Date().toISOString();
     const old = this.db
       .prepare(
@@ -118,6 +153,8 @@ export class CrawlStore {
         now,
         now,
       );
+    if (lane === "new")
+      this.db.prepare("UPDATE listings SET capture_lane='new' WHERE key=?").run(item.key);
     if (!complete)
       this.db
         .prepare(
@@ -336,6 +373,7 @@ export class CrawlStore {
     this.db.exec("PRAGMA secure_delete=ON; BEGIN IMMEDIATE");
     try {
       for (const table of [
+        "recommendation_views",
         "analysis_attempts",
         "analysis_tasks",
         "analysis_runs",

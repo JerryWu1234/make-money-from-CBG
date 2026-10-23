@@ -86,6 +86,8 @@ function setup(captureComplete = true, petCount = 1) {
   crawl.observe(record.listing);
   crawl.save(record.listing, record.detail!);
   const store = new AnalysisStore(crawl.db);
+  // These pricing regressions exercise a finite batch; streaming has its own suite.
+  vi.spyOn(store, "followsCapture").mockReturnValue(false);
   const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), undefined, true, true);
   const base = {
     version: 1 as const,
@@ -342,7 +344,8 @@ it.each([
       items: c.gear.items.map((item) => ({ ...item, searchState: state, searchStatus: state })),
     });
   try {
-    const id = await c.runner.start("codex", true, c.profile);
+    // This case verifies that a failed role leaves the next role unstarted.
+    const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
     await c.runner.settled();
     expect(c.store.run(id)).toMatchObject({
       status: "paused",
@@ -479,8 +482,14 @@ it.each(["identity", "total"])("拒绝不匹配或重复计价的宝宝装备快
 
 it("宝宝库存未采齐时留在采集阶段，不调用市场查价或输出缺项分析", async () => {
   const c = setup(false);
+  vi.restoreAllMocks();
   try {
-    await expect(c.runner.start("codex", false, c.profile)).rejects.toThrow("暂无详情完整的商品");
+    const id = await c.runner.start("codex", false, c.profile);
+    expect(c.store.run(id)).toMatchObject({
+      status: "running",
+      total: 0,
+      phase: "waiting_capture",
+    });
     expect(c.analyze).not.toHaveBeenCalled();
     expect(c.searchEquipment).not.toHaveBeenCalled();
     expect(c.searchPets).not.toHaveBeenCalled();

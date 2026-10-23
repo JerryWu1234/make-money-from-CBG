@@ -61,8 +61,10 @@ window.ajax_with_recommend=async function(options){
    if(settings.mode==='stalled'){options.onComplete();return;}
    if(settings.mode==='error'){options.onSuccess({status:1,msg:'装备查询请求失败'});options.onComplete();return;}
    const page=options.data.page, activePages=settings.broadenedPages && options.data.init_hp<176 ? settings.broadenedPages : settings.pages;
-   const rows=(activePages[page-1]||[]).filter(row=>['damage','all_wakan','init_damage_raw','init_wakan','init_defense','init_hp','init_dex'].every(key=>row.rawAttributes?.[key]===undefined || options.data[key]===undefined || row.rawAttributes[key]+(options.data.attr_with_melt?(row.meltAttributes?.[key]||0):0)>=options.data[key]));
-   options.onSuccess({status:0,msg:rows,paging:{cur_page:page,num_begin:1,num_end:activePages.length}});
+   let filtered=(settings.initialSort?activePages.flat():(activePages[page-1]||[])).filter(row=>['all_damage','damage','all_wakan','init_damage','init_damage_raw','init_wakan','init_defense','init_hp','init_dex'].every(key=>row.rawAttributes?.[key]===undefined || options.data[key]===undefined || row.rawAttributes[key]+(options.data.attr_with_melt?(row.meltAttributes?.[key]||0):0)>=options.data[key]));
+   if(settings.initialSort&&options.data.order_by){const [key,direction]=options.data.order_by.split(' ');filtered.sort((a,b)=>(a.rawAttributes[key]-b.rawAttributes[key])*(direction==='ASC'?1:-1));}
+   const size=activePages[0]?.length||15,rows=settings.initialSort?filtered.slice((page-1)*size,page*size):filtered;
+   options.onSuccess({status:0,msg:rows,paging:{cur_page:page,num_begin:1,num_end:settings.initialSort?Math.max(1,Math.ceil(filtered.length/size)):activePages.length}});
    options.onComplete();
  },settings.delay);
 };
@@ -78,6 +80,8 @@ window.overall_search=function(args,page,order){
    const root=document.querySelector('#search_result');
    if(!result.msg.length){root.innerHTML='<p>没有符合条件的商品</p>';return;}
    const table=document.createElement('table');
+   if(settings.duplicateInitialHeaders){const outside=document.createElement('span');outside.textContent='初伤';document.body.append(outside);const hidden=document.createElement('span');hidden.textContent='初伤';hidden.style.display='none';root.append(hidden)}
+   if(!settings.jewelry&&!settings.jade&&!settings.yuanshen&&!settings.missingInitialSort){const header=table.insertRow();for(const [label,key] of [['初伤','init_damage'],['初防','init_defense'],['初灵','init_wakan'],['初血','init_hp'],['初敏','init_dex']]){const cell=document.createElement('th'),link=document.createElement('a');link.textContent=label+(settings.initialSortArrows&&CurSearchValue.order_by.key===key?(CurSearchValue.order_by.sort==='ASC'?'↑':'↓'):'');link.href='#';link.onclick=event=>{event.preventDefault();const old=CurSearchValue.order_by;CurSearchValue.order_by={key,sort:old.key===key&&old.sort==='DESC'?'ASC':'DESC'};overall_search(CurSearchValue.arg,1,CurSearchValue.order_by)};cell.append(link);header.append(cell)}}
    for(const row of result.msg){const tr=document.createElement('tr'),td=document.createElement('td'),a=document.createElement('a'),img=document.createElement('img');a.className='soldImg';a.href='https://xyq.cbg.163.com/equip?s='+encodeURIComponent(row.serverId||'1')+'&eid='+encodeURIComponent(row.eid)+'&from_shareid=must-not-send-viewer&reco_request_id=tracking&cross_buy_serverid=99';img.src=${JSON.stringify(pixel)};img.width=40;img.height=40;img.setAttribute('data_equip_name',row.name);img.setAttribute('data_equipid','ordersn-'+row.eid);if(row.kindId!==undefined)img.setAttribute('data_kindid',row.kindId);if(row.modelId!==undefined)img.setAttribute('data_equip_type',row.modelId);if(row.level!==undefined)img.setAttribute('data_equip_level',row.level);a.append(img);td.append(a);if(row.description!==undefined){const desc=document.createElement('textarea');desc.id='equip_desc_'+(row.descriptionOrdersn||'ordersn-'+row.eid);desc.style.display='none';desc.value=row.description;td.append(desc);}tr.append(td);table.append(tr);}root.append(table);
    const pager=document.querySelector('#pager');
    if(result.paging.num_end>1){pager.append('第'+page+'页, 共'+result.paging.num_end+'页');const jump=document.createElement('input');jump.id='pager_input';jump.addEventListener('keydown',event=>{if(event.key==='Enter')goto(Number(jump.value));});pager.append(jump);if(page>1)pager.insertAdjacentHTML('beforeend','<a href="javascript:goto('+(page-1)+')">上一页</a>');if(page<result.paging.num_end)pager.insertAdjacentHTML('beforeend','<a href="javascript:goto('+(page+1)+')">下一页</a>');}
@@ -138,14 +142,14 @@ if(settings.yuanshen){
  field('txt_minghun_level_min','text');field('chk_include_ext_mh_lv','checkbox');
 }else if(settings.jewelry){
  buildSlider('equip_level_slider',20,40);menu('kind_panel',Kinds);menu('added_attr_num_panel',[[2,'2条'],[3,'3条']]);
- const attrs=Array.from({length:19},(_,i)=>[i+1,'属性'+(i+1)]);
- field('sel_basic_attr_type','select',['damage','defense','magic_damage','magic_defense','fengyin','anti_fengyin','speed'].map(key=>[key,key]));
+ const attrs=['固伤','伤害','速度','法伤','狂暴','物理暴击','法术暴击','封印','法伤结果','穿刺','治疗','气血','防御','法防','抗物理暴击','抗法术暴击','抗封','格挡','回复'].map((name,index)=>[index+1,name]);
+ field('sel_basic_attr_type','select',[['damage','戒指·伤害'],['defense','戒指·防御'],['magic_damage','耳饰·法伤'],['magic_defense','耳饰·法防'],['fengyin','手镯·封印'],['anti_fengyin','手镯·抗封'],['speed','佩饰·速度']]);
  field('txt_basic_attr_value','text');field('txt_jinglian_level','text');field('txt_repair_fail','text');field('txt_suit_effect_level','text');field('sel_suit_effect','select',(window.SuitEffects||[]).map((name,index)=>[index+1,name]));field('chk_has_eazy_effect','checkbox');
  add('<input type="radio" id="added_attr_logic_detail" name="added_attr_logic" value="detail">');
  for(let i=1;i<=3;i++)field('sel_add_attr'+i,'select',attrs);
 }else{
  buildSlider('level_slider',10,20);menu('kind_check_panel',EquipKinds);menu('special_effect_panel',SpecialEffects);menu('special_skill_panel',SpecialSkills);menu('gem_panel',Gems);
- for(const key of ['repair_fail','damage','all_wakan','gem_level','init_defense','init_damage_raw','init_wakan','init_hp','init_dex','hole_num'])field('txt_'+key,'text');
+ for(const key of ['repair_fail','all_damage','damage','all_wakan','gem_level','init_defense','init_damage','init_damage_raw','init_wakan','init_hp','init_dex','hole_num'])field('txt_'+key,'text');
  field('chk_attr_with_melt','checkbox');
  add('<div id="check_mode_panel"><input type="radio" name="special_mode" value="and" checked><input type="radio" name="special_mode" value="or"></div>');
  field('radio_short_cut','radio');field('sel_short_cut','select',settings.suitShortcutOptions||window.SuitEffects||[]);
@@ -168,7 +172,7 @@ document.querySelector('#'+searchButton).addEventListener('click',()=>{
  if(settings.yuanshen){arg.fixture_kind=selected('equip_type_check_panel');arg.fixture_addon=selected('equip_attr_check_panel');arg.fixture_attr_type=document.querySelector('#attr_type').value;}
  else if(settings.jade){if(document.querySelector('#chk_include_ext_mh_lv').checked)arg.include_ext_mh_lv=1;for(const key of ['init_attrs','base_attrs1','base_attrs2','total_attrs','minghun_effect']){const value=document.querySelector('#sel_'+key).value;if(value)arg[key]=JSON.stringify({[value]:key==='minghun_effect'?Number(document.querySelector('#txt_'+key).value)*10:document.querySelector('#txt_'+key).value});}}
  else{const slider=document.querySelector('.levelSlider').slider.value;arg[settings.jewelry?'equip_level_min':'level_min']=slider.min;arg[settings.jewelry?'equip_level_max':'level_max']=slider.max;
- if(settings.jewelry){if(document.querySelector('#chk_has_eazy_effect').checked)arg.special_effect=1;const primary=document.querySelector('#sel_basic_attr_type').value;if(primary)arg[primary]=Number(document.querySelector('#txt_basic_attr_value').value);const suit=document.querySelector('#sel_suit_effect').value;if(suit)arg.suit_effect=suit;for(let i=1;i<=3;i++){const value=document.querySelector('#sel_add_attr'+i).value;if(value){arg.added_attr_logic='detail';arg['added_attr.'+value]=(arg['added_attr.'+value]||0)+1;}}}
+ if(settings.jewelry){if(document.querySelector('#chk_has_eazy_effect').checked)arg.special_effect=1;const primary=document.querySelector('#sel_basic_attr_type').value;if(primary){const value=Number(document.querySelector('#txt_basic_attr_value').value);if(value)arg[primary]=value;else arg.basic_attr_value=value;}const suit=document.querySelector('#sel_suit_effect').value;if(suit)arg.suit_effect=suit;for(let i=1;i<=3;i++){const value=document.querySelector('#sel_add_attr'+i).value;if(value){arg.added_attr_logic='detail';arg['added_attr.'+value]=(arg['added_attr.'+value]||0)+1;}}}
  else{if(arg.special_effect)arg.special_mode=document.querySelector('#check_mode_panel input:checked')?.value||'and';if(document.querySelector('#chk_attr_with_melt').checked){if(['init_damage','init_damage_raw','all_damage','damage','init_defense','init_hp','init_dex','init_wakan','all_wakan'].some(key=>arg[key]))arg.attr_with_melt=1;}else{arg.attr_without_melt=1;arg.sum_attr_without_melt=1;}
  const shortcut=document.querySelector('#sel_short_cut').value;if(document.querySelector('#radio_short_cut').checked&&shortcut)arg.suit_effect=shortcut;
  for(const [type,values] of [['added_status',window.SuitAddedStatus],['append_skill',window.SuitAppendSkills],['transform_skill',window.SuitTransformSkills],['transform_charm',window.SuitTransformCharms]]){if(document.querySelector('#radio_'+type).checked){const name=document.querySelector('#txt_'+type).value;if(name.trim()){const ids=Object.entries(values||{}).filter(([label])=>label.indexOf(name)!==-1).map(([,id])=>id);if(ids.length)arg.suit_effect=ids.join(',');}}}

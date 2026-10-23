@@ -1113,6 +1113,21 @@ body {
   border-radius: 8px;
   cursor: pointer;
 }
+.crawl-concurrency {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+}
+.crawl-concurrency input {
+  width: 6rem;
+  padding: 9px;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  background: #0f172a;
+  color: var(--text-primary);
+  font: inherit;
+}
 .saved-list {
   max-height: 220px;
   overflow: auto;
@@ -1766,4 +1781,15 @@ body {
   .drawer-body .detail-tabs button {
     white-space: nowrap;
   }
+}
+.equipment-analysis-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+.equipment-analysis-toggle input {
+  width: 1.25rem;
+  height: 1.25rem;
+  accent-color: #62dccb;
 }

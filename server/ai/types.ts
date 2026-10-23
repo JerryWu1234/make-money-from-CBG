@@ -1,4 +1,5 @@
 export type AiProvider = "codex" | "deepseek";
+export type AnalysisRequestOptions = { bareRoleReview?: boolean };
 
 export type AiModelOptions = {
   provider: AiProvider;

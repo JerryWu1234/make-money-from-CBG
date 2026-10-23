@@ -91,6 +91,7 @@ it("组件失败尚无实际查询记录也累计两次，未读取的skipped响
   const source = failedSource([]);
   const first = await searchEquipmentPrices(value, signal, source);
   expect(first.items[0]).toMatchObject({ searchState: "pending", searchFailureCount: 1 });
+  expect(first.issues).not.toContain("本次检索没有实际查询记录，返回价格未采纳");
   const untouched = await searchEquipmentPrices(
     value,
     signal,
@@ -107,6 +108,10 @@ it("组件失败尚无实际查询记录也累计两次，未读取的skipped响
   expect(untouched.items[0]).toMatchObject({ searchState: "pending", searchFailureCount: 1 });
   const second = await searchEquipmentPrices(value, signal, source, undefined, untouched);
   expect(second.items[0]).toMatchObject({ searchState: "skipped", searchFailureCount: 2 });
+  expect(second.searchComplete).toBe(true);
+  expect(second.issues).not.toContain("本次检索没有实际查询记录，返回价格未采纳");
+  expect(second.items[0].referencePrice).toBeNull();
+  expect(second.items[0].skipReason).toContain("市场售价未知");
 });
 
 it.each(["上古玉魄", "元身", "精魄"])("%s不套用普通装备失败预算", async (category) => {

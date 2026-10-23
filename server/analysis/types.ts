@@ -4,7 +4,33 @@ import type { AnalysisProfile, ValuationResult } from "./valuation-types";
 import type { EquipmentPricingSnapshot } from "./equipment-pricing";
 import type { PetPricingSnapshot } from "./pet-pricing";
 
+export const DEFAULT_ANALYSIS_CONCURRENCY = 10;
+export function analysisConcurrency(value: unknown = DEFAULT_ANALYSIS_CONCURRENCY): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
+    throw new Error("分析并发数必须是正整数");
+  return value;
+}
+export type AnalysisLane = "new" | "old";
+export function analysisLaneLimits(concurrency: number) {
+  const newLimit = concurrency === 1 ? 1 : Math.min(concurrency - 1, Math.ceil(concurrency * 0.7));
+  return { newLimit, oldLimit: concurrency - newLimit };
+}
+
 export type DimensionId = "foundation" | "equipment" | "pets";
+export type CapturedAssetCounts = {
+  equipment: number | null;
+  jewelry: number | null;
+  pets: number;
+  equipmentTotal?: number;
+  equipmentItems?: Array<{
+    name: string;
+    level: number | null;
+    gemLevel: number | null;
+    specialSkills: string[];
+    specialEffects: string[];
+    sets: string[];
+  }>;
+};
 export type Evidence = { path: string; value: string; reason: string };
 export type Dimension = { score: number | null; reason: string; evidence: Evidence[] };
 export type ProductAnalysis = {
@@ -19,6 +45,14 @@ export type ProductAnalysis = {
   valuation?: ValuationResult;
 };
 export type AnalysisRun = {
+  concurrency?: number;
+  runningCount?: number;
+  newRunning?: number;
+  oldRunning?: number;
+  newLimit?: number;
+  oldLimit?: number;
+  currentItems?: string[];
+  assetCounts?: CapturedAssetCounts | null;
   id: string;
   provider: AiProvider;
   model: string;
@@ -44,7 +78,13 @@ export type AnalysisRun = {
   } | null;
   reused: number;
   current: string | null;
-  phase?: "equipment_search" | "pet_search" | "pet_gear_search" | "analysis" | null;
+  phase?:
+    | "equipment_search"
+    | "pet_search"
+    | "pet_gear_search"
+    | "analysis"
+    | "waiting_capture"
+    | null;
   profileHash?: string;
   calculationVersion?: string;
 };
@@ -73,6 +113,9 @@ export type AnalysisItem = {
   error: string | null;
   profileChanged?: boolean;
   valuation?: ValuationResult;
+  recommendation?: import("./recommendation").Recommendation;
+  recommendationViewed?: boolean;
+  assetSummary?: { equipment: string; pets: string } | null;
 };
 export type AnalysisResultItem = {
   taskId: string;
@@ -96,13 +139,20 @@ export type AnalysisOverview = {
   };
   profile?: Pick<
     AnalysisProfile,
-    "hash" | "version" | "promptHash" | "calculationCompatible" | "calculationVersion"
+    | "hash"
+    | "version"
+    | "promptHash"
+    | "calculationCompatible"
+    | "calculationVersion"
+    | "equipmentSearch"
+    | "petSearch"
   >;
   counts: { total: number; complete: number; waitingDetail: number };
   run: AnalysisRun | null;
   activeRun: AnalysisRun | null;
   runs: AnalysisRun[];
   ranking: AnalysisItem[];
+  manualReview?: AnalysisItem[];
   records: { page: number; totalPages: number; total: number; items: AnalysisItem[] };
   results: { page: number; totalPages: number; total: number; items: AnalysisResultItem[] };
   history: {
@@ -116,6 +166,7 @@ export type AnalysisOverview = {
   }[];
 };
 export type AnalysisDetail = {
+  assetCounts?: CapturedAssetCounts | null;
   taskId: string;
   runId: string;
   provider: AiProvider;
@@ -127,6 +178,7 @@ export type AnalysisDetail = {
   inputText: string;
   promptHash: string;
   promptText: string;
+  requestTemplate?: string;
   result: ProductAnalysis | null;
   completedAt: string | null;
   error: string | null;

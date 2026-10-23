@@ -3,8 +3,52 @@ import {
   coreEquipmentDescription,
   itemFromAttributes,
   jewelryDescriptionSections,
+  preserveJewelryTooltipSections,
   observedEquipmentCategory,
+  equipmentEmptyProof,
 } from "./compact";
+import type { TabSnapshot } from "./types";
+
+it.each([
+  "confirmed",
+  "missing-worn",
+  "hidden-store",
+  "unread-object",
+  "wrong-name",
+  "wrong-model",
+  "unknown-icon",
+])("人物空装备证据与随身宝宝装备逐件绑定：%s", (kind) => {
+  const tab: TabSnapshot = {
+    name: "道具/法宝",
+    text: "现金100",
+    fields: [],
+    tables: [],
+    elements: [],
+    tooltips: [],
+    items: [
+      {
+        index: 0,
+        name: kind === "wrong-name" ? "另一件" : "嵌宝金环",
+        modelId: kind === "wrong-model" ? "9999" : "9210",
+        kind: "equipment",
+        attributes: kind === "unread-object" ? {} : { 装备对象: "召唤兽" },
+      },
+    ],
+    equipmentContainers: [
+      { id: "RoleUsingEquips", present: kind !== "missing-worn", visible: true, icons: [] },
+      {
+        id: "RoleStoreEquips",
+        present: true,
+        visible: kind !== "hidden-store",
+        icons: [
+          { name: "嵌宝金环", modelId: "9210" },
+          ...(kind === "unknown-icon" ? [{ name: "未知", modelId: "123" }] : []),
+        ],
+      },
+    ],
+  };
+  expect(equipmentEmptyProof([tab])).toBe(kind === "confirmed" ? "official-containers" : undefined);
+});
 
 describe("有官网证据的角色装备分类", () => {
   it.each(["4221", "4223", "4233", "4246", "63232"])(
@@ -252,4 +296,73 @@ it("装备背景说明不是镶嵌属性，镶嵌宝石、效果和等级仍保�
   expect(coreEquipmentDescription("镶嵌着宝物的金环，可以提高速度。\n" + attributes)).toBe(
     attributes,
   );
+});
+
+describe("已核实零精炼灵饰的真实色码分段", () => {
+  const raw =
+    "等级 100#r速度 +16#r耐久度 498#r#G法术防御 +21#r#G气血 +79#r#G抵抗封印等级 +20#r#c4DBAF4特效：锐不可当（2级）#r#c4DBAF4固定伤害 +2";
+  const tooltip =
+    "莲音玦\n【类型】佩饰\n等级 100\n速度 +16\n耐久度 498\n法术防御 +21\n气血 +79\n抵抗封印等级 +20\n特效：锐不可当（2级）\n固定伤害 +2";
+  const observed = () =>
+    itemFromAttributes(
+      {
+        data_equip_name: "莲音玦",
+        data_equip_type: "27303",
+        data_equip_location: "role_using_equip_190",
+        data_equip_desc: raw,
+      },
+      2,
+    );
+  it("官网佩饰身份和3条绿字足以保留分段，无需虚构精炼等级", () => {
+    const item = observed();
+    expect(jewelryDescriptionSections(item.description!)?.added).toEqual([
+      "法术防御 +21",
+      "气血 +79",
+      "抵抗封印等级 +20",
+    ]);
+    expect(item.description).not.toContain("精炼等级");
+  });
+  it.each(["data_kindid", "data-kindid"])("包内零精炼灵饰沿用官网明确的%s分类证据", (key) => {
+    const item = itemFromAttributes(
+      {
+        data_equip_name: "莲音玦",
+        data_equip_type: "27303",
+        data_equip_location: "store_equip_tips1",
+        data_equip_desc: raw,
+        [key]: "64",
+      },
+      2,
+    );
+    expect(item.kindId).toBe("64");
+    expect(jewelryDescriptionSections(item.description!)?.added).toEqual([
+      "法术防御 +21",
+      "气血 +79",
+      "抵抗封印等级 +20",
+    ]);
+    expect(item.description).not.toContain("精炼等级");
+  });
+  it("实际提示中连续唯一匹配原始附加段，覆盖描述时保留标题", () => {
+    const restored = preserveJewelryTooltipSections(tooltip, observed().description!);
+    expect(jewelryDescriptionSections(coreEquipmentDescription(restored))?.added).toHaveLength(3);
+    expect(restored).toContain("耐久度 498\n附加属性：\n法术防御 +21");
+  });
+  it("原始段与实际提示不符或出现多个位置，不恢复标题", () => {
+    expect(
+      preserveJewelryTooltipSections(
+        tooltip.replace("气血 +79", "气血 +80"),
+        observed().description!,
+      ),
+    ).not.toContain("附加属性：");
+    expect(
+      preserveJewelryTooltipSections(
+        tooltip + "\n法术防御 +21\n气血 +79\n抵抗封印等级 +20",
+        observed().description!,
+      ),
+    ).not.toContain("附加属性：");
+  });
+  it("无官方灵饰身份的普通绿字装备不按零精炼灵饰分段", () => {
+    expect(
+      itemFromAttributes({ data_equip_name: "未知物品", data_equip_desc: raw }, 0).description,
+    ).not.toContain("附加属性：");
+  });
 });

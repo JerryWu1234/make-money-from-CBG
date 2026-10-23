@@ -190,3 +190,31 @@ describe("装备价敏字段的结构化比较", () => {
     ).toBeNull();
   });
 });
+
+it("零精炼灵饰保留已证实主附段，套装额外固定伤害不并入基础属性", () => {
+  const value = parseEquipmentAttributes(
+    "等级 100\n速度 +16\n耐久度 498\n附加属性：\n法术防御 +21\n气血 +79\n抵抗封印等级 +20\n特效：锐不可当（2级）\n固定伤害 +2\n固定伤害+12（已生效）",
+  );
+  expect(value.jewelrySections?.main.速度).toEqual(["+16"]);
+  expect(value.jewelrySections?.added).toEqual({
+    法术防御: ["+21"],
+    气血: ["+79"],
+    抵抗封印等级: ["+20"],
+  });
+  expect(value.fields.固定伤害).toBeUndefined();
+  expect(value.fields.特效加成).toEqual(["固定伤害:+2"]);
+  expect(value.fields.已生效套装加成).toEqual(["固定伤害:+12"]);
+});
+
+it("已核实灵饰身份的零精炼参考品原始绿字段也保留，不能与自身不匹配", () => {
+  const raw =
+    "等级100#r速度 +16#r耐久度 498#r#G法术防御 +21#r#G气血 +79#r#G抵抗封印等级 +20#r#c4DBAF4特效：锐不可当（2级）#r#c4DBAF4固定伤害 +2";
+  const source = parseEquipmentAttributes(raw, true);
+  expect(source.jewelrySections?.added).toEqual({
+    法术防御: ["+21"],
+    气血: ["+79"],
+    抵抗封印等级: ["+20"],
+  });
+  expect(source.fields.固定伤害).toBeUndefined();
+  expect(parseEquipmentAttributes(raw).jewelrySections).toBeUndefined();
+});

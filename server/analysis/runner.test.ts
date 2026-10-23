@@ -15,7 +15,7 @@ const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
-function setup(keys = ["a", "b"], recordFactory = analysisRecord, captureRunning?: () => boolean) {
+function setup(keys = ["a", "b"], recordFactory = analysisRecord) {
   const crawl = new CrawlStore(":memory:");
   for (const key of keys) {
     const record = recordFactory(key);
@@ -35,6 +35,8 @@ function setup(keys = ["a", "b"], recordFactory = analysisRecord, captureRunning
     crawl.save(record.listing, record.detail!);
   }
   const store = new AnalysisStore(crawl.db);
+  // Keep finite-batch assertions here; continuous waiting is covered in runner-streaming.test.ts.
+  vi.spyOn(store, "followsCapture").mockReturnValue(false);
   const analyze = vi.fn<AnalysisClient["analyze"]>().mockImplementation(async (prompt) => {
     const key = keys.find((key) => prompt.includes(`商品 ID：${key}。`))!;
     return {
@@ -48,7 +50,7 @@ function setup(keys = ["a", "b"], recordFactory = analysisRecord, captureRunning
       analyze,
     }),
   );
-  const runner = new AnalysisRunner(store, connect, captureRunning);
+  const runner = new AnalysisRunner(store, connect);
   cleanups.push(async () => {
     await runner.shutdown();
     crawl.db.close();
@@ -134,55 +136,51 @@ function untilAborted(signal: AbortSignal): Promise<never> {
 }
 
 describe("持久化的商品分析队列", () => {
-  it.each([false, true])(
-    "暂停的跟随采集空队列可续跑，采集运行=%s，首角色不重算且新角色同批追加",
-    async (captureAtResume) => {
-      let capturing = true;
-      const keys = ["a"];
-      const { crawl, store, runner, analyze, connect } = setup(
-        keys,
-        analysisRecord,
-        () => capturing,
-      );
-      const id = await runner.start("codex");
-      await vi.waitFor(() => expect(store.run(id)?.completed).toBe(1));
-      await runner.pause(id);
-      expect(store.run(id)).toMatchObject({ status: "paused", completed: 1, queued: 0 });
-      expect(store.hasCapturedPending(id)).toBe(false);
-      const taskId = store.overview({ runId: id }).records.items[0].taskId!;
-      const first = structuredClone(store.detail(taskId));
-
-      capturing = captureAtResume;
-      await runner.resume(id, true);
-      if (!captureAtResume) await runner.settled();
-      expect(connect).toHaveBeenCalledTimes(2);
-      expect(store.run(id)).toMatchObject({
-        status: captureAtResume ? "running" : "completed",
-        completed: 1,
-        queued: 0,
-      });
-      expect(analyze).toHaveBeenCalledOnce();
-
-      keys.push("b");
-      const record = analysisRecord("b");
-      crawl.observe(record.listing);
-      crawl.save(record.listing, record.detail!);
-      if (captureAtResume) expect(runner.appendCaptured()).toBe(1);
-      capturing = false;
-      expect(await runner.resume(id)).toBe(id);
-      await runner.settled();
-      expect(store.run(id)).toMatchObject({
-        status: "completed",
-        total: 2,
-        completed: 2,
-        failed: 0,
-      });
-      expect(store.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n).toBe(1);
-      expect(analyze).toHaveBeenCalledTimes(2);
-      expect(store.detail(taskId)).toEqual(first);
-    },
-  );
-
+  it("仅上次实际返回错误输出时附加校验反馈，后续无输出超时不沿用旧反馈", async () => {
+    const { store, runner, analyze, profile } = await valuationSetup();
+    analyze
+      .mockResolvedValueOnce({ text: "not-json" })
+      .mockRejectedValueOnce(new Error("分析超时，请重试"));
+    const id = await runner.start("codex", false, profile);
+    await runner.settled();
+    expect(store.run(id)).toMatchObject({ status: "paused", completed: 0 });
+    await runner.resume(id, true);
+    await runner.settled();
+    expect(analyze.mock.calls[1][0]).toContain("上次输出校验未通过");
+    expect(store.run(id)).toMatchObject({ status: "paused", completed: 0 });
+    await runner.resume(id, true);
+    await runner.settled();
+    expect(analyze.mock.calls[2][0]).toBe(analyze.mock.calls[0][0]);
+    expect(store.run(id)).toMatchObject({ status: "completed", completed: 1 });
+  });
+  it("同输入只更新查价时复用已验证本体，不再次调用AI；输入变化则仍调用AI", async () => {
+    const context = await valuationSetup();
+    const id = await context.runner.start("codex", false, context.profile);
+    await context.runner.settled();
+    const row = context.store.db
+      .prepare("SELECT id,result_json FROM analysis_tasks WHERE run_id=?")
+      .get(id)!;
+    expect(context.analyze).toHaveBeenCalledTimes(1);
+    context.store.db.prepare("UPDATE analysis_tasks SET status='queued' WHERE id=?").run(row.id);
+    await context.runner.resume(id);
+    await context.runner.settled();
+    expect(context.store.run(id)?.completed).toBe(1);
+    expect(context.analyze).toHaveBeenCalledTimes(1);
+    const attempt = context.store.db
+      .prepare(
+        "SELECT raw_response,usage_json,request_text FROM analysis_attempts ORDER BY rowid DESC LIMIT 1",
+      )
+      .get()!;
+    expect(attempt.raw_response).toBeNull();
+    expect(String(attempt.request_text)).toContain("本次未调用AI");
+    expect(JSON.parse(String(attempt.usage_json)).source).toBe("validated-body-recalculation");
+    context.store.db
+      .prepare("UPDATE analysis_tasks SET status='queued',input_hash='changed-input' WHERE id=?")
+      .run(row.id);
+    await context.runner.resume(id);
+    await context.runner.settled();
+    expect(context.analyze).toHaveBeenCalledTimes(2);
+  });
   it("非跟随采集的空队列继续仍不连接AI或重算已完成角色", async () => {
     const { store, runner, analyze, connect } = setup(["a"]);
     const id = await runner.start("codex", false, undefined, true);
@@ -256,9 +254,11 @@ describe("持久化的商品分析队列", () => {
       false,
     );
     expect(store.detail(savedTask, otherServer)?.profileChanged).toBe(false);
-    expect(await runner.start("codex", false, otherServer)).toBe(first);
+    const waiting = await runner.start("codex", false, otherServer);
+    expect(waiting).not.toBe(first);
     await runner.settled();
     expect(analyze).toHaveBeenCalledTimes(1);
+    expect(store.detail(savedTask, otherServer)?.profileChanged).toBe(false);
     const changed = createProfile(
       profile.template,
       {
@@ -280,7 +280,6 @@ describe("持久化的商品分析队列", () => {
       valuation: store.detail(savedTask)!.result!.valuation,
     });
     expect(store.overview({ currentProfile: changed }).ranking).toHaveLength(0);
-    expect(store.overview({ currentProfile: otherServer }).ranking).toHaveLength(1);
     expect(store.detail(savedTask, changed)?.profileChanged).toBe(true);
     for (const changedSettings of [
       createProfile(profile.template + "\n请补充价格说明。", profile.settings, true, true),
@@ -303,7 +302,6 @@ describe("持久化的商品分析队列", () => {
     );
     expect(store.overview({ currentProfile: changed }).results.items[0].profileChanged).toBe(false);
     expect(store.overview({ currentProfile: changed }).records.items[0].profileChanged).toBe(false);
-    expect(store.overview({ currentProfile: changed }).ranking).toHaveLength(1);
     expect(store.detail(savedTask, changed)?.profileChanged).toBe(true);
   });
   it("增量任务只处理新增商品；新任务排队时保留之前的完整结果", async () => {
@@ -458,11 +456,11 @@ describe("持久化的商品分析队列", () => {
     await runner.pause();
   });
 
-  it("完成后宝宝行情过期会移出当前推荐榜，原价格和证据仍能在历史查看", async () => {
+  it("完成后宝宝行情过期会标记过时，原价格和证据仍能在历史查看", async () => {
     const { store, runner, profile } = await valuationSetup();
     const id = await runner.start("codex", true, profile);
     await runner.settled();
-    expect(store.overview({ runId: id }).ranking).toHaveLength(1);
+    expect(store.overview({ runId: id }).records.items[0].state).toBe("completed");
     const taskId = store.overview({ runId: id }).records.items[0].taskId!;
     const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
     store.db
@@ -755,7 +753,7 @@ describe("持久化的商品分析队列", () => {
     expect(analyze).toHaveBeenCalledTimes(2);
   });
 
-  it("试分析3件按列表顺序逐件入库，排除第4件与待补采商品", async () => {
+  it("并发1时试分析3件按列表顺序逐件入库，排除第4件与待补采商品", async () => {
     const { crawl, store, runner, analyze, connect } = setup(["d", "c", "b", "a"]);
     crawl.observe(analysisRecord("pending").listing);
     const original = analyze.getMockImplementation()!;
@@ -763,7 +761,7 @@ describe("持久化的商品分析队列", () => {
       expect(store.run(store.activeRun()!.id)?.completed).toBe(analyze.mock.calls.length - 1);
       return original(prompt, schema, signal);
     });
-    const id = await runner.start("codex", true, undefined, true, "gpt-6-luna", 3);
+    const id = await runner.start("codex", true, undefined, true, "gpt-6-luna", 3, undefined, 1);
     await runner.settled();
     expect(store.run(id)).toMatchObject({ total: 3, completed: 3, failed: 0, model: "gpt-6-luna" });
     expect(analyze).toHaveBeenCalledTimes(3);
@@ -778,7 +776,7 @@ describe("持久化的商品分析队列", () => {
     expect(analyze).toHaveBeenCalledTimes(3);
   });
 
-  it("每件完整原文只发送一次，结果提交后才发下一件，未补采商品不入队", async () => {
+  it("并发1时每件完整原文只发送一次，结果提交后才发下一件，未补采商品不入队", async () => {
     const { crawl, store, runner, analyze } = setup();
     crawl.observe(analysisRecord("pending").listing);
     let release!: () => void;
@@ -791,7 +789,7 @@ describe("持久化的商品分析队列", () => {
       else expect(store.run(store.activeRun()!.id)?.completed).toBe(1);
       return defaultAnalyze(prompt, schema, signal);
     });
-    const id = await runner.start("codex");
+    const id = await runner.start("codex", false, undefined, false, undefined, 1, undefined, 1);
     expect(analyze).toHaveBeenCalledTimes(1);
     expect(store.run(id)).toMatchObject({ status: "running", total: 2, completed: 0 });
     expect(() => crawl.clear()).toThrow("分析任务仍在执行");
@@ -801,7 +799,7 @@ describe("持久化的商品分析队列", () => {
     expect(store.run(id)).toMatchObject({ status: "completed", total: 2, completed: 2 });
     const overview = store.overview({ runId: id });
     expect(overview.counts).toEqual({ total: 3, complete: 2, waitingDetail: 1 });
-    const detail = store.detail(overview.ranking[0].taskId!)!;
+    const detail = store.detail(overview.records.items[0].taskId!)!;
     expect(detail.inputText).toBe(buildProductDocument(crawl.detail("a") as SavedRoleRecord).text);
     expect(analyze.mock.calls[0][0]).toContain(detail.inputText);
     expect(detail.attempts[0]).toMatchObject({
@@ -880,13 +878,13 @@ describe("持久化的商品分析队列", () => {
     const { crawl, store, runner, analyze } = setup(["a"]);
     const first = await runner.start("codex");
     await runner.settled();
-    const original = store.detail(store.overview({ runId: first }).ranking[0].taskId!)!;
+    const original = store.detail(store.overview({ runId: first }).records.items[0].taskId!)!;
     const reused = await runner.start("codex");
     await runner.settled();
     expect(reused).toBe(first);
     expect(store.run(reused)).toMatchObject({ completed: 1, reused: 0 });
     expect(store.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n).toBe(1);
-    const reusedDetail = store.detail(store.overview({ runId: reused }).ranking[0].taskId!)!;
+    const reusedDetail = store.detail(store.overview({ runId: reused }).records.items[0].taskId!)!;
     expect(reusedDetail.taskId).toBe(original.taskId);
     expect(reusedDetail.attempts).toEqual(original.attempts);
     expect(analyze).toHaveBeenCalledTimes(1);
@@ -912,7 +910,7 @@ describe("持久化的商品分析队列", () => {
     analyze
       .mockResolvedValueOnce({ text: "not-json" })
       .mockResolvedValueOnce({ text: "still-invalid" });
-    const id = await runner.start("codex");
+    const id = await runner.start("codex", false, undefined, false, undefined, 1, undefined, 1);
     await runner.settled();
     expect(store.run(id)).toMatchObject({ status: "paused", failed: 1, completed: 0, queued: 1 });
     expect(analyze).toHaveBeenCalledOnce();
@@ -939,7 +937,7 @@ describe("持久化的商品分析队列", () => {
   it("额度或登录错误暂停整批，不继续消耗后面的调用；过长原文保留但不截断发送", async () => {
     const { store, runner, analyze } = setup();
     analyze.mockRejectedValueOnce(new Error("429 quota exceeded"));
-    const id = await runner.start("codex");
+    const id = await runner.start("codex", false, undefined, false, undefined, 1, undefined, 1);
     await runner.settled();
     expect(store.run(id)).toMatchObject({ status: "paused", completed: 0, queued: 2 });
     expect(analyze).toHaveBeenCalledTimes(1);
@@ -960,9 +958,9 @@ describe("持久化的商品分析队列", () => {
       .records.items.find((item) => item.state === "failed")!;
     expect(store.detail(item.taskId!)?.inputText).toContain("大".repeat(100_000));
   });
-  it("空库不连接 AI，分页查询覆盖全部记录，暂停后清空同时删除分析历史", async () => {
+  it("空库试分析不连接 AI，分页查询覆盖全部记录，暂停后清空同时删除分析历史", async () => {
     const { crawl, store, runner, connect } = setup([]);
-    await expect(runner.start("codex")).rejects.toThrow("暂无详情完整");
+    await expect(runner.start("codex", false, undefined, true)).rejects.toThrow("暂无详情完整");
     expect(connect).not.toHaveBeenCalled();
     for (let i = 0; i < 25; i++) crawl.observe(analysisRecord(String(i)).listing);
     expect(store.overview({ page: 2 }).records).toMatchObject({

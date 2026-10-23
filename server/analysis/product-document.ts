@@ -22,7 +22,7 @@ function ordered(value: unknown): unknown {
   return value;
 }
 
-/** One product becomes one complete string, passed unchanged as the SDK's product input. */
+/** Preserve the complete source and its hash, independently of the AI request's scope. */
 export function buildProductDocument(record: SavedRoleRecord): ProductDocument {
   if (record.status !== "complete" || !record.detail)
     throw new Error("商品详情尚未完整采集，不能生成分析资料");

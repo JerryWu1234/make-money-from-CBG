@@ -53,6 +53,36 @@ const config: EquipmentSearchConfig = {
     ["1041,2041", "乾坤斩"],
   ],
   gems: [[6, "黑宝石"]],
+  jewelryPrimaryAttrs: [
+    ["damage", "戒指·伤害"],
+    ["defense", "戒指·防御"],
+    ["magic_damage", "耳饰·法伤"],
+    ["magic_defense", "耳饰·法防"],
+    ["fengyin", "手镯·封印"],
+    ["anti_fengyin", "手镯·抗封"],
+    ["speed", "佩饰·速度"],
+  ],
+  jewelryAddedAttrs: [
+    [1, "固伤"],
+    [2, "伤害"],
+    [3, "速度"],
+    [4, "法伤"],
+    [5, "狂暴"],
+    [6, "物理暴击"],
+    [7, "法术暴击"],
+    [8, "封印"],
+    [9, "法伤结果"],
+    [10, "穿刺"],
+    [11, "治疗"],
+    [12, "气血"],
+    [13, "防御"],
+    [14, "法防"],
+    [15, "抗物理暴击"],
+    [16, "抗法术暴击"],
+    [17, "抗封"],
+    [18, "格挡"],
+    [19, "回复"],
+  ],
   addedAttrs: [
     [4, "法伤"],
     [3, "速度"],
@@ -131,7 +161,16 @@ describe("按各物品表单的等级边界生成查询", () => {
     });
   });
   it.each([60, 80, 160])("灵饰%i级使用灵饰表单", (level) => {
-    const query = equipmentQuery(item({ category: "灵饰 · 戒指", level }), config, "1");
+    const query = equipmentQuery(
+      item({
+        category: "灵饰 · 戒指",
+        level,
+        description:
+          "等级" + level + "\n防御20\n精炼等级3\n附加属性：\n固定伤害10[+12]\n治疗能力8[+9]",
+      }),
+      config,
+      "1",
+    );
     expect(query).toMatchObject({
       jewelry: true,
       args: { equip_level_min: level, equip_level_max: level },
@@ -139,9 +178,124 @@ describe("按各物品表单的等级边界生成查询", () => {
     expect(query.args).not.toHaveProperty("level_min");
   });
   it.each([0, 50, 70, 90, 170])("灵饰%i级不套普通10级步长", (level) => {
-    expect(() => equipmentQuery(item({ category: "灵饰 · 戒指", level }), config, "1")).toThrow(
-      "灵饰检索",
-    );
+    expect(() =>
+      equipmentQuery(
+        item({
+          category: "灵饰 · 戒指",
+          level,
+          description:
+            "等级" + level + "\n防御20\n精炼等级3\n附加属性：\n固定伤害10[+12]\n治疗能力8[+9]",
+        }),
+        config,
+        "1",
+      ),
+    ).toThrow("灵饰检索");
+  });
+});
+
+it("无下限搜索保留低值候选；官网省略灵饰0下限时等价，但非零条件仍须提交", () => {
+  const expected = {
+    equip_level_min: 100,
+    equip_level_max: 100,
+    kindid: "61",
+    serverid: "902",
+    defense: 0,
+    "added_attr.1": 1,
+  };
+  const actual = {
+    equip_level_min: 100,
+    equip_level_max: 100,
+    kindid: "61",
+    serverid: "902",
+    "added_attr.1": 1,
+  };
+  expect(() => assertEquipmentUIArguments(expected, actual)).not.toThrow();
+  expect(() =>
+    assertEquipmentUIArguments(expected, { ...actual, basic_attr_value: 0 }),
+  ).not.toThrow();
+  expect(() => assertEquipmentUIArguments(expected, { ...actual, basic_attr_value: 99 })).toThrow(
+    "basic_attr_value",
+  );
+  expect(() => assertEquipmentUIArguments({ ...expected, defense: 20 }, actual)).toThrow("defense");
+  expect(() => assertEquipmentUIArguments(expected, { ...actual, equip_level_max: 120 })).toThrow(
+    "equip_level_max",
+  );
+  expect(() => assertEquipmentUIArguments({ ...expected, suit_effect: 4 }, actual)).toThrow(
+    "suit_effect",
+  );
+});
+
+describe("灵饰真实基础条件", () => {
+  const observed = {
+    ...config,
+    kinds: [
+      [61, "戒指"],
+      [64, "佩饰"],
+    ] as Array<[number, string]>,
+    jewelryPrimaryAttrs: [
+      ["defense", "戒指·防御"],
+      ["speed", "佩饰·速度"],
+    ] as Array<[string, string]>,
+    jewelryAddedAttrs: [
+      ["101", "固伤"],
+      ["311", "治疗"],
+      ["213", "防御"],
+      ["3", "速度"],
+    ] as Array<[string, string]>,
+  };
+  const target = item({
+    category: "灵饰 · 戒指",
+    description: "等级100\n防御+22\n精炼等级3\n附加属性：\n治疗能力+10[+9]\n固定伤害+10[+12]",
+  });
+  it("使用无下限和两条实际附加类型，低值不被提前排除，编号采用官网选项而非数组顺序", () => {
+    expect(equipmentQuery(target, observed, "163").args).toMatchObject({
+      defense: 0,
+      added_attr_num: 2,
+      added_attr_logic: "detail",
+      "added_attr.311": 1,
+      "added_attr.101": 1,
+    });
+    expect(equipmentQuery(target, observed, "163").args).not.toHaveProperty("jinglian_level");
+  });
+  it("同名主附属性分段且保留重复条数，不把括号加成加到基础值", () => {
+    const value = equipmentQuery(
+      {
+        ...target,
+        description:
+          "等级100\n防御+20\n精炼等级3\n附加属性：\n防御+21[+24]\n防御+25[+24]\n速度+10[+9]",
+      },
+      observed,
+      "163",
+    ).args;
+    expect(value).toMatchObject({
+      defense: 0,
+      added_attr_num: 3,
+      "added_attr.213": 2,
+      "added_attr.3": 1,
+    });
+  });
+  it.each([
+    { ...observed, jewelryPrimaryAttrs: [] },
+    {
+      ...observed,
+      jewelryPrimaryAttrs: [
+        ["defense", "戒指·防御"],
+        ["wrong", "戒指·防御"],
+      ],
+    },
+    { ...observed, jewelryAddedAttrs: [["101", "固伤"]] },
+    { ...observed, jewelryAddedAttrs: [...observed.jewelryAddedAttrs, ["999", "治疗"]] },
+  ])("属性控件映射缺失或重复时不发漏条件的查询", (cfg) => {
+    expect(() => equipmentQuery(target, cfg as EquipmentSearchConfig, "163")).toThrow(/灵饰.*属性/);
+  });
+  it("分段和基础数值不可靠时停止构造查询", () => {
+    for (const description of [
+      "等级100\n防御22\n精炼等级3",
+      target.description.replace("防御+22", "防御未知"),
+    ])
+      expect(() => equipmentQuery({ ...target, description }, observed, "163")).toThrow(
+        /灵饰.*属性/,
+      );
   });
 });
 
@@ -158,9 +312,8 @@ describe("灵饰核心套装使用官方独立字符串映射", () => {
     kinds: [[61, "戒指"]] as Array<[number, string]>,
     jewelrySuitEffects: ["血气方刚", "通真达灵", "心无旁骛", "健步如飞"],
   };
-  // Failure cases: numeric >= filters exclude authorized lower-base samples; old
-  // enhancement stages reapply gems/refinement; jewelry effects must remain selected.
-  it("单条件宽搜保留灵饰核心特效，不填主属性下限或精炼", () => {
+  // Main base values are now filled as requested; refinement bonuses must remain excluded.
+  it("按基础属性类型无下限搜索与附加组合，保留核心特效而不填精炼", () => {
     const plan = equipmentQueryPlan(ring, jewelryConfig, "1");
     expect(plan).toHaveLength(1);
     expect(plan[0].args).toEqual({
@@ -171,6 +324,12 @@ describe("灵饰核心套装使用官方独立字符串映射", () => {
       kindid: "61",
       suit_effect: "4",
       suit_effect_level: 2,
+      defense: 0,
+      added_attr_num: 3,
+      added_attr_logic: "detail",
+      "added_attr.9": 1,
+      "added_attr.4": 1,
+      "added_attr.7": 1,
     });
   });
   it.each([undefined, ["健步如飞", "健步如飞"], ["其他套装"]])(
@@ -248,7 +407,7 @@ describe("官方装备搜索条件", () => {
       assertEquipmentUIArguments(expected, { ...expected, cross_buy_serverid: "482" }),
     ).not.toThrow();
   });
-  it("灵饰分类缺失时用已分段主属性确认类型，不发送数值下限", () => {
+  it("灵饰分类缺失时用已分段主属性确认类型并填写基础值", () => {
     const jewelry = item({
       name: "莲音玦",
       category: "灵饰",
@@ -267,9 +426,9 @@ describe("官方装备搜索条件", () => {
     };
     const query = equipmentQuery(jewelry, jewelryConfig, "1");
     expect(query.args.kindid).toBe("64");
-    expect(query.args).not.toHaveProperty("speed");
+    expect(query.args.speed).toBe(0);
   });
-  it("人物装备提交身份范围和实际特效特技套装，不带数值下限或孔数", () => {
+  it("人物装备提交扣宝石初血及实际特效特技套装，不加孔数条件", () => {
     const target = item({
       description: item().description + "\n开运孔数3\n套装：变身术之噬天虎\n特技：破血狂攻",
     });
@@ -289,6 +448,7 @@ describe("官方装备搜索条件", () => {
       serverid: "1",
       attr_without_melt: 1,
       kindid: "20",
+      init_hp: 0,
       special_effect: "3",
       special_skill: "1036",
       special_mode: "and",
@@ -428,7 +588,8 @@ describe("官方装备搜索条件", () => {
         name: "测试配饰",
         category: "灵饰 · 配饰",
         level: 80,
-        description: "等级：80\n速度：20\n精炼等级：6\n修理失败：0",
+        description:
+          "等级：80\n速度：20\n精炼等级：6\n附加属性：\n气血50[+168]\n防御20[+48]\n修理失败：0",
       }),
       {
         ...config,
@@ -495,7 +656,11 @@ describe("官方装备搜索条件", () => {
 
   it("公开kindId可识别泛型分类中的灵饰，保留61至64搜索类型", () => {
     const result = equipmentQuery(
-      item({ category: "人物装备", kindId: "064" }),
+      item({
+        category: "人物装备",
+        kindId: "064",
+        description: "等级100\n速度20\n精炼等级3\n附加属性：\n气血50[+84]\n防御20[+24]",
+      }),
       {
         ...config,
         kinds: [
@@ -518,14 +683,33 @@ describe("官方装备搜索条件", () => {
   });
 
   it.each([
-    "防御296\n锻炼等级8\n镶嵌宝石 月亮石",
-    "伤害300\n锻炼等级10\n镶嵌宝石 太阳石",
-    "敏捷4\n防御37\n熔炼效果：+3防御",
-  ])("基础值由详情核验方向，不向官网发送≥目标数值：%s", (description) => {
-    const { args } = equipmentQuery(item({ description: "等级100\n" + description }), config, "1");
-    expect(Object.keys(args).some((key) => key.startsWith("init_"))).toBe(false);
-    for (const key of ["damage", "all_wakan", "gem_value", "gem_level", "repair_fail", "hole_num"])
-      expect(args).not.toHaveProperty(key);
+    ["衣服", "防御296\n锻炼等级8\n镶嵌宝石 月亮石", "init_defense"],
+    ["剑", "伤害300\n锻炼等级10\n镶嵌宝石 太阳石", "init_damage_raw"],
+    ["鞋子", "敏捷4\n速度64\n防御37\n锻炼等级8\n宝石：黑宝石", "init_dex"],
+    ["腰带", "气血570\n锻炼等级8\n宝石：光芒石", "init_hp"],
+    ["饰品", "灵力148\n锻炼等级8\n宝石：舍利子", "init_wakan"],
+    ["衣服", "防御0\n锻炼等级0", "init_defense"],
+  ])("%s核心初始值必须可靠，搜索无下限且不把初速当初敏", (category, description, key) => {
+    const { args } = equipmentQuery(
+      item({ category, description: "等级100\n" + description }),
+      config,
+      "1",
+    );
+    expect(args[key]).toBe(0);
+    expect(
+      equipmentQuery(item({ category, description: "等级100\n" + description }), config, "1")
+        .coreSkipReason,
+    ).toBeNull();
+    expect(Object.keys(args).filter((key) => key.startsWith("init_"))).toEqual([key]);
+    for (const excluded of [
+      "damage",
+      "all_wakan",
+      "gem_value",
+      "gem_level",
+      "repair_fail",
+      "hole_num",
+    ])
+      expect(args).not.toHaveProperty(excluded);
   });
   it("官网名称配置唯一明确武器分类时补kind，不靠自制名字表", () => {
     expect(
@@ -553,7 +737,7 @@ describe("官方装备搜索条件", () => {
     ).not.toHaveProperty("kindid");
   });
 
-  it("灵饰不提交主附属性下限、精炼或条数条件", () => {
+  it("灵饰填主属性基础值及重复附加类型，未重复计入精炼加成", () => {
     const { args } = equipmentQuery(
       item({
         category: "灵饰 · 耳饰",
@@ -571,6 +755,11 @@ describe("官方装备搜索条件", () => {
       pass_fair_show: "1",
       serverid: "1",
       kindid: "62",
+      magic_damage: 0,
+      added_attr_num: 3,
+      added_attr_logic: "detail",
+      "added_attr.4": 2,
+      "added_attr.3": 1,
     });
   });
 });
@@ -914,7 +1103,7 @@ describe("实际装备的分阶段相近检索", () => {
       [6, "黑宝石"],
     ],
   };
-  it("实际人物装备只生成一条宽搜，宝石与修理不同不增加搜索阶段", () => {
+  it("实际人物装备只生成一条初防查询，宝石与修理不同不增加搜索阶段", () => {
     const target = item({
       name: "黑魔冠",
       category: "人物装备 · 头盔",
@@ -932,6 +1121,7 @@ describe("实际装备的分阶段相近检索", () => {
           serverid: "1",
           attr_without_melt: 1,
           kindid: "15",
+          init_defense: 0,
         },
       },
     ]);
@@ -1551,6 +1741,7 @@ it("官网类型已确认的衣服使用可还原初防，不因非核心气血�
     { ...config, namedKinds: [[18, "男衣"]] },
     "1",
   );
-  expect(query.args).not.toHaveProperty("init_defense");
+  expect(query.args.init_defense).toBe(0);
+  expect(query.args).not.toHaveProperty("init_hp");
   expect(query.coreSkipReason).toBeNull();
 });

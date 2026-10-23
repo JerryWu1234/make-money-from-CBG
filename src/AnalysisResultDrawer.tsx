@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { AnalysisDetail } from "../server/analysis/types";
 import { displayTime } from "./SavedRoleList";
 import { ProductAnalysisView } from "./ProductAnalysisView";
+import { AssetCounts, EquipmentSummary } from "./AssetCounts";
 
 export function AnalysisResultDrawer({
   taskId,
@@ -121,6 +122,7 @@ export function AnalysisResultDrawer({
             {detail.result ? (
               <ProductAnalysisView
                 result={detail.result}
+                assetCounts={detail.assetCounts}
                 onConfigure={onConfigure}
                 previousSettings={
                   detail.profileChanged ||
@@ -136,6 +138,12 @@ export function AnalysisResultDrawer({
                     : "商品已排队，等待分析。")}
               </p>
             )}
+            {!detail.result && (
+              <p>
+                <AssetCounts counts={detail.assetCounts} />
+              </p>
+            )}
+            {!detail.result && <EquipmentSummary counts={detail.assetCounts} />}
             <section className="analysis-input-preview">
               <h3>本次输入留档</h3>
               <p>
@@ -160,7 +168,7 @@ export function AnalysisResultDrawer({
                   </details>
                   <details>
                     <summary>查看本次使用的 Prompt 模板</summary>
-                    <pre>{detail.profile.template}</pre>
+                    <pre>{detail.requestTemplate ?? detail.profile.template}</pre>
                   </details>
                 </>
               )}

@@ -86,6 +86,77 @@ describe("装备局部补采", () => {
   afterAll(async () => {
     await browser?.close();
   });
+  // 失败方式：共享详情页串号、读取失败未归还页面、每件都新开页而没有复用。
+  it("并发角色使用独立详情页，完整读取后复用空闲页", async () => {
+    const context = await browser.newContext();
+    await context.route("**/*", (route) => {
+      const id = new URL(route.request().url()).searchParams.get("eid")!;
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          fixture(false).replaceAll("新武器", `武器${id}`) +
+          `<script>window.RoleData={id:${JSON.stringify(id)}}</script>`,
+      });
+    });
+    try {
+      const page = await context.newPage();
+      const createDetailPage = vi.fn(() => context.newPage());
+      const source = createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        createDetailPage,
+        signal: new AbortController().signal,
+        onDetailProgress: vi.fn(),
+        log: vi.fn(),
+      });
+      const rows = ["one", "two", "three"].map((id) => ({
+        ...listing,
+        key: `367:${id}`,
+        eid: id,
+        url: `https://xyq.cbg.163.com/equip?s=367&eid=${id}`,
+      }));
+      const results = await Promise.all(rows.map((row) => source.detail(row)));
+      for (const [index, result] of results.entries()) {
+        expect(result.raw.RoleData).toEqual({ id: rows[index].eid });
+        expect(result.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].name).toBe(
+          `武器${rows[index].eid}`,
+        );
+        expect(result.equipmentCapture?.complete).toBe(true);
+      }
+      expect(createDetailPage).toHaveBeenCalledTimes(2);
+      await source.detail(rows[0]);
+      expect(createDetailPage).toHaveBeenCalledTimes(2);
+    } finally {
+      await context.close();
+    }
+  }, 30000);
+  it("采集始终读取所有标签、装备及宝宝，不受只分析裸号的设置影响", async () => {
+    const page = await browser.newPage();
+    await page.route("**/*", (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: fixture(false, completePet()),
+      }),
+    );
+    try {
+      const source = createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        signal: new AbortController().signal,
+        onDetailProgress: () => {},
+        log: () => {},
+      });
+      const result = await source.detail(listing);
+      expect(result.captureMode).toBe("all");
+      expect(result.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      expect(result.petCapture).toMatchObject({ complete: true, issues: [] });
+      expect(MAIN_TABS.every((name) => result.tabs.some((tab) => tab.name === name))).toBe(true);
+      expect(result.tabs.find((tab) => tab.name === "道具/法宝")!.items!.length).toBeGreaterThan(0);
+      expect(result.tabs.find((tab) => tab.name === "召唤兽/孩子")!.pets).toHaveLength(1);
+    } finally {
+      await page.close();
+    }
+  }, 20000);
   it("同一采集流程先缺武器属性，自动重新打开并读全后才返回完成", async () => {
     const page = await browser.newPage();
     let visits = 0;
@@ -118,6 +189,59 @@ describe("装备局部补采", () => {
       await page.close();
     }
   }, 20000);
+  it.each([
+    {
+      label: "名称尾部空格",
+      name: "新武器 ",
+      tooltip: "新武器\n等级 100\n伤害 +420",
+      complete: true,
+    },
+    {
+      label: "名称首尾空白",
+      name: "　新武器\t ",
+      tooltip: "新武器\n等级 100\n伤害 +420",
+      complete: true,
+    },
+    {
+      label: "不同物品名称",
+      name: "新武器 ",
+      tooltip: "另一把武器\n等级 100\n伤害 +420",
+      complete: false,
+    },
+    { label: "相同名称缺属性", name: "新武器 ", tooltip: "新武器\n等级 100", complete: false },
+  ])(
+    "提示框名称首尾空白匹配边界：$label",
+    async ({ name, tooltip, complete }) => {
+      const page = await browser.newPage();
+      const gear = `<div id="RoleEquip"><img width="40" height="40" data_kindid="999" data_equip_name="${name}" data_equip_desc="等级 100" data_equip_category="武器" data_tip_box="WhitespaceTipsBox" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseover="document.getElementById('WhitespaceTipsBox').style.display='block'"><div id="WhitespaceTipsBox" style="display:none;white-space:pre-line">${tooltip}</div></div>`;
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, "", "", gear),
+        }),
+      );
+      try {
+        const detail = await collectValuationDetail(
+          page,
+          listing,
+          previous(),
+          new AbortController().signal,
+        );
+        expect(detail.equipmentCapture?.complete).toBe(complete);
+        const captured = detail.tabs.find((entry) => entry.name === "道具/法宝")!.items![0];
+        expect(captured.name).toBe(name);
+        expect(captured.description).toContain(tooltip.split("\n").slice(1).join("\n"));
+        if (complete) expect(detail.equipmentCapture?.issues).toEqual([]);
+        else
+          expect(
+            detail.equipmentCapture?.issues.some((issue) => issue.includes("提示框未完整显示")),
+          ).toBe(true);
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
   it("宝宝饰品带切换索引但只有提示框时仍读取，不能误当头像跳过", async () => {
     const page = await browser.newPage();
     const pet = completePet()
@@ -346,6 +470,37 @@ describe("装备局部补采", () => {
     }
   });
 
+  it("人物装备为空但随身有宝宝装备时，以可见容器及已读装备对象确认完整", async () => {
+    const page = await browser.newPage();
+    try {
+      const body =
+        '<p>现金：100</p><table id="RoleUsingEquips"><tr><td></td></tr></table><table id="RoleStoreEquips"><tr><td><img width="40" height="40" data_equip_name="嵌宝金环" data_equip_type="9210" data_equip_desc="等级 95#r速度 +24#r耐久 500" data_equip_type_desc="【装备对象】召唤兽#r【装备条件】等级95"></td></tr></table>';
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, "", "", body),
+        }),
+      );
+      const captured = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(captured.equipmentCapture).toMatchObject({
+        complete: true,
+        emptyProof: "official-containers",
+        issues: [],
+      });
+      expect(captured.tabs.find((tab) => tab.name === "道具/法宝")?.items?.[0]).toMatchObject({
+        name: "嵌宝金环",
+        attributes: { 装备对象: "召唤兽" },
+      });
+    } finally {
+      await page.close();
+    }
+  });
+
   it("新采保存官网模型号，玉魄、技能书和镶嵌材料不误报装备属性缺失", async () => {
     const page = await browser.newPage();
     try {
@@ -383,6 +538,70 @@ describe("装备局部补采", () => {
       await page.close();
     }
   }, 15000);
+  it("官网4103内丹只有技能说明时完整采集，不要求人物装备等级和数值", async () => {
+    const page = await browser.newPage();
+    try {
+      const innerdan =
+        '<img width="40" height="40" data_equip_name="高级召唤兽内丹" data_equip_type="4103" data_equip_desc="所带内丹技能：血债偿#r本方召唤兽被击飞时提升法术伤害">';
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, innerdan),
+        }),
+      );
+      const detail = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(detail.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      const items = detail.tabs.find((tab) => tab.name === "道具/法宝")!.items!;
+      expect(items[1]).toMatchObject({
+        name: "高级召唤兽内丹",
+        modelId: "4103",
+        category: "道具 · 召唤兽内丹",
+      });
+      expect(items[1].description).toContain("血债偿");
+    } finally {
+      await page.close();
+    }
+  }, 15000);
+
+  // 失败方式：材料被当作装备要求属性或悬停；普通装备因此被一并跳过。
+  it("钟灵石和百炼精铁无需装备属性，仍完整读取同页的普通装备", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(
+            false,
+            undefined,
+            undefined,
+            '<img width="40" height="40" data_equip_name="钟灵石" data_equip_type="50344"><img width="40" height="40" data_equip_name="百炼精铁" data_equip_type="4001" data_equip_desc="等级 150">',
+          ),
+        }),
+      );
+      const detail = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(detail.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      const items = detail.tabs.find((entry) => entry.name === "道具/法宝")!.items!;
+      expect(items[0].description).toContain("伤害 +420");
+      expect(items.slice(1).map((item) => item.category)).toEqual([
+        "材料 · 钟灵石",
+        "材料 · 百炼精铁",
+      ]);
+      expect(items[2].description).toBe("等级 150");
+    } finally {
+      await page.close();
+    }
+  }, 15000);
+
   it("空描述也读取提示框，新装备和宝宝替换旧快照，其余资料保留", async () => {
     const page = await browser.newPage();
     try {

@@ -137,6 +137,13 @@ describe("官方 Codex 登录与 SDK", () => {
     expect(options.env.OPENAI_API_KEY).toBeUndefined();
     expect(options.env.CODEX_API_KEY).toBeUndefined();
     expect(options.config.forced_login_method).toBe("chatgpt");
+    expect(options.config.features).toEqual({
+      shell_tool: false,
+      unified_exec: false,
+      hooks: false,
+      multi_agent: false,
+      apps: false,
+    });
     expect(mocks.startThread).toHaveBeenCalledWith(
       expect.objectContaining({
         workingDirectory: "/private/tmp/cbg-codex-fixture",
@@ -229,6 +236,77 @@ describe("官方 Codex 登录与 SDK", () => {
     await probeCodex("Reply READY.", signal);
     expect(mocks.options.mock.calls[1][0].config.service_tier).toBeUndefined();
     expect(mocks.startThread.mock.calls[1][0].modelReasoningEffort).toBe("low");
+  });
+
+  it("裸号核对使用 low/fast，关闭无关工具并在结构化回合完成时返回", async () => {
+    let closed = false;
+    mocks.runStreamed.mockResolvedValue({
+      events: (async function* () {
+        try {
+          yield {
+            type: "item.completed",
+            item: { type: "agent_message", text: '{"decision":"PASS"}' },
+          };
+          yield { type: "turn.completed", usage: { input_tokens: 100, output_tokens: 10 } };
+          throw new Error("完成后不应再等待额外输出");
+        } finally {
+          closed = true;
+        }
+      })(),
+    });
+    const { requestCodex } = await import("./codex");
+    const signal = new AbortController().signal,
+      schema = { type: "object" };
+    const response = await requestCodex("裸号核对", signal, {
+      model: "gpt-6-luna",
+      outputSchema: schema,
+      bareRoleReview: true,
+    });
+    expect(response).toMatchObject({
+      text: '{"decision":"PASS"}',
+      usage: {
+        input_tokens: 100,
+        input_scope: "body",
+        reasoning_effort: "low",
+        completion_mode: "turn.completed",
+      },
+    });
+    expect(mocks.startThread.mock.calls[0][0]).toMatchObject({
+      modelReasoningEffort: "low",
+      webSearchMode: "disabled",
+    });
+    expect(mocks.options.mock.calls[0][0].config).toMatchObject({
+      service_tier: "fast",
+      features: {
+        shell_tool: false,
+        unified_exec: false,
+        hooks: false,
+        multi_agent: false,
+        apps: false,
+      },
+    });
+    expect(mocks.runStreamed).toHaveBeenCalledWith("裸号核对", { signal, outputSchema: schema });
+    expect(mocks.run).not.toHaveBeenCalled();
+    expect(closed).toBe(true);
+  });
+
+  it("裸号结构化流未完成时不能把中途文本作为成功结果", async () => {
+    mocks.runStreamed.mockResolvedValue({
+      events: (async function* () {
+        yield {
+          type: "item.completed",
+          item: { type: "agent_message", text: '{"decision":"PASS"}' },
+        };
+      })(),
+    });
+    const { requestCodex } = await import("./codex");
+    await expect(
+      requestCodex("裸号核对", new AbortController().signal, {
+        model: "gpt-6-luna",
+        outputSchema: {},
+        bareRoleReview: true,
+      }),
+    ).rejects.toThrow("完整完成事件");
   });
 
   it("装备查价启用实时搜索并返回真实搜索事件，不把模型文本当查询记录", async () => {

@@ -589,13 +589,14 @@ describe("裸号估值的复算与可追溯输入", () => {
       crawl.db.close();
     }
   });
-  it("完整原文只出现一次，金额严格复算；AI改写待确认项时保留程序完整列表", () => {
+  it("裸号只发送核算投影，金额严格复算；AI改写待确认项时保留程序完整列表", () => {
     const record = completeRecord(),
       configured = profile(),
       doc = buildProductDocument(record);
     const prompt = valuationPrompt(doc, record, configured);
-    expect(prompt.startsWith(template)).toBe(true);
-    expect(prompt.split(doc.text)).toHaveLength(2);
+    expect(prompt).toContain("【裸号核对专用模板 v1】");
+    expect(prompt).not.toContain(doc.text);
+    expect(prompt).toContain(doc.contentHash);
     const computed = calculateValuation(record, configured);
     const result = validateValuation(JSON.stringify(computed), doc, record, configured);
     expect(result.valuation?.decision).toBe("BUY");
@@ -626,7 +627,7 @@ describe("裸号估值的复算与可追溯输入", () => {
       expect(preserved.missingData).toEqual([...pending.missing_fields, ...pending.pending_rules]);
     }
   });
-  it("修改计价规则停用旧算法；默认联网查价，费用不参与新设置指纹", () => {
+  it("修改计价规则停用旧算法；默认仅裸号，费用不参与新设置指纹", () => {
     expect(createProfile(template).calculationCompatible).toBe(true);
     expect(createProfile(template + "\n请简洁解释。").calculationCompatible).toBe(true);
     const changed = createProfile(template.replace("| 未飞升 | 0 元 |", "| 未飞升 | 10 元 |"));
@@ -648,8 +649,8 @@ describe("裸号估值的复算与可追溯输入", () => {
     });
     expect(() => normalizeSettings({ b: 0.8, a: 0.9 })).toThrow("0 < a ≤ b");
     const automatic = createProfile(template);
-    expect(automatic.equipmentSearch).toBe(true);
-    expect(automatic.petSearch).toBe(true);
+    expect(automatic.equipmentSearch).toBe(false);
+    expect(automatic.petSearch).toBe(false);
     const ignoredPolicy = createProfile(template, {
       ...DEFAULT_SETTINGS,
       b: 0.3,
@@ -659,7 +660,9 @@ describe("裸号估值的复算与可追溯输入", () => {
     });
     expect(ignoredPolicy.settingsHash).toBe(automatic.settingsHash);
     expect(ignoredPolicy.hash).toBe(automatic.hash);
-    expect(createProfile(template, DEFAULT_SETTINGS, false).hash).not.toBe(automatic.hash);
+    expect(createProfile(template, { ...DEFAULT_SETTINGS, analyzeEquipment: true }).hash).not.toBe(
+      automatic.hash,
+    );
   });
   it("保存设置防止覆盖并持久化，保留原Prompt逐字内容", () => {
     const directory = mkdtempSync(join(tmpdir(), "cbg-profile-")),
@@ -789,7 +792,9 @@ describe("裸号估值的复算与可追溯输入", () => {
         completed: 1,
         profileHash: configured.hash,
       });
-      const task = store.overview({ runId: one }).ranking[0].taskId!;
+      const task = store
+        .overview({ runId: one })
+        .records.items.find((item) => item.state === "completed")!.taskId!;
       const detail = store.detail(task)!;
       expect(detail.profile?.template).toBe(template);
       expect(detail.attempts[0].requestText).toBe(detail.promptText);

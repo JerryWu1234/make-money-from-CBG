@@ -162,9 +162,15 @@ export async function prepareList(
   const selling = page.locator('#order_menu a[data_attr_name="selling_time"]');
   const expiry = page.locator('#order_menu a[data_attr_name="expire_time"]');
   const preferred = /^(selling_time|expire_time) DESC$/.exec(preferredOrder || "")?.[1];
+  if (
+    preferredOrder === "selling_time DESC" &&
+    !(await selling.count()) &&
+    (await readListings(page)).order !== preferredOrder
+  )
+    throw new Error("网站未提供上架时间倒序，已暂停采集");
   const field =
-    preferred === "selling_time" && (await selling.count())
-      ? preferred
+    preferredOrder === "selling_time DESC"
+      ? "selling_time"
       : preferred === "expire_time" && (await expiry.count())
         ? preferred
         : (await selling.count())
@@ -183,7 +189,10 @@ export async function prepareList(
       await waitList(page, 1);
     }
   }
-  return gotoPage(page, 1, signal, true);
+  const result = await gotoPage(page, 1, signal, true);
+  if (preferredOrder === "selling_time DESC" && result.order !== preferredOrder)
+    throw new Error("未能确认上架时间倒序，已暂停采集");
+  return result;
 }
 export async function hoverListing(
   page: Page,

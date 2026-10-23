@@ -7,6 +7,7 @@ import {
   equipmentEmptyProof,
   hasUnconfirmedEmptyEquipment,
   itemFromAttributes,
+  preserveJewelryTooltipSections,
   observedEquipmentCategory,
 } from "./compact";
 import { collectPets, petCaptureSummary } from "./pets";
@@ -83,6 +84,36 @@ async function capture(page: Page, name: string): Promise<TabSnapshot> {
       elements: [],
       tooltips: [],
       items: [],
+      ...(/^道具\/法宝(?:\s*\/|$)/.test(tabName)
+        ? {
+            equipmentContainers: equipmentScopes.map((id, index) => ({
+              id,
+              present: !!scopes[index],
+              visible:
+                scopes[index]?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
+                false,
+              icons: Array.from(
+                scopes[index]?.querySelectorAll("img, [data_equip_name], [data-equip-name]") || [],
+              )
+                .filter(
+                  (icon) =>
+                    !/\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#].*)?$/i.test(
+                      icon.getAttribute("src") || "",
+                    ),
+                )
+                .map((icon) => ({
+                  name:
+                    icon.getAttribute("data_equip_name") ||
+                    icon.getAttribute("data-equip-name") ||
+                    "",
+                  modelId:
+                    icon.getAttribute("data_equip_type") ||
+                    icon.getAttribute("data-equip-type") ||
+                    "",
+                })),
+            })),
+          }
+        : {}),
       ...(emptyEquipment ? { equipmentEmptyProof: "official-containers" as const } : {}),
     };
   }, name);
@@ -164,7 +195,11 @@ async function inspectItems(
     // 名称、技能类别或装备属性已在元素里时直接读取，不触发无意义的提示框。
     let item = itemFromAttributes(attrs, index);
     // 已明确不在人物装备计价范围内的物品不要求普通装备属性。
-    if (/^(?:法宝|灵宝|神器|道具 · 召唤兽技能书|材料 · 精魄灵石)$/.test(item.category || "")) {
+    if (
+      /^(?:法宝|灵宝|神器|道具 · 召唤兽(?:技能书|内丹)|材料 · (?:精魄灵石|钟灵石|百炼精铁))$/.test(
+        item.category || "",
+      )
+    ) {
       snapshot.items!.push(item);
       continue;
     }
@@ -250,7 +285,7 @@ async function inspectItems(
           },
           {
             id: tipId || "",
-            name: attrs.data_equip_name || "",
+            name: attrs.data_equip_name?.trim() || "",
             requireStats: incompleteEquipment,
             expectedLevel,
           },
@@ -287,7 +322,13 @@ async function inspectItems(
         )
           issues?.push(`${snapshot.name}：${item.name} 的未鉴定提示框名称或等级与物品不一致`);
       }
-      item = itemFromAttributes({ ...attrs, data_equip_desc: tooltip }, index);
+      item = itemFromAttributes(
+        {
+          ...attrs,
+          data_equip_desc: preserveJewelryTooltipSections(tooltip, item.description || ""),
+        },
+        index,
+      );
       if (item.name.startsWith("图标 ")) item.name = tooltip.split("\n")[0];
     }
     if (!item.description && !item.attributes && item.name.startsWith("图标 "))
@@ -535,6 +576,7 @@ export async function collectValuationDetail(
   }
   return {
     ...previous,
+    captureMode: "all" as const,
     captureVersion: CAPTURE_VERSION,
     valuation,
     equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
@@ -650,6 +692,7 @@ export async function collectDetail(
   report("全部标签读取完成，正在保存详情…");
   const now = new Date().toISOString();
   return {
+    captureMode: "all" as const,
     captureVersion: CAPTURE_VERSION,
     valuation: await captureValuation(page),
     equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),

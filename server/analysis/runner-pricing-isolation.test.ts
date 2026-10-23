@@ -58,6 +58,8 @@ function setup(petSearch = false) {
     crawl.save(record.listing, record.detail!);
   }
   const store = new AnalysisStore(crawl.db);
+  // These regressions run one role at a time; parallel failure handling has its own suite.
+  vi.spyOn(store, "followsCapture").mockReturnValue(false);
   const profile = createProfile(
     readFileSync(PROMPT_FILE, "utf8"),
     DEFAULT_SETTINGS,
@@ -118,7 +120,7 @@ it("逐件检查点保持运行，连续保存不污染CAS基线，暂停后保�
       return snapshot;
     },
   );
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await vi.waitFor(() => expect(lateCheckpoint).toBeTypeOf("function"));
   await c.runner.pause(id);
   expect(c.store.run(id)).toMatchObject({ status: "paused", queued: 2 });
@@ -137,7 +139,7 @@ it("宝宝成长表单误差暂停批次，保留首件并不启动后续角色"
     assertPetUIArguments({ growth: 1009 }, { growth: 1008 });
     throw new Error("应当先拒绝成长误差");
   });
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await c.runner.settled();
   expect(c.store.run(id)).toMatchObject({
     status: "paused",
@@ -159,7 +161,7 @@ it.each(["宝宝官网表单实际条件与计划不一致：level_min", "藏宝
   async (message) => {
     const c = setup(true);
     c.searchPets.mockRejectedValueOnce(new Error(message));
-    const id = await c.runner.start("codex", true, c.profile);
+    const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
     await c.runner.settled();
     expect(c.store.run(id)).toMatchObject({ status: "paused", queued: 2, waitingPricing: 0 });
     expect(c.searchPets).toHaveBeenCalledOnce();
@@ -171,7 +173,7 @@ it.each([false, true])("宝宝页面等待20秒超时暂停批次，错误保留
   const error = new Error("page.waitForFunction: Timeout 20000ms exceeded.");
   if (keepName) error.name = "TimeoutError";
   c.searchPets.mockRejectedValueOnce(error);
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await c.runner.settled();
   expect(c.store.run(id)).toMatchObject({
     status: "paused",
@@ -210,7 +212,7 @@ it("单角色读取失败立即暂停，普通继续不越过，显式重试按�
       })),
     };
   });
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await c.runner.settled();
   expect(c.store.run(id)).toMatchObject({
     status: "paused",
@@ -228,7 +230,9 @@ it("单角色读取失败立即暂停，普通继续不越过，显式重试按�
   expect(detail.attempts).toEqual([]);
   expect(detail.equipmentPricing).toMatchObject({ searchComplete: false, total: null });
   expect(detail.error).toContain("单独重试待补齐项");
-  const reloaded = new AnalysisRunner(new AnalysisStore(c.crawl.db), async () => ({
+  const reloadedStore = new AnalysisStore(c.crawl.db);
+  vi.spyOn(reloadedStore, "followsCapture").mockReturnValue(false);
+  const reloaded = new AnalysisRunner(reloadedStore, async () => ({
     model: "test",
     analyze: c.analyze,
     searchEquipment: c.search,
@@ -247,7 +251,7 @@ it("单角色读取失败立即暂停，普通继续不越过，显式重试按�
 it("登录失效暂停整个批次，不越过访问限制处理下一角色", async () => {
   const c = setup();
   c.search.mockRejectedValueOnce(new Error("藏宝阁登录已失效"));
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await c.runner.settled();
   expect(c.store.run(id)).toMatchObject({ status: "paused", queued: 2, waitingPricing: 0 });
   expect(c.search).toHaveBeenCalledOnce();
@@ -256,7 +260,7 @@ it("登录失效暂停整个批次，不越过访问限制处理下一角色", a
 it("未知页面结构暂停批次，不生成半成品AI结果", async () => {
   const c = setup();
   c.search.mockRejectedValueOnce(new Error("商品页结构不支持：无法定位主商品容器"));
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await c.runner.settled();
   expect(c.store.run(id)).toMatchObject({
     status: "paused",
@@ -301,7 +305,7 @@ it("即使游标持续变化也在自动轮数上限暂停，不启动后续角�
         }
       : { ...equipmentPricingPlan(record), searchComplete: true },
   );
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await c.runner.settled();
   expect(c.search).toHaveBeenCalledTimes(MAX_PRICING_ROUNDS);
   expect(c.store.run(id)).toMatchObject({
@@ -318,7 +322,7 @@ it("即使游标持续变化也在自动轮数上限暂停，不启动后续角�
 it("调用忽略取消时暂停仍立即结束，不留running任务", async () => {
   const c = setup();
   c.search.mockImplementationOnce(() => new Promise(() => {}));
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await vi.waitFor(() => expect(c.search).toHaveBeenCalledOnce());
   await c.runner.pause(id);
   expect(c.store.run(id)).toMatchObject({ status: "paused", queued: 2, waitingPricing: 0 });
@@ -383,7 +387,7 @@ it("查价累计时间到上限时暂停批次，即使仍有翻页进展", asyn
       ],
     };
   });
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await c.runner.settled();
   expect(firstRoleRounds).toBe(6);
   expect(c.store.run(id)).toMatchObject({
@@ -408,7 +412,7 @@ it("单次查价超时暂停批次，忽略迟到的快照", async () => {
         release = resolve;
       }),
   );
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await vi.waitFor(() => expect(c.search).toHaveBeenCalledOnce());
   timeout.abort(new DOMException("查价超时", "TimeoutError"));
   await c.runner.settled();
@@ -464,7 +468,7 @@ it("首屏无样本跳过单件后继续AI分析和下一角色", async () => {
       })),
     }),
   );
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await c.runner.settled();
   expect(c.search).toHaveBeenCalledTimes(2);
   expect(c.store.run(id)).toMatchObject({ completed: 2, waitingPricing: 0, queued: 0 });
@@ -481,7 +485,7 @@ it("首屏无样本跳过单件后继续AI分析和下一角色", async () => {
 it("主动暂停只显示通知，忽略取消的AI调用也能结束；继续复用报价完成队列", async () => {
   const c = setup();
   c.analyze.mockImplementationOnce(() => new Promise(() => {}));
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await vi.waitFor(() => expect(c.analyze).toHaveBeenCalledOnce());
   await c.runner.pause(id);
   expect(c.store.run(id)).toMatchObject({
@@ -503,7 +507,7 @@ it("主动暂停只显示通知，忽略取消的AI调用也能结束；继续�
 it("真实登录失败仍显示错误，不被主动暂停通知掩盖", async () => {
   const c = setup();
   c.search.mockRejectedValueOnce(new Error("藏宝阁登录已失效"));
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await c.runner.settled();
   expect(c.store.run(id)).toMatchObject({
     status: "paused",
@@ -523,7 +527,7 @@ it("查价接近时限后，AI分析仍拥有独立的五分钟超时", async ()
     expect(c.store.acquire(owner)).toBe(true);
     return { ...equipmentPricingPlan(record), searchComplete: true };
   });
-  const id = await c.runner.start("codex", true, c.profile);
+  const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
   await c.runner.settled();
   expect(timeouts.mock.calls[1][0]).toBe(300_000);
   expect(c.store.run(id)).toMatchObject({ completed: 2, waitingPricing: 0 });

@@ -23,7 +23,11 @@ export function observedEquipmentCategory(category = "", location = "", modelId 
     return "元身";
   // Official equip_info identifies these as summon-equipment embedding materials.
   if ([4036, 4037, 4038].includes(Number(modelId))) return "材料 · 精魄灵石";
+  // Model identifiers observed on the official role inventory in live capture.
+  if (modelId === "50344") return "材料 · 钟灵石";
+  if (modelId === "4001") return "材料 · 百炼精铁";
   if ([611, 18521, 56870].includes(Number(modelId))) return "道具 · 召唤兽技能书";
+  if (modelId === "4103") return "道具 · 召唤兽内丹";
   if (category.trim() && !/^(?:\d+|人物装备|装备|武器|灵饰)$/.test(category.trim()))
     return category;
   const label: Record<string, string> = {
@@ -50,9 +54,49 @@ export function equipmentEmptyProof(tabs: TabSnapshot[]) {
   if (!tabs.length) return undefined;
   const explicit = (tab: TabSnapshot) =>
     /(?:^|\n)\s*(?:暂无道具|没有装备|无装备)\s*(?:$|\n)/.test(tab.text);
-  if (!tabs.every((tab) => tab.equipmentEmptyProof === "official-containers" || explicit(tab)))
+  const containersWithoutRoleEquipment = (tab: TabSnapshot) => {
+    const containers = tab.equipmentContainers;
+    if (
+      !containers ||
+      !["RoleUsingEquips", "RoleStoreEquips"].every((id) =>
+        containers.some(
+          (container) => container.id === id && container.present && container.visible,
+        ),
+      )
+    )
+      return false;
+    return containers
+      .filter((container) => container.present)
+      .every(
+        (container) =>
+          container.visible &&
+          container.icons.every(
+            (icon) =>
+              (icon.modelId === "17320" && icon.name === "三界密令") ||
+              (!!icon.name &&
+                !!icon.modelId &&
+                (tab.items || []).some(
+                  (item) =>
+                    item.name === icon.name &&
+                    item.modelId === icon.modelId &&
+                    item.attributes?.装备对象 === "召唤兽",
+                )),
+          ),
+      );
+  };
+  if (
+    !tabs.every(
+      (tab) =>
+        tab.equipmentEmptyProof === "official-containers" ||
+        explicit(tab) ||
+        containersWithoutRoleEquipment(tab),
+    )
+  )
     return undefined;
-  return tabs.some((tab) => tab.equipmentEmptyProof === "official-containers")
+  return tabs.some(
+    (tab) =>
+      tab.equipmentEmptyProof === "official-containers" || containersWithoutRoleEquipment(tab),
+  )
     ? ("official-containers" as const)
     : ("explicit-text" as const);
 }
@@ -96,8 +140,8 @@ const jewelryAttributePattern =
   /^(固定伤害|法术伤害结果|法术伤害|法术防御(?:等级)?|法术暴击(?:等级)?|物理暴击(?:等级)?|抗物理暴击(?:等级)?|抗法术暴击(?:等级)?|抵抗封印(?:等级)?|抗封印等级|封印命中(?:等级)?|狂暴(?:等级)?|穿刺(?:等级)?|治疗能力|格挡值|气血回复效果|回复|气血|防御|速度|伤害|固伤|法伤结果|法伤|法防|封印|抗封|治疗|格挡)[：:\s]*[+＋]?\d+(?:\s*\[[+＋]?\d+\])?$/;
 
 /** Preserve the distinction the official LingshiDescParser makes before removing color codes. */
-function markJewelryAddedAttributes(value: string) {
-  if (!value.includes("#r") || !/精炼等级/.test(value)) return value;
+function markJewelryAddedAttributes(value: string, knownJewelry = false) {
+  if (!value.includes("#r") || (!knownJewelry && !/精炼等级/.test(value))) return value;
   const lines = value
     .split("#r")
     .map((line) => line.trim())
@@ -115,8 +159,8 @@ function markJewelryAddedAttributes(value: string) {
 }
 
 /** Missing color/section evidence is not enough to distinguish a repeated primary stat. */
-export function jewelryDescriptionSections(value: string) {
-  const lines = cleanDescription(markJewelryAddedAttributes(value))
+export function jewelryDescriptionSections(value: string, knownJewelry = false) {
+  const lines = cleanDescription(markJewelryAddedAttributes(value, knownJewelry))
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
@@ -137,9 +181,32 @@ export function jewelryDescriptionSections(value: string) {
   if (![2, 3].includes(added.length)) return null;
   return { main: lines.slice(0, marker).join("\n"), added };
 }
+/** Restore only an observed raw section that occurs uniquely in the visible tooltip. */
+export function preserveJewelryTooltipSections(
+  tooltip: string,
+  observed: string,
+  knownJewelry = false,
+) {
+  if (jewelryDescriptionSections(tooltip)) return tooltip;
+  const section = jewelryDescriptionSections(observed, knownJewelry);
+  if (!section) return tooltip;
+  const compact = (line: string) => line.replace(/\s+/g, "");
+  const lines = cleanDescription(tooltip)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const positions = lines.flatMap((_, index) =>
+    section.added.every((line, offset) => compact(line) === compact(lines[index + offset] || ""))
+      ? [index]
+      : [],
+  );
+  if (positions.length !== 1) return tooltip;
+  lines.splice(positions[0], 0, "附加属性：");
+  return lines.join("\n");
+}
 // 只保留可用于比较价格的数值、名称及装备限制，不保存故事和通用功效。
-export function coreEquipmentDescription(value: string) {
-  return cleanDescription(markJewelryAddedAttributes(value))
+export function coreEquipmentDescription(value: string, knownJewelry = false) {
+  return cleanDescription(markJewelryAddedAttributes(value, knownJewelry))
     .split(/\n/)
     .map((line) => line.trim())
     .filter(
@@ -220,11 +287,18 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
     attrs.data_equip_type,
   ].find((value) => value?.trim() && !/^\d+$/.test(value.trim()));
   const observedCategory = observedEquipmentCategory(declaredCategory, location, modelId);
+  // 官方图标明确给出的分类 ID；不从名字、data_type 或 data_equip_type 推算。
+  const kindId = attrs.data_kindid || attrs["data-kindid"];
   // 玉魄的奇袭/效形/到期描述和技能书内容不能按普通装备字段精简。
   const description =
-    /上古玉魄|召唤兽技能书|材料/.test(observedCategory || "") || location === "RolePetShipin"
+    /上古玉魄|召唤兽(?:技能书|内丹)|材料/.test(observedCategory || "") ||
+    location === "RolePetShipin"
       ? cleanDescription(rawDescription)
-      : coreEquipmentDescription(rawDescription);
+      : coreEquipmentDescription(
+          rawDescription,
+          /灵饰|戒指|耳饰|手镯|佩饰|配饰/.test(observedCategory || "") ||
+            ["61", "62", "63", "64"].includes(kindId || ""),
+        );
   // model/type 不作 kindid；仅明确核对过的模型和官网容器参与分类。
   const storage = [attrs.data_storage_type, location].filter(Boolean).join(" ");
   const category = /lingbao|灵宝/i.test(storage)
@@ -234,8 +308,6 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
       : /(?:^|\n)\s*(?:灵气|修炼境界)[：:\s]/.test(description) || /fabao|法宝/i.test(storage)
         ? "法宝"
         : observedCategory;
-  // 官方图标明确给出的分类 ID；不从名字、data_type 或 data_equip_type 推算。
-  const kindId = attrs.data_kindid || attrs["data-kindid"];
   return {
     index,
     name,
