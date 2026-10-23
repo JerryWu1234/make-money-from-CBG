@@ -269,7 +269,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     const settings = page.getByRole("dialog", { name: "估值与挂牌比较设置" });
     await expect(settings.getByLabel("最高买入系数 b", { exact: true })).not.toBeVisible();
     await expect(settings.getByLabel("全部额外成本 F（元）", { exact: true })).not.toBeVisible();
-    await expect(settings).toContainText("先核对装备和宝宝，再联网查价，比较挂牌差异");
+    await expect(settings).toContainText("装备总开关：已关闭，仅分析裸号。");
     await settings.getByText("全服行情：自动匹配每件商品的区服", { exact: true }).click();
     await expect(settings.getByLabel("热度排名 r", { exact: true })).toHaveValue("13");
     await expect(settings.getByLabel("金价 G（元）", { exact: true })).toHaveValue("218.29");
@@ -288,6 +288,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     ).toBeVisible();
     expect(calls).toBe(0);
     expect(profile.settings).toMatchObject({ b: 0.8, extraCost: null });
+    expect(profile.template).toContain("请简洁说明主要待确认项。");
     await expect(page.getByLabel("分析模型")).toHaveValue("");
     await page.getByLabel("分析模型").selectOption("other-model");
     await page.getByRole("button", { name: "开始分析已有商品", exact: true }).click();
@@ -373,7 +374,12 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await expect(result.getByText("估值与挂牌价差额", { exact: true })).not.toBeVisible();
     await result.screenshot({ path: testInfo.outputPath("valuation-result.png") });
     await result.getByText("查看本次使用的 Prompt 模板", { exact: true }).click();
-    await expect(result).toContainText("请简洁说明主要待确认项。");
+    const analysedTask = store.overview().records.items.find((item) => item.key === "a")!;
+    const requestTemplate = store.detail(analysedTask.taskId!)!.requestTemplate;
+    expect(requestTemplate).toBeTruthy();
+    expect(requestTemplate).not.toContain("请简洁说明主要待确认项。");
+    await expect(result).toContainText(requestTemplate!);
+    await expect(result).not.toContainText("请简洁说明主要待确认项。");
     expect(calls).toBe(4);
     expect(store.overview().run).toMatchObject({ total: 4, completed: 4, model: "other-model" });
     await result.getByRole("button", { name: "去补充分析设置", exact: true }).click();

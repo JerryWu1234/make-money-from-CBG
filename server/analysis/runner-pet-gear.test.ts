@@ -344,7 +344,8 @@ it.each([
       items: c.gear.items.map((item) => ({ ...item, searchState: state, searchStatus: state })),
     });
   try {
-    const id = await c.runner.start("codex", true, c.profile);
+    // This case verifies that a failed role leaves the next role unstarted.
+    const id = await c.runner.start("codex", true, c.profile, false, undefined, 1, undefined, 1);
     await c.runner.settled();
     expect(c.store.run(id)).toMatchObject({
       status: "paused",

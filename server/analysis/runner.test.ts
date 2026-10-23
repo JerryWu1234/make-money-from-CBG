@@ -280,7 +280,6 @@ describe("持久化的商品分析队列", () => {
       valuation: store.detail(savedTask)!.result!.valuation,
     });
     expect(store.overview({ currentProfile: changed }).ranking).toHaveLength(0);
-    expect(store.overview({ currentProfile: otherServer }).ranking).toHaveLength(1);
     expect(store.detail(savedTask, changed)?.profileChanged).toBe(true);
     for (const changedSettings of [
       createProfile(profile.template + "\n请补充价格说明。", profile.settings, true, true),
@@ -303,7 +302,6 @@ describe("持久化的商品分析队列", () => {
     );
     expect(store.overview({ currentProfile: changed }).results.items[0].profileChanged).toBe(false);
     expect(store.overview({ currentProfile: changed }).records.items[0].profileChanged).toBe(false);
-    expect(store.overview({ currentProfile: changed }).ranking).toHaveLength(1);
     expect(store.detail(savedTask, changed)?.profileChanged).toBe(true);
   });
   it("增量任务只处理新增商品；新任务排队时保留之前的完整结果", async () => {
@@ -458,11 +456,11 @@ describe("持久化的商品分析队列", () => {
     await runner.pause();
   });
 
-  it("完成后宝宝行情过期会移出当前推荐榜，原价格和证据仍能在历史查看", async () => {
+  it("完成后宝宝行情过期会标记过时，原价格和证据仍能在历史查看", async () => {
     const { store, runner, profile } = await valuationSetup();
     const id = await runner.start("codex", true, profile);
     await runner.settled();
-    expect(store.overview({ runId: id }).ranking).toHaveLength(1);
+    expect(store.overview({ runId: id }).records.items[0].state).toBe("completed");
     const taskId = store.overview({ runId: id }).records.items[0].taskId!;
     const oldTime = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString();
     store.db
@@ -755,7 +753,7 @@ describe("持久化的商品分析队列", () => {
     expect(analyze).toHaveBeenCalledTimes(2);
   });
 
-  it("试分析3件按列表顺序逐件入库，排除第4件与待补采商品", async () => {
+  it("并发1时试分析3件按列表顺序逐件入库，排除第4件与待补采商品", async () => {
     const { crawl, store, runner, analyze, connect } = setup(["d", "c", "b", "a"]);
     crawl.observe(analysisRecord("pending").listing);
     const original = analyze.getMockImplementation()!;
@@ -763,7 +761,7 @@ describe("持久化的商品分析队列", () => {
       expect(store.run(store.activeRun()!.id)?.completed).toBe(analyze.mock.calls.length - 1);
       return original(prompt, schema, signal);
     });
-    const id = await runner.start("codex", true, undefined, true, "gpt-6-luna", 3);
+    const id = await runner.start("codex", true, undefined, true, "gpt-6-luna", 3, undefined, 1);
     await runner.settled();
     expect(store.run(id)).toMatchObject({ total: 3, completed: 3, failed: 0, model: "gpt-6-luna" });
     expect(analyze).toHaveBeenCalledTimes(3);
@@ -778,7 +776,7 @@ describe("持久化的商品分析队列", () => {
     expect(analyze).toHaveBeenCalledTimes(3);
   });
 
-  it("每件完整原文只发送一次，结果提交后才发下一件，未补采商品不入队", async () => {
+  it("并发1时每件完整原文只发送一次，结果提交后才发下一件，未补采商品不入队", async () => {
     const { crawl, store, runner, analyze } = setup();
     crawl.observe(analysisRecord("pending").listing);
     let release!: () => void;
@@ -791,7 +789,7 @@ describe("持久化的商品分析队列", () => {
       else expect(store.run(store.activeRun()!.id)?.completed).toBe(1);
       return defaultAnalyze(prompt, schema, signal);
     });
-    const id = await runner.start("codex");
+    const id = await runner.start("codex", false, undefined, false, undefined, 1, undefined, 1);
     expect(analyze).toHaveBeenCalledTimes(1);
     expect(store.run(id)).toMatchObject({ status: "running", total: 2, completed: 0 });
     expect(() => crawl.clear()).toThrow("分析任务仍在执行");
@@ -801,7 +799,7 @@ describe("持久化的商品分析队列", () => {
     expect(store.run(id)).toMatchObject({ status: "completed", total: 2, completed: 2 });
     const overview = store.overview({ runId: id });
     expect(overview.counts).toEqual({ total: 3, complete: 2, waitingDetail: 1 });
-    const detail = store.detail(overview.ranking[0].taskId!)!;
+    const detail = store.detail(overview.records.items[0].taskId!)!;
     expect(detail.inputText).toBe(buildProductDocument(crawl.detail("a") as SavedRoleRecord).text);
     expect(analyze.mock.calls[0][0]).toContain(detail.inputText);
     expect(detail.attempts[0]).toMatchObject({
@@ -880,13 +878,13 @@ describe("持久化的商品分析队列", () => {
     const { crawl, store, runner, analyze } = setup(["a"]);
     const first = await runner.start("codex");
     await runner.settled();
-    const original = store.detail(store.overview({ runId: first }).ranking[0].taskId!)!;
+    const original = store.detail(store.overview({ runId: first }).records.items[0].taskId!)!;
     const reused = await runner.start("codex");
     await runner.settled();
     expect(reused).toBe(first);
     expect(store.run(reused)).toMatchObject({ completed: 1, reused: 0 });
     expect(store.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n).toBe(1);
-    const reusedDetail = store.detail(store.overview({ runId: reused }).ranking[0].taskId!)!;
+    const reusedDetail = store.detail(store.overview({ runId: reused }).records.items[0].taskId!)!;
     expect(reusedDetail.taskId).toBe(original.taskId);
     expect(reusedDetail.attempts).toEqual(original.attempts);
     expect(analyze).toHaveBeenCalledTimes(1);
@@ -912,7 +910,7 @@ describe("持久化的商品分析队列", () => {
     analyze
       .mockResolvedValueOnce({ text: "not-json" })
       .mockResolvedValueOnce({ text: "still-invalid" });
-    const id = await runner.start("codex");
+    const id = await runner.start("codex", false, undefined, false, undefined, 1, undefined, 1);
     await runner.settled();
     expect(store.run(id)).toMatchObject({ status: "paused", failed: 1, completed: 0, queued: 1 });
     expect(analyze).toHaveBeenCalledOnce();
@@ -939,7 +937,7 @@ describe("持久化的商品分析队列", () => {
   it("额度或登录错误暂停整批，不继续消耗后面的调用；过长原文保留但不截断发送", async () => {
     const { store, runner, analyze } = setup();
     analyze.mockRejectedValueOnce(new Error("429 quota exceeded"));
-    const id = await runner.start("codex");
+    const id = await runner.start("codex", false, undefined, false, undefined, 1, undefined, 1);
     await runner.settled();
     expect(store.run(id)).toMatchObject({ status: "paused", completed: 0, queued: 2 });
     expect(analyze).toHaveBeenCalledTimes(1);

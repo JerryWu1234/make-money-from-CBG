@@ -416,7 +416,7 @@ export function AiConnectionControl({
             连接设置
           </button>
         </div>
-        <small>按本次分析范围提交资料；完整采集原文留档，结果保存后处理下一件。</small>
+        <small>按本次分析范围提交资料；完整采集原文留档，按配置并发处理，每件结果独立保存。</small>
       </div>
       {step && (
         <div className="analysis-overlay">

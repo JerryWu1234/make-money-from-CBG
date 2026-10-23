@@ -4,6 +4,18 @@ import type { AnalysisProfile, ValuationResult } from "./valuation-types";
 import type { EquipmentPricingSnapshot } from "./equipment-pricing";
 import type { PetPricingSnapshot } from "./pet-pricing";
 
+export const DEFAULT_ANALYSIS_CONCURRENCY = 10;
+export function analysisConcurrency(value: unknown = DEFAULT_ANALYSIS_CONCURRENCY): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1)
+    throw new Error("分析并发数必须是正整数");
+  return value;
+}
+export type AnalysisLane = "new" | "old";
+export function analysisLaneLimits(concurrency: number) {
+  const newLimit = concurrency === 1 ? 1 : Math.min(concurrency - 1, Math.ceil(concurrency * 0.7));
+  return { newLimit, oldLimit: concurrency - newLimit };
+}
+
 export type DimensionId = "foundation" | "equipment" | "pets";
 export type CapturedAssetCounts = {
   equipment: number | null;
@@ -33,6 +45,13 @@ export type ProductAnalysis = {
   valuation?: ValuationResult;
 };
 export type AnalysisRun = {
+  concurrency?: number;
+  runningCount?: number;
+  newRunning?: number;
+  oldRunning?: number;
+  newLimit?: number;
+  oldLimit?: number;
+  currentItems?: string[];
   assetCounts?: CapturedAssetCounts | null;
   id: string;
   provider: AiProvider;
@@ -94,6 +113,9 @@ export type AnalysisItem = {
   error: string | null;
   profileChanged?: boolean;
   valuation?: ValuationResult;
+  recommendation?: import("./recommendation").Recommendation;
+  recommendationViewed?: boolean;
+  assetSummary?: { equipment: string; pets: string } | null;
 };
 export type AnalysisResultItem = {
   taskId: string;
@@ -130,6 +152,7 @@ export type AnalysisOverview = {
   activeRun: AnalysisRun | null;
   runs: AnalysisRun[];
   ranking: AnalysisItem[];
+  manualReview?: AnalysisItem[];
   records: { page: number; totalPages: number; total: number; items: AnalysisItem[] };
   results: { page: number; totalPages: number; total: number; items: AnalysisResultItem[] };
   history: {

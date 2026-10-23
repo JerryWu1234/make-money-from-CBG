@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { diagnostics } from "./diagnostics";
 import { ScheduleConfigError } from "./crawler/schedule-time";
 import { validateSampleSelection } from "./analysis/sample-selection";
+import { analysisConcurrency } from "./analysis/types";
 
 const getRoutes = new Set([
   "/api/browser/status",
@@ -40,6 +41,7 @@ const postRoutes = new Set([
   "/api/analysis/pet/check",
   "/api/analysis/pet-gear/check",
   "/api/analysis/settings/save",
+  "/api/analysis/recommendation/view",
 ]);
 
 async function verifyRequestBody(request: IncomingMessage, limit = 4096) {
@@ -143,9 +145,13 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             summary: true,
             search: params.get("search") || undefined,
             filter: params.get("filter") || undefined,
+            showViewed: params.get("showViewed") === "true",
           });
           break;
         }
+        case "/api/analysis/recommendation/view":
+          result = analysis.markRecommendationViewed(input.key);
+          break;
         case "/api/analysis/detail":
           result = analysis.analysisDetail(params.get("taskId") || "");
           break;
@@ -190,6 +196,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             (input.sampleSize as number | undefined) ?? 1,
             productKeys,
             input.equipmentOnly === true,
+            analysisConcurrency(input.concurrency),
           );
           break;
         }
@@ -197,10 +204,18 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
           result = await analysis.pauseAnalysis(runId || undefined);
           break;
         case "/api/analysis/resume":
-          result = await analysis.resumeAnalysis(runId);
+          result = await analysis.resumeAnalysis(
+            runId,
+            false,
+            input.concurrency === undefined ? undefined : analysisConcurrency(input.concurrency),
+          );
           break;
         default:
-          result = await analysis.resumeAnalysis(runId, true);
+          result = await analysis.resumeAnalysis(
+            runId,
+            true,
+            input.concurrency === undefined ? undefined : analysisConcurrency(input.concurrency),
+          );
       }
       if (!res.destroyed) res.end(JSON.stringify(result));
       return;
@@ -290,6 +305,14 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
           {
             const keys = (body as Record<string, unknown>).keys;
             const refresh = (body as Record<string, unknown>).refresh;
+            const concurrency = (body as Record<string, unknown>).concurrency;
+            if (
+              concurrency !== undefined &&
+              (typeof concurrency !== "number" ||
+                !Number.isSafeInteger(concurrency) ||
+                concurrency < 1)
+            )
+              throw new Error("并发数必须是正整数");
             if (
               keys !== undefined &&
               (!Array.isArray(keys) ||
@@ -312,6 +335,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             const attempt = await crawler.startCrawl("manual", undefined, {
               backfillOnly: pathname === "/api/crawl/backfill",
               keys: keys as string[] | undefined,
+              ...(concurrency !== undefined ? { concurrency: concurrency as number } : {}),
               ...(refresh === true ? { refresh: true } : {}),
             });
             if (attempt.started) (await import("./crawler/schedule")).disableScanSchedule();

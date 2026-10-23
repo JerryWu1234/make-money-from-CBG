@@ -792,7 +792,9 @@ describe("裸号估值的复算与可追溯输入", () => {
         completed: 1,
         profileHash: configured.hash,
       });
-      const task = store.overview({ runId: one }).ranking[0].taskId!;
+      const task = store
+        .overview({ runId: one })
+        .records.items.find((item) => item.state === "completed")!.taskId!;
       const detail = store.detail(task)!;
       expect(detail.profile?.template).toBe(template);
       expect(detail.attempts[0].requestText).toBe(detail.promptText);

@@ -23,6 +23,9 @@ export function observedEquipmentCategory(category = "", location = "", modelId 
     return "元身";
   // Official equip_info identifies these as summon-equipment embedding materials.
   if ([4036, 4037, 4038].includes(Number(modelId))) return "材料 · 精魄灵石";
+  // Model identifiers observed on the official role inventory in live capture.
+  if (modelId === "50344") return "材料 · 钟灵石";
+  if (modelId === "4001") return "材料 · 百炼精铁";
   if ([611, 18521, 56870].includes(Number(modelId))) return "道具 · 召唤兽技能书";
   if (modelId === "4103") return "道具 · 召唤兽内丹";
   if (category.trim() && !/^(?:\d+|人物装备|装备|武器|灵饰)$/.test(category.trim()))

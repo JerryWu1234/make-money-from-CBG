@@ -196,7 +196,9 @@ async function inspectItems(
     let item = itemFromAttributes(attrs, index);
     // 已明确不在人物装备计价范围内的物品不要求普通装备属性。
     if (
-      /^(?:法宝|灵宝|神器|道具 · 召唤兽(?:技能书|内丹)|材料 · 精魄灵石)$/.test(item.category || "")
+      /^(?:法宝|灵宝|神器|道具 · 召唤兽(?:技能书|内丹)|材料 · (?:精魄灵石|钟灵石|百炼精铁))$/.test(
+        item.category || "",
+      )
     ) {
       snapshot.items!.push(item);
       continue;

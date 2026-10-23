@@ -211,7 +211,8 @@ it.each([1, 2])(
       },
     }));
     try {
-      const id = await runner.start("codex", false, profile);
+      // Keep the screenshot failure budget and recovery order within one active role.
+      const id = await runner.start("codex", false, profile, false, undefined, 1, undefined, 1);
       if (failures === 2) {
         await vi.waitFor(() =>
           expect(store.run(id)).toMatchObject({

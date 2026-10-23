@@ -23,8 +23,11 @@ function setup() {
     release = resolve;
   });
   const analyzed: string[] = [];
-  const analyze = vi.fn(async () => {
-    const row = crawl.db.prepare("SELECT * FROM analysis_tasks WHERE status='running'").get()!;
+  const analyze = vi.fn(async (prompt: string) => {
+    const productKey = prompt.match(/商品 ID：([^。\n]+)[。\n]/)![1];
+    const row = crawl.db
+      .prepare("SELECT * FROM analysis_tasks WHERE status='running' AND listing_key=?")
+      .get(productKey)!;
     const key = String(row.listing_key);
     analyzed.push(key);
     if (analyzed.length === 1) await gate;

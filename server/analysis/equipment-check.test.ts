@@ -212,9 +212,9 @@ describe("同会话单件装备查价", () => {
     expect(mocks.createEquipmentSource).not.toHaveBeenCalled();
   });
 
-  it("0耐久资料保留为完整装备并实际查价，不套用正常耐久价格", async () => {
+  it("0耐久且修理失败未达3次的装备实际查价，不套用正常耐久价格", async () => {
     const record = savedRecord();
-    record.detail!.tabs.at(-1)!.items![1].description = "等级 100\n防御 +50\n耐久 0\n修理失败 3次";
+    record.detail!.tabs.at(-1)!.items![1].description = "等级 100\n防御 +50\n耐久 0\n修理失败 2次";
     mocks.savedDetail.mockReturnValue(record);
     await checkEquipment(input, new AbortController().signal);
     expect(mocks.findCandidates).toHaveBeenCalledOnce();

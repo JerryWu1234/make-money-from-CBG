@@ -14,8 +14,11 @@ import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
 import { petGearInventory } from "./pet-gear-inventory";
 import { validateSampleSelection } from "./sample-selection";
 import { captureIssues } from "../crawler/capture-readiness";
-import { capturedAssetCounts } from "./asset-counts";
+import { capturedAssetCounts, capturedAssetSummary } from "./asset-counts";
+import { recommendationFor } from "./recommendation";
+import { analysisConcurrency, analysisLaneLimits, DEFAULT_ANALYSIS_CONCURRENCY } from "./types";
 import type {
+  AnalysisLane,
   AnalysisDetail,
   AnalysisItem,
   AnalysisOverview,
@@ -27,6 +30,7 @@ type Row = Record<string, SQLOutputValue>;
 export type AnalysisTask = {
   id: string;
   runId: string;
+  lane: AnalysisLane;
   document: ProductDocument;
   record: SavedRoleRecord;
   prompt: string;
@@ -126,6 +130,7 @@ export class AnalysisStore {
     );
     CREATE TABLE IF NOT EXISTS analysis_tasks (
       id TEXT PRIMARY KEY, run_id TEXT NOT NULL, ordinal INTEGER NOT NULL, listing_key TEXT NOT NULL,
+      queue_lane TEXT NOT NULL DEFAULT 'old',
       input_hash TEXT NOT NULL, input_text TEXT NOT NULL, prompt_hash TEXT NOT NULL, prompt_text TEXT NOT NULL,
       source_listing_json TEXT NOT NULL, source_detail_json TEXT NOT NULL, collected_at TEXT NOT NULL,
       status TEXT NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0, reused INTEGER NOT NULL DEFAULT 0,
@@ -134,6 +139,7 @@ export class AnalysisStore {
     CREATE INDEX IF NOT EXISTS analysis_tasks_run ON analysis_tasks(run_id,ordinal);
     CREATE INDEX IF NOT EXISTS analysis_tasks_input ON analysis_tasks(input_hash,status);
     CREATE INDEX IF NOT EXISTS analysis_tasks_listing ON analysis_tasks(listing_key,status,completed_at DESC);
+    CREATE TABLE IF NOT EXISTS recommendation_views (listing_key TEXT PRIMARY KEY, viewed_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS analysis_attempts (
       id TEXT PRIMARY KEY, task_id TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL,
       finished_at TEXT, raw_response TEXT, usage_json TEXT, error TEXT
@@ -146,9 +152,17 @@ export class AnalysisStore {
         .some((column) => column.name === "source_task_id")
     )
       db.exec("ALTER TABLE analysis_tasks ADD COLUMN source_task_id TEXT");
+    if (
+      !db
+        .prepare("PRAGMA table_info(analysis_tasks)")
+        .all()
+        .some((column) => column.name === "queue_lane")
+    )
+      db.exec("ALTER TABLE analysis_tasks ADD COLUMN queue_lane TEXT NOT NULL DEFAULT 'old'");
     for (const [table, column] of [
       ["analysis_runs", "profile_json"],
       ["analysis_runs", "follow_capture"],
+      ["analysis_runs", "concurrency"],
       ["analysis_tasks", "pricing_progress_json"],
       ["analysis_attempts", "request_text"],
       ["analysis_attempts", "request_hash"],
@@ -226,6 +240,10 @@ export class AnalysisStore {
       .prepare(`SELECT r.*,count(t.id) total,
       coalesce(sum(t.status='completed'),0) completed,coalesce(sum(t.status='failed'),0) failed,
       coalesce(sum(t.status='queued'),0) queued,coalesce(sum(t.reused),0) reused,
+      coalesce(sum(t.status='running'),0) running_count,
+      coalesce(sum(t.status='running' AND t.queue_lane='new'),0) new_running,
+      coalesce(sum(t.status='running' AND t.queue_lane='old'),0) old_running,
+      (SELECT json_group_array(json_extract(source_listing_json,'$.name')) FROM analysis_tasks WHERE run_id=r.id AND status='running') current_names,
       coalesce(sum(t.status='waiting_pricing'),0) waiting_pricing,
       (SELECT pricing_progress_json FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) pricing_progress_json,
       (SELECT json_extract(source_listing_json,'$.name') FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current,
@@ -247,6 +265,12 @@ export class AnalysisStore {
     return row
       ? {
           id: String(row.id),
+          concurrency: Number(row.concurrency || 1),
+          runningCount: Number(row.running_count),
+          newRunning: Number(row.new_running),
+          oldRunning: Number(row.old_running),
+          ...analysisLaneLimits(Number(row.concurrency || 1)),
+          currentItems: JSON.parse(String(row.current_names)),
           provider: String(row.provider) as AiProvider,
           model: String(row.model),
           ruleVersion: String(row.rule_version),
@@ -373,6 +397,13 @@ export class AnalysisStore {
       )
       .run(state, error, now(), id, owner, Date.now());
   }
+  setConcurrency(id: string, concurrency: number, owner: string) {
+    analysisConcurrency(concurrency);
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    this.db
+      .prepare("UPDATE analysis_runs SET concurrency=? WHERE id=?")
+      .run(String(concurrency), id);
+  }
   private reusableResult(
     provider: AiProvider,
     model: string,
@@ -476,14 +507,16 @@ export class AnalysisStore {
     sample = false,
     sampleSize = 1,
     productKeys?: string[],
+    concurrency = DEFAULT_ANALYSIS_CONCURRENCY,
   ) {
+    analysisConcurrency(concurrency);
     validateSampleSelection(sample, sampleSize, productKeys);
     const id = randomUUID();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db
         .prepare(
-          "INSERT INTO analysis_runs(id,provider,model,rule_version,status,created_at,updated_at,error,profile_json,follow_capture) VALUES(?,?,?,?,?,?,?,NULL,?,?)",
+          "INSERT INTO analysis_runs(id,provider,model,rule_version,status,created_at,updated_at,error,profile_json,follow_capture,concurrency) VALUES(?,?,?,?,?,?,?,NULL,?,?,?)",
         )
         .run(
           id,
@@ -495,13 +528,14 @@ export class AnalysisStore {
           now(),
           profile ? JSON.stringify(profile) : null,
           sample ? "0" : "1",
+          String(concurrency),
         );
       const selected = productKeys
         ? " AND key IN (" + productKeys.map(() => "?").join(",") + ")"
         : "";
       const rows = this.db
         .prepare(
-          "SELECT key,listing_json,detail_json FROM listings WHERE status='complete' AND detail_json IS NOT NULL" +
+          "SELECT key,listing_json,detail_json,capture_lane FROM listings WHERE status='complete' AND detail_json IS NOT NULL" +
             selected +
             " ORDER BY " +
             (sample ? "key ASC" : "first_seen_at ASC,key ASC") +
@@ -518,7 +552,7 @@ export class AnalysisStore {
       }
       if (!rows.length && sample) throw new Error("暂无详情完整的商品，请先采集商品详情");
       const insert = this.db.prepare(
-        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json,queue_lane) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       );
       let inserted = 0;
       rows.forEach((row, index) => {
@@ -559,6 +593,7 @@ export class AnalysisStore {
           previous ? previous.source_task_id || previous.id : null,
           previous?.equipment_pricing_json ?? null,
           previous?.pet_pricing_json ?? null,
+          row.capture_lane === "new" ? "new" : "old",
         );
       });
       if (!inserted) {
@@ -616,7 +651,7 @@ export class AnalysisStore {
       ? (JSON.parse(String(run.profile_json)) as AnalysisProfile)
       : undefined;
     const rows = this.db
-      .prepare(`SELECT l.key,l.listing_json,l.detail_json FROM listings l
+      .prepare(`SELECT l.key,l.listing_json,l.detail_json,l.capture_lane FROM listings l
       WHERE l.status='complete' AND l.detail_json IS NOT NULL
       AND NOT EXISTS(SELECT 1 FROM analysis_tasks t WHERE t.run_id=? AND t.listing_key=l.key)
       ORDER BY l.first_seen_at ASC,l.key ASC`)
@@ -654,8 +689,8 @@ export class AnalysisStore {
         )
           continue;
         this.db
-          .prepare(`INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued')`)
+          .prepare(`INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,queue_lane)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?)`)
           .run(
             randomUUID(),
             id,
@@ -668,6 +703,7 @@ export class AnalysisStore {
             String(row.listing_json),
             String(row.detail_json),
             document.collectedAt,
+            row.capture_lane === "new" ? "new" : "old",
           );
         added++;
       }
@@ -680,20 +716,22 @@ export class AnalysisStore {
     }
   }
 
-  next(runId: string): AnalysisTask | null {
+  next(runId: string, preferredLane?: AnalysisLane): AnalysisTask | null {
     const row = this.db
       .prepare(
         `SELECT t.*,r.profile_json,
           (SELECT length(trim(coalesce(a.raw_response,'')))>0 FROM analysis_attempts a
            WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1) last_attempt_had_response
          FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id
-         WHERE t.run_id=? AND t.status='queued' ORDER BY t.ordinal ASC LIMIT 1`,
+         WHERE t.run_id=? AND t.status='queued'
+         ORDER BY CASE WHEN t.queue_lane=? THEN 0 ELSE 1 END,t.ordinal ASC LIMIT 1`,
       )
-      .get(runId);
+      .get(runId, preferredLane ?? null);
     if (!row) return null;
     return {
       id: String(row.id),
       runId,
+      lane: row.queue_lane === "new" ? "new" : "old",
       document: {
         formatVersion: 1,
         productKey: String(row.listing_key),
@@ -1042,6 +1080,16 @@ export class AnalysisStore {
       valuation: row.state === "completed" ? overviewResult(result, summary)?.valuation : undefined,
     };
   }
+  markRecommendationViewed(key: unknown) {
+    if (typeof key !== "string" || !key || key !== key.trim() || key.length > 100)
+      throw new Error("商品编号无效");
+    if (!this.db.prepare("SELECT 1 FROM listings WHERE key=?").get(key))
+      throw new Error("商品不存在");
+    this.db
+      .prepare("INSERT INTO recommendation_views VALUES(?,?) ON CONFLICT(listing_key) DO NOTHING")
+      .run(key, now());
+    return { key, viewed: true };
+  }
   overview(
     options: {
       provider?: AiProvider;
@@ -1052,6 +1100,7 @@ export class AnalysisStore {
       search?: string;
       filter?: string;
       summary?: boolean;
+      showViewed?: boolean;
     } = {},
   ): AnalysisOverview {
     const ids = this.db
@@ -1103,15 +1152,31 @@ export class AnalysisStore {
       .all(...values, (page - 1) * 20)
       .map((row) => this.item(row, options.currentProfile, options.summary));
     const ranking: AnalysisItem[] = [];
+    const manualReview: AnalysisItem[] = [];
     const rankedRows = this.db
       .prepare(
-        `WITH products AS (${source}) SELECT * FROM products WHERE state='completed' AND (json_extract(result_json,'$.valuation.decision')='BUY' OR (json_extract(result_json,'$.valuation') IS NULL AND json_extract(result_json,'$.score') IS NOT NULL)) ORDER BY coalesce(json_extract(result_json,'$.valuation.price_difference_ratio'),json_extract(result_json,'$.valuation.margin_of_safety')) DESC,json_extract(result_json,'$.score') DESC,key ASC`,
+        `WITH products AS (${source}) SELECT products.*,inventory.detail_json,views.viewed_at FROM products JOIN listings inventory ON inventory.key=products.key LEFT JOIN recommendation_views views ON views.listing_key=products.key WHERE state='completed' AND json_type(result_json,'$.valuation.bare_role_value') IN ('integer','real')${options.showViewed ? "" : " AND views.listing_key IS NULL"} ORDER BY coalesce(json_extract(result_json,'$.valuation.price_difference_ratio'),json_extract(result_json,'$.valuation.margin_of_safety')) DESC,json_extract(result_json,'$.score') DESC,products.key ASC`,
       )
       .iterate(...sourceValues);
     for (const row of rankedRows) {
       const item = this.item(row, options.currentProfile, options.summary);
-      if (!item.profileChanged) ranking.push(item);
-      if (ranking.length === 10) break;
+      item.recommendationViewed = !!row.viewed_at;
+      if (!item.profileChanged) {
+        const record: SavedRoleRecord = {
+          listing: JSON.parse(String(row.listing_json)),
+          detail: JSON.parse(String(row.detail_json)),
+          status: "complete",
+          error: null,
+        };
+        item.recommendation = recommendationFor(record, item.valuation);
+        if (item.recommendation.status === "recommended" && ranking.length < 10) {
+          item.assetSummary = capturedAssetSummary(record);
+          ranking.push(item);
+        }
+        if (item.recommendation.status === "manual" && manualReview.length < 10)
+          manualReview.push(item);
+      }
+      if (ranking.length === 10 && manualReview.length === 10) break;
     }
     const history = this.db
       .prepare(
@@ -1179,6 +1244,7 @@ export class AnalysisStore {
       activeRun,
       runs,
       ranking,
+      manualReview,
       records: { page, totalPages, total, items: records },
       history,
       results: {

@@ -137,6 +137,13 @@ describe("官方 Codex 登录与 SDK", () => {
     expect(options.env.OPENAI_API_KEY).toBeUndefined();
     expect(options.env.CODEX_API_KEY).toBeUndefined();
     expect(options.config.forced_login_method).toBe("chatgpt");
+    expect(options.config.features).toEqual({
+      shell_tool: false,
+      unified_exec: false,
+      hooks: false,
+      multi_agent: false,
+      apps: false,
+    });
     expect(mocks.startThread).toHaveBeenCalledWith(
       expect.objectContaining({
         workingDirectory: "/private/tmp/cbg-codex-fixture",

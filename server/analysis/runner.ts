@@ -5,7 +5,9 @@ import { equipmentInventory, type EquipmentPricingSnapshot } from "./equipment-p
 import type { PetPricingSnapshot } from "./pet-pricing";
 import { petGearInventory, type PetGearPricingSnapshot } from "./pet-gear-inventory";
 import { ANALYSIS_SCHEMA, validateAnalysis } from "./contract";
-import { AnalysisStore } from "./store";
+import { AnalysisStore, type AnalysisTask } from "./store";
+import { analysisConcurrency, analysisLaneLimits, DEFAULT_ANALYSIS_CONCURRENCY } from "./types";
+import type { AnalysisLane } from "./types";
 import type { PricingSearchProgress } from "./equipment-pricing";
 import { VALUATION_SCHEMA, validateValuation, recalculateValuation } from "./valuation-contract";
 import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
@@ -107,7 +109,9 @@ export class AnalysisRunner {
     selectedModel?: string,
     sampleSize = 1,
     productKeys?: string[],
+    concurrency = DEFAULT_ANALYSIS_CONCURRENCY,
   ) {
+    analysisConcurrency(concurrency);
     validateSampleSelection(sample, sampleSize, productKeys);
     if (profile && profile.calculationVersion !== CALCULATION_VERSION)
       throw new Error("估值规则已更新，请按新规则开始分析；旧结果仍可查看");
@@ -118,6 +122,7 @@ export class AnalysisRunner {
       if (run?.provider !== provider) throw new Error("请先暂停当前分析，再切换 AI");
       if (selectedModel && run.model !== selectedModel)
         throw new Error("请先暂停当前分析，再切换模型");
+      if (run.concurrency !== concurrency) throw new Error("请先暂停当前分析，再修改并发数");
       return existing.id;
     }
     if (sample && !this.store.counts().complete)
@@ -131,6 +136,7 @@ export class AnalysisRunner {
       if (run?.provider !== provider) throw new Error("请先暂停当前分析，再切换 AI");
       if (selectedModel && run.model !== selectedModel)
         throw new Error("请先暂停当前分析，再切换模型");
+      if (run.concurrency !== concurrency) throw new Error("请先暂停当前分析，再修改并发数");
       return afterConnect.id;
     }
     this.store.recover();
@@ -138,7 +144,11 @@ export class AnalysisRunner {
     if (!this.store.acquire(owner)) {
       if (productKeys) throw new Error("另一个本机服务正在分析，请先在该服务暂停");
       const current = this.store.activeRun();
-      if (current?.provider === provider && (!selectedModel || current.model === selectedModel))
+      if (
+        current?.provider === provider &&
+        (!selectedModel || current.model === selectedModel) &&
+        current.concurrency === concurrency
+      )
         return current.id;
       throw new Error("另一个本机服务正在分析，请先在该服务暂停");
     }
@@ -151,10 +161,11 @@ export class AnalysisRunner {
         sample,
         sampleSize,
         productKeys,
+        concurrency,
       );
       if (this.store.run(id)?.status === "running" || (!sample && this.store.followsCapture(id))) {
         this.store.setRun(id, "running", null, owner);
-        this.launch(id, owner, client);
+        this.launch(id, owner, client, concurrency);
       } else this.store.release(owner);
       return id;
     } catch (error) {
@@ -162,13 +173,17 @@ export class AnalysisRunner {
       throw error;
     }
   }
-  async resume(id: string, retryFailed = false) {
+  async resume(id: string, retryFailed = false, concurrency?: number) {
+    if (concurrency !== undefined) analysisConcurrency(concurrency);
     if (this.active) {
       if (this.active.id !== id) throw new Error("请先暂停当前分析任务");
+      if (concurrency !== undefined && this.store.run(id)?.concurrency !== concurrency)
+        throw new Error("请先暂停当前分析，再修改并发数");
       return id;
     }
     const run = this.store.run(id);
     if (!run) throw new Error("分析任务不存在");
+    const count = analysisConcurrency(concurrency ?? run.concurrency);
     if (!retryFailed && (run.failed || run.waitingPricing))
       throw new Error("请先重试失败或待补齐的商品，再继续分析");
     if (
@@ -184,6 +199,8 @@ export class AnalysisRunner {
     const afterConnect = this.currentActivity();
     if (afterConnect) {
       if (afterConnect.id !== id) throw new Error("请先暂停当前分析任务");
+      if (this.store.run(id)?.concurrency !== count)
+        throw new Error("请先暂停当前分析，再修改并发数");
       return afterConnect.id;
     }
     this.store.recover();
@@ -192,14 +209,15 @@ export class AnalysisRunner {
     try {
       if (retryFailed) this.store.retry(id);
       this.store.setRun(id, "running", null, owner);
-      this.launch(id, owner, client);
+      this.launch(id, owner, client, count);
       return id;
     } catch (error) {
       this.store.release(owner);
       throw error;
     }
   }
-  private launch(id: string, owner: string, client: AnalysisClient) {
+  private launch(id: string, owner: string, client: AnalysisClient, concurrency: number) {
+    this.store.setConcurrency(id, concurrency, owner);
     const controller = new AbortController();
     const activity = { id, owner, controller, completion: Promise.resolve() };
     this.active = activity;
@@ -210,7 +228,7 @@ export class AnalysisRunner {
         controller.abort(new Error("无法续期分析锁，请继续分析"));
       }
     }, 30_000);
-    activity.completion = this.process(id, owner, client, controller.signal)
+    activity.completion = this.process(id, owner, client, controller, concurrency)
       .catch((error: unknown) => {
         if (this.store.owns(owner))
           this.store.setRun(
@@ -226,15 +244,54 @@ export class AnalysisRunner {
         if (this.active === activity) this.active = null;
       });
   }
-  private async process(id: string, owner: string, client: AnalysisClient, stop: AbortSignal) {
-    let budget = { taskId: "", started: Date.now(), rounds: 0 };
-    while (!stop.aborted) {
-      if (!this.store.owns(owner)) return;
-      this.store.appendCaptured(id, owner);
-      let task = this.store.next(id);
-      if (!task) {
-        // Collection may stop or restart independently; only pausing analysis ends this wait.
-        if (this.store.followsCapture(id)) {
+  private async process(
+    id: string,
+    owner: string,
+    client: AnalysisClient,
+    controller: AbortController,
+    concurrency: number,
+  ) {
+    const stop = controller.signal;
+    const pending = new Set<Promise<void>>();
+    const running = { new: 0, old: 0 };
+    const limits = analysisLaneLimits(concurrency);
+    let nextSingleLane: AnalysisLane = "new";
+    try {
+      while (!stop.aborted && this.store.owns(owner)) {
+        this.store.appendCaptured(id, owner);
+        while (!stop.aborted && pending.size < concurrency) {
+          const preferredLane =
+            concurrency === 1 ? nextSingleLane : running.new < limits.newLimit ? "new" : "old";
+          const task = this.store.next(id, preferredLane);
+          if (!task) break;
+          running[task.lane]++;
+          nextSingleLane = task.lane === "new" ? "old" : "new";
+          const work = this.processTask(task, owner, client, controller)
+            .catch((error: unknown) => {
+              if (!stop.aborted && this.store.owns(owner))
+                this.store.setRun(
+                  id,
+                  "paused",
+                  error instanceof Error ? error.message : "分析失败",
+                  owner,
+                );
+              controller.abort();
+            })
+            .finally(() => {
+              running[task.lane]--;
+              pending.delete(work);
+            });
+          pending.add(work);
+        }
+        if (pending.size) {
+          // 有空闲槽位时继续检查新采集角色，不被其他慢请求挡住。
+          await Promise.race([
+            ...pending,
+            ...(pending.size < concurrency && this.store.followsCapture(id)
+              ? [new Promise<void>((resolve) => setTimeout(resolve, 1000))]
+              : []),
+          ]);
+        } else if (this.store.followsCapture(id)) {
           await new Promise<void>((resolve) => {
             const done = () => {
               clearTimeout(timer);
@@ -244,16 +301,40 @@ export class AnalysisRunner {
             const timer = setTimeout(done, 1000);
             stop.addEventListener("abort", done, { once: true });
           });
-          continue;
+        } else {
+          this.store.setRun(id, "completed", null, owner);
+          return;
         }
-        this.store.setRun(id, "completed", null, owner);
-        return;
       }
+    } finally {
+      controller.abort();
+      await Promise.allSettled(pending);
+      if (this.store.owns(owner) && this.store.run(id)?.status === "running")
+        this.store.setRun(id, "paused", null, owner);
+    }
+  }
+  private async processTask(
+    task: AnalysisTask,
+    owner: string,
+    client: AnalysisClient,
+    controller: AbortController,
+  ) {
+    const id = task.runId;
+    const stop = controller.signal;
+    const pause = (message: string) => {
+      if (!stop.aborted) this.store.setRun(id, "paused", message, owner);
+      controller.abort();
+    };
+    const deferPricing = (message: string) => {
+      this.store.deferPricing(task, owner, message);
+      controller.abort();
+    };
+    const budget = { started: Date.now(), rounds: 0 };
+    while (!stop.aborted && this.store.owns(owner)) {
       if (task.profile && (!task.record.detail || captureIssues(task.record.detail).length)) {
-        this.store.setRun(id, "paused", "角色资料尚未完整采集，请补采后继续分析", owner);
+        pause("角色资料尚未完整采集，请补采后继续分析");
         return;
       }
-      if (budget.taskId !== task.id) budget = { taskId: task.id, started: Date.now(), rounds: 0 };
       const equipmentPricingCurrent =
         !!task.equipmentPricing &&
         task.equipmentPricing.inputHash ===
@@ -284,7 +365,7 @@ export class AnalysisRunner {
         pendingPricing &&
         (budget.rounds >= MAX_PRICING_ROUNDS || Date.now() - budget.started >= MAX_ROLE_PRICING_MS)
       ) {
-        this.store.deferPricing(task, owner, "达到本角色自动查价上限，报价仍未补齐");
+        deferPricing("达到本角色自动查价上限，报价仍未补齐");
         return;
       }
       const reportProgress = (progress: Partial<PricingSearchProgress> = {}) => {
@@ -337,9 +418,7 @@ export class AnalysisRunner {
           task = this.store.saveEquipmentPricing(task, snapshot, owner);
           if (snapshot.searchComplete === false) {
             if (pricingSearchAdvanced(previousPricing, snapshot)) continue;
-            this.store.deferPricing(
-              task,
-              owner,
+            deferPricing(
               (snapshot.items.some((item) => item.searchState === "read_failed")
                 ? "装备查询或详情读取失败：" +
                   snapshot.items
@@ -366,10 +445,10 @@ export class AnalysisRunner {
                 ? error.message
                 : "装备联网查价失败，请重试";
           if (!stop.aborted && (signal.aborted || itemPricingError(error))) {
-            this.store.deferPricing(task, owner, message);
+            deferPricing(message);
             return;
           }
-          this.store.setRun(id, "paused", message, owner);
+          pause(message);
           return;
         }
         continue;
@@ -404,9 +483,7 @@ export class AnalysisRunner {
           task = this.store.savePetPricing(task, snapshot, owner);
           if (snapshot.searchComplete === false) {
             if (pricingSearchAdvanced(previousPricing, snapshot)) continue;
-            this.store.deferPricing(
-              task,
-              owner,
+            deferPricing(
               (snapshot.items.some((item) => item.searchState === "read_failed")
                 ? "宝宝详情读取失败"
                 : "宝宝查价游标未推进") +
@@ -425,10 +502,10 @@ export class AnalysisRunner {
                 ? error.message
                 : "宝宝联网查价失败，请重试";
           if (!stop.aborted && (signal.aborted || itemPricingError(error))) {
-            this.store.deferPricing(task, owner, message);
+            deferPricing(message);
             return;
           }
-          this.store.setRun(id, "paused", message, owner);
+          pause(message);
           return;
         }
         continue;
@@ -472,9 +549,7 @@ export class AnalysisRunner {
               (item) => item.searchState === "read_failed" || item.searchStatus === "read_failed",
             );
             if (!readFailed && pricingSearchAdvanced(previousPricing, gearPricing)) continue;
-            this.store.deferPricing(
-              task,
-              owner,
+            deferPricing(
               (readFailed ? "宝宝装备详情读取失败" : "宝宝装备查价游标未推进") +
                 "，已保存角色和宝宝查价进度；等待新的可核验数据或修复读取后继续查价" +
                 (gearPricing.issues.length
@@ -494,10 +569,10 @@ export class AnalysisRunner {
                 ? error.message
                 : "宝宝装备联网查价失败，请重试";
           if (!stop.aborted && (signal.aborted || itemPricingError(error))) {
-            this.store.deferPricing(task, owner, message);
+            deferPricing(message);
             return;
           }
-          this.store.setRun(id, "paused", message, owner);
+          pause(message);
           return;
         }
         continue;
@@ -526,7 +601,7 @@ export class AnalysisRunner {
           result,
           usage: { source: "validated-body-recalculation", inputHash: task.document.contentHash },
         });
-        continue;
+        return;
       }
       const prompt =
         task.profile &&
@@ -572,6 +647,7 @@ export class AnalysisRunner {
             )
           : validateAnalysis(raw, task.document, task.record);
         this.store.finish(task, attempt, owner, { state: "completed", result, raw, usage });
+        return;
       } catch (error) {
         if (!this.store.owns(owner)) return;
         const message = stop.aborted
@@ -592,16 +668,18 @@ export class AnalysisRunner {
           usage,
           requeue: stop.aborted || fatal,
         });
-        this.store.setRun(id, "paused", message, owner);
+        pause(message);
         return;
       }
     }
-    this.store.setRun(id, "paused", null, owner);
   }
   async pause(id?: string) {
     if (this.active) {
       if (id && this.active.id !== id) throw new Error("请暂停当前正在执行的分析批次");
       const activity = this.active;
+      const run = this.store.run(activity.id);
+      if (run?.status === "running" && run.runningCount)
+        this.store.setRun(activity.id, "paused", "已暂停，继续时先处理这件商品", activity.owner);
       activity.controller.abort();
       await activity.completion;
       return;

@@ -1,4 +1,5 @@
 import {
+  DEFAULT_CRAWL_CONCURRENCY,
   ListingChangedError,
   type Checkpoint,
   type CrawlSource,
@@ -10,12 +11,26 @@ import { prepareCrawlPages } from "./resume";
 import { CAPTURE_VERSION, hasUnconfirmedEmptyEquipment } from "./compact";
 import { MAIN_TABS } from "./detail";
 import { IncompleteCaptureError } from "./capture-readiness";
+import { watchCrawl } from "./watch";
 export interface CrawlOptions {
+  concurrency?: number;
+  watch?: boolean;
+  headIntervalMs?: number;
   backfillOnly?: boolean;
   keys?: string[];
   refresh?: boolean;
 }
 export function validateCrawlOptions(options: CrawlOptions) {
+  if (
+    options.concurrency !== undefined &&
+    (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1)
+  )
+    throw new Error("并发数必须是正整数");
+  if (
+    options.headIntervalMs !== undefined &&
+    (!Number.isSafeInteger(options.headIntervalMs) || options.headIntervalMs < 1)
+  )
+    throw new Error("首页检查间隔必须是正整数毫秒");
   if (
     options.refresh &&
     (!options.backfillOnly ||
@@ -25,6 +40,32 @@ export function validateCrawlOptions(options: CrawlOptions) {
   )
     throw new Error("刷新采集仅支持明确指定一个已保存商品");
 }
+
+async function captureConcurrently(
+  items: Listing[],
+  concurrency: number,
+  signal: AbortSignal,
+  capture: (item: Listing, index: number) => Promise<void>,
+) {
+  let next = 0;
+  let failure: { error: unknown } | undefined;
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (!failure && !signal.aborted && next < items.length) {
+        const index = next++;
+        try {
+          await capture(items[index], index);
+        } catch (error) {
+          failure ??= { error };
+        }
+      }
+    }),
+  );
+  // 退出前等在途任务结束，避免释放采集锁后仍有页面操作或落库。
+  signal.throwIfAborted();
+  if (failure) throw failure.error;
+}
+
 export async function crawl(
   source: CrawlSource,
   store: CrawlStore,
@@ -34,6 +75,10 @@ export async function crawl(
 ) {
   signal.throwIfAborted();
   validateCrawlOptions(options);
+  if (options.watch && !options.backfillOnly)
+    return watchCrawl(source, store, signal, publish, options);
+  const concurrency = options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
+  publish({ concurrency });
   let saved = 0,
     skipped = 0,
     failed = 0;
@@ -48,12 +93,13 @@ export async function crawl(
       retryCompleted: 0,
       message: `优先补采 ${retries.length} 条未完成详情…`,
     });
-    for (const [index, item] of retries.entries()) {
+    let retryCompleted = 0;
+    await captureConcurrently(retries, concurrency, signal, async (item, index) => {
       signal.throwIfAborted();
       store.beginRetry(item.key, options.refresh);
       publish({
         current: item.name || item.eid,
-        retryCompleted: index,
+        retryCompleted,
         detailProgress: `正在补采 ${index + 1}/${retries.length}：打开已保存商品链接…`,
       });
       try {
@@ -99,7 +145,7 @@ export async function crawl(
             name: "IncompleteDetailError",
           });
         saved++;
-        publish({ saved, retryCompleted: index + 1, totalSaved: store.count() });
+        publish({ saved, retryCompleted: ++retryCompleted, totalSaved: store.count() });
       } catch (error) {
         signal.throwIfAborted();
         if (error instanceof IncompleteCaptureError && !options.refresh)
@@ -110,13 +156,13 @@ export async function crawl(
         retryFailed.add(item.key);
         publish({
           failed,
-          retryCompleted: index + 1,
+          retryCompleted: ++retryCompleted,
           lastItemError: `商品 ${item.key}：${message}`,
           detailProgress: "该商品详情待重试，继续正常采集",
         });
         if (!(error instanceof Error && error.name === "IncompleteDetailError")) throw error;
       }
-    }
+    });
   }
   if (options.backfillOnly) {
     publish({
@@ -165,6 +211,7 @@ export async function crawl(
     });
     let items = page.items;
     const handled = new Set<string>();
+    const pending: Listing[] = [];
     let changes = 0;
     while (true) {
       signal.throwIfAborted();
@@ -205,6 +252,14 @@ export async function crawl(
         publish({ skipped, detailProgress: "详情已完整保存，跳过重复采集" });
         continue;
       }
+      pending.push(item);
+    }
+    let checkpointIndex = -1;
+    let completed = Math.max(0, items.length - pending.length);
+    publish({ itemIndex: completed });
+    await captureConcurrently(pending, concurrency, signal, async (item, index) => {
+      signal.throwIfAborted();
+      publish({ current: item.name || item.eid });
       try {
         const detail = await source.detail(item);
         signal.throwIfAborted();
@@ -215,12 +270,19 @@ export async function crawl(
           page: number,
           savedAt: detail.collectedAt,
         };
-        if (!store.save(item, detail, checkpoint))
+        // 所有已核对商品先登记为 pending；乱序完成也能先补采，且成功断点不倒退。
+        const advance = index > checkpointIndex;
+        if (!store.save(item, detail, advance ? checkpoint : undefined))
           throw Object.assign(new Error("采集完整性校验未通过，未推进成功断点"), {
             name: "IncompleteDetailError",
           });
         saved++;
-        publish({ saved, totalSaved: store.count(), checkpoint });
+        if (advance) checkpointIndex = index;
+        publish({
+          saved,
+          totalSaved: store.count(),
+          ...(advance ? { checkpoint } : {}),
+        });
       } catch (error) {
         signal.throwIfAborted();
         if (error instanceof IncompleteCaptureError) store.save(item, error.detail);
@@ -232,11 +294,13 @@ export async function crawl(
             lastItemError: `商品 ${item.key}：${error.message}`,
             detailProgress: "该商品详情待重试，继续下一条",
           });
-          continue;
+          return;
         }
         throw error;
+      } finally {
+        publish({ itemIndex: ++completed });
       }
-    }
+    });
   }
   store.markBackfillComplete();
   publish({

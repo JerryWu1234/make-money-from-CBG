@@ -53,6 +53,7 @@ describe("商品分析 HTTP 链路", () => {
       1,
       undefined,
       true,
+      10,
     );
     mocks.startAnalysis.mockClear();
     for (const equipmentOnly of ["true", 1, null, {}]) {
@@ -106,6 +107,7 @@ describe("商品分析 HTTP 链路", () => {
       1,
       undefined,
       false,
+      10,
     );
   });
   it("开始请求指定提供方，刷新状态不会启动 SDK", async () => {
@@ -126,6 +128,7 @@ describe("商品分析 HTTP 链路", () => {
       1,
       undefined,
       false,
+      10,
     );
     await apiMiddleware(
       request("/api/analysis/status?provider=deepseek&page=2&search=宝宝&filter=failed"),
@@ -137,6 +140,7 @@ describe("商品分析 HTTP 链路", () => {
       page: 2,
       resultsPage: 1,
       summary: true,
+      showViewed: false,
       search: "宝宝",
       filter: "failed",
       runId: undefined,
@@ -158,6 +162,7 @@ describe("商品分析 HTTP 链路", () => {
       1,
       undefined,
       false,
+      10,
     );
     mocks.startAnalysis.mockClear();
     const invalid = response();
@@ -189,6 +194,7 @@ describe("商品分析 HTTP 链路", () => {
       3,
       undefined,
       false,
+      10,
     );
     mocks.startAnalysis.mockClear();
     for (const sampleSize of [0, 4, 1.5, "3", null]) {
@@ -233,13 +239,13 @@ describe("商品分析 HTTP 链路", () => {
       response() as unknown as ServerResponse,
       vi.fn(),
     );
-    expect(mocks.resumeAnalysis).toHaveBeenLastCalledWith("run");
+    expect(mocks.resumeAnalysis).toHaveBeenLastCalledWith("run", false, undefined);
     await apiMiddleware(
       request("/api/analysis/retry", { runId: "run" }),
       response() as unknown as ServerResponse,
       vi.fn(),
     );
-    expect(mocks.resumeAnalysis).toHaveBeenLastCalledWith("run", true);
+    expect(mocks.resumeAnalysis).toHaveBeenLastCalledWith("run", true, undefined);
   });
   it("导出的是数据库中的当次完整原文和完整请求", async () => {
     mocks.analysisDetail.mockReturnValue({

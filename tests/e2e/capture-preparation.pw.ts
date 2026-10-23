@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Route } from "@playwright/test";
 import { CrawlStore } from "../../server/crawler/store";
@@ -6,7 +6,7 @@ import { AnalysisStore } from "../../server/analysis/store";
 import type { AnalysisOverview } from "../../server/analysis/types";
 import { analysisRecord } from "../fixtures/analysis";
 
-test("采集准备前置：无完整记录也能自动采集，显示进度且可以暂停", async ({ page }) => {
+test("采集准备前置：无完整记录也能自动采集，显示进度且可以暂停", async ({ page }, testInfo) => {
   const crawl = new CrawlStore(":memory:");
   const record = analysisRecord("a");
   record.detail!.equipmentCapture!.complete = false;
@@ -79,7 +79,7 @@ test("采集准备前置：无完整记录也能自动采集，显示进度且�
       });
     });
     await page.goto("http://cbg-capture.test/analysis-preview");
-    const start = page.getByRole("button", { name: "开始分析已有商品" });
+    const start = page.getByRole("button", { name: "开始分析并等待采集" });
     await expect(start).toBeEnabled();
     await start.click();
     await expect(
@@ -88,15 +88,36 @@ test("采集准备前置：无完整记录也能自动采集，显示进度且�
     await expect(page.getByText("完整采集中", { exact: true })).toBeVisible();
     const pause = page.getByRole("button", { name: "暂停资料采集" });
     await expect(pause).toBeEnabled();
-    const directory = path.join(process.cwd(), "data/capture-before-analysis-2026-10-13");
-    await mkdir(directory, { recursive: true });
-    await page.screenshot({ path: path.join(directory, "preparation-ui.png"), fullPage: false });
+    await page.screenshot({ path: testInfo.outputPath("preparation-ui.png"), fullPage: false });
     await pause.click();
     await expect(pause).toBeHidden();
     expect(startCalls).toBe(1);
     expect(pauseCalls).toBe(1);
     expect(store.run("not-created")).toBeNull();
-    expect(crawl.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n).toBe(0);
+    const analysisRuns = Number(crawl.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n);
+    expect(analysisRuns).toBe(0);
+    const evidence = testInfo.outputPath("evidence.json");
+    await writeFile(
+      evidence,
+      JSON.stringify(
+        {
+          fixture: true,
+          repeat:
+            "vp run build && vp exec playwright test tests/e2e/capture-preparation.pw.ts --workers=1 --output=data/capture-preparation-e2e",
+          completeRecords: store.counts().complete,
+          startCalls,
+          pauseCalls,
+          preparationPaused: preparation === undefined,
+          analysisRuns,
+        },
+        null,
+        2,
+      ),
+    );
+    await testInfo.attach("采集准备暂停验证结果", {
+      path: evidence,
+      contentType: "application/json",
+    });
   } finally {
     await starting?.abort().catch(() => {});
     crawl.close();

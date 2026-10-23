@@ -119,6 +119,126 @@ const refreshDetail = (listing: Listing, price = "500.00"): RoleDetail => ({
   },
 });
 const readSaved = (db: CrawlStore, key: string) => db.detail(key) as SavedRoleRecord | null;
+
+// 失败方式：超出并发上限、乱序完成使断点倒退、失败后继续派发、暂停后落库、续采漏掉未完成项。
+describe("并发采集", () => {
+  it.each([undefined, 1, 2, 4])("并发配置 %s 限制在途数量且不重复采集", async (concurrency) => {
+    const db = memory();
+    const rows = Array.from({ length: 7 }, (_, index) => item(index + 1));
+    const src = source([rows]);
+    const releases: Array<() => void> = [];
+    let active = 0,
+      maximum = 0;
+    src.detail = vi.fn(async (row) => {
+      active++;
+      maximum = Math.max(maximum, active);
+      await new Promise<void>((resolve) => releases.push(resolve));
+      active--;
+      return detail(row);
+    });
+    const task = crawl(src, db, signal(), vi.fn(), { concurrency });
+    const limit = concurrency ?? 4;
+    await vi.waitFor(() => expect(releases).toHaveLength(limit));
+    expect(db.retryItems()).toHaveLength(rows.length);
+    while (db.count() < rows.length) {
+      releases.splice(0).forEach((release) => release());
+      await vi.waitFor(() => expect(releases.length > 0 || db.count() === rows.length).toBe(true));
+    }
+    await task;
+    expect(maximum).toBe(limit);
+    expect(src.detail).toHaveBeenCalledTimes(rows.length);
+    expect(db.checkpoint()?.key).toBe(rows.at(-1)!.key);
+    expect(db.backfillComplete()).toBe(true);
+  });
+
+  it("后面的角色先完成，前面的结果仍保存且断点不倒退", async () => {
+    const db = memory(),
+      rows = [item(1), item(2), item(3)];
+    const src = source([rows]);
+    const releases = new Map<string, () => void>();
+    src.detail = vi.fn(async (row) => {
+      await new Promise<void>((resolve) => releases.set(row.key, resolve));
+      return detail(row);
+    });
+    const task = crawl(src, db, signal(), vi.fn());
+    await vi.waitFor(() => expect(releases.size).toBe(3));
+    for (const row of [...rows].reverse()) {
+      releases.get(row.key)!();
+      await vi.waitFor(() => expect(readSaved(db, row.key)?.status).toBe("complete"));
+      expect(db.checkpoint()?.key).toBe(rows[2].key);
+    }
+    await task;
+    expect(db.count()).toBe(3);
+  });
+
+  it("安全验证停止派发，等在途任务结束后才退出，随后补采不漏项", async () => {
+    const db = memory(),
+      rows = [item(1), item(2), item(3), item(4)];
+    const src = source([rows]);
+    const releases = new Map<string, () => void>();
+    src.detail = vi.fn(async (row) => {
+      await new Promise<void>((resolve) => releases.set(row.key, resolve));
+      if (row.key === rows[0].key) throw new Error("安全验证");
+      return detail(row);
+    });
+    let settled = false;
+    const outcome = crawl(src, db, signal(), vi.fn(), { concurrency: 2 }).then(
+      () => {
+        settled = true;
+        return null;
+      },
+      (error: unknown) => {
+        settled = true;
+        return error;
+      },
+    );
+    await vi.waitFor(() => expect(releases.size).toBe(2));
+    releases.get(rows[0].key)!();
+    await vi.waitFor(() => expect(readSaved(db, rows[0].key)?.status).toBe("failed"));
+    expect(settled).toBe(false);
+    expect(src.detail).toHaveBeenCalledTimes(2);
+    releases.get(rows[1].key)!();
+    expect(await outcome).toMatchObject({ message: "安全验证" });
+    expect(db.count()).toBe(1);
+    expect(db.backfillComplete()).toBe(false);
+    const resumed = source([[]]);
+    await crawl(resumed, db, signal(), vi.fn(), { backfillOnly: true });
+    expect(db.count()).toBe(4);
+    expect(resumed.detail).toHaveBeenCalledTimes(3);
+  });
+
+  it("暂停保留所有在途与未开始角色，续采可更换并发数", async () => {
+    const db = memory(),
+      rows = [item(1), item(2), item(3), item(4)];
+    const control = new AbortController(),
+      src = source([rows]);
+    src.detail = vi.fn(async (row) => {
+      await new Promise<void>((resolve) =>
+        control.signal.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      return detail(row);
+    });
+    const outcome = crawl(src, db, control.signal, vi.fn()).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(src.detail).toHaveBeenCalledTimes(4));
+    control.abort(new Error("用户暂停采集"));
+    expect(await outcome).toMatchObject({ message: "用户暂停采集" });
+    expect(db.count()).toBe(0);
+    expect(db.retryItems()).toHaveLength(4);
+    expect(db.checkpoint()).toBeUndefined();
+    const resumed = source([[]]);
+    await crawl(resumed, db, signal(), vi.fn(), { backfillOnly: true, concurrency: 1 });
+    expect(db.count()).toBe(4);
+    expect(db.checkpoint()).toBeUndefined();
+  });
+
+  it.each([0, -1, 1.5, NaN, Infinity])("拒绝无效并发数 %s 且不读取列表", async (concurrency) => {
+    const src = source([[item(1)]]),
+      db = memory();
+    await expect(crawl(src, db, signal(), vi.fn(), { concurrency })).rejects.toThrow("并发数");
+    expect(src.page).not.toHaveBeenCalled();
+    expect(db.count()).toBe(0);
+  });
+});
 it.each([false, true])(
   "采集失败保留部分详情且不推进成功断点，补采模式=%s",
   async (backfillOnly) => {

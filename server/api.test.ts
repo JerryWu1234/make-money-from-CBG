@@ -23,6 +23,8 @@ const mocks = vi.hoisted(() => ({
   checkPetGear: vi.fn(),
   equipmentCheckImported: vi.fn(),
   startAnalysis: vi.fn(),
+  analysisOverview: vi.fn(),
+  markRecommendationViewed: vi.fn(),
   aiProvider: vi.fn(),
 }));
 vi.mock("./crawler/controller", () => mocks);
@@ -111,6 +113,60 @@ it("首页装备开关读写不启动采集、登录或分析", async () => {
   expect(mocks.checkCbgStatus).not.toHaveBeenCalled();
 });
 
+describe("分析并发设置", () => {
+  it.each([undefined, 2])("开始分析传入并发数 %s，未设置时默认10", async (concurrency) => {
+    const res = response();
+    await (
+      await import("./api")
+    ).apiMiddleware(
+      request("/api/analysis/start", { provider: "codex", concurrency }),
+      res,
+      vi.fn(),
+    );
+    expect(mocks.startAnalysis).toHaveBeenCalledWith(
+      "codex",
+      false,
+      false,
+      undefined,
+      1,
+      undefined,
+      false,
+      concurrency ?? 10,
+    );
+    expect(res.statusCode).toBe(200);
+  });
+  it.each(["resume", "retry"])("%s 保留批次或传入新的并发数", async (action) => {
+    const { apiMiddleware } = await import("./api");
+    for (const concurrency of [undefined, 2]) {
+      await apiMiddleware(
+        request(`/api/analysis/${action}`, { runId: "batch", concurrency }),
+        response(),
+        vi.fn(),
+      );
+      expect(mocks.resumeAnalysis).toHaveBeenLastCalledWith(
+        "batch",
+        action === "retry",
+        concurrency,
+      );
+    }
+  });
+  it.each(["start", "resume", "retry"])("%s 拒绝无效并发配置", async (action) => {
+    const { apiMiddleware } = await import("./api");
+    for (const concurrency of [0, -1, 1.5, "3", null]) {
+      const res = response();
+      await apiMiddleware(
+        request(`/api/analysis/${action}`, { provider: "codex", runId: "batch", concurrency }),
+        res,
+        vi.fn(),
+      );
+      expect(res.statusCode).toBe(500);
+      expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ error: "分析并发数必须是正整数" });
+    }
+    expect(mocks.startAnalysis).not.toHaveBeenCalled();
+    expect(mocks.resumeAnalysis).not.toHaveBeenCalled();
+  });
+});
+
 describe("指定商品试分析", () => {
   it("宝宝装备表单诊断沿用请求取消，不启动AI或分析队列", async () => {
     const input = { productKey: "941:role", mode: "discover" };
@@ -142,9 +198,16 @@ describe("指定商品试分析", () => {
     const { apiMiddleware } = await import("./api");
     const res = response();
     await apiMiddleware(request("/api/analysis/start", input), res, vi.fn());
-    expect(mocks.startAnalysis).toHaveBeenCalledWith("codex", false, true, undefined, 1, [
-      "462:target",
-    ]);
+    expect(mocks.startAnalysis).toHaveBeenCalledWith(
+      "codex",
+      false,
+      true,
+      undefined,
+      1,
+      ["462:target"],
+      false,
+      10,
+    );
     expect(res.statusCode).toBe(200);
   });
 
@@ -350,6 +413,30 @@ describe("采集接口与定时计划", () => {
     await apiMiddleware(request("/api/crawl/start"), response(), vi.fn());
     expect(mocks.disableScanSchedule).toHaveBeenCalledTimes(1);
   });
+  it.each(["/api/crawl/start", "/api/crawl/backfill"])("%s 传入配置的并发数", async (pathname) => {
+    const { apiMiddleware } = await import("./api");
+    mocks.startCrawl.mockResolvedValue({
+      status: { running: true, concurrency: 2 },
+      started: true,
+    });
+    const res = response();
+    await apiMiddleware(request(pathname, { concurrency: 2 }), res, vi.fn());
+    expect(mocks.startCrawl).toHaveBeenCalledWith("manual", undefined, {
+      backfillOnly: pathname.endsWith("backfill"),
+      keys: undefined,
+      concurrency: 2,
+    });
+    expect(res.statusCode).toBe(200);
+  });
+  it.each([0, -1, 1.5, "3", null])("拒绝无效并发数 %j，不启动采集", async (concurrency) => {
+    const { apiMiddleware } = await import("./api");
+    const res = response();
+    await apiMiddleware(request("/api/crawl/start", { concurrency }), res, vi.fn());
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ error: "并发数必须是正整数" });
+    expect(mocks.startCrawl).not.toHaveBeenCalled();
+    expect(mocks.disableScanSchedule).not.toHaveBeenCalled();
+  });
   it("仅明确单商品补采可请求完整刷新", async () => {
     const { apiMiddleware } = await import("./api");
     const key = "33:target";
@@ -390,4 +477,29 @@ describe("采集接口与定时计划", () => {
     expect(mocks.clearCrawl).not.toHaveBeenCalled();
     expect(mocks.disableScanSchedule).not.toHaveBeenCalled();
   });
+});
+
+// Failure cases: view requests reach analysis execution, GET defaults expose viewed
+// products, or the show-viewed option is not forwarded to the ranking filter.
+it("推荐查看接口仅保存标记，读取默认隐藏且支持显示已查看", async () => {
+  const { apiMiddleware } = await import("./api");
+  mocks.markRecommendationViewed.mockReturnValue({ key: "product", viewed: true });
+  const res = response();
+  await apiMiddleware(
+    request("/api/analysis/recommendation/view", { key: "product" }),
+    res,
+    vi.fn(),
+  );
+  expect(mocks.markRecommendationViewed).toHaveBeenCalledWith("product");
+  expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ key: "product", viewed: true });
+  for (const show of [false, true]) {
+    const read = request("/api/analysis/status" + (show ? "?showViewed=true" : ""));
+    read.method = "GET";
+    mocks.analysisOverview.mockReturnValue({ ranking: [] });
+    await apiMiddleware(read, response(), vi.fn());
+    expect(mocks.analysisOverview).toHaveBeenLastCalledWith(
+      expect.objectContaining({ showViewed: show }),
+    );
+  }
+  expect(mocks.startAnalysis).not.toHaveBeenCalled();
 });

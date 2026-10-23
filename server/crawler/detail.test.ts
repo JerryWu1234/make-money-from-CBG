@@ -86,6 +86,50 @@ describe("装备局部补采", () => {
   afterAll(async () => {
     await browser?.close();
   });
+  // 失败方式：共享详情页串号、读取失败未归还页面、每件都新开页而没有复用。
+  it("并发角色使用独立详情页，完整读取后复用空闲页", async () => {
+    const context = await browser.newContext();
+    await context.route("**/*", (route) => {
+      const id = new URL(route.request().url()).searchParams.get("eid")!;
+      return route.fulfill({
+        contentType: "text/html",
+        body:
+          fixture(false).replaceAll("新武器", `武器${id}`) +
+          `<script>window.RoleData={id:${JSON.stringify(id)}}</script>`,
+      });
+    });
+    try {
+      const page = await context.newPage();
+      const createDetailPage = vi.fn(() => context.newPage());
+      const source = createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        createDetailPage,
+        signal: new AbortController().signal,
+        onDetailProgress: vi.fn(),
+        log: vi.fn(),
+      });
+      const rows = ["one", "two", "three"].map((id) => ({
+        ...listing,
+        key: `367:${id}`,
+        eid: id,
+        url: `https://xyq.cbg.163.com/equip?s=367&eid=${id}`,
+      }));
+      const results = await Promise.all(rows.map((row) => source.detail(row)));
+      for (const [index, result] of results.entries()) {
+        expect(result.raw.RoleData).toEqual({ id: rows[index].eid });
+        expect(result.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].name).toBe(
+          `武器${rows[index].eid}`,
+        );
+        expect(result.equipmentCapture?.complete).toBe(true);
+      }
+      expect(createDetailPage).toHaveBeenCalledTimes(2);
+      await source.detail(rows[0]);
+      expect(createDetailPage).toHaveBeenCalledTimes(2);
+    } finally {
+      await context.close();
+    }
+  }, 30000);
   it("采集始终读取所有标签、装备及宝宝，不受只分析裸号的设置影响", async () => {
     const page = await browser.newPage();
     await page.route("**/*", (route) =>
@@ -519,6 +563,40 @@ describe("装备局部补采", () => {
         category: "道具 · 召唤兽内丹",
       });
       expect(items[1].description).toContain("血债偿");
+    } finally {
+      await page.close();
+    }
+  }, 15000);
+
+  // 失败方式：材料被当作装备要求属性或悬停；普通装备因此被一并跳过。
+  it("钟灵石和百炼精铁无需装备属性，仍完整读取同页的普通装备", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(
+            false,
+            undefined,
+            undefined,
+            '<img width="40" height="40" data_equip_name="钟灵石" data_equip_type="50344"><img width="40" height="40" data_equip_name="百炼精铁" data_equip_type="4001" data_equip_desc="等级 150">',
+          ),
+        }),
+      );
+      const detail = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(detail.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      const items = detail.tabs.find((entry) => entry.name === "道具/法宝")!.items!;
+      expect(items[0].description).toContain("伤害 +420");
+      expect(items.slice(1).map((item) => item.category)).toEqual([
+        "材料 · 钟灵石",
+        "材料 · 百炼精铁",
+      ]);
+      expect(items[2].description).toBe("等级 150");
     } finally {
       await page.close();
     }

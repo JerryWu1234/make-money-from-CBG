@@ -234,7 +234,7 @@ async function runCodexRequest(
         forced_login_method: "chatgpt",
         model_provider: "openai",
         ...(!probe && !search && options?.model === "gpt-6-luna" ? { service_tier: "fast" } : {}),
-        ...(search || options?.bareRoleReview
+        ...(probe || search || options?.bareRoleReview
           ? {
               features: {
                 shell_tool: false,

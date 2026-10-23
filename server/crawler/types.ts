@@ -1,3 +1,10 @@
+export const DEFAULT_CRAWL_CONCURRENCY = 4;
+export type CrawlLane = "new" | "old";
+export interface HeadCheckpoint {
+  time: string;
+  keys: string[];
+}
+
 export interface Listing {
   key: string;
   serverId: string;
@@ -28,7 +35,7 @@ export interface ListingPage {
   items: Listing[];
 }
 export interface CrawlSource {
-  prepare: () => Promise<ListingPage>;
+  prepare: (order?: string) => Promise<ListingPage>;
   page: (number: number) => Promise<ListingPage>;
   onShelf: (item: Listing) => Promise<boolean>;
   hover: (item: Listing) => Promise<Listing>;
@@ -142,6 +149,17 @@ export interface Checkpoint {
   savedAt: string;
 }
 export interface CrawlStatus {
+  concurrency?: number;
+  newRunning?: number;
+  oldRunning?: number;
+  newQueued?: number;
+  oldQueued?: number;
+  newLimit?: number;
+  oldLimit?: number;
+  headCheckedAt?: string;
+  nextHeadCheckAt?: string;
+  headPage?: number;
+  historyPage?: number;
   includeAssets?: boolean;
   running: boolean;
   phase: "idle" | "locating" | "retrying" | "collecting" | "paused" | "completed" | "error";

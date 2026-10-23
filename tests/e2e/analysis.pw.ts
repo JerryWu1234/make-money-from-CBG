@@ -200,13 +200,14 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     expect(store.overview().run?.model).toBe("deepseek-v4-pro");
     await page.getByRole("tab", { name: /推荐榜/ }).click();
     await expect(page.getByRole("tabpanel", { name: "推荐榜" }).getByRole("article")).toHaveCount(
-      2,
+      0,
     );
     await page.screenshot({
       path: testInfo.outputPath("analysis-completed-fixture.png"),
       fullPage: true,
     });
-    await page.getByRole("button", { name: "查看分析依据" }).first().click();
+    await page.getByRole("tab", { name: /全部商品/ }).click();
+    await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
     const drawer = page.getByRole("dialog", { name: "角色a" });
     await expect(drawer.getByRole("heading", { name: "评分字段依据" })).toBeVisible();
     await drawer.getByText("查看完整商品原文", { exact: true }).click();

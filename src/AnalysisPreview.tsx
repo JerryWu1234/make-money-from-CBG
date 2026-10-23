@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AiProvider } from "../server/ai/types";
-import type { AnalysisItem, AnalysisOverview, AnalysisRun } from "../server/analysis/types";
+import {
+  analysisConcurrency,
+  DEFAULT_ANALYSIS_CONCURRENCY,
+  type AnalysisItem,
+  type AnalysisOverview,
+  type AnalysisRun,
+} from "../server/analysis/types";
 import { AiConnectionControl } from "./AiConnectionControl";
 import { AssetCounts, EquipmentSummary } from "./AssetCounts";
 import { AnalysisResultDrawer } from "./AnalysisResultDrawer";
@@ -72,8 +78,10 @@ export function AnalysisPreview() {
   const [resultsPage, setResultsPage] = useState(1);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
+  const [showViewed, setShowViewed] = useState(false);
   const [revision, setRevision] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [concurrency, setConcurrency] = useState(String(DEFAULT_ANALYSIS_CONCURRENCY));
   const [error, setError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
@@ -126,6 +134,7 @@ export function AnalysisPreview() {
           resultsPage: String(resultsPage),
           search,
           filter,
+          showViewed: String(showViewed),
         });
         const next = await request<AnalysisOverview>(
           `/api/analysis/status?${params}`,
@@ -157,29 +166,40 @@ export function AnalysisPreview() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [provider, page, resultsPage, search, filter, revision]);
+  }, [provider, page, resultsPage, search, filter, showViewed, revision]);
 
-  const mutate = useCallback(async (path: string, body: unknown) => {
-    if (operation.current && path !== "/api/analysis/pause") return;
-    operation.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await request<AnalysisRun | null>(path, body);
-      if (next) {
-        setProvider(next.provider);
-        setSelectedModels((previous) => ({ ...previous, [next.provider]: next.model }));
-        setModelChanged(false);
+  const mutate = useCallback(
+    async (path: string, body: Record<string, unknown>) => {
+      if (operation.current && path !== "/api/analysis/pause") return;
+      if (path !== "/api/analysis/pause") {
+        try {
+          body = { ...body, concurrency: analysisConcurrency(Number(concurrency)) };
+        } catch (failure) {
+          setError((failure as Error).message);
+          return;
+        }
       }
-      setRevision((value) => value + 1);
-    } catch (failure) {
-      const message = failure instanceof Error ? failure.message : "操作失败，请重试";
-      setError(message === "已暂停完整资料采集准备" ? null : message);
-    } finally {
-      operation.current = false;
-      setBusy(false);
-    }
-  }, []);
+      operation.current = true;
+      setBusy(true);
+      setError(null);
+      try {
+        const next = await request<AnalysisRun | null>(path, body);
+        if (next) {
+          setProvider(next.provider);
+          setSelectedModels((previous) => ({ ...previous, [next.provider]: next.model }));
+          setModelChanged(false);
+        }
+        setRevision((value) => value + 1);
+      } catch (failure) {
+        const message = failure instanceof Error ? failure.message : "操作失败，请重试";
+        setError(message === "已暂停完整资料采集准备" ? null : message);
+      } finally {
+        operation.current = false;
+        setBusy(false);
+      }
+    },
+    [concurrency],
+  );
   const start = useCallback(
     async (selected: AiProvider) => {
       setTab("history");
@@ -210,6 +230,15 @@ export function AnalysisPreview() {
   const viewItem = (item: AnalysisItem) => {
     if (item.taskId) setTaskId(item.taskId);
     else setRoleKey(item.key);
+  };
+  const viewRecommendation = async (item: AnalysisItem) => {
+    viewItem(item);
+    try {
+      await request("/api/analysis/recommendation/view", { key: item.key });
+      setRevision((value) => value + 1);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "无法保存查看记录");
+    }
   };
   const startLabel = preparation
     ? "正在完整采集…"
@@ -275,6 +304,17 @@ export function AnalysisPreview() {
               locked={busy || running}
             />
             <div className="analysis-hero-actions">
+              <label className="analysis-concurrency">
+                分析并发数
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={concurrency}
+                  disabled={busy || running}
+                  onChange={(event) => setConcurrency(event.target.value)}
+                />
+              </label>
               <button
                 className="analysis-button analysis-button-outline"
                 disabled={busy}
@@ -301,6 +341,33 @@ export function AnalysisPreview() {
                 </button>
               )}
             </div>
+            <p className="analysis-start-hint">
+              默认同时分析 {DEFAULT_ANALYSIS_CONCURRENCY}{" "}
+              个角色；修改后在下次开始、继续或重试时生效。
+            </p>
+            <p className="analysis-start-hint">默认新号配额 7、老号配额 3；空闲名额可互相借用。</p>
+            {active && (
+              <p className="analysis-start-hint" role="status">
+                分析并发上限：{active.concurrency ?? 1} · 当前在途：
+                {active.runningCount ?? (active.current ? 1 : 0)} 个角色
+                {active.currentItems && active.currentItems.length > 1
+                  ? ` · ${active.currentItems.join("、")}`
+                  : ""}
+              </p>
+            )}
+            {active && active.newLimit !== undefined && active.oldLimit !== undefined && (
+              <p className="analysis-start-hint" role="status" aria-label="分析双队列状态">
+                新号在途 {active.newRunning ?? 0}（配额 {active.newLimit}
+                {(active.newRunning ?? 0) > active.newLimit
+                  ? `，借用 ${(active.newRunning ?? 0) - active.newLimit} 个空闲名额`
+                  : ""}
+                ） · 老号在途 {active.oldRunning ?? 0}（配额 {active.oldLimit}
+                {(active.oldRunning ?? 0) > active.oldLimit
+                  ? `，借用 ${(active.oldRunning ?? 0) - active.oldLimit} 个空闲名额`
+                  : ""}
+                ）
+              </p>
+            )}
             {settingsNotice && (
               <p className="analysis-start-hint" role="status">
                 设置已保存。下次分析将更新受影响的商品，已有结果保留。
@@ -321,9 +388,11 @@ export function AnalysisPreview() {
                       ? active.total === 0
                         ? "正在等待首个角色资料采集完整，完成后自动开始分析，无需再次点击。"
                         : `现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
-                      : searchingEquipment
-                        ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
-                        : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                      : (active.runningCount || 0) > 1
+                        ? `正在并发处理：${active.currentItems?.join("、")} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                        : searchingEquipment
+                          ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                          : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
                     : data.counts.total === 0
                       ? "尚未采集商品；可以先开始分析并等待，角色资料采集完整后会自动分析。"
                       : run && !sameModel
@@ -331,7 +400,7 @@ export function AnalysisPreview() {
                         : run && !sameCalculation
                           ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
                           : run?.status === "paused"
-                            ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续分析会沿用任务开始时的设置。`
+                            ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续时沿用原计价设置，并发数使用当前输入。`
                             : run?.status === "completed"
                               ? `本批次已处理：${run.completed} 件成功，${run.failed} 件失败，${waitingPricing} 件价格待补齐。待补齐项保留进度，需单独重试。`
                               : `${data.counts.complete} 件资料完整，可以开始分析；${data.counts.waitingDetail} 件等待补采。`}
@@ -351,6 +420,7 @@ export function AnalysisPreview() {
             )}
             {active?.assetCounts && (
               <p className="analysis-start-hint">
+                {(active.runningCount || 0) > 1 ? `${active.current}的资产：` : ""}
                 <AssetCounts counts={active.assetCounts} />
               </p>
             )}
@@ -457,9 +527,37 @@ export function AnalysisPreview() {
             </div>
             {tab === "ranking" ? (
               <div className="analysis-rank-list" role="tabpanel" aria-label="推荐榜">
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={showViewed}
+                    onChange={(event) => setShowViewed(event.target.checked)}
+                  />
+                  显示已查看的推荐
+                </label>
                 <div className="analysis-list-intro">
-                  <span>已完成商品前 10 名</span>
-                  <span>完整保存后更新榜单</span>
+                  <span>
+                    按金额阶梯和配置条件筛选，不限制差额百分比；裸号估值高于挂牌价不限，最多展示10个
+                  </span>
+                  <span>差额 = 挂牌价 − 裸号估值</span>
+                  <span>有等级相差不超过 10 级的非野生宝宝，或至少 3 件带宝石装备（含灵饰）</span>
+                  <span>
+                    ≤100元：基础条件；100～200元：1类配置；200～300元：2类；300～500元：3类
+                  </span>
+                  <span>
+                    500～800元：3类且1类较强；800～1000元：3类且2类较强；差额超过1000元不展示
+                  </span>
+                  <details>
+                    <summary>查看配置条件（每类只计一次）</summary>
+                    <p>宝石装备：3件≥4段，较强为3件≥6段；同名套装：3个不同部位，较强为5个。</p>
+                    <p>
+                      灵饰：1件精炼≥4段且有2条有效附加属性，较强为2件；攻击属性按已采集的属性保存方案匹配，方案不明只认通用生存、速度属性。
+                    </p>
+                    <p>
+                      宝宝：等级符合且当前技能、资质、成长资料完整，较强为2只。资料完整不代表实战强度。边界归较低一档，较强配置同时满足普通条件。
+                    </p>
+                    <p>这些是筛选条件，不代表装备或宝宝已估价，也不证明资产能够补足差额。</p>
+                  </details>
                 </div>
                 {!data?.ranking.length && (
                   <div className="analysis-start-empty">
@@ -498,7 +596,25 @@ export function AnalysisPreview() {
                         <span>{item.server}</span>
                       </div>
                       <p>{item.summary}</p>
+                      {item.recommendation && (
+                        <p>
+                          差额 {valuationMoney(item.recommendation.gap)} ·{" "}
+                          {item.recommendation.factors.length} 类配置，
+                          {item.recommendation.strongerFactors.length} 类较强
+                        </p>
+                      )}
+                      <div className="analysis-rank-assets" aria-label="装备和宝宝简要信息">
+                        {item.assetSummary ? (
+                          <>
+                            <p>{item.assetSummary.equipment}</p>
+                            <p>{item.assetSummary.pets}</p>
+                          </>
+                        ) : (
+                          <p>装备和宝宝资料未采齐</p>
+                        )}
+                      </div>
                       <div className="analysis-tags">
+                        {item.recommendationViewed && <span>已查看</span>}
                         {item.highlights.map((item, index) => (
                           <span key={index}>{item}</span>
                         ))}
@@ -515,7 +631,7 @@ export function AnalysisPreview() {
                             : `最高买入 ${valuationMoney(item.valuation.max_listing_price)}`
                           : `配置参考分 ${item.score}`}
                       </span>
-                      <button onClick={() => viewItem(item)}>查看分析依据 →</button>
+                      <button onClick={() => void viewRecommendation(item)}>查看分析依据 →</button>
                     </div>
                   </article>
                 ))}
@@ -774,7 +890,7 @@ export function AnalysisPreview() {
           </section>
           <aside className="analysis-aside">
             <section className="analysis-plan-card">
-              <span className="analysis-kicker">QUEUE / 顺序执行</span>
+              <span className="analysis-kicker">QUEUE / 分析队列</span>
               <h2>当前分析队列</h2>
               <p>
                 {run
@@ -790,17 +906,19 @@ export function AnalysisPreview() {
                   <span style={{ width: `${run?.total ? (finished / run.total) * 100 : 0}%` }} />
                 </div>
                 <p>
-                  {active?.current
-                    ? searchingEquipment
-                      ? `正在联网查${searchAsset}价格 · ${active.current}`
-                      : `正在分析 ${active.current}`
-                    : waitingForRoles
-                      ? "等待新角色资料采集完整"
-                      : running
-                        ? "正在准备下一件商品"
-                        : run?.status === "paused"
-                          ? "已暂停，等待继续"
-                          : "暂无正在执行的商品"}
+                  {(active?.runningCount || 0) > 1
+                    ? `正在处理 ${active?.currentItems?.join("、")}`
+                    : active?.current
+                      ? searchingEquipment
+                        ? `正在联网查${searchAsset}价格 · ${active.current}`
+                        : `正在分析 ${active.current}`
+                      : waitingForRoles
+                        ? "等待新角色资料采集完整"
+                        : running
+                          ? "正在准备下一件商品"
+                          : run?.status === "paused"
+                            ? "已暂停，等待继续"
+                            : "暂无正在执行的商品"}
                 </p>
               </div>
               <p>

@@ -15,6 +15,7 @@ import { refreshMarket, marketServers } from "./market";
 import { createProfile, loadProfile, saveProfile, PROMPT_FILE } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
 import { reconcileCapturedEquipmentCategories } from "./equipment-category-evidence";
+import { analysisConcurrency, DEFAULT_ANALYSIS_CONCURRENCY } from "./types";
 
 type CapturePreparation = {
   controller: AbortController;
@@ -180,7 +181,9 @@ export async function startAnalysis(
   sampleSize = 1,
   productKeys?: string[],
   equipmentOnly = false,
+  concurrency = DEFAULT_ANALYSIS_CONCURRENCY,
 ) {
+  analysisConcurrency(concurrency);
   validateSampleSelection(sample, sampleSize, productKeys);
   const analysis = service();
   if (
@@ -217,6 +220,7 @@ export async function startAnalysis(
     model,
     sampleSize,
     productKeys,
+    concurrency,
   );
   if (equipmentOnly) {
     const frozen = service()
@@ -228,7 +232,8 @@ export async function startAnalysis(
   }
   return service().store.run(id);
 }
-export async function resumeAnalysis(id: string, retry = false) {
+export async function resumeAnalysis(id: string, retry = false, concurrency?: number) {
+  if (concurrency !== undefined) analysisConcurrency(concurrency);
   const analysis = service();
   if (!analysis.runner.isRunning()) {
     const row = analysis.store.db.prepare("SELECT id FROM analysis_runs WHERE id=?").get(id);
@@ -242,7 +247,7 @@ export async function resumeAnalysis(id: string, retry = false) {
     if (keys.length) await prepareCaptures(keys);
     analysis.store.refreshPendingCaptures(id);
   }
-  await service().runner.resume(id, retry);
+  await service().runner.resume(id, retry, concurrency);
   return service().store.run(id);
 }
 export async function pauseAnalysis(id?: string) {
@@ -262,6 +267,9 @@ export function analysisDetail(id: string) {
   const detail = service().store.detail(id, loadProfile(service().store.db));
   if (!detail) throw new Error("商品分析记录不存在");
   return detail;
+}
+export function markRecommendationViewed(key: unknown) {
+  return service().store.markRecommendationViewed(key);
 }
 export function isAnalyzing() {
   return !!service().preparing || service().runner.isRunning();
