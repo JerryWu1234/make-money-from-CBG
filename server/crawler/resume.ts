@@ -22,8 +22,8 @@ export async function locateCheckpoint(
   )
     return null;
   let low = 1,
-    high = first.totalPages,
-    result = first.totalPages;
+    high = first.totalPages;
+  let result: number | null = null;
   const sampled = new Map<number, ListingPage>([[1, first]]);
   while (low <= high) {
     signal.throwIfAborted();
@@ -45,7 +45,7 @@ export async function locateCheckpoint(
     } else low = mid + 1;
   }
   // 从相等时间的第一批开始；同秒发布、多页同时间和断点商品下架都不能跳过。
-  return Math.max(1, result - 1);
+  return result === null ? null : Math.max(1, result - 1);
 }
 
 export async function prepareCrawlPages(

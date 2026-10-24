@@ -87,6 +87,60 @@ describe("真实角色结构的估值资料", () => {
     expect(value(source, "神器1总分")).toBe("38");
     expect(normalizeValuationSource(source).issues).toEqual([]);
   });
+  it.each([
+    [[{ disable: 0, attr: "法术防御 +126" }], "0"],
+    [[{ disable: 0, attr: "固定伤害 +40" }], "0"],
+    [
+      [
+        { disable: 0, attr: "固定伤害 +40" },
+        { disable: 0, attr: "速度 +0.1" },
+        { disable: 0, attr: "治疗能力 +0.2" },
+      ],
+      "0.39",
+    ],
+    [
+      [
+        { disable: 0, attr: "固定伤害 +40" },
+        { disable: 0, attr: "速度 +0.1234" },
+        { disable: 0, attr: "治疗能力 +0.2" },
+      ],
+      "0.42042",
+    ],
+    [
+      [
+        { disable: 0, attr: "固定伤害 +40" },
+        { disable: 0, attr: "速度 +3.7" },
+        { disable: 0, attr: "治疗能力 +11.2" },
+      ],
+      "19.37",
+    ],
+    [
+      [
+        { disable: 0, attr: "法术防御 +20" },
+        { disable: 0, attr: "速度 +3.7" },
+        { disable: 0, attr: "气血 +315" },
+        { disable: 1, attr: "法术防御 +999" },
+      ],
+      "36.31",
+    ],
+  ])("忽略法术防御和固定伤害计分，保留网页原值，其他有效属性正常计分：%j", (attributes, score) => {
+    const set = { ...suit(), attributes };
+    const source = { ...empty(), hasArtifact: true, artifact: { id: 6205, suit: [set] } };
+    const result = normalizeValuationSource(source);
+    expect(value(source, "神器1总分")).toBe(score);
+    expect(value(source, "神器1未计分属性")).toBe(attributes[0].attr);
+    expect(result.issues).toEqual([]);
+    expect(result.source).toEqual(source);
+  });
+  it.each(["未知属性 +999", "法术防御 +未知", "固定伤害 +未知"])(
+    "仍拒绝未定义或数值不完整的属性：%s",
+    (attr) => {
+      const set = { ...suit(), attributes: [{ disable: 0, attr }] };
+      const source = { ...empty(), hasArtifact: true, artifact: { id: 6205, suit: [set] } };
+      expect(value(source, "神器1总分")).toBeUndefined();
+      expect(normalizeValuationSource(source).issues).toContain("神器1属性未识别：" + attr);
+    },
+  );
   it("槽位状态缺失不能视为未满槽或不存在", () => {
     const set = suit();
     delete (set.components[0].wuxing[0] as { wuxingshi_level?: number }).wuxingshi_level;

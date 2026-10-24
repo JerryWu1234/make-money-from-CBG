@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   startCrawl: vi.fn(),
   equipmentAnalysisSettings: vi.fn(),
   setEquipmentAnalysis: vi.fn(),
+  setCaptureRoleLimit: vi.fn(),
   disableScanSchedule: vi.fn(),
   scanScheduleStatus: vi.fn(),
   enableScanSchedule: vi.fn(),
@@ -23,7 +24,9 @@ const mocks = vi.hoisted(() => ({
   checkPetGear: vi.fn(),
   equipmentCheckImported: vi.fn(),
   startAnalysis: vi.fn(),
+  confirmSchoolFormula: vi.fn(),
   analysisOverview: vi.fn(),
+  savedRecords: vi.fn(),
   markRecommendationViewed: vi.fn(),
   aiProvider: vi.fn(),
 }));
@@ -78,6 +81,32 @@ beforeEach(() => {
   });
 });
 
+it.each(["complete", "tasks", "all"])("采集记录接口把 %s 范围传入服务端分页", async (scope) => {
+  mocks.savedRecords.mockReturnValue({ total: 0, items: [] });
+  const req = request(`/api/crawl/records?page=2&pageSize=20&scope=${scope}`);
+  req.method = "GET";
+  const res = response();
+  await (await import("./api")).apiMiddleware(req, res, vi.fn());
+  expect(res.statusCode).toBe(200);
+  expect(mocks.savedRecords).toHaveBeenCalledWith(2, 20, scope);
+});
+
+it("正式商品分析接口转交完整范围，拒绝无效范围", async () => {
+  const req = request("/api/analysis/status?scope=complete");
+  req.method = "GET";
+  await (await import("./api")).apiMiddleware(req, response(), vi.fn());
+  expect(mocks.analysisOverview).toHaveBeenCalledWith(
+    expect.objectContaining({ scope: "complete" }),
+  );
+  for (const path of ["/api/analysis/status", "/api/crawl/records"]) {
+    const invalid = request(`${path}?scope=unknown`);
+    invalid.method = "GET";
+    const res = response();
+    await (await import("./api")).apiMiddleware(invalid, res, vi.fn());
+    expect(res.statusCode).toBe(400);
+  }
+});
+
 it("资料待补采返回409并保留明确的角色提示", async () => {
   const message = "还有 1 个角色资料待补采：29534033。";
   mocks.startAnalysis.mockRejectedValue(
@@ -89,6 +118,127 @@ it("资料待补采返回409并保留明确的角色提示", async () => {
   ).apiMiddleware(request("/api/analysis/start", { provider: "codex" }), res, vi.fn());
   expect(res.statusCode).toBe(409);
   expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ error: message });
+});
+
+it("保存500角色采集目标，不启动或暂停分析", async () => {
+  mocks.setCaptureRoleLimit.mockReturnValue({ roleLimit: 500, totalRoles: 20 });
+  const res = response();
+  await (
+    await import("./api")
+  ).apiMiddleware(request("/api/crawl/target/save", { roleLimit: 500 }), res, vi.fn());
+  expect(mocks.setCaptureRoleLimit).toHaveBeenCalledWith(500);
+  expect(JSON.parse(res.end.mock.calls[0][0])).toMatchObject({ roleLimit: 500 });
+  expect(mocks.analysisControllerImported).not.toHaveBeenCalled();
+});
+
+it("明确确认飞升公式只保存当前角色的确认，不启动或修改分析批次", async () => {
+  const productKeys = ["159:one", "377:two"];
+  mocks.confirmSchoolFormula.mockReturnValue({ confirmed: 2, productKeys });
+  const res = response();
+  await (
+    await import("./api")
+  ).apiMiddleware(
+    request("/api/analysis/school-formula/confirm", { productKeys, confirmed: true }),
+    res,
+    vi.fn(),
+  );
+  expect(mocks.confirmSchoolFormula).toHaveBeenCalledWith(productKeys, true);
+  expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ confirmed: 2, productKeys });
+  expect(mocks.startAnalysis).not.toHaveBeenCalled();
+  expect(mocks.resumeAnalysis).not.toHaveBeenCalled();
+});
+
+it("飞升公式未经明确确认时保留校验错误，不启动模型", async () => {
+  mocks.confirmSchoolFormula.mockImplementation(() => {
+    throw Object.assign(new Error("请明确确认沿用原公式"), {
+      name: "SchoolFormulaConfirmationError",
+    });
+  });
+  const res = response();
+  await (
+    await import("./api")
+  ).apiMiddleware(
+    request("/api/analysis/school-formula/confirm", { productKeys: ["159:one"] }),
+    res,
+    vi.fn(),
+  );
+  expect(res.statusCode).toBe(400);
+  expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ error: "请明确确认沿用原公式" });
+  expect(mocks.startAnalysis).not.toHaveBeenCalled();
+});
+
+describe("关键操作请求日志", () => {
+  it("记录继续分析的到达和返回，关联同一次请求且不保存请求体", async () => {
+    const res = response();
+    await (
+      await import("./api")
+    ).apiMiddleware(
+      request("/api/analysis/resume", { runId: "batch", secret: "private-value" }),
+      res,
+      vi.fn(),
+    );
+    res.emit("finish");
+    res.emit("close");
+    const received = mocks.record.mock.calls.find(([event]) => event === "api.control_received")!;
+    expect(received[1]).toEqual({
+      requestId: expect.any(String),
+      route: "/api/analysis/resume",
+      method: "POST",
+    });
+    expect(mocks.record).toHaveBeenCalledWith("api.control_finished", {
+      requestId: received[1].requestId,
+      route: "/api/analysis/resume",
+      status: 200,
+      durationMs: expect.any(Number),
+    });
+    expect(mocks.record).not.toHaveBeenCalledWith("api.control_closed", expect.anything());
+    expect(JSON.stringify(mocks.record.mock.calls)).not.toContain("private-value");
+  });
+
+  it.each([403, 405])("在启动流程前拒绝请求时仍记录返回状态 %s", async (status) => {
+    const req = request("/api/browser/open");
+    if (status === 403) req.headers.origin = "http://other.local";
+    else req.method = "GET";
+    const res = response();
+    await (await import("./api")).apiMiddleware(req, res, vi.fn());
+    res.emit("finish");
+    expect(mocks.record).toHaveBeenCalledWith("api.control_received", expect.anything());
+    expect(mocks.record).toHaveBeenCalledWith(
+      "api.control_finished",
+      expect.objectContaining({ status, route: "/api/browser/open" }),
+    );
+    expect(mocks.checkCbgStatus).not.toHaveBeenCalled();
+  });
+
+  it("客户端提前断开时只记录一次关闭，状态轮询不产生操作日志", async () => {
+    let resolve!: () => void;
+    mocks.resumeAnalysis.mockReturnValue(
+      new Promise<void>((done) => {
+        resolve = done;
+      }),
+    );
+    const res = response();
+    const { apiMiddleware } = await import("./api");
+    const pending = apiMiddleware(
+      request("/api/analysis/resume", { runId: "batch" }),
+      res,
+      vi.fn(),
+    );
+    await vi.waitFor(() => expect(mocks.resumeAnalysis).toHaveBeenCalled());
+    res.emit("close");
+    resolve();
+    await pending;
+    res.emit("finish");
+    expect(
+      mocks.record.mock.calls.filter(([event]) => event === "api.control_closed"),
+    ).toHaveLength(1);
+    expect(mocks.record).not.toHaveBeenCalledWith("api.control_finished", expect.anything());
+    mocks.record.mockClear();
+    const req = request("/api/analysis/status");
+    req.method = "GET";
+    await apiMiddleware(req, response(), vi.fn());
+    expect(mocks.record).not.toHaveBeenCalled();
+  });
 });
 
 it("首页装备开关读写不启动采集、登录或分析", async () => {
@@ -428,15 +578,20 @@ describe("采集接口与定时计划", () => {
     });
     expect(res.statusCode).toBe(200);
   });
-  it.each([0, -1, 1.5, "3", null])("拒绝无效并发数 %j，不启动采集", async (concurrency) => {
-    const { apiMiddleware } = await import("./api");
-    const res = response();
-    await apiMiddleware(request("/api/crawl/start", { concurrency }), res, vi.fn());
-    expect(res.statusCode).toBe(500);
-    expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ error: "并发数必须是正整数" });
-    expect(mocks.startCrawl).not.toHaveBeenCalled();
-    expect(mocks.disableScanSchedule).not.toHaveBeenCalled();
-  });
+  it.each([0, -1, 1, 3, 5, 1.5, "3", null])(
+    "拒绝无效并发数 %j，不启动采集",
+    async (concurrency) => {
+      const { apiMiddleware } = await import("./api");
+      const res = response();
+      await apiMiddleware(request("/api/crawl/start", { concurrency }), res, vi.fn());
+      expect(res.statusCode).toBe(500);
+      expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({
+        error: "并发数必须是正偶数（2、4、6…）",
+      });
+      expect(mocks.startCrawl).not.toHaveBeenCalled();
+      expect(mocks.disableScanSchedule).not.toHaveBeenCalled();
+    },
+  );
   it("仅明确单商品补采可请求完整刷新", async () => {
     const { apiMiddleware } = await import("./api");
     const key = "33:target";

@@ -16,6 +16,9 @@ import { validateSampleSelection } from "./sample-selection";
 import { pricingSearchAdvanced } from "./pricing-progress";
 import { pricingSnapshotFresh } from "./pricing-integrity";
 import { captureIssues } from "../crawler/capture-readiness";
+import { isCurrentRoleCapture } from "../crawler/role-identity";
+import { EXPIRED_MARKET_NOTICE } from "./market";
+import { assertServiceOpen } from "../service-lifecycle";
 
 export type AnalysisClient = {
   model: string;
@@ -111,6 +114,7 @@ export class AnalysisRunner {
     productKeys?: string[],
     concurrency = DEFAULT_ANALYSIS_CONCURRENCY,
   ) {
+    assertServiceOpen();
     analysisConcurrency(concurrency);
     validateSampleSelection(sample, sampleSize, productKeys);
     if (profile && profile.calculationVersion !== CALCULATION_VERSION)
@@ -128,6 +132,7 @@ export class AnalysisRunner {
     if (sample && !this.store.counts().complete)
       throw new Error("暂无详情完整的商品，请先采集商品详情");
     const client = await this.client(provider, selectedModel);
+    assertServiceOpen();
     // The lease also protects the await above and separate local Node services.
     const afterConnect = this.currentActivity();
     if (afterConnect) {
@@ -174,6 +179,7 @@ export class AnalysisRunner {
     }
   }
   async resume(id: string, retryFailed = false, concurrency?: number) {
+    assertServiceOpen();
     if (concurrency !== undefined) analysisConcurrency(concurrency);
     if (this.active) {
       if (this.active.id !== id) throw new Error("请先暂停当前分析任务");
@@ -183,6 +189,7 @@ export class AnalysisRunner {
     }
     const run = this.store.run(id);
     if (!run) throw new Error("分析任务不存在");
+    if (run.marketExpired) throw new Error(EXPIRED_MARKET_NOTICE);
     const count = analysisConcurrency(concurrency ?? run.concurrency);
     if (!retryFailed && (run.failed || run.waitingPricing))
       throw new Error("请先重试失败或待补齐的商品，再继续分析");
@@ -196,6 +203,7 @@ export class AnalysisRunner {
     if (run.calculationVersion && run.calculationVersion !== CALCULATION_VERSION)
       throw new Error("估值规则已更新，请按新规则开始分析；旧结果仍可查看");
     const client = await this.client(run.provider, run.model);
+    assertServiceOpen();
     const afterConnect = this.currentActivity();
     if (afterConnect) {
       if (afterConnect.id !== id) throw new Error("请先暂停当前分析任务");
@@ -258,6 +266,10 @@ export class AnalysisRunner {
     let nextSingleLane: AnalysisLane = "new";
     try {
       while (!stop.aborted && this.store.owns(owner)) {
+        if (this.store.run(id)?.marketExpired) {
+          this.store.setRun(id, "paused", EXPIRED_MARKET_NOTICE, owner);
+          return;
+        }
         this.store.appendCaptured(id, owner);
         while (!stop.aborted && pending.size < concurrency) {
           const preferredLane =
@@ -331,7 +343,11 @@ export class AnalysisRunner {
     };
     const budget = { started: Date.now(), rounds: 0 };
     while (!stop.aborted && this.store.owns(owner)) {
-      if (task.profile && (!task.record.detail || captureIssues(task.record.detail).length)) {
+      if (
+        (task.profile || isCurrentRoleCapture(task.record.detail)) &&
+        (!task.record.detail ||
+          captureIssues(task.record.detail, false, true, task.record.listing).length)
+      ) {
         pause("角色资料尚未完整采集，请补采后继续分析");
         return;
       }

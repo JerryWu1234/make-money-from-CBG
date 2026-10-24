@@ -28,19 +28,30 @@ export async function collectRole(
 ) {
   const started = Date.now();
   log("detail.start", { key: item.key });
-  const report = (message: string) => onDetailProgress(`${item.name || item.eid}：${message}`);
+  const report = (message: string) => {
+    const prefix = "召唤兽图标核对异常：";
+    if (message.startsWith(prefix)) {
+      log("detail.pet_icon_mismatch", {
+        key: item.key,
+        diagnostic: JSON.parse(message.slice(prefix.length)),
+      });
+      return;
+    }
+    onDetailProgress(`${item.name || item.eid}：${message}`);
+  };
   const previous = savedRecord?.(item.key);
   const result = await collectCompleteCapture(
     async () => {
       await pace(signal, 1800, 1700);
       return previous?.detail &&
-        !captureIssues(previous.detail, true).length &&
+        !captureIssues(previous.detail, true, true, item).length &&
         MAIN_TABS.every((name) => previous.detail!.tabs.some((tab) => tab.name === name))
         ? await collectValuationDetail(detailPage, item, previous.detail, signal, report)
         : await collectDetail(detailPage, item, signal, report);
     },
     signal,
     report,
+    item,
   );
   log("detail.collected", {
     key: item.key,
@@ -97,7 +108,14 @@ export function createCrawlSource({
       log("anchor.checked", { key: item.key, onShelf });
       return onShelf;
     },
-    hover: (item) => hoverListing(listPage, item, signal),
+    hover: (item) =>
+      hoverListing(
+        listPage,
+        item,
+        signal,
+        (stage) => log("list.hover_recovered", { key: item.key, stage }),
+        ({ event, ...diagnostic }) => log(`list.hover_${event}`, diagnostic),
+      ),
     detail: async (item) => {
       signal.throwIfAborted();
       const page = available.pop() || (await createDetailPage?.());

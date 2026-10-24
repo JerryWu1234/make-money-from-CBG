@@ -95,6 +95,19 @@ export function AnalysisPreview() {
   const preparation = data?.capturePreparation;
   const running = !!active || !!preparation;
   const waitingForRoles = active?.phase === "waiting_capture";
+  const waitingDetail = data?.captureTasks?.total ?? data?.counts.waitingDetail ?? 0;
+  const pendingDetail = data?.captureTasks?.pending ?? data?.counts.pendingDetail ?? waitingDetail;
+  const failedDetail = data?.captureTasks?.failed ?? data?.counts.failedDetail ?? 0;
+  const capture = data?.captureActivity;
+  const inFlight = Math.min(pendingDetail, capture?.inFlight ?? 0);
+  const captureSummary =
+    typeof capture?.inFlight === "number"
+      ? `${inFlight} 件正在采集 · ${pendingDetail - inFlight} 件排队待采 · ${failedDetail} 件采集失败待重试`
+      : `${pendingDetail} 件待采或采集中 · ${failedDetail} 件采集失败待重试`;
+  const captureStopped =
+    !capture?.running && (capture?.phase === "error" || capture?.phase === "paused");
+  const captureTargetReached =
+    !!capture?.roleLimit && (capture.totalRoles ?? 0) >= capture.roleLimit;
   const searchingEquipment =
     active?.phase === "equipment_search" ||
     active?.phase === "pet_search" ||
@@ -109,6 +122,7 @@ export function AnalysisPreview() {
   const finished = (run?.completed || 0) + (run?.failed || 0) + waitingPricing;
   const sameCalculation =
     !run?.calculationVersion || run.calculationVersion === data?.profile?.calculationVersion;
+  const sameMarket = !run?.marketExpired;
   const selectedModel = selectedModels[provider];
   const effectiveModel = selectedModel || defaultModels[provider];
   const sameModel = !modelChanged || !effectiveModel || run?.model === effectiveModel;
@@ -135,6 +149,7 @@ export function AnalysisPreview() {
           search,
           filter,
           showViewed: String(showViewed),
+          scope: "complete",
         });
         const next = await request<AnalysisOverview>(
           `/api/analysis/status?${params}`,
@@ -204,7 +219,13 @@ export function AnalysisPreview() {
     async (selected: AiProvider) => {
       setTab("history");
       setResultsPage(1);
-      if (sameCalculation && sameModel && run?.provider === selected && run.status === "paused")
+      if (
+        sameCalculation &&
+        sameMarket &&
+        sameModel &&
+        run?.provider === selected &&
+        run.status === "paused"
+      )
         await mutate(
           run.failed + (run.waitingPricing || 0) > 0
             ? "/api/analysis/retry"
@@ -217,7 +238,7 @@ export function AnalysisPreview() {
           model: selectedModels[selected] || undefined,
         });
     },
-    [run, mutate, sameCalculation, sameModel, selectedModels],
+    [run, mutate, sameCalculation, sameMarket, sameModel, selectedModels],
   );
   const changeProvider = (selected: AiProvider) => {
     setProvider(selected);
@@ -252,15 +273,17 @@ export function AnalysisPreview() {
             : "正在分析…"
         : run && !sameModel
           ? "按新模型开始分析"
-          : run && !sameCalculation
-            ? "按新规则开始分析"
-            : run?.status === "paused"
-              ? "继续分析"
-              : run?.status === "completed"
-                ? "分析新增或已更新商品"
-                : data?.counts.complete === 0
-                  ? "开始分析并等待采集"
-                  : "开始分析已有商品";
+          : run && !sameMarket
+            ? "刷新行情并重新分析"
+            : run && !sameCalculation
+              ? "按新规则开始分析"
+              : run?.status === "paused"
+                ? "继续分析"
+                : run?.status === "completed"
+                  ? "分析新增或已更新商品"
+                  : data?.counts.complete === 0
+                    ? "开始分析并等待采集"
+                    : "开始分析已有商品";
 
   return (
     <div className="analysis-page">
@@ -331,15 +354,19 @@ export function AnalysisPreview() {
                   {preparation ? "暂停资料采集" : "暂停分析"}
                 </button>
               )}
-              {!running && sameCalculation && run && !!(run.failed + waitingPricing) && (
-                <button
-                  className="analysis-button analysis-button-outline"
-                  disabled={busy}
-                  onClick={() => void mutate("/api/analysis/retry", { runId: run.id })}
-                >
-                  重试失败及待补齐的 {run.failed + waitingPricing} 件
-                </button>
-              )}
+              {!running &&
+                sameCalculation &&
+                sameMarket &&
+                run &&
+                !!(run.failed + waitingPricing) && (
+                  <button
+                    className="analysis-button analysis-button-outline"
+                    disabled={busy}
+                    onClick={() => void mutate("/api/analysis/retry", { runId: run.id })}
+                  >
+                    重试失败及待补齐的 {run.failed + waitingPricing} 件
+                  </button>
+                )}
             </div>
             <p className="analysis-start-hint">
               默认同时分析 {DEFAULT_ANALYSIS_CONCURRENCY}{" "}
@@ -387,7 +414,7 @@ export function AnalysisPreview() {
                     ? waitingForRoles
                       ? active.total === 0
                         ? "正在等待首个角色资料采集完整，完成后自动开始分析，无需再次点击。"
-                        : `现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
+                        : `资料完整的现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
                       : (active.runningCount || 0) > 1
                         ? `正在并发处理：${active.currentItems?.join("、")} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
                         : searchingEquipment
@@ -397,14 +424,49 @@ export function AnalysisPreview() {
                       ? "尚未采集商品；可以先开始分析并等待，角色资料采集完整后会自动分析。"
                       : run && !sameModel
                         ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
-                        : run && !sameCalculation
-                          ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
-                          : run?.status === "paused"
-                            ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续时沿用原计价设置，并发数使用当前输入。`
-                            : run?.status === "completed"
-                              ? `本批次已处理：${run.completed} 件成功，${run.failed} 件失败，${waitingPricing} 件价格待补齐。待补齐项保留进度，需单独重试。`
-                              : `${data.counts.complete} 件资料完整，可以开始分析；${data.counts.waitingDetail} 件等待补采。`}
+                        : run && !sameMarket
+                          ? "本批次区服行情已过期。重新分析将刷新行情并使用新批次，已有结果保留。"
+                          : run && !sameCalculation
+                            ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
+                            : run?.status === "paused"
+                              ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续时沿用原计价设置，并发数使用当前输入。`
+                              : run?.status === "completed"
+                                ? `本批次已处理：${run.completed} 件成功，${run.failed} 件失败，${waitingPricing} 件价格待补齐。待补齐项保留进度，需单独重试。`
+                                : `${data.counts.complete} 件资料完整，可以开始分析；${captureSummary}。`}
             </p>
+            {waitingForRoles && (
+              <div className="analysis-pending-note" role="status" aria-label="采集续采提示">
+                <strong>
+                  {captureStopped
+                    ? capture.phase === "error"
+                      ? "采集已因错误停止，分析正在等待资料"
+                      : "采集已暂停，分析正在等待资料"
+                    : captureTargetReached
+                      ? `已达到 ${capture.roleLimit} 个完整角色的采集目标`
+                      : "当前没有正在执行的模型分析"}
+                </strong>
+                <p>
+                  {waitingDetail > 0
+                    ? `另有 ${waitingDetail} 项采集任务：${captureSummary}。完整入库后才会成为商品并进入分析。`
+                    : "正在等待新的完整角色资料。"}
+                  {captureTargetReached
+                    ? "已采集的完整角色会继续分析；额外发现的链接保留为采集任务。"
+                    : captureStopped
+                      ? "未完成商品仍保留；请前往采集工作台查看原因并恢复采集，资料完整后会自动接着分析。"
+                      : "资料完整后会自动接着分析；可前往采集工作台查看进度或继续采集。"}
+                </p>
+                <a
+                  className="analysis-button analysis-button-primary"
+                  href={captureTargetReached || !waitingDetail ? "/" : "/?recordsScope=tasks"}
+                >
+                  {captureTargetReached
+                    ? "前往采集工作台查看结果"
+                    : waitingDetail > 0
+                      ? "前往采集工作台查看任务"
+                      : "前往采集工作台抓取新角色"}
+                </a>
+              </div>
+            )}
             {active && searchingEquipment && active.pricingProgress && (
               <p className="analysis-start-hint" role="status">
                 {active.pricingProgress.assetName || searchAsset}
@@ -481,10 +543,10 @@ export function AnalysisPreview() {
         <div className="analysis-overview" aria-label="分析页面概览">
           <div>
             <span className="analysis-overview-icon">01</span>
-            <small>已采集商品</small>
+            <small>完整商品</small>
             <strong>{data?.counts.total || 0} 件</strong>
             <p>
-              {data?.counts.complete || 0} 件详情完整 · {data?.counts.waitingDetail || 0} 件待补采
+              {data?.counts.complete || 0} 件详情完整 · {captureSummary}
             </p>
           </div>
           <div>
@@ -596,6 +658,10 @@ export function AnalysisPreview() {
                         <span>{item.server}</span>
                       </div>
                       <p>{item.summary}</p>
+                      <p>
+                        列表核对：{displayTime(item.lastSeenAt)} · 资料采集：
+                        {displayTime(item.collectedAt)}
+                      </p>
                       {item.recommendation && (
                         <p>
                           差额 {valuationMoney(item.recommendation.gap)} ·{" "}

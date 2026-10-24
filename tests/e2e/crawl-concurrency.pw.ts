@@ -142,7 +142,7 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
             (update) => {
               status = { ...status, ...update };
             },
-            options,
+            { ...options, watch: true },
           )
             .catch((error: unknown) => {
               status = {
@@ -182,26 +182,37 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
     await listPage.goto("https://xyq.cbg.163.com/list");
     await page.goto("http://cbg-ui.test/");
     const count = page.getByRole("spinbutton", { name: "并发抓取数" });
-    await expect(count).toHaveValue("4");
+    await expect(count).toHaveValue("10");
+    await expect(count).toHaveAttribute("min", "2");
+    await expect(count).toHaveAttribute("step", "2");
     const start = page.getByRole("button", { name: /开始采集详情|继续采集 \/ 检查新增/ });
     await expect(start).toBeEnabled();
+    await count.fill("4");
     await start.click();
-    await expect.poll(() => active).toBe(4);
+    // 首次准备列表及逐项悬停带有真实节流，等待条件成立后再检查在途配额。
+    await expect.poll(() => active, { timeout: 30000 }).toBe(4);
+    await expect(page.getByText(/定时检查首页新增/)).toBeVisible();
+    await expect(page.getByLabel("采集双队列状态")).toContainText("/2");
     await expect(count).toBeDisabled();
     await page.getByRole("button", { name: "暂停采集", exact: true }).click();
     await expect(count).toBeEnabled();
     expect(store.count()).toBe(0);
     expect(store.retryItems()).toHaveLength(4);
     expect(active).toBe(0);
-    await count.fill("0");
-    await start.click();
-    await expect(page.getByRole("alert")).toHaveText("并发数必须是正整数");
+    for (const invalid of ["0", "1", "3", "5"]) {
+      await count.fill(invalid);
+      await start.click();
+      await expect(page.getByRole("alert")).toHaveText("并发数必须是正偶数（2、4、6…）");
+    }
     expect(runs).toHaveLength(1);
     await count.fill("2");
     await start.click();
-    await expect.poll(() => status.phase, { timeout: 180000 }).toBe("completed");
+    await expect.poll(() => store.count(), { timeout: 180000 }).toBe(5);
+    await expect(page.getByLabel("采集双队列状态")).toContainText("/1");
+    await expect(page.getByText(/首页下次检查/)).toBeVisible();
+    await page.getByRole("button", { name: "暂停采集", exact: true }).click();
     await completion;
-    await expect(page.getByText(/本轮完成：新增或更新 5 条/)).toBeVisible();
+    expect(status.phase).toBe("paused");
     expect(store.count()).toBe(5);
     expect(runs.map((run) => run.maximum)).toEqual([4, 2]);
     expect(runs.map((run) => run.pages)).toEqual([4, 2]);

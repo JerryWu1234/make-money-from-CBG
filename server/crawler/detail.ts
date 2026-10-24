@@ -9,9 +9,13 @@ import {
   itemFromAttributes,
   preserveJewelryTooltipSections,
   observedEquipmentCategory,
+  equipmentNameUnresolved,
+  mergeWornEquipmentLevel,
+  type WornEquipmentSource,
 } from "./compact";
 import { collectPets, petCaptureSummary } from "./pets";
 import { captureValuation } from "./valuation-capture";
+import { roleIdentityIssues } from "./role-identity";
 
 export const MAIN_TABS = [
   "人物/修炼",
@@ -124,6 +128,7 @@ async function inspectItems(
   signal: AbortSignal,
   report: (message: string) => void,
   issues?: string[],
+  worn?: { listing: Listing; source: WornEquipmentSource | null },
 ) {
   const petItems = /^召唤兽 \d+$/.test(snapshot.name);
   const count = await page
@@ -150,7 +155,7 @@ async function inspectItems(
   for (let index = 0; index < count; index++) {
     checkAborted(signal);
     const icon = page.locator(`[data-cbg-inspect-index="${index}"]`);
-    const attrs = await icon.evaluate((el) => {
+    let attrs = await icon.evaluate((el) => {
       if (el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]')) return null;
       const attrs: Record<string, string> = {};
       // 装备数据和提示框标识可能在图片的 a/td 父元素上。
@@ -191,12 +196,19 @@ async function inspectItems(
       return attrs;
     });
     if (!attrs) continue;
+    let rawLevel: string | undefined;
+    if (worn) {
+      const merged = mergeWornEquipmentLevel(attrs, worn.listing, worn.source);
+      attrs = merged.attrs;
+      rawLevel = merged.rawLevel;
+      if (merged.issue) issues?.push(`${snapshot.name}：${merged.issue}`);
+    }
     report(`正在读取 ${snapshot.name} 的物品属性 ${index + 1}/${count}`);
     // 名称、技能类别或装备属性已在元素里时直接读取，不触发无意义的提示框。
     let item = itemFromAttributes(attrs, index);
     // 已明确不在人物装备计价范围内的物品不要求普通装备属性。
     if (
-      /^(?:法宝|灵宝|神器|道具 · 召唤兽(?:技能书|内丹)|材料 · (?:精魄灵石|钟灵石|百炼精铁))$/.test(
+      /^(?:法宝|灵宝|神器|道具 · 召唤兽(?:技能书|内丹)|材料 · (?:精魄灵石|钟灵石|百炼精铁|太阳石|制造指南书|点化石))$/.test(
         item.category || "",
       )
     ) {
@@ -225,7 +237,10 @@ async function inspectItems(
           .complete);
     // 官网元素可能只有等级；缺属性时仍须悬停，不能把非空描述当作已读完整。
     if (
-      (attrs.data_equip_desc?.trim() && !rawYupo && !incompleteEquipment) ||
+      (attrs.data_equip_desc?.trim() &&
+        !rawYupo &&
+        !incompleteEquipment &&
+        !item.name.startsWith("图标 ")) ||
       attrs.data_skill_type
     ) {
       if (!item.name.startsWith("图标 ")) snapshot.items!.push(item);
@@ -313,6 +328,13 @@ async function inspectItems(
       ].join("\n");
     }, tipId || "");
     if (tooltip) {
+      if (
+        rawLevel !== undefined &&
+        [...tooltip.matchAll(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})(?=\s|$)/g)].some(
+          (match) => Number(match[1]) !== Number(rawLevel),
+        )
+      )
+        issues?.push(`${snapshot.name}：原始穿戴装备等级与提示框等级不一致`);
       if (tooltip.split("\n").some((line) => line.trim() === "未鉴定物品")) {
         const level = unidentifiedEquipmentLevel(tooltip);
         if (
@@ -329,7 +351,8 @@ async function inspectItems(
         },
         index,
       );
-      if (item.name.startsWith("图标 ")) item.name = tooltip.split("\n")[0];
+      if (item.name.startsWith("图标 ") && !equipmentNameUnresolved(tooltip.split("\n")[0]))
+        item.name = tooltip.split("\n")[0];
     }
     if (!item.description && !item.attributes && item.name.startsWith("图标 "))
       issues?.push(`${snapshot.name}：第 ${index + 1} 个物品图标没有读取到名称和属性`);
@@ -388,6 +411,8 @@ export function equipmentCaptureSummary(
         /装备对象[：:]?\s*召唤兽/.test(item.description || "")
       )
         continue;
+      if (equipmentNameUnresolved(item.name))
+        issues.push(`${tab.name}：型号 ${item.modelId || "未知"} 的装备名称未完整读取`);
       if (
         category === "上古玉魄" &&
         /^\s*\{\s*"minghun"\s*:\s*\{|<json>/i.test(item.description || "")
@@ -484,9 +509,52 @@ async function inspectEquipmentTabs(
   signal: AbortSignal,
   report: (message: string) => void,
   issues: string[],
+  item: Listing,
 ) {
   const snapshots = [snapshot];
-  await inspectItems(page, snapshot, signal, report, issues);
+  const source = await page.evaluate(
+    ({ serverId, eid }): WornEquipmentSource | null => {
+      try {
+        const globals = window as unknown as Record<string, unknown>;
+        const equip = globals.EquipInfo as Record<string, unknown> | undefined;
+        if (String(equip?.server_id) !== serverId || String(equip?.eid) !== eid) return null;
+        const decode = globals.decode_desc;
+        const Parser = globals.RoleInfoParser as new (
+          text: string,
+          options: Record<string, unknown>,
+        ) => { raw_info: Record<string, unknown> };
+        const encoded = document.querySelector<HTMLTextAreaElement>("#equip_desc_value")?.value;
+        if (typeof decode !== "function" || typeof Parser !== "function" || !encoded) return null;
+        const raw = new Parser(decode(encoded), { resUrl: globals.ResUrl, serverId }).raw_info;
+        if (
+          !raw ||
+          !raw.AllEquip ||
+          typeof raw.AllEquip !== "object" ||
+          Array.isArray(raw.AllEquip)
+        )
+          return null;
+        const allEquip: Record<string, unknown> = {};
+        for (const slot of ["1", "2", "3", "4", "5", "6"]) {
+          if (!Object.hasOwn(raw.AllEquip, slot)) continue;
+          const equipment = (raw.AllEquip as Record<string, unknown>)[slot];
+          if (!equipment || typeof equipment !== "object" || Array.isArray(equipment)) continue;
+          const fields = equipment as Record<string, unknown>;
+          allEquip[slot] = {
+            iType: fields.iType,
+            cDesc: fields.cDesc,
+            ...(Object.hasOwn(fields, "obj_level") ? { obj_level: fields.obj_level } : {}),
+          };
+        }
+        return { serverId, eid, allEquip };
+      } catch {
+        // 可选原档解析失败时不补字段；连接、导航等 evaluate 外部错误仍正常抛出。
+        return null;
+      }
+    },
+    { serverId: item.serverId, eid: item.eid },
+  );
+  const worn = { listing: item, source };
+  await inspectItems(page, snapshot, signal, report, issues, worn);
   snapshot.itemsCollectedAt = new Date().toISOString();
   const nested = page.locator(
     '[data-cbg-detail-root] [role="tab"], [data-cbg-detail-root] [data-tab], [data-cbg-detail-root] .tab a, [data-cbg-detail-root] .tabs a',
@@ -508,7 +576,7 @@ async function inspectEquipmentTabs(
     await tab.evaluate((element) => (element as HTMLElement).click());
     await settled(page, signal);
     const child = await capture(page, `道具/法宝 / ${name}`);
-    await inspectItems(page, child, signal, report, issues);
+    await inspectItems(page, child, signal, report, issues, worn);
     child.itemsCollectedAt = new Date().toISOString();
     snapshots.push(child);
   }
@@ -525,11 +593,9 @@ export async function collectValuationDetail(
 ) {
   await openDetail(page, item, signal, report);
   const valuation = await captureValuation(page);
-  if (
-    valuation.source.eid &&
-    (valuation.source.eid !== item.eid || valuation.source.serverId !== item.serverId)
-  )
-    throw Object.assign(new Error("详情商品身份不一致，已停止补采"), {
+  const identityIssues = roleIdentityIssues(valuation.source, item);
+  if (identityIssues.length)
+    throw Object.assign(new Error("详情商品身份未核验：" + identityIssues.join("；")), {
       name: "IncompleteDetailError",
     });
   const now = new Date().toISOString();
@@ -552,7 +618,14 @@ export async function collectValuationDetail(
     await settled(page, signal);
     const snapshot = { ...(await capture(page, name)), collectedAt: now };
     if (name === "道具/法宝") {
-      const snapshots = await inspectEquipmentTabs(page, snapshot, signal, report, equipmentIssues);
+      const snapshots = await inspectEquipmentTabs(
+        page,
+        snapshot,
+        signal,
+        report,
+        equipmentIssues,
+        item,
+      );
       tabs.push(...snapshots.slice(1).map((tab) => ({ ...tab, collectedAt: now })));
     }
     if (name === "召唤兽/孩子") petCapture = await inspectPets(page, snapshot, signal, report, now);
@@ -610,7 +683,14 @@ export async function collectDetail(
     const snapshot = await capture(page, name);
     tabs.push(snapshot);
     if (name === "道具/法宝") {
-      const snapshots = await inspectEquipmentTabs(page, snapshot, signal, report, equipmentIssues);
+      const snapshots = await inspectEquipmentTabs(
+        page,
+        snapshot,
+        signal,
+        report,
+        equipmentIssues,
+        item,
+      );
       tabs.push(...snapshots.slice(1));
       continue;
     }
@@ -691,10 +771,14 @@ export async function collectDetail(
   checkAborted(signal);
   report("全部标签读取完成，正在保存详情…");
   const now = new Date().toISOString();
+  const valuation = await captureValuation(page);
+  valuation.issues = [
+    ...new Set([...valuation.issues, ...roleIdentityIssues(valuation.source, item)]),
+  ];
   return {
     captureMode: "all" as const,
     captureVersion: CAPTURE_VERSION,
-    valuation: await captureValuation(page),
+    valuation,
     equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
     petCapture,
     url: item.url,

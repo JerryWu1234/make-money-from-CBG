@@ -80,6 +80,58 @@ afterEach(async () => {
 });
 
 describe("官方 Codex 登录与 SDK", () => {
+  it("已完成的流不再接收上级取消，避免SDK清理子进程监听后触发未处理AbortError", async () => {
+    const controller = new AbortController();
+    const lateAbort = vi.fn();
+    mocks.runStreamed.mockImplementation(async (_prompt, options) => {
+      options.signal.addEventListener("abort", lateAbort);
+      return {
+        events: (async function* () {
+          yield { type: "turn.completed", usage: {} };
+        })(),
+      };
+    });
+    const { probeCodex } = await import("./codex");
+    await probeCodex("模拟连接", controller.signal);
+    controller.abort(new Error("服务关闭"));
+    expect(lateAbort).not.toHaveBeenCalled();
+  });
+  it("执行中的请求继续接收上级取消，并清理临时目录", async () => {
+    const controller = new AbortController();
+    let started!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    mocks.runStreamed.mockImplementation(async (_prompt, options) => ({
+      events: (async function* () {
+        await new Promise<void>((_resolve, reject) => {
+          options.signal.addEventListener("abort", () => reject(options.signal.reason), {
+            once: true,
+          });
+          started();
+        });
+        yield { type: "turn.completed", usage: {} };
+      })(),
+    }));
+    const { probeCodex } = await import("./codex");
+    const result = probeCodex("模拟连接", controller.signal);
+    const rejected = expect(result).rejects.toThrow("用户暂停");
+    await ready;
+    controller.abort(new Error("用户暂停"));
+    await rejected;
+    expect(mocks.rm).toHaveBeenCalledWith("/private/tmp/cbg-codex-fixture", {
+      recursive: true,
+      force: true,
+    });
+  });
+  it("已取消的请求不启动SDK，并清理临时目录", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("已经暂停"));
+    const { probeCodex } = await import("./codex");
+    await expect(probeCodex("模拟连接", controller.signal)).rejects.toThrow("已经暂停");
+    expect(mocks.startThread).not.toHaveBeenCalled();
+    expect(mocks.rm).toHaveBeenCalledOnce();
+  });
   it("默认分析选择官方列表中的 Luna，不改写全局设置", async () => {
     const { codexModel, codexModels } = await import("./codex");
     expect(await codexModel()).toBe("gpt-6-luna");
@@ -151,7 +203,10 @@ describe("官方 Codex 登录与 SDK", () => {
         approvalPolicy: "never",
       }),
     );
-    expect(mocks.runStreamed).toHaveBeenCalledWith("Reply READY.", { signal });
+    expect(mocks.runStreamed).toHaveBeenCalledWith("Reply READY.", {
+      signal: expect.any(AbortSignal),
+    });
+    expect(mocks.runStreamed.mock.calls[0][1].signal).not.toBe(signal);
   });
 
   it("连接测试收到完整完成事件后关闭流，不等待进程的剩余退出时间", async () => {
@@ -217,7 +272,10 @@ describe("官方 Codex 登录与 SDK", () => {
         webSearchMode: "disabled",
       }),
     );
-    expect(mocks.run).toHaveBeenCalledWith("一件商品的完整原文", { signal, outputSchema: schema });
+    expect(mocks.run).toHaveBeenCalledWith("一件商品的完整原文", {
+      signal: expect.any(AbortSignal),
+      outputSchema: schema,
+    });
     expect(result.usage).toMatchObject({ input_tokens: 20, output_tokens: 10 });
   });
 
@@ -285,7 +343,10 @@ describe("官方 Codex 登录与 SDK", () => {
         apps: false,
       },
     });
-    expect(mocks.runStreamed).toHaveBeenCalledWith("裸号核对", { signal, outputSchema: schema });
+    expect(mocks.runStreamed).toHaveBeenCalledWith("裸号核对", {
+      signal: expect.any(AbortSignal),
+      outputSchema: schema,
+    });
     expect(mocks.run).not.toHaveBeenCalled();
     expect(closed).toBe(true);
   });
@@ -359,7 +420,7 @@ describe("官方 Codex 登录与 SDK", () => {
       apps: false,
     });
     expect(mocks.run).toHaveBeenCalledWith(expect.stringContaining(prompt), {
-      signal,
+      signal: expect.any(AbortSignal),
       outputSchema: schema,
     });
     expect(mocks.rm).toHaveBeenCalledWith("/private/tmp/cbg-codex-fixture", {

@@ -51,6 +51,67 @@ it.each([
 });
 
 describe("有官网证据的角色装备分类", () => {
+  it("保存原档确认的4002太阳石按材料保留等级，不凭名称或相邻编号跳过装备检查", () => {
+    const attrs = {
+      data_equip_name: "太阳石",
+      data_equip_type: "4002",
+      data_equip_desc: "等级 6  ",
+      data_equip_location: "saved-item-location",
+    };
+    expect(itemFromAttributes(attrs, 5)).toMatchObject({
+      name: "太阳石",
+      modelId: "4002",
+      category: "材料 · 太阳石",
+      description: "等级 6",
+      location: "saved-item-location",
+    });
+    for (const modelId of ["", "4003", "04002", "31301"])
+      expect(
+        itemFromAttributes({ ...attrs, data_equip_type: modelId }, 5).category,
+      ).toBeUndefined();
+    expect(observedEquipmentCategory("武器", "仓库", "31301")).toBe("武器");
+    expect(
+      itemFromAttributes(
+        { data_equip_name: "未知武器", data_equip_type: "31301", data_equip_desc: "伤害 +750" },
+        0,
+      ).attributes?.等级,
+    ).toBeUndefined();
+  });
+  it("官网型号4034的点化石保留附加技能，同名未知型号仍须核对", () => {
+    const attrs = {
+      data_equip_name: "点化石",
+      data_equip_type: "4034",
+      data_equip_desc: "附加技能：高级幸运",
+    };
+    expect(itemFromAttributes(attrs, 9)).toMatchObject({
+      name: "点化石",
+      modelId: "4034",
+      category: "材料 · 点化石",
+      description: "附加技能：高级幸运",
+    });
+    for (const modelId of ["", "4035"])
+      expect(
+        itemFromAttributes({ ...attrs, data_equip_type: modelId }, 9).category,
+      ).toBeUndefined();
+  });
+  it("官网型号612的制造指南书按材料保存说明，不凭同名或相邻型号推断", () => {
+    expect(
+      itemFromAttributes(
+        {
+          data_equip_name: "制造指南书",
+          data_equip_type: "612",
+          data_equip_desc: "制造指南书#r种类：头盔#r可制造等级：150",
+        },
+        0,
+      ),
+    ).toMatchObject({
+      modelId: "612",
+      category: "材料 · 制造指南书",
+      description: "制造指南书\n种类：头盔\n可制造等级：150",
+    });
+    expect(itemFromAttributes({ data_equip_name: "制造指南书" }, 0).category).toBeUndefined();
+    expect(observedEquipmentCategory("人物装备", "仓库", "613")).toBe("人物装备");
+  });
   it.each(["4221", "4223", "4233", "4246", "63232"])(
     "官方元身模型%s与普通装备分开分类，旧材料类别和位置不改变型号",
     (modelId) => {

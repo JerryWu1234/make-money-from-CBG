@@ -1,4 +1,4 @@
-import { expect, it } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import { analysisRecord } from "../../tests/fixtures/analysis";
 import { recommendationFor } from "./recommendation";
 import type { ValuationResult } from "./valuation-types";
@@ -258,6 +258,102 @@ it("查看记录持久化，默认隐藏并补足10条，显示全部保留已�
     expect(store.overview().results.total).toBe(12);
     crawl.clear();
     expect(crawl.db.prepare("SELECT count(*) n FROM recommendation_views").get()!.n).toBe(0);
+  } finally {
+    crawl.close();
+  }
+});
+
+it("大资料榜单只排序轻量候选，再按原序补足推荐和人工复核", () => {
+  const crawl = new CrawlStore(":memory:");
+  try {
+    for (const kind of ["excluded", "recommended", "manual"]) {
+      for (let index = 0; index < 12; index++) {
+        const r = record();
+        r.listing.key = `${kind}-${String(index).padStart(2, "0")}`;
+        r.detail!.tabs[0].text += "采集证据".repeat(8192);
+        crawl.observe(r.listing);
+        crawl.save(r.listing, r.detail!);
+      }
+    }
+    const store = new AnalysisStore(crawl.db);
+    const profile = createProfile("大资料榜单回归");
+    const runId = store.createRun("codex", "test", false, profile);
+    const complete = crawl.db.prepare(
+      "UPDATE analysis_tasks SET status='completed',result_json=? WHERE listing_key=?",
+    );
+    for (const kind of ["excluded", "recommended", "manual"]) {
+      for (let index = 0; index < 12; index++)
+        complete.run(
+          JSON.stringify({
+            score: 12 - index,
+            valuation: {
+              ...valuation(kind === "excluded" ? 19000 : kind === "manual" ? 18000 : 20000),
+              ...(index % 2
+                ? { margin_of_safety: kind === "excluded" ? 100 : 12 - index }
+                : { price_difference_ratio: kind === "excluded" ? 100 : 12 - index }),
+            },
+          }),
+          `${kind}-${String(index).padStart(2, "0")}`,
+        );
+    }
+    const prepare = crawl.db.prepare.bind(crawl.db);
+    const sortQueries: { sql: string; columns: string[]; fields: number }[] = [];
+    const spy = vi.spyOn(crawl.db, "prepare").mockImplementation((sql) => {
+      const statement = prepare(sql);
+      if (sql.includes("ORDER BY coalesce("))
+        sortQueries.push({
+          sql,
+          columns: statement.columns().map((column) => column.name),
+          fields: Math.max(
+            ...prepare("EXPLAIN " + sql)
+              .all(...(sql.includes("t.run_id=?") ? [runId] : []))
+              .filter((row) => row.opcode === "SorterInsert")
+              .map((row) => Number(row.p4)),
+          ),
+        });
+      return statement;
+    });
+    try {
+      const first = store.overview({ runId, summary: true, currentProfile: profile });
+      const keys = (kind: string, start = 0) =>
+        Array.from(
+          { length: 10 },
+          (_, index) => `${kind}-${String(index + start).padStart(2, "0")}`,
+        );
+      expect(first.ranking.map((item) => item.key)).toEqual(keys("recommended"));
+      expect(first.manualReview?.map((item) => item.key)).toEqual(keys("manual"));
+      expect(first.ranking[0].taskId).toBe(
+        crawl.db
+          .prepare("SELECT id FROM analysis_tasks WHERE run_id=? AND listing_key=?")
+          .get(runId, "recommended-00")!.id,
+      );
+      store.markRecommendationViewed("recommended-00");
+      const filtered = store.overview({
+        runId,
+        summary: true,
+        currentProfile: profile,
+        search: "没有对应商品",
+        filter: "ready",
+      });
+      expect(filtered.records.total).toBe(0);
+      expect(filtered.ranking.map((item) => item.key)).toEqual(keys("recommended", 1));
+      expect(filtered.manualReview?.map((item) => item.key)).toEqual(keys("manual"));
+      expect(store.overview({ runId, showViewed: true }).ranking[0]).toMatchObject({
+        key: "recommended-00",
+        recommendationViewed: true,
+      });
+      const nextRun = store.createRun("codex", "test", false, profile);
+      expect(store.overview().ranking.map((item) => item.key)).toEqual(keys("recommended", 1));
+      expect(store.overview({ runId: nextRun }).ranking).toEqual([]);
+      expect(sortQueries.length).toBeGreaterThan(0);
+      for (const query of sortQueries) {
+        expect(query.columns).toEqual(["key", "task_id", "viewed_at"]);
+        expect(query.sql).not.toContain("json_remove(");
+        expect(query.fields).toBeLessThanOrEqual(6);
+      }
+    } finally {
+      spy.mockRestore();
+    }
   } finally {
     crawl.close();
   }

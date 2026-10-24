@@ -15,6 +15,9 @@ export function RoleDetailDrawer({
   useEffect(() => {
     const element = dialog.current!;
     const previous = document.activeElement as HTMLElement | null;
+    const scopeButton = previous
+      ?.closest(".saved-roles")
+      ?.querySelector<HTMLElement>('[aria-label="记录范围"] button[aria-pressed="true"]');
     const overflow = document.body.style.overflow;
     element.showModal();
     document.body.style.overflow = "hidden";
@@ -22,6 +25,7 @@ export function RoleDetailDrawer({
       element.close();
       document.body.style.overflow = overflow;
       if (previous?.isConnected) previous.focus({ preventScroll: true });
+      else if (scopeButton?.isConnected) scopeButton.focus({ preventScroll: true });
     };
   }, []);
   return createPortal(

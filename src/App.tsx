@@ -213,6 +213,8 @@ export function App() {
         <CrawlPanel
           ready={completed && result?.isLoggedIn === true && !running}
           onRunning={setCrawling}
+          onPrepare={() => request(true)}
+          preparationError={starting || running ? null : transportError || result?.error?.message}
         />
       </div>
     </main>

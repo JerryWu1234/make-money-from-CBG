@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { CrawlStore } from "../crawler/store";
 import type { SavedRoleRecord } from "../crawler/types";
 import { analysisRecord, analysisResponse } from "../../tests/fixtures/analysis";
@@ -15,8 +18,8 @@ const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
-function setup() {
-  const crawl = new CrawlStore(":memory:");
+function setup(filename = ":memory:") {
+  const crawl = new CrawlStore(filename);
   const store = new AnalysisStore(crawl.db);
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {
@@ -74,6 +77,127 @@ function setup() {
   };
 }
 describe("分析队列持续处理并等待新角色", () => {
+  it("候选和采集失败不触发模型，完整商品发布后立即分析且不重复", async () => {
+    const x = setup();
+    x.release();
+    x.add("publication", 1, false);
+    const id = await x.runner.start("codex", false);
+    expect(x.analyzed).toEqual([]);
+    expect(x.crawl.records(1, 20, "complete").total).toBe(0);
+    x.crawl.fail("publication", "资料未完整");
+    expect(x.runner.appendCaptured()).toBe(0);
+    expect(x.analyzed).toEqual([]);
+    const record = analysisRecord("publication");
+    expect(x.crawl.save(record.listing, record.detail!)).toBe(true);
+    expect(x.runner.appendCaptured()).toBe(1);
+    expect(x.runner.appendCaptured()).toBe(0);
+    await vi.waitFor(() => expect(x.store.run(id)?.completed).toBe(1), { timeout: 2500 });
+    expect(x.analyzed).toEqual(["publication"]);
+    expect(x.crawl.records(1, 20, "complete").total).toBe(1);
+    expect(x.crawl.records(1, 20, "tasks").total).toBe(0);
+  });
+  it("裸号待命时不反复重放已复用结果；新增与修改资料立即重新检查", async () => {
+    const x = setup();
+    const profile = createProfile("冻结裸号设置", undefined, false);
+    x.add("a", 1);
+    x.release();
+    await x.runner.start("codex", false, profile, true);
+    await x.runner.settled();
+    const id = await x.runner.start("codex", false, profile);
+    expect(x.store.run(id)).toMatchObject({ total: 0, phase: "waiting_capture" });
+    const prepare = vi.spyOn(x.crawl.db, "prepare");
+    expect(x.runner.appendCaptured()).toBe(0);
+    expect(x.runner.appendCaptured()).toBe(0);
+    expect(prepare.mock.calls.filter(([sql]) => sql.includes("AND t.input_hash=?"))).toHaveLength(
+      0,
+    );
+    prepare.mockRestore();
+    x.add("b", 2);
+    expect(x.runner.appendCaptured()).toBe(1);
+    await vi.waitFor(() => expect(x.store.run(id)?.completed).toBe(1), { timeout: 2500 });
+    const changed = analysisRecord("a");
+    changed.listing.price = "1234";
+    x.crawl.observe(changed.listing);
+    x.crawl.save(changed.listing, changed.detail!);
+    expect(x.runner.appendCaptured()).toBe(1);
+    await vi.waitFor(() => expect(x.store.run(id)?.completed).toBe(2), { timeout: 2500 });
+    expect(x.analyzed).toEqual(["a", "b", "a"]);
+  });
+  it("另一个数据库连接写入采集结果也会打破待命快照，不漏掉新角色", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-idle-append-"));
+    const filename = join(directory, "fixture.sqlite");
+    const x = setup(filename);
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const profile = createProfile("冻结裸号设置", undefined, false);
+    x.add("a", 1);
+    x.release();
+    await x.runner.start("codex", false, profile, true);
+    await x.runner.settled();
+    const id = await x.runner.start("codex", false, profile);
+    const other = new CrawlStore(filename);
+    try {
+      expect(x.runner.appendCaptured()).toBe(0);
+      const before = x.crawl.db.prepare("SELECT total_changes() n").get()!.n;
+      const next = analysisRecord("external");
+      other.observe(next.listing);
+      other.save(next.listing, next.detail!);
+      expect(x.crawl.db.prepare("SELECT total_changes() n").get()!.n).toBe(before);
+      expect(x.runner.appendCaptured()).toBe(1);
+      await vi.waitFor(() => expect(x.store.run(id)?.completed).toBe(1), { timeout: 2500 });
+      expect(x.analyzed).toEqual(["a", "external"]);
+    } finally {
+      other.close();
+    }
+  });
+  it("等待新角色期间行情过期即暂停，不能续跑旧行情且不发出AI请求", async () => {
+    const x = setup();
+    const source = {
+      serverId: "132",
+      serverName: "测试服",
+      age: "older" as const,
+      rank: 1,
+      goldPrice: 210,
+      goldUnit: 30000000,
+      baselineUnitConfirmed: true,
+      source: "auto" as const,
+      fetchedAt: new Date().toISOString(),
+      sources: [],
+    };
+    const profile = { ...createProfile("冻结行情", undefined, false), marketSources: [source] };
+    const id = await x.runner.start("codex", false, profile);
+    expect(x.store.run(id)?.marketExpired).toBe(false);
+    const expired = {
+      ...profile,
+      marketSources: [{ ...source, fetchedAt: new Date(Date.now() - 25 * 3600000).toISOString() }],
+    };
+    x.crawl.db
+      .prepare("UPDATE analysis_runs SET profile_json=? WHERE id=?")
+      .run(JSON.stringify(expired), id);
+    x.add("a", 1);
+    await vi.waitFor(
+      () =>
+        expect(x.store.run(id)).toMatchObject({
+          status: "paused",
+          marketExpired: true,
+          error: expect.stringContaining("区服行情已过期"),
+        }),
+      { timeout: 2500 },
+    );
+    await x.runner.settled();
+    expect(x.analyzed).toEqual([]);
+    expect(x.crawl.count()).toBe(1);
+    expect(x.connect).toHaveBeenCalledTimes(1);
+    await expect(x.runner.resume(id)).rejects.toThrow("区服行情已过期");
+    expect(x.connect).toHaveBeenCalledTimes(1);
+    expect(
+      JSON.parse(
+        String(
+          x.crawl.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(id)!
+            .profile_json,
+        ),
+      ),
+    ).toEqual(expired);
+  });
   it("空库可先启动等待，未完整角色不调用AI，首个采齐后自动分析，空批次暂停恢复不丢设置", async () => {
     const x = setup();
     const profile = createProfile("空库冻结设置", undefined, false);

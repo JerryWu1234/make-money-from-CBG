@@ -21,6 +21,14 @@ export function replaceSavedRecordsPage(page: number) {
   replaceUrl(params);
 }
 
+export function replaceSavedRecordsScope(scope: "complete" | "tasks") {
+  const params = new URLSearchParams(window.location.search);
+  if (scope === "tasks") params.set("recordsScope", scope);
+  else params.delete("recordsScope");
+  params.delete("recordsPage");
+  replaceUrl(params);
+}
+
 export function replaceSavedRecordKey(key: string | null) {
   const params = new URLSearchParams(window.location.search);
   if (key) params.set("record", key);

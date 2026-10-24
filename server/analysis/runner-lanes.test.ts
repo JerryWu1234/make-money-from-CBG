@@ -215,7 +215,9 @@ it("任务冻结lane，来源变化不改变输入hash，旧任务缺列时迁�
   expect(updated.lane).toBe("old");
   expect(updated.document.contentHash).toBe(task.document.contentHash);
   expect(x.store.next(id, "new")!.lane).toBe("new");
-  x.crawl.db.exec("ALTER TABLE analysis_tasks DROP COLUMN queue_lane");
+  x.crawl.db.exec(
+    "DROP INDEX analysis_tasks_run_status; ALTER TABLE analysis_tasks DROP COLUMN queue_lane",
+  );
   const migrated = new AnalysisStore(x.crawl.db);
   expect(migrated.next(id, "new")).toMatchObject({
     lane: "old",

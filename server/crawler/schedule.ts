@@ -347,6 +347,7 @@ export class ScanScheduler {
     this.loginRequested = false;
     try {
       const attempt = await this.scan.startCrawl(() => {
+        if (this.closed) return false;
         const live = this.store.read();
         return live.mode === "enabled" && this.nextSlot(this.now(), live).candidate === due;
       });

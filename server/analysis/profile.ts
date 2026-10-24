@@ -8,6 +8,7 @@ import { marketServers } from "./market";
 import { EQUIPMENT_SIMILAR_POLICY_VERSION, SIMILAR_POLICY_VERSION } from "./pricing-estimate";
 import { RECOMMENDED_BUY_FACTOR, RECOMMENDED_RULES } from "./valuation-settings";
 import { BARE_ROLE_TEMPLATE } from "./bare-role-prompt";
+import { loadAscendedSchoolFormulaConfirmations } from "./school-confirmation";
 import {
   DEFAULT_EQUIPMENT_BASELINE_PRICES,
   EQUIPMENT_BASELINE_POLICY_VERSION,
@@ -236,9 +237,13 @@ export function loadProfile(db: DatabaseSync, file = PROMPT_FILE) {
     ...settings,
     servers: [...manual, ...available],
   });
+  const confirmations = loadAscendedSchoolFormulaConfirmations(db);
   // A streaming batch must retain the original market facts for roles captured later.
   return {
     ...profile,
+    ...(Object.keys(confirmations).length
+      ? { ascendedSchoolFormulaConfirmations: confirmations }
+      : {}),
     marketSources: market.filter((row) => !manual.some((item) => item.serverId === row.serverId)),
   };
 }

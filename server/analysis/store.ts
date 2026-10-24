@@ -14,9 +14,11 @@ import { petInventory, type PetPricingSnapshot } from "./pet-pricing";
 import { petGearInventory } from "./pet-gear-inventory";
 import { validateSampleSelection } from "./sample-selection";
 import { captureIssues } from "../crawler/capture-readiness";
+import { isCurrentRoleCapture } from "../crawler/role-identity";
 import { capturedAssetCounts, capturedAssetSummary } from "./asset-counts";
 import { recommendationFor } from "./recommendation";
 import { analysisConcurrency, analysisLaneLimits, DEFAULT_ANALYSIS_CONCURRENCY } from "./types";
+import { automaticMarketExpired } from "./market";
 import type {
   AnalysisLane,
   AnalysisDetail,
@@ -123,6 +125,7 @@ function profileScope(
 }
 
 export class AnalysisStore {
+  private idleAppendSnapshot?: { runId: string; changes: number; version: number };
   constructor(readonly db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS analysis_runs (
       id TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, rule_version TEXT NOT NULL,
@@ -144,6 +147,7 @@ export class AnalysisStore {
       id TEXT PRIMARY KEY, task_id TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL,
       finished_at TEXT, raw_response TEXT, usage_json TEXT, error TEXT
     );
+    CREATE INDEX IF NOT EXISTS analysis_attempts_task ON analysis_attempts(task_id,created_at DESC,id DESC);
     CREATE TABLE IF NOT EXISTS analysis_lock (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL);`);
     if (
       !db
@@ -177,6 +181,9 @@ export class AnalysisStore {
       )
         db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
     }
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS analysis_tasks_run_status ON analysis_tasks(run_id,status,queue_lane,reused,id)",
+    );
     this.recover();
   }
   acquire(owner: string) {
@@ -228,12 +235,20 @@ export class AnalysisStore {
   counts() {
     const row = this.db
       .prepare(
-        "SELECT count(*) total,sum(CASE WHEN status='complete' AND detail_json IS NOT NULL THEN 1 ELSE 0 END) complete FROM listings",
+        "SELECT count(*) total,sum(CASE WHEN status='complete' AND detail_json IS NOT NULL THEN 1 ELSE 0 END) complete,sum(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed FROM listings",
       )
       .get()!;
     const total = Number(row.total),
-      complete = Number(row.complete || 0);
-    return { total, complete, waitingDetail: total - complete };
+      complete = Number(row.complete || 0),
+      failedDetail = Number(row.failed || 0),
+      waitingDetail = total - complete;
+    return {
+      total,
+      complete,
+      waitingDetail,
+      pendingDetail: waitingDetail - failedDetail,
+      failedDetail,
+    };
   }
   run(id: string): AnalysisRun | null {
     const row = this.db
@@ -260,6 +275,20 @@ export class AnalysisStore {
       FROM analysis_runs r LEFT JOIN analysis_tasks t ON t.run_id=r.id WHERE r.id=? GROUP BY r.id`)
       .get(id);
     const storedError = row ? nullable(row.error) : null;
+    const profile = row?.profile_json
+      ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
+      : undefined;
+    const finiteServers =
+      profile && row?.follow_capture === "0"
+        ? new Set(
+            this.db
+              .prepare(
+                "SELECT DISTINCT json_extract(source_listing_json,'$.serverId') server_id FROM analysis_tasks WHERE run_id=?",
+              )
+              .all(id)
+              .map((task) => String(task.server_id)),
+          )
+        : null;
     const pauseNotice =
       row?.status === "paused" && storedError?.startsWith("已暂停") ? storedError : null;
     return row
@@ -305,11 +334,20 @@ export class AnalysisStore {
             !Number(row.queued)
               ? "waiting_capture"
               : (nullable(row.phase) as AnalysisRun["phase"]),
-          ...(row.profile_json
+          ...(profile
             ? {
-                profileHash: (JSON.parse(String(row.profile_json)) as AnalysisProfile).hash,
-                calculationVersion: (JSON.parse(String(row.profile_json)) as AnalysisProfile)
-                  .calculationVersion,
+                profileHash: profile.hash,
+                marketExpired: automaticMarketExpired(
+                  finiteServers
+                    ? {
+                        ...profile,
+                        marketSources: profile.marketSources?.filter((source) =>
+                          finiteServers.has(source.serverId),
+                        ),
+                      }
+                    : profile,
+                ),
+                calculationVersion: profile.calculationVersion,
               }
             : {}),
         }
@@ -338,6 +376,17 @@ export class AnalysisStore {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const row of rows) {
+        const current: SavedRoleRecord = {
+          listing: JSON.parse(String(row.listing_json)),
+          detail: JSON.parse(String(row.detail_json)),
+          status: "complete",
+          error: null,
+        };
+        if (
+          (profile || isCurrentRoleCapture(current.detail)) &&
+          captureIssues(current.detail!, false, true, current.listing).length
+        )
+          throw new Error("采集完整性或身份未核验，不能更新分析输入");
         if (
           row.source_listing_json === row.listing_json &&
           row.source_detail_json === row.detail_json
@@ -358,13 +407,8 @@ export class AnalysisStore {
           }
           continue;
         }
-        const record: SavedRoleRecord = {
-          listing: JSON.parse(String(row.listing_json)),
-          detail: JSON.parse(String(row.detail_json)),
-          status: "complete",
-          error: null,
-        };
-        if (captureIssues(record.detail!).length)
+        const record = current;
+        if (captureIssues(record.detail!, false, true, record.listing).length)
           throw new Error("采集完整性未核验，不能更新分析输入");
         const document = buildProductDocument(record);
         const prompt = profile
@@ -563,7 +607,10 @@ export class AnalysisStore {
           error: null,
         };
         if (record.listing.key !== row.key) throw new Error("商品 ID 与数据库记录不一致");
-        if (profile && captureIssues(record.detail!).length)
+        if (
+          (profile || isCurrentRoleCapture(record.detail)) &&
+          captureIssues(record.detail!, false, true, record.listing).length
+        )
           throw new Error("角色资料尚未完整采集，不能进入分析任务");
         const document = buildProductDocument(record);
         const prompt = profile
@@ -650,6 +697,18 @@ export class AnalysisStore {
     const profile = run.profile_json
       ? (JSON.parse(String(run.profile_json)) as AnalysisProfile)
       : undefined;
+    // Bare-role reuse has no expiring asset quotes. An unchanged database needs
+    // no repeated document construction/replay while waiting for new captures.
+    // total_changes covers this connection; data_version covers other writers.
+    const snapshot =
+      profile && !profile.equipmentSearch && !profile.petSearch && !profile.petGearSearch
+        ? {
+            runId: id,
+            changes: Number(this.db.prepare("SELECT total_changes() n").get()!.n),
+            version: Number(this.db.prepare("PRAGMA data_version").get()!.data_version),
+          }
+        : undefined;
+    if (snapshot && isDeepStrictEqual(snapshot, this.idleAppendSnapshot)) return 0;
     const rows = this.db
       .prepare(`SELECT l.key,l.listing_json,l.detail_json,l.capture_lane FROM listings l
       WHERE l.status='complete' AND l.detail_json IS NOT NULL
@@ -672,7 +731,11 @@ export class AnalysisStore {
           error: null,
         };
         if (record.listing.key !== row.key) throw new Error("商品 ID 与数据库记录不一致");
-        if (profile && captureIssues(record.detail!).length) continue;
+        if (
+          (profile || isCurrentRoleCapture(record.detail)) &&
+          captureIssues(record.detail!, false, true, record.listing).length
+        )
+          continue;
         const document = buildProductDocument(record);
         const prompt = profile
           ? valuationPrompt(document, record, profile)
@@ -709,6 +772,7 @@ export class AnalysisStore {
       }
       if (added) this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), id);
       this.db.exec("COMMIT");
+      this.idleAppendSnapshot = added ? undefined : snapshot;
       return added;
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -1064,6 +1128,7 @@ export class AnalysisStore {
       url: listing.url,
       collectionStatus: String(row.collection_status),
       collectedAt: nullable(row.collected_at),
+      lastSeenAt: nullable(row.last_seen_at),
       state: String(row.state) as AnalysisItem["state"],
       taskId: nullable(row.task_id),
       score: row.state === "completed" ? (result?.score ?? null) : null,
@@ -1101,6 +1166,7 @@ export class AnalysisStore {
       filter?: string;
       summary?: boolean;
       showViewed?: boolean;
+      scope?: import("../crawler/types").SavedListingScope;
     } = {},
   ): AnalysisOverview {
     const ids = this.db
@@ -1132,7 +1198,14 @@ export class AnalysisStore {
           .concat("'$.valuation.pet_pricing.gearPricing'")
           .join(",")})`
       : "t.result_json";
-    const source = `SELECT l.key,l.listing_json,l.collected_at,l.status collection_status,t.id task_id,${resultColumn} result_json,t.error task_error,selected_run.profile_json,${stateSql} state FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN analysis_runs selected_run ON selected_run.id=t.run_id`;
+    const productColumns = `l.key,l.listing_json,l.collected_at,l.last_seen_at,l.status collection_status,t.id task_id,${resultColumn} result_json,t.error task_error,selected_run.profile_json,${stateSql} state`;
+    const scopeCondition =
+      options.scope === "complete"
+        ? " WHERE l.status='complete' AND l.detail_json IS NOT NULL"
+        : options.scope === "tasks"
+          ? " WHERE l.status!='complete' OR l.detail_json IS NULL"
+          : "";
+    const source = `SELECT ${productColumns} FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN analysis_runs selected_run ON selected_run.id=t.run_id${scopeCondition}`;
     const conditions: string[] = [],
       values: string[] = [...sourceValues];
     if (options.search?.trim()) {
@@ -1153,14 +1226,20 @@ export class AnalysisStore {
       .map((row) => this.item(row, options.currentProfile, options.summary));
     const ranking: AnalysisItem[] = [];
     const manualReview: AnalysisItem[] = [];
+    // Sort only identity and numeric keys; hydrate evidence in that order afterward.
+    // The removed summary fields do not affect eligibility or the ranking values.
     const rankedRows = this.db
       .prepare(
-        `WITH products AS (${source}) SELECT products.*,inventory.detail_json,views.viewed_at FROM products JOIN listings inventory ON inventory.key=products.key LEFT JOIN recommendation_views views ON views.listing_key=products.key WHERE state='completed' AND json_type(result_json,'$.valuation.bare_role_value') IN ('integer','real')${options.showViewed ? "" : " AND views.listing_key IS NULL"} ORDER BY coalesce(json_extract(result_json,'$.valuation.price_difference_ratio'),json_extract(result_json,'$.valuation.margin_of_safety')) DESC,json_extract(result_json,'$.score') DESC,products.key ASC`,
+        `SELECT l.key,t.id task_id,views.viewed_at FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN recommendation_views views ON views.listing_key=l.key WHERE (${stateSql})='completed' AND json_type(t.result_json,'$.valuation.bare_role_value') IN ('integer','real')${options.showViewed ? "" : " AND views.listing_key IS NULL"} ORDER BY coalesce(json_extract(t.result_json,'$.valuation.price_difference_ratio'),json_extract(t.result_json,'$.valuation.margin_of_safety')) DESC,json_extract(t.result_json,'$.score') DESC,l.key ASC`,
       )
       .iterate(...sourceValues);
-    for (const row of rankedRows) {
+    const rankedProduct = this.db.prepare(
+      `SELECT ${productColumns},l.detail_json FROM listings l JOIN analysis_tasks t ON t.listing_key=l.key JOIN analysis_runs selected_run ON selected_run.id=t.run_id WHERE l.key=? AND t.id=?`,
+    );
+    for (const candidate of rankedRows) {
+      const row = rankedProduct.get(candidate.key, candidate.task_id)!;
       const item = this.item(row, options.currentProfile, options.summary);
-      item.recommendationViewed = !!row.viewed_at;
+      item.recommendationViewed = !!candidate.viewed_at;
       if (!item.profileChanged) {
         const record: SavedRoleRecord = {
           listing: JSON.parse(String(row.listing_json)),
@@ -1180,7 +1259,7 @@ export class AnalysisStore {
     }
     const history = this.db
       .prepare(
-        `SELECT a.*,t.id task_id,json_extract(t.source_listing_json,'$.name') name FROM analysis_attempts a JOIN analysis_tasks t ON a.task_id=t.id WHERE t.run_id=? ORDER BY a.created_at DESC,a.id ASC LIMIT 30`,
+        `SELECT a.id,a.state,a.created_at,a.finished_at,a.error,t.id task_id,json_extract(t.source_listing_json,'$.name') name FROM analysis_attempts a JOIN analysis_tasks t ON a.task_id=t.id WHERE t.run_id=? ORDER BY a.created_at DESC,a.id ASC LIMIT 30`,
       )
       .all(run?.id || "")
       .map((row) => ({
@@ -1238,8 +1317,27 @@ export class AnalysisStore {
           )!,
         };
       });
+    const counts = this.counts();
+    const captureTasks = {
+      total: counts.waitingDetail,
+      pending: counts.pendingDetail,
+      failed: counts.failedDetail,
+    };
+    const scopedCounts =
+      options.scope === "complete"
+        ? {
+            total: counts.complete,
+            complete: counts.complete,
+            waitingDetail: 0,
+            pendingDetail: 0,
+            failedDetail: 0,
+          }
+        : options.scope === "tasks"
+          ? { ...counts, total: counts.waitingDetail, complete: 0 }
+          : counts;
     return {
-      counts: this.counts(),
+      counts: scopedCounts,
+      captureTasks,
       run,
       activeRun,
       runs,

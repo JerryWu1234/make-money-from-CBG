@@ -1,8 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { diagnostics } from "./diagnostics";
 import { ScheduleConfigError } from "./crawler/schedule-time";
 import { validateSampleSelection } from "./analysis/sample-selection";
 import { analysisConcurrency } from "./analysis/types";
+import type { SavedListingScope } from "./crawler/types";
 
 const getRoutes = new Set([
   "/api/browser/status",
@@ -24,6 +26,7 @@ const postRoutes = new Set([
   "/api/browser/open",
   "/api/crawl/start",
   "/api/crawl/settings/save",
+  "/api/crawl/target/save",
   "/api/crawl/backfill",
   "/api/crawl/stop",
   "/api/crawl/clear",
@@ -41,7 +44,17 @@ const postRoutes = new Set([
   "/api/analysis/pet/check",
   "/api/analysis/pet-gear/check",
   "/api/analysis/settings/save",
+  "/api/analysis/school-formula/confirm",
   "/api/analysis/recommendation/view",
+]);
+
+const controlRoutes = new Set([
+  "/api/browser/open",
+  "/api/crawl/start",
+  "/api/crawl/backfill",
+  "/api/analysis/start",
+  "/api/analysis/resume",
+  "/api/analysis/retry",
 ]);
 
 async function verifyRequestBody(request: IncomingMessage, limit = 4096) {
@@ -68,6 +81,25 @@ async function verifyRequestBody(request: IncomingMessage, limit = 4096) {
 export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, next: () => void) {
   const pathname = req.url?.split("?")[0];
   if (!pathname || (!getRoutes.has(pathname) && !postRoutes.has(pathname))) return next();
+  if (controlRoutes.has(pathname)) {
+    const requestId = randomUUID();
+    const started = Date.now();
+    const finish = () => complete("api.control_finished");
+    const close = () => complete("api.control_closed");
+    const complete = (event: string) => {
+      res.removeListener("finish", finish);
+      res.removeListener("close", close);
+      diagnostics.record(event, {
+        requestId,
+        route: pathname,
+        status: res.statusCode,
+        durationMs: Date.now() - started,
+      });
+    };
+    diagnostics.record("api.control_received", { requestId, route: pathname, method: req.method });
+    res.once("finish", finish);
+    res.once("close", close);
+  }
   res.setHeader("Content-Type", "application/json");
   res.setHeader("Cache-Control", "no-store");
   if (req.method !== (getRoutes.has(pathname) ? "GET" : "POST")) {
@@ -78,6 +110,15 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
 
   const expectedOrigin = `http://${req.headers.host}`;
   try {
+    const scope = new URL(req.url!, expectedOrigin).searchParams.get("scope") || "all";
+    if (
+      (pathname === "/api/crawl/records" || pathname === "/api/analysis/status") &&
+      !["all", "complete", "tasks"].includes(scope)
+    ) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "记录范围无效" }));
+      return;
+    }
     if (
       (req.headers.origin && req.headers.origin !== expectedOrigin) ||
       (req.headers.referer && new URL(req.headers.referer).origin !== expectedOrigin)
@@ -135,6 +176,9 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
         case "/api/analysis/settings/save":
           result = analysis.saveAnalysisSettings(input);
           break;
+        case "/api/analysis/school-formula/confirm":
+          result = analysis.confirmSchoolFormula(input.productKeys, input.confirmed);
+          break;
         case "/api/analysis/status": {
           const provider = params.get("provider");
           result = analysis.analysisOverview({
@@ -146,6 +190,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             search: params.get("search") || undefined,
             filter: params.get("filter") || undefined,
             showViewed: params.get("showViewed") === "true",
+            ...(scope === "all" ? {} : { scope: scope as SavedListingScope }),
           });
           break;
         }
@@ -294,6 +339,9 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
       const params = new URL(req.url!, expectedOrigin).searchParams;
       let result: unknown;
       switch (pathname) {
+        case "/api/crawl/target/save":
+          result = crawler.setCaptureRoleLimit((body as Record<string, unknown>).roleLimit);
+          break;
         case "/api/crawl/settings":
           result = crawler.equipmentAnalysisSettings();
           break;
@@ -310,9 +358,10 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
               concurrency !== undefined &&
               (typeof concurrency !== "number" ||
                 !Number.isSafeInteger(concurrency) ||
-                concurrency < 1)
+                concurrency < 2 ||
+                concurrency % 2 !== 0)
             )
-              throw new Error("并发数必须是正整数");
+              throw new Error("并发数必须是正偶数（2、4、6…）");
             if (
               keys !== undefined &&
               (!Array.isArray(keys) ||
@@ -367,6 +416,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
           result = crawler.savedRecords(
             Number(params.get("page") || 1),
             Number(params.get("pageSize") || 20),
+            scope as SavedListingScope,
           );
           break;
         case "/api/crawl/detail":
@@ -394,9 +444,11 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
     res.statusCode =
       error instanceof ScheduleConfigError
         ? 400
-        : error instanceof Error && error.name === "CapturePreparationError"
-          ? 409
-          : 500;
+        : error instanceof Error && error.name === "SchoolFormulaConfirmationError"
+          ? 400
+          : error instanceof Error && error.name === "CapturePreparationError"
+            ? 409
+            : 500;
     res.end(JSON.stringify({ error: error instanceof Error ? error.message : "请求失败" }));
   }
 }

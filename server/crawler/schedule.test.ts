@@ -611,6 +611,27 @@ describe("扫描调度", () => {
     expect(fake.driver.stopCrawl).not.toHaveBeenCalled();
   });
 
+  it("服务关停时，尚在等待启动检查的定时任务不会再启动", async () => {
+    const store = memoryStore(daily());
+    const now = local(25, 9);
+    const fake = fakeDriver(() => now);
+    const start = fake.driver.startCrawl;
+    const scheduler = new ScanScheduler(store, fake.driver, () => now);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    fake.driver.startCrawl = vi.fn(async (canStart) => {
+      await gate;
+      return start(canStart);
+    });
+    const tick = scheduler.tick();
+    await vi.waitFor(() => expect(fake.driver.startCrawl).toHaveBeenCalledOnce());
+    const closing = scheduler.stop();
+    release();
+    await Promise.all([tick, closing]);
+    created.splice(created.indexOf(store), 1); // stop() 已经关闭此数据库。
+    expect(fake.driver.crawlActivity()).toBeNull();
+  });
+
   it("浏览器流程报错时提示处理，恢复计划会重新准备页面", async () => {
     const store = memoryStore(daily());
     const now = local(25, 9);

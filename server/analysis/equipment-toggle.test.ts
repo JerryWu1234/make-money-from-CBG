@@ -19,7 +19,12 @@ function fullRecord() {
   const record = valuationRecord();
   record.detail!.captureMode = "all";
   record.detail!.captureVersion = CAPTURE_VERSION;
-  record.detail!.valuation = { version: 1, fields: [], issues: [], source: {} };
+  record.detail!.valuation = {
+    version: 1,
+    fields: [],
+    issues: [],
+    source: { serverId: "367", eid: "item-a" },
+  };
   record.detail!.equipmentCapture = {
     version: 1,
     collectedAt: "now",

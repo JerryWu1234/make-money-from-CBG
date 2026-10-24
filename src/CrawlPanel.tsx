@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { DEFAULT_CRAWL_CONCURRENCY, type CrawlStatus } from "../server/crawler/types";
 import { RoleDetailDrawer } from "./RoleDetailDrawer";
 import { SavedRoleList, displayTime } from "./SavedRoleList";
@@ -11,14 +11,20 @@ type Status = CrawlStatus & {
 export function CrawlPanel({
   ready,
   onRunning,
+  onPrepare,
+  preparationError,
 }: {
   ready: boolean;
   onRunning: (running: boolean) => void;
+  onPrepare?: () => Promise<void>;
+  preparationError?: string | null;
 }) {
   const [status, setStatus] = useState<Status | null>(null);
   const [error, setError] = useState("");
   const [transportError, setTransportError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [waitingForReady, setWaitingForReady] = useState(false);
+  const pendingStart = useRef(false);
   const [concurrency, setConcurrency] = useState(String(DEFAULT_CRAWL_CONCURRENCY));
   const [analyzeEquipment, setAnalyzeEquipment] = useState<boolean | null>(null);
   const [savingMode, setSavingMode] = useState(false);
@@ -89,31 +95,60 @@ export function CrawlPanel({
       clearTimeout(timer);
     };
   }, [onRunning, selectRecord]);
-  const action = async (command: "start" | "stop") => {
-    const count = Number(concurrency);
-    if (command === "start" && (!Number.isSafeInteger(count) || count < 1)) {
-      setError("并发数必须是正整数");
-      return;
+  const action = useCallback(
+    async (command: "start" | "stop") => {
+      const count = Number(concurrency);
+      if (command === "start" && (!Number.isSafeInteger(count) || count < 2 || count % 2 !== 0)) {
+        setError("并发数必须是正偶数（2、4、6…）");
+        return;
+      }
+      setBusy(true);
+      setError("");
+      try {
+        if (command === "stop" && pendingStart.current) {
+          pendingStart.current = false;
+          setWaitingForReady(false);
+          return;
+        }
+        if (command === "start" && !ready) {
+          if (!onPrepare) throw new Error("请先进入角色列表，再继续采集");
+          pendingStart.current = true;
+          setWaitingForReady(true);
+          await onPrepare();
+          return;
+        }
+        const response = await fetch(`/api/crawl/${command}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(command === "start" ? { concurrency: count } : {}),
+          signal: AbortSignal.timeout(15000),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "采集操作失败");
+        setStatus(data);
+        onRunning(data.running);
+      } catch (e) {
+        pendingStart.current = false;
+        setWaitingForReady(false);
+        setError(e instanceof Error ? e.message : "采集操作失败");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [concurrency, onPrepare, onRunning, ready],
+  );
+  useEffect(() => {
+    if (!waitingForReady || !pendingStart.current) return;
+    if (preparationError) {
+      pendingStart.current = false;
+      setWaitingForReady(false);
+      setError(preparationError);
+    } else if (ready) {
+      pendingStart.current = false;
+      setWaitingForReady(false);
+      void action("start");
     }
-    setBusy(true);
-    setError("");
-    try {
-      const response = await fetch(`/api/crawl/${command}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(command === "start" ? { concurrency: count } : {}),
-        signal: AbortSignal.timeout(15000),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "采集操作失败");
-      setStatus(data);
-      onRunning(data.running);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "采集操作失败");
-    } finally {
-      setBusy(false);
-    }
-  };
+  }, [action, preparationError, ready, waitingForReady]);
   return (
     <section className="crawl-panel" aria-label="详情采集">
       <h2>详情采集与续采</h2>
@@ -143,32 +178,48 @@ export function CrawlPanel({
         并发抓取数
         <input
           type="number"
-          min="1"
-          step="1"
+          min="2"
+          step="2"
           value={concurrency}
-          disabled={busy || !!status?.running}
+          disabled={busy || waitingForReady || !!status?.running}
           onChange={(event) => setConcurrency(event.target.value)}
         />
       </label>
       <div className="crawl-actions">
         <button
           className="btn-primary"
-          disabled={busy || !!status?.running || !ready}
+          disabled={
+            busy ||
+            waitingForReady ||
+            !!status?.running ||
+            (!ready && !(status?.checkpoint && onPrepare))
+          }
           onClick={() => void action("start")}
         >
-          {status?.checkpoint ? "继续采集 / 检查新增" : "开始采集详情"}
+          {waitingForReady
+            ? "正在恢复采集准备…"
+            : status?.checkpoint
+              ? "继续采集 / 检查新增"
+              : "开始采集详情"}
         </button>
         <button
           className="btn-secondary"
-          disabled={busy || !status?.running}
+          disabled={busy || (!status?.running && !waitingForReady)}
           onClick={() => void action("stop")}
         >
-          暂停采集
+          {waitingForReady ? "取消继续采集" : "暂停采集"}
         </button>
       </div>
+      {waitingForReady && (
+        <p role="status" className="status-note">
+          正在恢复 Chrome 连接和角色列表；如需授权或扫码，请按页面提示完成，之后自动继续采集。
+        </p>
+      )}
       <p className="status-note">
-        默认同时抓取 {DEFAULT_CRAWL_CONCURRENCY} 个角色，新号、老号各 2
-        个；修改后在下次开始或继续采集时生效。
+        并发数只支持正偶数，默认 {DEFAULT_CRAWL_CONCURRENCY}
+        个。开始或继续时，先用全部名额处理已保存的未完成采集任务，再恢复新号、历史角色各占一半；失败任务独立保留，完整入库后才发布为商品并进入分析。
+        空闲名额可互借，有新任务后随在途任务结束恢复各一半。列表首页约每 60
+        秒检查一次，同时逐页核对历史列表。修改后在下次开始或继续采集时生效。
       </p>
       <p className="status-note">手动开始采集会关闭已启用的定时计划。</p>
       <ScanSchedulePanel ready={ready} running={!!status?.running} />
@@ -184,23 +235,36 @@ export function CrawlPanel({
       )}
       {status && (
         <div aria-live="polite">
-          <p>{status.message}</p>
+          <p
+            role={status.phase === "error" ? "alert" : undefined}
+            className={status.phase === "error" ? "error-message" : undefined}
+          >
+            {status.message}
+          </p>
           {status.running && (
             <p>本轮并发上限：{status.concurrency ?? DEFAULT_CRAWL_CONCURRENCY} 个角色</p>
           )}
-          {status.newLimit !== undefined && status.oldLimit !== undefined && (
-            <p aria-label="采集双队列状态">
-              新号在途 {status.newRunning ?? 0}/{status.newLimit} · 老号在途{" "}
-              {status.oldRunning ?? 0}/{status.oldLimit}
-              {` · 新号排队 ${status.newQueued ?? 0} · 老号排队 ${status.oldQueued ?? 0}`}
-              {(status.newRunning ?? 0) > status.newLimit
-                ? ` · 新号借用 ${(status.newRunning ?? 0) - status.newLimit} 个空闲名额`
-                : (status.oldRunning ?? 0) > status.oldLimit
-                  ? ` · 老号借用 ${(status.oldRunning ?? 0) - status.oldLimit} 个空闲名额`
-                  : ""}
+          {status.roleLimit && (
+            <p>
+              完整角色目标：{status.totalRoles ?? 0} / {status.roleLimit} ·
+              达到后停止采集，分析继续。
             </p>
           )}
-          {status.nextHeadCheckAt && (
+          {status.phase !== "retrying" &&
+            status.newLimit !== undefined &&
+            status.oldLimit !== undefined && (
+              <p aria-label="采集双队列状态">
+                新号在途 {status.newRunning ?? 0}/{status.newLimit} · 老号在途{" "}
+                {status.oldRunning ?? 0}/{status.oldLimit}
+                {` · 新号排队 ${status.newQueued ?? 0} · 老号排队 ${status.oldQueued ?? 0}`}
+                {(status.newRunning ?? 0) > status.newLimit
+                  ? ` · 新号借用 ${(status.newRunning ?? 0) - status.newLimit} 个空闲名额`
+                  : (status.oldRunning ?? 0) > status.oldLimit
+                    ? ` · 老号借用 ${(status.oldRunning ?? 0) - status.oldLimit} 个空闲名额`
+                    : ""}
+              </p>
+            )}
+          {status.phase !== "retrying" && status.nextHeadCheckAt && (
             <p className="status-note">
               首页下次检查：{displayTime(status.nextHeadCheckAt)}
               {status.headCheckedAt ? ` · 上次检查：${displayTime(status.headCheckedAt)}` : ""}
@@ -214,7 +278,7 @@ export function CrawlPanel({
           </p>
           {!!status.retryTotal && (
             <p>
-              优先补采：{status.retryCompleted || 0} / {status.retryTotal} 条未完成详情
+              优先处理采集任务：{status.retryCompleted || 0} / {status.retryTotal} 条
             </p>
           )}
           {status.current && <p>当前商品：{status.current}</p>}
@@ -235,7 +299,7 @@ export function CrawlPanel({
           )}
           <p className="status-note">
             数据库：{status.database}
-            。继续采集会先按已保存商品链接补采未完成详情；排序无法证明有序时自动逐页核对。
+            。继续采集会先处理已保存的采集任务；只有完整资料才能入商品库，排序无法证明有序时自动逐页核对。
           </p>
           {status.lastItemError && (
             <p className="status-note">最近待重试：{status.lastItemError}</p>

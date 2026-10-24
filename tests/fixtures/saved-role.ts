@@ -94,13 +94,22 @@ export function roleRecord(key: string, ready: boolean) {
   };
 }
 
-export function rolePage(page: number, ready: boolean) {
-  const keys = ["a", "b", ...Array.from({ length: 43 }, (_, i) => `k${i + 3}`)];
+export function rolePage(
+  page: number,
+  ready: boolean,
+  scope: "all" | "complete" | "tasks" = "all",
+) {
+  const keys = ["a", "b", ...Array.from({ length: 43 }, (_, i) => `k${i + 3}`)].filter(
+    (key) =>
+      scope === "all" || (scope === "complete") === (roleRecord(key, ready).status === "complete"),
+  );
+  const totalPages = Math.max(1, Math.ceil(keys.length / 20));
+  page = Math.max(1, Math.min(page, totalPages));
   return {
     page,
     pageSize: 20,
-    total: 45,
-    totalPages: 3,
+    total: keys.length,
+    totalPages,
     items: keys.slice((page - 1) * 20, page * 20).map((key) => ({
       key,
       name: `角色${key}`,

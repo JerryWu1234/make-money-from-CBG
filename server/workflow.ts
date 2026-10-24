@@ -211,7 +211,12 @@ export async function runFixedWorkflow(page: Page, publish: Publish): Promise<Op
     }
     await completeLogin(page, publish);
     stage("cross_server", "已登录，正在进入跨服购买…");
-    await clickInWorkPage(page, "#cross_server_buy");
+    // 登录回跳可能是没有跨服入口的商品详情页；复用已确认登录的同一工作页。
+    try {
+      await page.goto(CBG_CROSS_SERVER_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    } catch (error) {
+      if (!isNavigationTransition(error)) throw error;
+    }
   }
   await page.locator("#server_type_panel li").first().waitFor({ state: "visible", timeout: 30000 });
   stage("server_age", "正在选择开服时间：3年以上服…");

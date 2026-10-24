@@ -1,8 +1,14 @@
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { marketServers, parseMarketPages, refreshMarket, SERVER_DIRECTORY_URL } from "./market";
-import { DEFAULT_SETTINGS, loadProfile, PROMPT_FILE } from "./profile";
+import {
+  automaticMarketExpired,
+  marketServers,
+  parseMarketPages,
+  refreshMarket,
+  SERVER_DIRECTORY_URL,
+} from "./market";
+import { createProfile, DEFAULT_SETTINGS, loadProfile, PROMPT_FILE } from "./profile";
 import { calculateValuation } from "./valuation-calculator";
 import { valuationRecord } from "../../tests/fixtures/analysis";
 const directory =
@@ -13,6 +19,27 @@ const gold =
   '<table><tr><td>#1</td><td><a href="/mhb/info/173">北京1区-逍遥城</a></td><td>3年外</td><td>￥210.00</td></tr><tr><td>#2</td><td><a href="/mhb/info/132">北京1区-西栅老街</a></td><td>3年外</td><td>218.29</td></tr></table>';
 const parsed = () => parseMarketPages(directory, heat, gold, "older", "", new Date().toISOString());
 describe("全服行情自动匹配", () => {
+  it("冻结批次的自动行情也有24小时时效，刷新全局缓存不改变旧批次", () => {
+    const profile = { ...createProfile("行情时效"), marketSources: parsed() };
+    const fetchedAt = Date.parse(profile.marketSources[0].fetchedAt);
+    expect(automaticMarketExpired(profile, fetchedAt + 24 * 3600000 - 1)).toBe(false);
+    expect(automaticMarketExpired(profile, fetchedAt + 24 * 3600000)).toBe(true);
+    expect(
+      automaticMarketExpired({
+        ...profile,
+        marketSources: parsed().map((row) => ({ ...row, fetchedAt: "invalid" })),
+      }),
+    ).toBe(true);
+    const manual = {
+      ...profile,
+      settings: {
+        ...profile.settings,
+        servers: profile.marketSources.map((row) => ({ ...row, source: "manual" as const })),
+      },
+    };
+    expect(automaticMarketExpired(manual, fetchedAt + 48 * 3600000)).toBe(false);
+    expect(automaticMarketExpired(createProfile("无自动行情"))).toBe(false);
+  });
   it("以官方serverId及完整区服名交叉核对，热度排名不取金价排序", () => {
     const data = parsed();
     expect(data.find((row) => row.serverId === "132")).toMatchObject({

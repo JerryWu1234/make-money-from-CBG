@@ -1,6 +1,7 @@
 import {
   DEFAULT_CRAWL_CONCURRENCY,
   ListingChangedError,
+  SellingOrderUnavailableError,
   type Checkpoint,
   type CrawlSource,
   type CrawlStatus,
@@ -23,9 +24,11 @@ export interface CrawlOptions {
 export function validateCrawlOptions(options: CrawlOptions) {
   if (
     options.concurrency !== undefined &&
-    (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1)
+    (!Number.isSafeInteger(options.concurrency) ||
+      options.concurrency < 2 ||
+      options.concurrency % 2 !== 0)
   )
-    throw new Error("并发数必须是正整数");
+    throw new Error("并发数必须是正偶数（2、4、6…）");
   if (
     options.headIntervalMs !== undefined &&
     (!Number.isSafeInteger(options.headIntervalMs) || options.headIntervalMs < 1)
@@ -75,8 +78,6 @@ export async function crawl(
 ) {
   signal.throwIfAborted();
   validateCrawlOptions(options);
-  if (options.watch && !options.backfillOnly)
-    return watchCrawl(source, store, signal, publish, options);
   const concurrency = options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
   publish({ concurrency });
   let saved = 0,
@@ -177,6 +178,26 @@ export async function crawl(
     });
     return;
   }
+  if (options.watch) {
+    // 先用全部名额处理启动时已保存的未完成详情，再开启新号发现和双队列。
+    // 失败版本本轮隔离；续采进度也不能在切换双队列或排序回退时归零。
+    const seed = {
+      saved,
+      failed,
+      failedItems: retries.filter((item) => retryFailed.has(item.key)),
+    };
+    try {
+      return await watchCrawl(source, store, signal, publish, options, undefined, seed);
+    } catch (error) {
+      signal.throwIfAborted();
+      if (!(error instanceof SellingOrderUnavailableError)) throw error;
+      const notice =
+        "网站没有上架时间排序入口：定时检查首页新增，并持续逐页核对完整列表；新号、历史角色各占一半详情名额，空闲可互借";
+      publish({ phase: "locating", message: notice, strategy: notice });
+      // 到期排序不代表上架顺序：不用时间水位截断发现，也不据此跳过历史页。
+      return watchCrawl(source, store, signal, publish, options, "expire_time DESC", seed);
+    }
+  }
   const plan = await prepareCrawlPages(source, store, signal, publish);
   const { numbers, backfillComplete, fullScan } = plan;
   let end = plan.end;
@@ -259,6 +280,7 @@ export async function crawl(
     publish({ itemIndex: completed });
     await captureConcurrently(pending, concurrency, signal, async (item, index) => {
       signal.throwIfAborted();
+      store.beginRetry(item.key);
       publish({ current: item.name || item.eid });
       try {
         const detail = await source.detail(item);

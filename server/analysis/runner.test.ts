@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { analysisRecord, analysisResponse, valuationRecord } from "../../tests/fixtures/analysis";
 import { CrawlStore } from "../crawler/store";
 import type { SavedRoleRecord } from "../crawler/types";
@@ -10,8 +10,10 @@ import { createProfile, DEFAULT_SETTINGS, PROMPT_FILE } from "./profile";
 import { calculateValuation } from "./valuation-calculator";
 import { searchEquipmentPrices } from "./equipment-pricing";
 import { searchPetPricing } from "./pet-pricing";
+import { beginServiceShutdown, resetServiceLifecycle } from "../service-lifecycle";
 
 const cleanups: (() => Promise<void>)[] = [];
+beforeEach(() => resetServiceLifecycle());
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
@@ -136,6 +138,22 @@ function untilAborted(signal: AbortSignal): Promise<never> {
 }
 
 describe("持久化的商品分析队列", () => {
+  it.each(["start", "resume"] as const)(
+    "%s 连接 AI 期间开始关停，连接返回后不启动分析或获取租约",
+    async (operation) => {
+      const { store, runner, connect, analyze } = setup();
+      const id = operation === "resume" ? store.createRun("codex", "test-model") : undefined;
+      const acquire = vi.spyOn(store, "acquire");
+      connect.mockImplementation(async () => {
+        beginServiceShutdown();
+        return { model: "test-model", analyze };
+      });
+      await expect(id ? runner.resume(id) : runner.start("codex")).rejects.toThrow("正在关闭");
+      expect(analyze).not.toHaveBeenCalled();
+      expect(acquire).not.toHaveBeenCalled();
+    },
+  );
+
   it("仅上次实际返回错误输出时附加校验反馈，后续无输出超时不沿用旧反馈", async () => {
     const { store, runner, analyze, profile } = await valuationSetup();
     analyze
@@ -798,7 +816,13 @@ describe("持久化的商品分析队列", () => {
     expect(analyze).toHaveBeenCalledTimes(2);
     expect(store.run(id)).toMatchObject({ status: "completed", total: 2, completed: 2 });
     const overview = store.overview({ runId: id });
-    expect(overview.counts).toEqual({ total: 3, complete: 2, waitingDetail: 1 });
+    expect(overview.counts).toEqual({
+      total: 3,
+      complete: 2,
+      waitingDetail: 1,
+      pendingDetail: 1,
+      failedDetail: 0,
+    });
     const detail = store.detail(overview.records.items[0].taskId!)!;
     expect(detail.inputText).toBe(buildProductDocument(crawl.detail("a") as SavedRoleRecord).text);
     expect(analyze.mock.calls[0][0]).toContain(detail.inputText);

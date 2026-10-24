@@ -6,6 +6,61 @@ import { expect, it } from "vite-plus/test";
 import { analysisRecord } from "../../tests/fixtures/analysis";
 import { CrawlStore } from "./store";
 
+it("发现和重复扫描只登记待采，实际派发详情时才累计尝试次数", () => {
+  const store = new CrawlStore(":memory:");
+  const row = analysisRecord("not-started");
+  const attempts = () =>
+    store.db
+      .prepare("SELECT attempt_count,last_attempt_at FROM listings WHERE key=?")
+      .get(row.listing.key);
+  try {
+    store.observe(row.listing);
+    store.observe(row.listing);
+    expect(attempts()).toMatchObject({ attempt_count: 0, last_attempt_at: null });
+    store.beginRetry(row.listing.key);
+    expect(attempts()).toMatchObject({ attempt_count: 1, last_attempt_at: expect.any(String) });
+    store.fail(row.listing.key, "详情未读完");
+    const failedAttempt = attempts();
+    store.observe(row.listing);
+    expect(attempts()).toEqual(failedAttempt);
+    expect(store.detail(row.listing.key)).toMatchObject({ status: "failed", error: "详情未读完" });
+    store.beginRetry(row.listing.key);
+    expect(attempts()).toMatchObject({ attempt_count: 2 });
+  } finally {
+    store.close();
+  }
+});
+
+it("采集目标按完整的不同角色计数，同角色重复商品和未完成资料不占额度，重开保留目标", () => {
+  const folder = mkdtempSync(path.join(os.tmpdir(), "cbg-target-"));
+  const filename = path.join(folder, "capture.sqlite");
+  let db = new CrawlStore(filename);
+  try {
+    db.setRoleLimit(500);
+    const first = analysisRecord("first"),
+      repeat = analysisRecord("repeat"),
+      pending = analysisRecord("pending");
+    for (const row of [first, repeat]) {
+      row.listing.attrs.data_seller_roleid = "same-role";
+      db.observe(row.listing);
+      expect(db.save(row.listing, row.detail!)).toBe(true);
+    }
+    db.observe(pending.listing);
+    expect(db.count()).toBe(2);
+    expect(db.countRoles()).toBe(1);
+    db.close();
+    db = new CrawlStore(filename);
+    expect(db.roleLimit()).toBe(500);
+    expect(db.countRoles()).toBe(1);
+    for (const bad of [0, -1, 1.5, "500", NaN])
+      expect(() => db.setRoleLimit(bad)).toThrow("正整数");
+    expect(db.roleLimit()).toBe(500);
+  } finally {
+    db.close();
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
 // Failure cases: a lane changes frozen input, history demotes a new item, head discovery
 // overwrites history progress, restart loses either cursor, or migration deletes old records.
 it("新旧来源不改变商品原文，历史观察不降级新号，两个进度重启后分别保留", () => {
