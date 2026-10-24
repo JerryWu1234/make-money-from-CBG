@@ -1,6 +1,7 @@
 import {
   DEFAULT_CRAWL_CONCURRENCY,
   ListingChangedError,
+  ListingUnavailableError,
   SellingOrderUnavailableError,
   type Checkpoint,
   type CrawlSource,
@@ -148,7 +149,21 @@ export async function crawl(
         saved++;
         publish({ saved, retryCompleted: ++retryCompleted, totalSaved: store.count() });
       } catch (error) {
+        if (signal.aborted && error instanceof IncompleteCaptureError && !options.refresh)
+          store.savePartial(item, error.detail);
         signal.throwIfAborted();
+        if (error instanceof ListingUnavailableError) {
+          store.markUnavailable(item.key, error.message);
+          skipped++;
+          publish({
+            skipped,
+            retryCompleted: ++retryCompleted,
+            current: item.name || item.eid,
+            detailProgress: error.message,
+            totalSaved: store.count(),
+          });
+          return;
+        }
         if (error instanceof IncompleteCaptureError && !options.refresh)
           store.save(item, error.detail);
         const message = error instanceof Error ? error.message : String(error);
@@ -172,9 +187,10 @@ export async function crawl(
       current: undefined,
       detailProgress: undefined,
       saved,
+      skipped,
       failed,
       totalSaved: store.count(),
-      message: `估值资料补采完成：更新 ${saved} 件，${failed} 件待重试。`,
+      message: `估值资料补采完成：更新 ${saved} 件，跳过 ${skipped} 件无法补齐商品，${failed} 件待重试。`,
     });
     return;
   }
@@ -183,6 +199,7 @@ export async function crawl(
     // 失败版本本轮隔离；续采进度也不能在切换双队列或排序回退时归零。
     const seed = {
       saved,
+      skipped,
       failed,
       failedItems: retries.filter((item) => retryFailed.has(item.key)),
     };
@@ -270,7 +287,10 @@ export async function crawl(
       publish({ current: item.name || item.eid });
       if (store.observe(item)) {
         skipped++;
-        publish({ skipped, detailProgress: "详情已完整保存，跳过重复采集" });
+        publish({
+          skipped,
+          detailProgress: store.unavailableReason(item.key) || "详情已完整保存，跳过重复采集",
+        });
         continue;
       }
       pending.push(item);
@@ -306,7 +326,20 @@ export async function crawl(
           ...(advance ? { checkpoint } : {}),
         });
       } catch (error) {
+        if (signal.aborted && error instanceof IncompleteCaptureError)
+          store.savePartial(item, error.detail);
         signal.throwIfAborted();
+        if (error instanceof ListingUnavailableError) {
+          store.markUnavailable(item.key, error.message);
+          skipped++;
+          publish({
+            skipped,
+            current: item.name || item.eid,
+            detailProgress: error.message,
+            totalSaved: store.count(),
+          });
+          return;
+        }
         if (error instanceof IncompleteCaptureError) store.save(item, error.detail);
         store.fail(item.key, error instanceof Error ? error.message : String(error));
         if (error instanceof Error && error.name === "IncompleteDetailError") {
@@ -330,7 +363,7 @@ export async function crawl(
     running: false,
     current: undefined,
     detailProgress: undefined,
-    message: `本轮完成：新增或更新 ${saved} 条，跳过 ${skipped} 条已采集商品，${failed} 条详情待重试。`,
+    message: `本轮完成：新增或更新 ${saved} 条，跳过 ${skipped} 条已采集或无法补齐商品，${failed} 条详情待重试。`,
     saved,
     skipped,
     failed,

@@ -9,7 +9,6 @@ const mocks = vi.hoisted(() => ({
   startCrawl: vi.fn(),
   equipmentAnalysisSettings: vi.fn(),
   setEquipmentAnalysis: vi.fn(),
-  setCaptureRoleLimit: vi.fn(),
   disableScanSchedule: vi.fn(),
   scanScheduleStatus: vi.fn(),
   enableScanSchedule: vi.fn(),
@@ -118,17 +117,6 @@ it("资料待补采返回409并保留明确的角色提示", async () => {
   ).apiMiddleware(request("/api/analysis/start", { provider: "codex" }), res, vi.fn());
   expect(res.statusCode).toBe(409);
   expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ error: message });
-});
-
-it("保存500角色采集目标，不启动或暂停分析", async () => {
-  mocks.setCaptureRoleLimit.mockReturnValue({ roleLimit: 500, totalRoles: 20 });
-  const res = response();
-  await (
-    await import("./api")
-  ).apiMiddleware(request("/api/crawl/target/save", { roleLimit: 500 }), res, vi.fn());
-  expect(mocks.setCaptureRoleLimit).toHaveBeenCalledWith(500);
-  expect(JSON.parse(res.end.mock.calls[0][0])).toMatchObject({ roleLimit: 500 });
-  expect(mocks.analysisControllerImported).not.toHaveBeenCalled();
 });
 
 it("明确确认飞升公式只保存当前角色的确认，不启动或修改分析批次", async () => {

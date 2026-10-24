@@ -8,6 +8,7 @@ import {
   DEFAULT_CRAWL_CONCURRENCY,
   ListingChangedError,
   ListingDisappearedError,
+  ListingUnavailableError,
   SellingOrderUnavailableError,
   type Checkpoint,
   type CrawlLane,
@@ -46,7 +47,7 @@ export async function watchCrawl(
   publish: (state: Partial<CrawlStatus>) => void,
   options: CrawlOptions,
   order = ORDER,
-  seed: { saved: number; failed: number; failedItems: Listing[] } = {
+  seed: { saved: number; skipped?: number; failed: number; failedItems: Listing[] } = {
     saved: 0,
     failed: 0,
     failedItems: [],
@@ -63,12 +64,10 @@ export async function watchCrawl(
     seed.failedItems.map((item) => [item.key, item.sellingTime]),
   );
   const historyPoints = new Map<string, { point: Checkpoint; index: number }>();
-  const targetComplete = Symbol("targetComplete");
-  let targetFinished = false;
   let failure: { error: unknown; preserveCompleted?: boolean } | undefined;
   let wake: (() => void) | undefined;
   let saved = seed.saved,
-    skipped = 0,
+    skipped = seed.skipped || 0,
     failed = seed.failed,
     historyIndex = 0,
     savedHistoryIndex = -1,
@@ -80,10 +79,6 @@ export async function watchCrawl(
   const check = () => {
     signal.throwIfAborted();
     if (failure) throw failure.error;
-  };
-  const reachedTarget = () => {
-    const limit = store.roleLimit();
-    return limit && store.countRoles() >= limit ? limit : undefined;
   };
   const queued = () => {
     const queues: Record<CrawlLane, Listing[]> = { new: [], old: [] };
@@ -158,10 +153,23 @@ export async function watchCrawl(
         savedHistoryIndex = history.index;
         publish({ checkpoint });
       }
-      // 完整入库立即发布，避免多个完成回调先连续保存、到 finally 才触发目标停采。
       publish({ saved, totalSaved: store.count() });
     } catch (error) {
+      if (signal.aborted && error instanceof IncompleteCaptureError)
+        store.savePartial(item, error.detail);
       if (!signal.aborted && !failure) {
+        if (error instanceof ListingUnavailableError) {
+          store.markUnavailable(item.key, error.message);
+          failedVersions.delete(item.key);
+          skipped++;
+          publish({
+            skipped,
+            current: item.name || item.eid,
+            detailProgress: error.message,
+            totalSaved: store.count(),
+          });
+          return;
+        }
         if (error instanceof IncompleteCaptureError) store.save(item, error.detail);
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
@@ -174,7 +182,7 @@ export async function watchCrawl(
     }
   };
   const pump = () => {
-    while (!failure && !targetFinished && !signal.aborted && inFlight.size < concurrency) {
+    while (!failure && !signal.aborted && inFlight.size < concurrency) {
       const queues = queued();
       let lane: CrawlLane;
       if (queues.new.length && queues.old.length) {
@@ -202,36 +210,10 @@ export async function watchCrawl(
     }
     report();
   };
-  const admission = () => {
-    const limit = store.roleLimit();
-    if (!limit) return { reached: false, available: true };
-    const complete = store.countRoles();
-    if (complete >= limit) return { reached: true, available: false };
-    const queues = queued();
-    // 按商品 key 保守预留；重复角色和独立失败完成后才能释放临时名额。
-    const accepted = new Set([
-      ...inFlight.keys(),
-      ...queues.new.map((item) => item.key),
-      ...queues.old.map((item) => item.key),
-    ]);
-    return { reached: false, available: complete + accepted.size < limit };
-  };
-  const waitForAdmission = async () => {
-    while (true) {
-      check();
-      const state = admission();
-      if (state.reached) throw targetComplete;
-      if (state.available) return;
-      pump();
-      publish({ detailProgress: "接近目标，正在完整处理已接收角色…" });
-      await waitForWork(true);
-    }
-  };
   const observe = async (listed: Listing, lane: CrawlLane) => {
     try {
       while (true) {
         check();
-        if (store.roleLimit()) await waitForAdmission();
         // 列表发现不能持续超过详情处理速度；除在途外最多再保留一池待采任务。
         while (queued().new.length + queued().old.length >= concurrency) {
           pump();
@@ -247,19 +229,18 @@ export async function watchCrawl(
         const active = runningItems.get(item.key);
         if (active && (active.sellingTime !== item.sellingTime || active.price !== item.price))
           throw new ListingChangedError();
-        // hover 期间目标或已接收任务可能改变；等待后重新 hover，不能登记过期快照。
-        if (store.roleLimit()) {
-          const state = admission();
-          if (state.reached) throw targetComplete;
-          if (!state.available) continue;
+        if (store.observe(item, lane)) {
+          skipped++;
+          const unavailable = store.unavailableReason(item.key);
+          if (unavailable)
+            publish({ skipped, current: item.name || item.eid, detailProgress: unavailable });
         }
-        if (store.observe(item, lane)) skipped++;
         // 真正重新上架后，不沿用本轮旧版本的失败排除。
         if (failedVersions.get(item.key) !== item.sellingTime) failedVersions.delete(item.key);
         return item;
       }
     } catch (error) {
-      if (error !== targetComplete && !(error instanceof ListingDisappearedError))
+      if (!(error instanceof ListingDisappearedError))
         failure ??= {
           error,
           preserveCompleted: error instanceof Error && error.name === "TimeoutError",
@@ -352,7 +333,6 @@ export async function watchCrawl(
 
   publish({ phase: "collecting", message: "持续检查新上架角色，并从原断点补齐历史角色…" });
   try {
-    if (reachedTarget()) throw targetComplete;
     const first = await retryDiscovery(async () => {
       const first = await source.prepare(order);
       check();
@@ -369,7 +349,6 @@ export async function watchCrawl(
       previousHeadSignature = first.items.map((item) => item.key).join("|");
     while (true) {
       check();
-      if (reachedTarget()) throw targetComplete;
       pump();
       publish({ nextHeadCheckAt: new Date(nextHeadCheck).toISOString() });
       if (Date.now() >= nextHeadCheck) {
@@ -431,34 +410,18 @@ export async function watchCrawl(
       } else await waitForWork();
     }
   } catch (error) {
-    if (error === targetComplete) targetFinished = true;
-    else {
-      if (error instanceof ListingChangedError)
-        error.message = "列表在采集中发生变化，已暂停以免漏采或保存旧资料";
-      failure ??= { error };
-      if (!signal.aborted && !(error instanceof SellingOrderUnavailableError))
-        publish({
-          message: "采集遇到错误，已停止派发；正在结束在途任务并保存仍有效的完整详情…",
-          lastItemError: error instanceof Error ? error.message : String(error),
-        });
-    }
+    if (error instanceof ListingChangedError)
+      error.message = "列表在采集中发生变化，已暂停以免漏采或保存旧资料";
+    failure ??= { error };
+    if (!signal.aborted && !(error instanceof SellingOrderUnavailableError))
+      publish({
+        message: "采集遇到错误，已停止派发；正在结束在途任务并保存仍有效的完整详情…",
+        lastItemError: error instanceof Error ? error.message : String(error),
+      });
   } finally {
     // 暂停、列表失败、安全验证和租约中止都必须等在途页面操作结束。
     await Promise.all(inFlight.values());
   }
   signal.throwIfAborted();
   if (failure) throw failure.error;
-  const limit = reachedTarget();
-  if (limit) {
-    report();
-    publish({
-      phase: "completed",
-      running: false,
-      roleLimit: limit,
-      totalRoles: store.countRoles(),
-      current: undefined,
-      detailProgress: undefined,
-      message: `已达到 ${limit} 个完整角色，已停止抓取；分析继续处理本批角色。`,
-    });
-  }
 }

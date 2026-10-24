@@ -1,8 +1,15 @@
 import type { Page } from "playwright-core";
 import { collectDetail, collectValuationDetail, isOnShelf, MAIN_TABS } from "./detail";
 import { gotoPage, hoverListing, pace, prepareList } from "./page";
-import type { CrawlSource, Listing, SavedRoleRecord } from "./types";
+import {
+  SellingOrderUnavailableError,
+  type CrawlSource,
+  type Listing,
+  type SavedRoleRecord,
+} from "./types";
 import { collectCompleteCapture, captureIssues } from "./capture-readiness";
+import { saveCaptureFailure } from "./capture-failure";
+import { captureBrowserStep } from "../browser-evidence";
 
 interface SourceOptions {
   listPage: Page;
@@ -27,6 +34,8 @@ export async function collectRole(
   }: Pick<SourceOptions, "signal" | "savedRecord" | "onDetailProgress" | "log">,
 ) {
   const started = Date.now();
+  let attempt = 0;
+  let stage = "开始读取角色详情";
   log("detail.start", { key: item.key });
   const report = (message: string) => {
     const prefix = "召唤兽图标核对异常：";
@@ -37,21 +46,44 @@ export async function collectRole(
       });
       return;
     }
+    stage = message;
     onDetailProgress(`${item.name || item.eid}：${message}`);
   };
   const previous = savedRecord?.(item.key);
   const result = await collectCompleteCapture(
     async () => {
-      await pace(signal, 1800, 1700);
-      return previous?.detail &&
-        !captureIssues(previous.detail, true, true, item).length &&
-        MAIN_TABS.every((name) => previous.detail!.tabs.some((tab) => tab.name === name))
-        ? await collectValuationDetail(detailPage, item, previous.detail, signal, report)
-        : await collectDetail(detailPage, item, signal, report);
+      attempt++;
+      stage = "开始读取角色详情";
+      try {
+        await pace(signal, 1800, 1700);
+        const detail =
+          previous?.detail &&
+          !captureIssues(previous.detail, true, true, item).length &&
+          MAIN_TABS.every((name) => previous.detail!.tabs.some((tab) => tab.name === name))
+            ? await collectValuationDetail(detailPage, item, previous.detail, signal, report)
+            : await collectDetail(detailPage, item, signal, report);
+        const issues = captureIssues(detail, true, true, item);
+        if (issues.length)
+          await saveCaptureFailure(
+            detailPage,
+            signal,
+            { key: item.key, attempt, stage, issues },
+            log,
+          );
+        return detail;
+      } catch (error) {
+        await saveCaptureFailure(detailPage, signal, { key: item.key, attempt, stage, error }, log);
+        throw error;
+      }
     },
     signal,
     report,
     item,
+  );
+  await captureBrowserStep(
+    detailPage,
+    { flow: "collection", stage: "角色详情读取完成", key: item.key },
+    signal,
   );
   log("detail.collected", {
     key: item.key,
@@ -81,40 +113,78 @@ export function createCrawlSource({
   log,
 }: SourceOptions): CrawlSource {
   const available = [detailPage];
-  return {
-    prepare: async (order) => {
-      const result = await prepareList(listPage, signal, order ?? preferredOrder);
-      log("list.prepared", {
-        page: result.page,
-        totalPages: result.totalPages,
-        order: result.order,
-        count: result.items.length,
-      });
+  const step = async <T>(page: Page, stage: string, read: () => Promise<T>, key?: string) => {
+    try {
+      const result = await read();
+      await captureBrowserStep(page, { flow: "collection", stage: stage + "完成", key }, signal);
       return result;
-    },
-    page: async (number) => {
-      const result = await gotoPage(listPage, number, signal);
-      log("list.page_ready", {
-        requestedPage: number,
-        actualPage: result.page,
-        totalPages: result.totalPages,
-        count: result.items.length,
-      });
-      return result;
-    },
-    onShelf: async (item) => {
-      await pace(signal, 600, 400);
-      const onShelf = await isOnShelf(detailPage, item, signal);
-      log("anchor.checked", { key: item.key, onShelf });
-      return onShelf;
-    },
-    hover: (item) =>
-      hoverListing(
-        listPage,
-        item,
+    } catch (error) {
+      // This typed signal selects runner's existing full-list scan; it is not a failed action.
+      // Keep throwing it so expiry order never inherits the selling-time watermark strategy.
+      const orderFallback = error instanceof SellingOrderUnavailableError;
+      if (orderFallback)
+        log("list.selling_order_unavailable", {
+          requestedOrder: "selling_time DESC",
+          strategy: "full-scan",
+        });
+      await captureBrowserStep(
+        page,
+        orderFallback
+          ? { flow: "collection", stage: "上架时间排序不可用-切换逐页全表扫描", key }
+          : { flow: "collection", stage: stage + "失败", key, error },
         signal,
-        (stage) => log("list.hover_recovered", { key: item.key, stage }),
-        ({ event, ...diagnostic }) => log(`list.hover_${event}`, diagnostic),
+      );
+      throw error;
+    }
+  };
+  return {
+    prepare: (order) =>
+      step(listPage, "列表准备", async () => {
+        const result = await prepareList(listPage, signal, order ?? preferredOrder);
+        log("list.prepared", {
+          page: result.page,
+          totalPages: result.totalPages,
+          order: result.order,
+          count: result.items.length,
+        });
+        return result;
+      }),
+    page: (number) =>
+      step(listPage, `列表翻页至第 ${number} 页`, async () => {
+        const result = await gotoPage(listPage, number, signal);
+        log("list.page_ready", {
+          requestedPage: number,
+          actualPage: result.page,
+          totalPages: result.totalPages,
+          count: result.items.length,
+        });
+        return result;
+      }),
+    onShelf: (item) =>
+      step(
+        detailPage,
+        "角色上架状态读取",
+        async () => {
+          await pace(signal, 600, 400);
+          const onShelf = await isOnShelf(detailPage, item, signal);
+          log("anchor.checked", { key: item.key, onShelf });
+          return onShelf;
+        },
+        item.key,
+      ),
+    hover: (item) =>
+      step(
+        listPage,
+        "列表角色悬停读取",
+        () =>
+          hoverListing(
+            listPage,
+            item,
+            signal,
+            (stage) => log("list.hover_recovered", { key: item.key, stage }),
+            ({ event, ...diagnostic }) => log(`list.hover_${event}`, diagnostic),
+          ),
+        item.key,
       ),
     detail: async (item) => {
       signal.throwIfAborted();

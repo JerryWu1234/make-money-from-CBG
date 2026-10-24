@@ -6,6 +6,7 @@ import { collectCompleteCapture } from "./capture-readiness";
 import {
   ListingChangedError,
   ListingDisappearedError,
+  ListingUnavailableError,
   SellingOrderUnavailableError,
   type CrawlSource,
   type Listing,
@@ -93,17 +94,58 @@ afterEach(() => {
 });
 
 describe("持续发现新号和历史详情共享采集池", () => {
-  it("多个详情同时读完时逐件发布入库进度，达到角色目标不超采", async () => {
+  it("官网确证不存在的详情在持续采集中只跳过一次，重现不再派发且其它商品继续保存", async () => {
+    const db = memory(),
+      gone = item(1),
+      good = item(2),
+      src = source([[gone, good]]),
+      control = new AbortController(),
+      publish = vi.fn();
+    src.detail = vi.fn(async (row) => {
+      if (row.key === gone.key) throw new ListingUnavailableError("目标详情返回 HTTP 404");
+      return detail(row);
+    });
+    const outcome = crawl(src, db, control.signal, publish, {
+      watch: true,
+      headIntervalMs: 1000,
+    }).catch((error: unknown) => error);
+    try {
+      await flush();
+      expect(readSaved(db, gone.key)).toMatchObject({ status: "unavailable" });
+      expect(readSaved(db, good.key)).toMatchObject({ status: "complete" });
+      expect(db.retryItems()).toEqual([]);
+      expect(db.observe(gone)).toBe(true);
+      await flush();
+      expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === gone.key)).toHaveLength(
+        1,
+      );
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          skipped: 1,
+          detailProgress: expect.stringContaining("无法补齐"),
+        }),
+      );
+      expect(publish.mock.calls.every(([state]) => !state.failed)).toBe(true);
+      expect(db.checkpoint()?.key).not.toBe(gone.key);
+    } finally {
+      control.abort(new Error("验证停止"));
+      await outcome;
+    }
+  });
+  it("旧库目标不限制采集，外部中止后不继续保存在途详情", async () => {
     const db = memory(),
       src = source([Array.from({ length: 6 }, (_, i) => item(i + 1))]),
       active = holdDetails(src),
       control = new AbortController();
+    db.db.exec(
+      "ALTER TABLE crawl_state ADD COLUMN role_limit INTEGER; INSERT INTO crawl_state(id,role_limit) VALUES(1,1)",
+    );
     const outcome = crawl(
       src,
       db,
       control.signal,
       (status) => {
-        if (status.saved === 3) control.abort(new Error("达到角色目标"));
+        if (status.saved === 3) control.abort(new Error("外部验证任务停止采集"));
       },
       { watch: true, concurrency: 4 },
     ).catch((error: unknown) => error);

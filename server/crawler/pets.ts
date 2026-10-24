@@ -1,6 +1,7 @@
 import type { Page } from "playwright-core";
 import type { PetSnapshot, RoleDetail, TabSnapshot } from "./types";
 import { hoverForInspection } from "../viewport";
+import { captureBrowserStep } from "../browser-evidence";
 
 export function petCaptureSummary(
   count: number | null,
@@ -349,6 +350,11 @@ export async function collectPets(
       }
     }
     pets.push(pet);
+    await captureBrowserStep(
+      page,
+      { flow: "collection", stage: `宝宝读取完成-${index + 1}` },
+      signal,
+    );
   }
   return { count: discovered.expected, pets, issues };
 }

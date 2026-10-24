@@ -6,8 +6,10 @@ import {
   preserveJewelryTooltipSections,
   observedEquipmentCategory,
   equipmentEmptyProof,
+  hasUnconfirmedEmptyEquipment,
 } from "./compact";
 import type { TabSnapshot } from "./types";
+import emptyRoleInventory from "../../tests/fixtures/empty-role-inventory.json";
 
 it.each([
   "confirmed",
@@ -426,4 +428,50 @@ describe("已核实零精炼灵饰的真实色码分段", () => {
       itemFromAttributes({ data_equip_name: "未知物品", data_equip_desc: raw }, 0).description,
     ).not.toContain("附加属性：");
   });
+});
+
+it.each([
+  "captured",
+  "unread-material",
+  "wrong-name",
+  "wrong-model",
+  "wrong-category",
+  "unknown-icon",
+  "role-equipment",
+  "missing-worn",
+  "hidden-store",
+  "unread-pet-object",
+])("真实部分资料脱敏：空人物库存内的点化石与宝宝装备逐件核验 %s", (kind) => {
+  const tab = structuredClone(emptyRoleInventory) as TabSnapshot;
+  const material = tab.items!.find((item) => item.modelId === "4034")!;
+  const store = tab.equipmentContainers!.find((container) => container.id === "RoleStoreEquips")!;
+  if (kind === "unread-material") delete material.description;
+  if (kind === "wrong-name") material.name = "未知材料";
+  if (kind === "wrong-model") material.modelId = "4035";
+  if (kind === "wrong-category") material.category = "未知分类";
+  if (kind === "unknown-icon") store.icons.push({ name: "未知图标", modelId: "9999" });
+  if (kind === "role-equipment") {
+    store.icons.push({ name: "真实人物武器", modelId: "31301" });
+    tab.items!.push({
+      index: 10,
+      name: "真实人物武器",
+      modelId: "31301",
+      kind: "equipment",
+      category: "人物装备 · 武器",
+      description: "等级 100\n伤害 +420",
+    });
+  }
+  if (kind === "missing-worn") tab.equipmentContainers![0].present = false;
+  if (kind === "hidden-store") store.visible = false;
+  if (kind === "unread-pet-object")
+    tab
+      .items!.filter((item) => item.modelId === "9211")
+      .forEach((item) => {
+        delete item.attributes;
+      });
+  expect(equipmentEmptyProof([tab])).toBe(kind === "captured" ? "official-containers" : undefined);
+  if (kind === "captured")
+    expect(
+      hasUnconfirmedEmptyEquipment({ tabs: [tab], raw: {}, url: "", collectedAt: "fixture" }),
+    ).toBe(false);
 });

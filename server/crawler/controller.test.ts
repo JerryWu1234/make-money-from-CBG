@@ -7,9 +7,6 @@ const mocks = vi.hoisted(() => ({
   release: vi.fn(),
   crawl: vi.fn(),
   current: vi.fn(),
-  roleLimit: vi.fn(),
-  roleCount: vi.fn(),
-  setRoleLimit: vi.fn(),
   enqueue: vi.fn(),
   detailPage: { close: vi.fn(), setDefaultTimeout: vi.fn() },
 }));
@@ -19,9 +16,6 @@ vi.mock("./store", () => ({
       mocks.createStore();
     }
     count = () => 42;
-    roleLimit = mocks.roleLimit;
-    countRoles = mocks.roleCount;
-    setRoleLimit = mocks.setRoleLimit;
     checkpoint = () => undefined;
     recent = () => [];
     acquire = mocks.acquire;
@@ -47,38 +41,8 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   mocks.acquire.mockReturnValue(true);
-  mocks.roleLimit.mockReturnValue(undefined);
-  mocks.roleCount.mockReturnValue(0);
-  mocks.setRoleLimit.mockImplementation((limit) => mocks.roleLimit.mockReturnValue(limit));
   mocks.current.mockResolvedValue({ isLoggedIn: true, running: false, workflowStep: "completed" });
   initial = undefined;
-});
-
-it("达到完整角色目标后停止派发，最后一件仍入分析队列，不继续采第4件", async () => {
-  const enqueuedRoleCounts: unknown[] = [];
-  mocks.enqueue.mockImplementation(() => enqueuedRoleCounts.push(mocks.roleCount()));
-  mocks.roleLimit.mockReturnValue(3);
-  mocks.crawl.mockImplementation(async (_source, _store, signal: AbortSignal, publish) => {
-    for (let saved = 1; saved <= 5; saved++) {
-      signal.throwIfAborted();
-      mocks.roleCount.mockReturnValue(saved);
-      publish({ saved });
-      await Promise.resolve();
-    }
-  });
-  const controller = await import("./controller");
-  initial = controller;
-  const started = await controller.startCrawl();
-  await expect(started.activity!.completion).resolves.toMatchObject({
-    running: false,
-    phase: "completed",
-    saved: 3,
-    roleLimit: 3,
-    totalRoles: 3,
-    message: expect.stringContaining("分析继续"),
-  });
-  await vi.waitFor(() => expect(enqueuedRoleCounts).toContain(3));
-  expect(mocks.release).toHaveBeenCalledOnce();
 });
 
 it("浏览器检查期间开始关停，不会在检查返回后启动采集", async () => {
@@ -93,24 +57,23 @@ it("浏览器检查期间开始关停，不会在检查返回后启动采集", a
   expect(mocks.acquire).not.toHaveBeenCalled();
 });
 
-it("已达到角色目标时不重新连接 Chrome 或启动采集", async () => {
-  mocks.roleLimit.mockReturnValue(500);
-  mocks.roleCount.mockReturnValue(500);
-  const controller = await import("./controller");
-  initial = controller;
-  expect(await controller.startCrawl()).toMatchObject({
-    started: false,
-    status: { phase: "completed" },
-  });
-  expect(mocks.current).not.toHaveBeenCalled();
-  expect(mocks.crawl).not.toHaveBeenCalled();
-});
 afterEach(async () => {
   const controller = initial ?? (await import("./controller"));
   const activity = controller.crawlActivity();
   controller.stopCrawl();
   await activity?.completion;
   Reflect.deleteProperty(globalThis, key);
+  vi.unstubAllEnvs();
+});
+
+it("开启原始工作页显示时，采集停止后保留详情页供人工核对", async () => {
+  vi.stubEnv("CBG_SHOW_WORK_PAGES", "1");
+  mocks.crawl.mockResolvedValue(undefined);
+  const controller = await import("./controller");
+  initial = controller;
+  const started = await controller.startCrawl();
+  await started.activity!.completion;
+  expect(mocks.detailPage.close).not.toHaveBeenCalled();
 });
 
 it("模块重载保留采集进度、同一个在途任务和暂停控制器，不会重复启动", async () => {
@@ -167,28 +130,4 @@ it("完成后的状态不会因模块重载回到初始页", async () => {
   });
   expect(reloaded.crawlActivity()).toBeNull();
   expect(mocks.createStore).toHaveBeenCalledOnce();
-});
-
-it("模块重载后设置已达目标，原任务仍报告达标完成而非普通暂停", async () => {
-  mocks.crawl.mockImplementation(async (_source, _store, signal: AbortSignal) => {
-    await new Promise<void>((_resolve, reject) => {
-      signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-    });
-  });
-  const original = await import("./controller");
-  initial = original;
-  const started = await original.startCrawl();
-  await vi.waitFor(() => expect(mocks.crawl).toHaveBeenCalledOnce());
-  vi.resetModules();
-  const reloaded = await import("./controller");
-  mocks.roleCount.mockReturnValue(3);
-  reloaded.setCaptureRoleLimit(3);
-  await expect(started.activity!.completion).resolves.toMatchObject({
-    running: false,
-    phase: "completed",
-    roleLimit: 3,
-    totalRoles: 3,
-    message: expect.stringContaining("分析继续"),
-  });
-  expect(mocks.release).toHaveBeenCalledOnce();
 });

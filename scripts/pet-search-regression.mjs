@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ts from "typescript";
+import { browserEvidenceUrl } from "./regression-browser-evidence.mjs";
 import { chromium } from "playwright-core";
 import {
   petSearchDocument,
@@ -23,7 +24,10 @@ async function moduleUrl(file, replacements = {}) {
   return `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
 }
 const inline = (source) => `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-const compact = await moduleUrl("server/crawler/compact.ts");
+const schoolSkillsUrl = await moduleUrl("server/crawler/school-skills.ts");
+const compact = await moduleUrl("server/crawler/compact.ts", {
+  "./school-skills": schoolSkillsUrl,
+});
 const viewport = await moduleUrl("server/viewport.ts");
 const pageState = await moduleUrl("server/page-state.ts");
 const configuration = await moduleUrl("server/config.ts");
@@ -35,6 +39,7 @@ const crawlerPage = await moduleUrl("server/crawler/page.ts", {
 const workflow = await moduleUrl("server/workflow.ts", {
   "./config": configuration,
   "./page-state": pageState,
+  "./browser-evidence": browserEvidenceUrl,
 });
 const session = await moduleUrl("server/session.ts", {
   "playwright-core": import.meta.resolve("playwright-core"),
@@ -42,6 +47,7 @@ const session = await moduleUrl("server/session.ts", {
   "./chrome": await moduleUrl("server/chrome.ts"),
   "./config": configuration,
   "./work-transport": await moduleUrl("server/work-transport.ts"),
+  "./browser-evidence": browserEvidenceUrl,
   "./diagnostics": inline("export const diagnostics={record(){}};"),
 });
 const attributes = await moduleUrl("server/analysis/equip-attributes.ts", {
@@ -118,6 +124,7 @@ const { petSourceFromPages, fillPetSearchForm, petQuery, petQueries, assertPetUI
       "./pet-match": petMatcher,
       "./market-scope": marketScope,
       "../session": session,
+      "../browser-evidence": browserEvidenceUrl,
       "../viewport": viewport,
       "../crawler/controller": inline(
         "export function crawlDatabase(){throw new Error('Fixture must not open the application database');}",

@@ -131,58 +131,63 @@ describe("日常浏览器连接", () => {
       "ws://127.0.0.1:9456/devtools/browser/new-session",
     );
   });
-  it("创建隐藏后台页面，沿用默认用户上下文，只复用自己的工作页", async () => {
-    const { createBackgroundPage, getCbgPage } = await import("./session");
-    const oldPage = { isClosed: () => false } as Page;
-    const pages = [oldPage];
-    const targetSend = vi.fn(async (command: string) =>
-      command === "Target.getTargetInfo"
-        ? { targetInfo: { targetId: "worker" } }
-        : { windowId: 12, bounds: { windowState: "normal" } },
-    );
-    const targetDetach = vi.fn();
-    const context = {
-      pages: () => pages,
-      newCDPSession: vi.fn(async () => ({ send: targetSend, detach: targetDetach })),
-    };
-    const closed = vi.fn(() => false);
-    const worker = {
-      isClosed: closed,
-      context: () => context,
-      once: vi.fn(),
-      viewportSize: () => null,
-      setViewportSize: vi.fn(),
-    } as unknown as Page;
-    const send = vi.fn(async () => {
-      pages.push(worker);
-      return { targetId: "worker" };
-    });
-    const detach = vi.fn();
-    const browser = {
-      contexts: () => [context],
-      newBrowserCDPSession: async () => ({ send, detach }),
-    } as unknown as Browser;
-    expect(await createBackgroundPage(browser)).toBe(worker);
-    expect(send).toHaveBeenCalledExactlyOnceWith("Target.createTarget", {
-      url: "about:blank",
-      hidden: true,
-      forTab: false,
-      background: true,
-      focus: false,
-    });
-    expect(getCbgPage()).toBe(worker);
-    expect(detach).not.toHaveBeenCalled();
-    expect(await createBackgroundPage(browser)).toBe(worker);
-    expect(send).toHaveBeenCalledOnce();
-    vi.resetModules();
-    const reloaded = await import("./session");
-    expect(reloaded.getCbgPage()).toBe(worker);
-    expect(await reloaded.createBackgroundPage(browser)).toBe(worker);
-    expect(send).toHaveBeenCalledOnce();
-    closed.mockReturnValue(true);
-    expect(reloaded.getCbgPage()).toBeNull();
-    expect(context.newCDPSession).not.toHaveBeenCalledWith(oldPage);
-  });
+  it.each([false, true])(
+    "创建工作页（可见=%s），沿用默认用户上下文，只复用自己的页面",
+    async (visible) => {
+      vi.stubEnv("CBG_SHOW_WORK_PAGES", visible ? "1" : "0");
+      const { createBackgroundPage, getCbgPage } = await import("./session");
+      const oldPage = { isClosed: () => false } as Page;
+      const pages = [oldPage];
+      const targetSend = vi.fn(async (command: string) =>
+        command === "Target.getTargetInfo"
+          ? { targetInfo: { targetId: "worker" } }
+          : { windowId: 12, bounds: { windowState: "normal" } },
+      );
+      const targetDetach = vi.fn();
+      const context = {
+        pages: () => pages,
+        newCDPSession: vi.fn(async () => ({ send: targetSend, detach: targetDetach })),
+      };
+      const closed = vi.fn(() => false);
+      const worker = {
+        isClosed: closed,
+        context: () => context,
+        once: vi.fn(),
+        viewportSize: () => null,
+        setViewportSize: vi.fn(),
+      } as unknown as Page;
+      const send = vi.fn(async () => {
+        pages.push(worker);
+        return { targetId: "worker" };
+      });
+      const detach = vi.fn();
+      const browser = {
+        contexts: () => [context],
+        newBrowserCDPSession: async () => ({ send, detach }),
+      } as unknown as Browser;
+      expect(await createBackgroundPage(browser)).toBe(worker);
+      expect(send).toHaveBeenCalledExactlyOnceWith("Target.createTarget", {
+        url: "about:blank",
+        hidden: !visible,
+        forTab: false,
+        background: !visible,
+        focus: visible,
+        ...(visible ? { newWindow: true } : {}),
+      });
+      expect(getCbgPage()).toBe(worker);
+      expect(detach).not.toHaveBeenCalled();
+      expect(await createBackgroundPage(browser)).toBe(worker);
+      expect(send).toHaveBeenCalledOnce();
+      vi.resetModules();
+      const reloaded = await import("./session");
+      expect(reloaded.getCbgPage()).toBe(worker);
+      expect(await reloaded.createBackgroundPage(browser)).toBe(worker);
+      expect(send).toHaveBeenCalledOnce();
+      closed.mockReturnValue(true);
+      expect(reloaded.getCbgPage()).toBeNull();
+      expect(context.newCDPSession).not.toHaveBeenCalledWith(oldPage);
+    },
+  );
 });
 
 describe("并发创建后台页", () => {

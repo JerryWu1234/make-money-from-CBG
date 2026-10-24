@@ -50,6 +50,10 @@ export class DiagnosticLog {
     private readonly enabled = true,
   ) {}
 
+  evidenceDirectory() {
+    return path.join(this.directory, "browser-steps", this.runId);
+  }
+
   record(event: string, data: Record<string, unknown> = {}) {
     if (!this.enabled) return;
     try {

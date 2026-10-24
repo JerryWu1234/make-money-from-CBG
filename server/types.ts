@@ -24,6 +24,7 @@ export interface RoleList {
 }
 
 export interface OpenCbgResult {
+  workPagesVisible?: boolean;
   connected: boolean;
   loginStatus: "unknown" | "logged_out" | "logged_in";
   title: string;

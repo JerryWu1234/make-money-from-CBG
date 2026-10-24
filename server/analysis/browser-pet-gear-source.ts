@@ -1,5 +1,6 @@
 import type { Page } from "playwright-core";
 import { createHiddenPage, getBrowser } from "../session";
+import { captureBrowserStep } from "../browser-evidence";
 import { pace } from "../crawler/page";
 import { assertAvailable } from "../crawler/page";
 import { createHash } from "node:crypto";
@@ -331,6 +332,29 @@ export async function createPetGearSource(
   signal.throwIfAborted();
   let page: Page | undefined, detailPage: Page | undefined;
   let scopeAudit: ReturnType<typeof createMarketScopeAudit> | undefined;
+  const navigate = async (
+    target: Page,
+    url: string,
+    stage: string,
+    workSignal: AbortSignal,
+    key?: string,
+  ) => {
+    try {
+      const response = await target.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: url === PET_GEAR_SEARCH_URL ? 45_000 : 30_000,
+      });
+      await captureBrowserStep(target, { flow: "analysis", stage, key }, workSignal);
+      return response;
+    } catch (error) {
+      await captureBrowserStep(
+        target,
+        { flow: "analysis", stage: stage + ".failed", key, error },
+        workSignal,
+      );
+      throw error;
+    }
+  };
   const close = async () => {
     signal.removeEventListener("abort", onAbort);
     scopeAudit?.close();
@@ -352,14 +376,25 @@ export async function createPetGearSource(
     return {
       async discover() {
         signal.throwIfAborted();
-        await searchPage.goto(PET_GEAR_SEARCH_URL, {
-          waitUntil: "domcontentloaded",
-          timeout: 45_000,
-        });
-        await pace(signal);
-        const form = await readPetGearSearchForm(searchPage);
-        signal.throwIfAborted();
-        return form;
+        try {
+          await navigate(searchPage, PET_GEAR_SEARCH_URL, "pet_gear.search.opened", signal);
+          await pace(signal);
+          const form = await readPetGearSearchForm(searchPage);
+          signal.throwIfAborted();
+          await captureBrowserStep(
+            searchPage,
+            { flow: "analysis", stage: "pet_gear.form.read" },
+            signal,
+          );
+          return form;
+        } catch (error) {
+          await captureBrowserStep(
+            searchPage,
+            { flow: "analysis", stage: "pet_gear.discover.failed", error },
+            signal,
+          );
+          throw error;
+        }
       },
       async findCandidates(
         items: PetGearPricingItem[],
@@ -454,7 +489,7 @@ export async function createPetGearSource(
               try {
                 detailPage ||= await createHiddenPage(browser);
                 workSignal.throwIfAborted();
-                await detailPage.goto(url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+                await navigate(detailPage, url, "pet_gear.detail.opened", workSignal, item.key);
                 await assertAvailable(detailPage);
                 if (equipmentIdentity(detailPage.url()) !== identity)
                   throw new Error("宝宝装备详情跳转到另一商品，报价未采用");
@@ -489,8 +524,19 @@ export async function createPetGearSource(
                   fetchedAt: new Date().toISOString(),
                   sourceHash: createHash("sha256").update(source.html).digest("hex"),
                 });
+                await captureBrowserStep(
+                  detailPage,
+                  { flow: "analysis", stage: "pet_gear.detail.read", key: item.key },
+                  workSignal,
+                );
                 failedUrls.delete(url);
               } catch (error) {
+                if (detailPage)
+                  await captureBrowserStep(
+                    detailPage,
+                    { flow: "analysis", stage: "pet_gear.detail.failed", key: item.key, error },
+                    workSignal,
+                  );
                 workSignal.throwIfAborted();
                 failedUrls.set(url, modeIndex);
                 throw error;
@@ -533,12 +579,20 @@ export async function createPetGearSource(
                 exhausted: false,
               };
               const similar = modeIndex === 1;
-              await searchPage.goto(PET_GEAR_SEARCH_URL, {
-                waitUntil: "domcontentloaded",
-                timeout: 45_000,
-              });
+              await navigate(
+                searchPage,
+                PET_GEAR_SEARCH_URL,
+                "pet_gear.search.opened",
+                workSignal,
+                item.key,
+              );
               await pace(workSignal);
               const applied = await applyPetGearUI(searchPage, item, similar, serverId, workSignal);
+              await captureBrowserStep(
+                searchPage,
+                { flow: "analysis", stage: "pet_gear.filters.filled", key: item.key },
+                workSignal,
+              );
               queryText =
                 "目标单服 " +
                 serverId +
@@ -555,6 +609,15 @@ export async function createPetGearSource(
                     .locator("#pager_bar")
                     .getByText("下一页", { exact: true })
                     .click();
+                await captureBrowserStep(
+                  searchPage,
+                  {
+                    flow: "analysis",
+                    stage: first ? "pet_gear.search.submitted" : "pet_gear.search.page_changed",
+                    key: item.key,
+                  },
+                  workSignal,
+                );
                 await pace(workSignal);
                 const listing = await readPetGearRows(searchPage, pageNumber);
                 const request = scopeAudit!.confirm();
@@ -602,6 +665,11 @@ export async function createPetGearSource(
                 });
                 assertEquipmentUIArguments(applied.args, submittedArgs);
                 queried = true;
+                await captureBrowserStep(
+                  searchPage,
+                  { flow: "analysis", stage: "pet_gear.results.read", key: item.key },
+                  workSignal,
+                );
                 return listing;
               };
               // The site's observed next-page control recreates the saved page without hidden API calls.
@@ -700,6 +768,11 @@ export async function createPetGearSource(
               if (next.modeIndex >= 2 || next.modeIndex === modeIndex) break;
             }
           } catch (error) {
+            await captureBrowserStep(
+              searchPage,
+              { flow: "analysis", stage: "pet_gear.search.failed", key: item.key, error },
+              workSignal,
+            );
             workSignal.throwIfAborted();
             failed = !refreshSkipped;
             note = error instanceof Error ? error.message : String(error);
@@ -769,6 +842,12 @@ export async function createPetGearSource(
       close,
     };
   } catch (error) {
+    if (page)
+      await captureBrowserStep(
+        page,
+        { flow: "analysis", stage: "pet_gear.source.failed", error },
+        signal,
+      );
     await close();
     throw error;
   }

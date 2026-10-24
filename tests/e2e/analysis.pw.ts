@@ -619,7 +619,7 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
     );
     await expect(page.getByRole("link", { name: "前往采集工作台查看任务" })).toHaveAttribute(
       "href",
-      "/?recordsScope=tasks",
+      "/",
     );
     await expect(page.getByLabel("分析模型")).toHaveValue("waiting-fixture-model");
     expect(calls).toBe(1);
@@ -639,14 +639,6 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
       path: testInfo.outputPath("capture-stopped-with-pending.png"),
       fullPage: true,
     });
-    captureActivity = { running: false, phase: "completed", roleLimit: 500, totalRoles: 500 };
-    await page.reload();
-    await expect(page.getByLabel("采集续采提示")).toContainText("已达到 500 个完整角色的采集目标");
-    await expect(page.getByRole("link", { name: "前往采集工作台查看结果" })).toHaveAttribute(
-      "href",
-      "/",
-    );
-    await expect(page.getByRole("link", { name: "前往采集工作台查看任务" })).toHaveCount(0);
     captureActivity = undefined;
     crawl.fail(pending.listing.key, "详情页读取超时");
     await page.reload();

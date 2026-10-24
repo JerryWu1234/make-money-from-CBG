@@ -106,8 +106,6 @@ export function AnalysisPreview() {
       : `${pendingDetail} 件待采或采集中 · ${failedDetail} 件采集失败待重试`;
   const captureStopped =
     !capture?.running && (capture?.phase === "error" || capture?.phase === "paused");
-  const captureTargetReached =
-    !!capture?.roleLimit && (capture.totalRoles ?? 0) >= capture.roleLimit;
   const searchingEquipment =
     active?.phase === "equipment_search" ||
     active?.phase === "pet_search" ||
@@ -441,29 +439,18 @@ export function AnalysisPreview() {
                     ? capture.phase === "error"
                       ? "采集已因错误停止，分析正在等待资料"
                       : "采集已暂停，分析正在等待资料"
-                    : captureTargetReached
-                      ? `已达到 ${capture.roleLimit} 个完整角色的采集目标`
-                      : "当前没有正在执行的模型分析"}
+                    : "当前没有正在执行的模型分析"}
                 </strong>
                 <p>
                   {waitingDetail > 0
                     ? `另有 ${waitingDetail} 项采集任务：${captureSummary}。完整入库后才会成为商品并进入分析。`
                     : "正在等待新的完整角色资料。"}
-                  {captureTargetReached
-                    ? "已采集的完整角色会继续分析；额外发现的链接保留为采集任务。"
-                    : captureStopped
-                      ? "未完成商品仍保留；请前往采集工作台查看原因并恢复采集，资料完整后会自动接着分析。"
-                      : "资料完整后会自动接着分析；可前往采集工作台查看进度或继续采集。"}
+                  {captureStopped
+                    ? "未完成商品仍保留；请前往采集工作台查看原因并恢复采集，资料完整后会自动接着分析。"
+                    : "资料完整后会自动接着分析；可前往采集工作台查看进度或继续采集。"}
                 </p>
-                <a
-                  className="analysis-button analysis-button-primary"
-                  href={captureTargetReached || !waitingDetail ? "/" : "/?recordsScope=tasks"}
-                >
-                  {captureTargetReached
-                    ? "前往采集工作台查看结果"
-                    : waitingDetail > 0
-                      ? "前往采集工作台查看任务"
-                      : "前往采集工作台抓取新角色"}
+                <a className="analysis-button analysis-button-primary" href="/">
+                  {waitingDetail > 0 ? "前往采集工作台查看任务" : "前往采集工作台抓取新角色"}
                 </a>
               </div>
             )}

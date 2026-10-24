@@ -6,7 +6,10 @@ import type { SavedListingScope } from "../../server/crawler/types";
 import { analysisRecord } from "../fixtures/analysis";
 import { browserStatus, crawlStatus } from "../fixtures/saved-role";
 
-test("完整商品和采集任务使用独立服务端范围、分页与刷新恢复", async ({ page, context }) => {
+test("单一商品列表排除未完整记录，兼容旧任务链接并保留分页刷新", async ({
+  page,
+  context,
+}, testInfo) => {
   const store = new CrawlStore(":memory:");
   const scopes: string[] = [];
   for (let index = 0; index < 21; index++) {
@@ -77,27 +80,27 @@ test("完整商品和采集任务使用独立服务端范围、分页与刷新�
     });
   });
   try {
-    await page.goto("http://cbg-ui.test/");
+    await page.goto("http://cbg-ui.test/?recordsScope=tasks&recordsPage=3&record=pending");
     const products = page.getByRole("region", { name: "已采集角色" });
     await expect(products.getByText("共 21 条", { exact: false })).toBeVisible();
     await expect(products.getByRole("row")).toHaveCount(21);
     await expect(products.getByText("失败角色", { exact: false })).toHaveCount(0);
+    await expect(products.getByText("排队角色", { exact: false })).toHaveCount(0);
+    await expect(products.getByRole("button", { name: "完整商品", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "采集任务", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page).not.toHaveURL(/recordsScope=|recordsPage=|record=/);
     await products.getByRole("button", { name: "下一页" }).click();
     await expect(products.getByRole("row")).toHaveCount(2);
-    await products.getByRole("button", { name: "采集任务", exact: true }).click();
-    const tasks = page.getByRole("region", { name: "采集任务", exact: true });
-    await expect(tasks.getByText("共 3 条", { exact: false })).toBeVisible();
-    await expect(tasks.getByRole("row")).toHaveCount(4);
-    await expect(tasks.getByText("fixture：师门资料仍缺一项", { exact: false })).toBeVisible();
-    await expect(tasks.getByText("资料待核验，尚未发布", { exact: true })).toBeVisible();
-    await expect(page).toHaveURL(/recordsScope=tasks/);
-    await expect(page).not.toHaveURL(/recordsPage=/);
+    await expect(page).toHaveURL(/recordsPage=2/);
     await page.reload();
-    await expect(
-      page.getByRole("region", { name: "采集任务", exact: true }).getByRole("row"),
-    ).toHaveCount(4);
+    await expect(products.getByRole("row")).toHaveCount(2);
+    await expect(products.getByText("共 21 条", { exact: false })).toBeVisible();
+    await expect(page).toHaveURL(/recordsPage=2/);
+    await expect(page.getByRole("region", { name: "采集任务", exact: true })).toHaveCount(0);
+    await products.screenshot({ path: testInfo.outputPath("single-complete-product-list.png") });
     expect(scopes).toContain("complete");
-    expect(scopes).toContain("tasks");
+    expect(scopes).not.toContain("tasks");
     expect(scopes).not.toContain("all");
   } finally {
     await context.unrouteAll({ behavior: "wait" });

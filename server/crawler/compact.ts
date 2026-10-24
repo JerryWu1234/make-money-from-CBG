@@ -140,7 +140,13 @@ export function equipmentEmptyProof(tabs: TabSnapshot[]) {
                   (item) =>
                     item.name === icon.name &&
                     item.modelId === icon.modelId &&
-                    item.attributes?.装备对象 === "召唤兽",
+                    (item.attributes?.装备对象 === "召唤兽" ||
+                      // Observed in RoleSplitEquips alongside pet gear. Its read material
+                      // description is evidence of a non-role item, never of an unread icon.
+                      (icon.modelId === "4034" &&
+                        icon.name === "点化石" &&
+                        item.category === "材料 · 点化石" &&
+                        !!item.description?.trim())),
                 )),
           ),
       );

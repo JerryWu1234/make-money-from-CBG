@@ -19,9 +19,11 @@ import type {
   SavedListingScope,
 } from "./types";
 import { captureIssues } from "./capture-readiness";
+import { diagnostics } from "../diagnostics";
 
 export class CrawlStore {
   readonly db: DatabaseSync;
+  private retrySnapshot?: { changes: number; version: number; listings: string[] };
   constructor(readonly filename = path.resolve("data/cbg.sqlite")) {
     if (filename !== ":memory:") mkdirSync(path.dirname(filename), { recursive: true });
     this.db = new DatabaseSync(filename);
@@ -45,7 +47,6 @@ export class CrawlStore {
     this.ensureListingColumn("capture_lane", "TEXT NOT NULL DEFAULT 'old'");
     this.ensureCrawlStateColumn("backfill_complete", "INTEGER NOT NULL DEFAULT 0");
     this.ensureCrawlStateColumn("head_checkpoint_json", "TEXT");
-    this.ensureCrawlStateColumn("role_limit", "INTEGER");
     this.compactExisting();
     for (const row of this.db
       .prepare(
@@ -163,9 +164,13 @@ export class CrawlStore {
     if (lane === "new")
       this.db.prepare("UPDATE listings SET capture_lane='new' WHERE key=?").run(item.key);
     // 列表重现不是一次详情重试；同一上架版本保留原失败原因，实际派发时才清除。
-    if (!complete && !(old?.status === "failed" && old.selling_time === item.sellingTime))
+    if (
+      !complete &&
+      old?.status !== "unavailable" &&
+      !(old?.status === "failed" && old.selling_time === item.sellingTime)
+    )
       this.db.prepare("UPDATE listings SET status='pending',error=NULL WHERE key=?").run(item.key);
-    return complete;
+    return complete || old?.status === "unavailable";
   }
   retryItems(keys?: string[], refresh = false): Listing[] {
     if (refresh) {
@@ -176,11 +181,28 @@ export class CrawlStore {
           "SELECT listing_json FROM listings WHERE key=? AND status IN ('pending','failed','complete')",
         )
         .get(keys[0]);
-      if (!row) throw new Error("指定刷新商品不存在");
+      if (!row) {
+        const unavailable = this.unavailableReason(keys[0]);
+        if (unavailable) throw new Error(unavailable);
+        throw new Error("指定刷新商品不存在");
+      }
       return [JSON.parse(String(row.listing_json)) as Listing];
     }
     const selectedKeys = keys ? new Set(keys) : undefined;
     if (selectedKeys?.size === 0) return [];
+    const snapshot =
+      selectedKeys || this.db.isTransaction
+        ? undefined
+        : {
+            changes: Number(this.db.prepare("SELECT total_changes() AS n").get()!.n),
+            version: Number(this.db.prepare("PRAGMA data_version").get()!.data_version),
+          };
+    if (
+      snapshot &&
+      snapshot.changes === this.retrySnapshot?.changes &&
+      snapshot.version === this.retrySnapshot.version
+    )
+      return this.retrySnapshot.listings.map((listing) => JSON.parse(listing) as Listing);
     // 排序只携带轻量键，避免详情原文随排序记录写入临时文件；派发单件时先按主键缩小范围。
     const orderedKeys = this.db
       .prepare(
@@ -206,6 +228,8 @@ export class CrawlStore {
         if (!selectedKeys || selectedKeys.has(item.key)) items.push(item);
       }
     }
+    if (snapshot)
+      this.retrySnapshot = { ...snapshot, listings: items.map((item) => JSON.stringify(item)) };
     return items;
   }
   anchorItems(): Listing[] {
@@ -229,8 +253,25 @@ export class CrawlStore {
     if (result.changes !== 1) throw new Error("待补采商品不存在或已完成");
   }
   save(item: Listing, detail: RoleDetail, checkpoint?: Checkpoint) {
+    return this.persistDetail(item, detail, checkpoint, false);
+  }
+  savePartial(item: Listing, detail: RoleDetail) {
+    return this.persistDetail(item, detail, undefined, true);
+  }
+  private persistDetail(
+    item: Listing,
+    detail: RoleDetail,
+    checkpoint: Checkpoint | undefined,
+    partial: boolean,
+  ) {
+    if (this.unavailableReason(item.key)) return false;
+    if (
+      partial &&
+      this.db.prepare("SELECT 1 FROM listings WHERE key=? AND status='complete'").get(item.key)
+    )
+      return false;
     const issues = captureIssues(detail, false, true, item);
-    const complete = issues.length === 0;
+    const complete = !partial && issues.length === 0;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.archive(item.key, detail);
@@ -243,8 +284,12 @@ export class CrawlStore {
           JSON.stringify(compactListing(item)),
           item.price,
           JSON.stringify(detail),
-          complete ? "complete" : "failed",
-          complete ? null : "采集资料尚未完整：" + issues.join("；"),
+          partial ? "pending" : complete ? "complete" : "failed",
+          partial
+            ? "采集已暂停，已保留已读资料，等待继续补齐"
+            : complete
+              ? null
+              : "采集资料尚未完整：" + issues.join("；"),
           detail.collectedAt,
           item.key,
         );
@@ -291,37 +336,27 @@ export class CrawlStore {
     }
   }
   fail(key: string, error: string) {
-    this.db.prepare("UPDATE listings SET status='failed',error=? WHERE key=?").run(error, key);
+    this.db
+      .prepare("UPDATE listings SET status='failed',error=? WHERE key=? AND status!='unavailable'")
+      .run(error, key);
+  }
+  markUnavailable(key: string, reason: string) {
+    // Preserve every old partial/source snapshot; terminal state never publishes it as complete.
+    this.db
+      .prepare("UPDATE listings SET status='unavailable',error=? WHERE key=?")
+      .run(reason, key);
+    diagnostics.record("crawl.item_unavailable", { key, reason, action: "skip_without_retry" });
+  }
+  unavailableReason(key: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT error FROM listings WHERE key=? AND status='unavailable'")
+      .get(key);
+    return row ? String(row.error || "官网商品已不存在，无法补齐，已跳过且不再重试") : undefined;
   }
   count(): number {
     return Number(
       this.db.prepare("SELECT count(*) AS n FROM listings WHERE status='complete'").get()?.n || 0,
     );
-  }
-  countRoles(): number {
-    return Number(
-      this.db
-        .prepare(`SELECT count(DISTINCT server_id || ':' || coalesce(
-      nullif(json_extract(listing_json,'$.attrs.data_seller_roleid'),''),
-      nullif(json_extract(listing_json,'$.attrs.data_owner_roleid'),''),
-      nullif(json_extract(listing_json,'$.summary.usernum'),''),nullif(name,''),key
-    )) AS n FROM listings WHERE status='complete'`)
-        .get()!.n,
-    );
-  }
-  roleLimit(): number | undefined {
-    const value = this.db
-      .prepare("SELECT role_limit FROM crawl_state WHERE id=1")
-      .get()?.role_limit;
-    return typeof value === "number" && value > 0 ? value : undefined;
-  }
-  setRoleLimit(value: unknown) {
-    if (value !== null && (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1))
-      throw new Error("采集角色目标必须为正整数，或使用 null 取消目标");
-    this.db
-      .prepare(`INSERT INTO crawl_state(id,role_limit) VALUES(1,?)
-      ON CONFLICT(id) DO UPDATE SET role_limit=excluded.role_limit`)
-      .run(value);
   }
   recent() {
     return this.db
@@ -381,6 +416,7 @@ export class CrawlStore {
           lastAttemptAt: row.last_attempt_at ? String(row.last_attempt_at) : null,
           attemptCount: Number(row.attempt_count || 0),
           valuationReady:
+            row.status === "complete" &&
             row.capture_version === CAPTURE_VERSION &&
             !row.valuation_issues &&
             row.equipment_complete === 1 &&

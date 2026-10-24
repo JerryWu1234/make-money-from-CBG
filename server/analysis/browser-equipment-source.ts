@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Page } from "playwright-core";
 import { createHiddenPage, getBrowser } from "../session";
+import { captureBrowserStep } from "../browser-evidence";
 import { assertAvailable, pace } from "../crawler/page";
 import { hoverForInspection } from "../viewport";
 import { buildPageState } from "../page-state";
@@ -1519,6 +1520,27 @@ export function equipmentSourceFromPages(
       throw new Error("候选商品不属于目标服务器，未采用报价");
     return safe;
   };
+  const navigate = async (
+    page: Page,
+    url: string,
+    options: Parameters<Page["goto"]>[1],
+    stage: string,
+    requestSignal: AbortSignal,
+    key?: string,
+  ) => {
+    try {
+      const response = await page.goto(url, options);
+      await captureBrowserStep(page, { flow: "analysis", stage, key }, requestSignal);
+      return response;
+    } catch (error) {
+      await captureBrowserStep(
+        page,
+        { flow: "analysis", stage: stage + ".failed", key, error },
+        requestSignal,
+      );
+      throw error;
+    }
+  };
   const cache = new Map<string, string>();
   const deadline = Date.now() + 180_000;
   let progress: PricingSearchProgress = { assetName: "", page: 1, validSamples: 0, retryCount: 0 };
@@ -1550,10 +1572,17 @@ export function equipmentSourceFromPages(
       report({ retryCount: attempt });
       try {
         await pace(requestSignal, 600, 400);
-        const response = await detailPage.goto(safe, {
-          waitUntil: "domcontentloaded",
-          timeout: 15000,
-        });
+        const response = await navigate(
+          detailPage,
+          safe,
+          {
+            waitUntil: "domcontentloaded",
+            timeout: 15000,
+          },
+          "equipment.detail.opened",
+          requestSignal,
+          equipmentIdentity(safe),
+        );
         requestSignal.throwIfAborted();
         if ([401, 403, 429].includes(response?.status() || 0))
           throw new Error(
@@ -1562,9 +1591,24 @@ export function equipmentSourceFromPages(
         if (equipmentIdentity(detailPage.url()) !== equipmentIdentity(safe))
           throw new Error("装备详情跳转到另一商品，报价未采用");
         const value = await equipmentPageSource(detailPage, requestSignal);
+        await captureBrowserStep(
+          detailPage,
+          { flow: "analysis", stage: "equipment.detail.read", key: equipmentIdentity(safe) },
+          requestSignal,
+        );
         cache.set(safe, value.html);
         return value.html;
       } catch (error) {
+        await captureBrowserStep(
+          detailPage,
+          {
+            flow: "analysis",
+            stage: "equipment.detail.failed",
+            key: equipmentIdentity(safe),
+            error,
+          },
+          requestSignal,
+        );
         requestSignal.throwIfAborted();
         const message = error instanceof Error ? error.message : String(error);
         if (
@@ -1586,58 +1630,78 @@ export function equipmentSourceFromPages(
       requestSignal.throwIfAborted();
       const unsupported = equipmentLevelUnsupportedReason(item);
       if (unsupported) throw new Error(unsupported);
-      await searchPage.goto(
-        isYuanshen(item)
-          ? YUANSHEN_SEARCH_URL
-          : item.category === "上古玉魄"
-            ? JADE_SEARCH_URL
-            : isJewelry(item)
-              ? JEWELRY_SEARCH_URL
-              : EQUIPMENT_SEARCH_URL,
-        { waitUntil: "domcontentloaded", timeout: 15000 },
-      );
-      requestSignal.throwIfAborted();
-      await searchPage.waitForFunction(
-        ({ jewelry, jade, yuanshen }) => {
-          const g = window as unknown as Record<string, any>;
-          const visible = (selector: string) =>
-            Array.from(document.querySelectorAll(selector)).some((node) => node.checkVisibility());
-          if (
-            g.CaptchaCheck?.need_captcha ||
-            visible(
-              "#qrcode,#loginContainer,#captcha_container,.yidun_popup,.geetest_panel,input[type=password]",
+      try {
+        await navigate(
+          searchPage,
+          isYuanshen(item)
+            ? YUANSHEN_SEARCH_URL
+            : item.category === "上古玉魄"
+              ? JADE_SEARCH_URL
+              : isJewelry(item)
+                ? JEWELRY_SEARCH_URL
+                : EQUIPMENT_SEARCH_URL,
+          { waitUntil: "domcontentloaded", timeout: 15000 },
+          "equipment.search.opened",
+          requestSignal,
+          item.key,
+        );
+        requestSignal.throwIfAborted();
+        await searchPage.waitForFunction(
+          ({ jewelry, jade, yuanshen }) => {
+            const g = window as unknown as Record<string, any>;
+            const visible = (selector: string) =>
+              Array.from(document.querySelectorAll(selector)).some((node) =>
+                node.checkVisibility(),
+              );
+            if (
+              g.CaptchaCheck?.need_captcha ||
+              visible(
+                "#qrcode,#loginContainer,#captcha_container,.yidun_popup,.geetest_panel,input[type=password]",
+              )
             )
-          )
-            return true;
-          const panel = yuanshen
-            ? "#equip_type_check_panel"
-            : jade
-              ? "#yupo_type_panel"
-              : jewelry
-                ? "#kind_panel"
-                : "#kind_check_panel";
-          return (
-            document.readyState !== "loading" &&
-            !!document.querySelector(panel + " li") &&
-            !!document.querySelector("#server_type_panel li") &&
-            (jade ||
-              yuanshen ||
-              !!document.querySelector(
-                (jewelry ? "#equip_level_slider" : "#level_slider") + " .startPoint .num",
-              ))
-          );
-        },
-        {
-          jewelry: isJewelry(item),
-          jade: item.category === "上古玉魄",
-          yuanshen: isYuanshen(item),
-        },
-        { timeout: 15000 },
-      );
-      requestSignal.throwIfAborted();
-      const form = await readEquipmentSearchForm(searchPage);
-      requestSignal.throwIfAborted();
-      return form;
+              return true;
+            const panel = yuanshen
+              ? "#equip_type_check_panel"
+              : jade
+                ? "#yupo_type_panel"
+                : jewelry
+                  ? "#kind_panel"
+                  : "#kind_check_panel";
+            return (
+              document.readyState !== "loading" &&
+              !!document.querySelector(panel + " li") &&
+              !!document.querySelector("#server_type_panel li") &&
+              (jade ||
+                yuanshen ||
+                !!document.querySelector(
+                  (jewelry ? "#equip_level_slider" : "#level_slider") + " .startPoint .num",
+                ))
+            );
+          },
+          {
+            jewelry: isJewelry(item),
+            jade: item.category === "上古玉魄",
+            yuanshen: isYuanshen(item),
+          },
+          { timeout: 15000 },
+        );
+        requestSignal.throwIfAborted();
+        const form = await readEquipmentSearchForm(searchPage);
+        requestSignal.throwIfAborted();
+        await captureBrowserStep(
+          searchPage,
+          { flow: "analysis", stage: "equipment.form.read", key: item.key },
+          requestSignal,
+        );
+        return form;
+      } catch (error) {
+        await captureBrowserStep(
+          searchPage,
+          { flow: "analysis", stage: "equipment.discover.failed", key: item.key, error },
+          requestSignal,
+        );
+        throw error;
+      }
     },
     async findCandidates(items, requestSignal) {
       requestSignal = AbortSignal.any([signal, requestSignal]);
@@ -1691,7 +1755,8 @@ export function equipmentSourceFromPages(
           const jewelry = isJewelry(item),
             jade = item.category === "上古玉魄",
             yuanshen = isYuanshen(item);
-          await searchPage.goto(
+          await navigate(
+            searchPage,
             yuanshen
               ? YUANSHEN_SEARCH_URL
               : jade
@@ -1703,6 +1768,9 @@ export function equipmentSourceFromPages(
               waitUntil: "domcontentloaded",
               timeout: 15000,
             },
+            "equipment.search.opened",
+            requestSignal,
+            item.key,
           );
           requestSignal.throwIfAborted();
           stage = "login_check";
@@ -2373,6 +2441,11 @@ export function equipmentSourceFromPages(
                   yuanshen ? "yuanshen" : jade ? "jade" : jewelry ? "jewelry" : "equipment",
                   requestSignal,
                 );
+                await captureBrowserStep(
+                  searchPage,
+                  { flow: "analysis", stage: "equipment.filters.filled", key: item.key },
+                  requestSignal,
+                );
                 filledEvidence = await captureEvidence("filled");
               }
               marketScope ||= createMarketScopeAudit(searchPage, serverId);
@@ -2394,6 +2467,15 @@ export function equipmentSourceFromPages(
                   page: pageNumber,
                   actions: [await clickEquipmentSearchPage(searchPage, pageNumber)],
                 });
+              await captureBrowserStep(
+                searchPage,
+                {
+                  flow: "analysis",
+                  stage: first ? "equipment.search.submitted" : "equipment.search.page_changed",
+                  key: item.key,
+                },
+                requestSignal,
+              );
               if (!queryRecorded) {
                 queries.push(query);
                 itemQueries.push(query);
@@ -2450,6 +2532,11 @@ export function equipmentSourceFromPages(
                   () => marketScope!.begin(act, 1),
                   () => marketScope!.confirm(),
                   async (sortRequest) => {
+                    await captureBrowserStep(
+                      searchPage,
+                      { flow: "analysis", stage: "equipment.results.sorted", key: item.key },
+                      requestSignal,
+                    );
                     const evidence = await captureEvidence("sorting", undefined, sortRequest);
                     if (evidence)
                       (recordedUi[recordedUi.length - 1].evidence ||= []).push(evidence);
@@ -2568,6 +2655,11 @@ export function equipmentSourceFromPages(
                 );
                 return { rows, empty, hasNext };
               }, pageNumber);
+              await captureBrowserStep(
+                searchPage,
+                { flow: "analysis", stage: "equipment.results.read", key: item.key },
+                requestSignal,
+              );
               const submittedEvidence = await captureEvidence(
                 "submitted",
                 submitted,
@@ -2888,6 +2980,11 @@ export function equipmentSourceFromPages(
             note,
           });
         } catch (error) {
+          await captureBrowserStep(
+            searchPage,
+            { flow: "analysis", stage: "equipment." + stage + ".failed", key: item.key, error },
+            requestSignal,
+          );
           requestSignal.throwIfAborted();
           if (stage === "scope_confirm" || fatalEquipmentSearchError(error)) throw error;
           // A structural failure on one item must not discard earlier verified items.
@@ -2964,6 +3061,12 @@ export async function createEquipmentSource(
       : undefined;
     return equipmentSourceFromPages(searchPage, detailPage, signal, serverId, onProgress, evidence);
   } catch (error) {
+    if (searchPage)
+      await captureBrowserStep(
+        searchPage,
+        { flow: "analysis", stage: "equipment.source.failed", key: productKey, error },
+        signal,
+      );
     await Promise.allSettled([searchPage?.close(), detailPage?.close()]);
     throw error;
   }

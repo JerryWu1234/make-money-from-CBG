@@ -184,7 +184,7 @@ it("显式0级仍缺真实名称时三次有界重读后隔离保存原始来源
     expect(reads).toBe(3);
     store.observe(record.listing);
     expect(store.save(record.listing, record.detail!)).toBe(false);
-    expect(store.countRoles()).toBe(0);
+    expect(store.count()).toBe(0);
     expect(store.checkpoint()).toBeUndefined();
     expect(store.retryItems().map((item) => item.key)).toEqual([record.listing.key]);
     const archived = store.db

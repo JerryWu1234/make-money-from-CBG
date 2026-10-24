@@ -7,7 +7,7 @@ export class IncompleteCaptureError extends Error {
   constructor(
     message: string,
     readonly detail: RoleDetail,
-    cause: Error,
+    cause: unknown,
   ) {
     super(message, { cause });
     this.name = "IncompleteDetailError";
@@ -121,30 +121,39 @@ export async function collectCompleteCapture(
 ): Promise<RoleDetail> {
   let last: Error | undefined;
   let partial: RoleDetail | undefined;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  const checkAborted = () => {
+    if (signal.aborted && partial)
+      throw new IncompleteCaptureError("采集已暂停，已保留本轮读取资料", partial, signal.reason);
     signal.throwIfAborted();
+  };
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    checkAborted();
     try {
       const captured = await read();
-      signal.throwIfAborted();
       const detail = normalizeSchoolSkillCapture(captured);
+      partial = detail;
+      checkAborted();
       const issues = captureIssues(detail, true, true, listing);
       if (!issues.length) return detail;
-      partial = detail;
       throw Object.assign(new Error("角色资料采集未完成：" + issues.join("；")), {
         name: "IncompleteDetailError",
       });
     } catch (error) {
-      signal.throwIfAborted();
+      checkAborted();
+      const cause =
+        error instanceof IncompleteCaptureError && error.cause instanceof Error
+          ? error.cause
+          : error;
       if (
-        !(error instanceof Error) ||
-        /登录|验证码|安全验证|频繁|繁忙|权限|禁止/i.test(error.message) ||
-        (!["IncompleteDetailError", "TimeoutError"].includes(error.name) &&
-          !isSameDetailNavigationInterrupted(error))
+        !(cause instanceof Error) ||
+        /登录|验证码|安全验证|频繁|繁忙|权限|禁止/i.test(cause.message) ||
+        (!["IncompleteDetailError", "TimeoutError"].includes(cause.name) &&
+          !isSameDetailNavigationInterrupted(cause))
       )
-        throw error;
-      last = error;
-      if (attempt < 3)
-        report(`资料尚未核验完整，正在本轮内自动重读 ${attempt}/2：${error.message}`);
+        throw cause;
+      if (error instanceof IncompleteCaptureError) partial = error.detail;
+      last = error instanceof Error ? error : cause;
+      if (attempt < 3) report(`资料尚未核验完整，正在本轮内自动重读 ${attempt}/2：${last.message}`);
     }
   }
   if (partial)

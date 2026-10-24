@@ -88,7 +88,7 @@ it.each(["missing", "mismatch"])(
         false,
       );
       expect(store.count()).toBe(0);
-      expect(store.countRoles()).toBe(0);
+      expect(store.count()).toBe(0);
       expect(store.checkpoint()).toBeUndefined();
       expect(store.detail(record.listing.key)).toMatchObject({
         status: "failed",

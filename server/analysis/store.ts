@@ -235,13 +235,13 @@ export class AnalysisStore {
   counts() {
     const row = this.db
       .prepare(
-        "SELECT count(*) total,sum(CASE WHEN status='complete' AND detail_json IS NOT NULL THEN 1 ELSE 0 END) complete,sum(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed FROM listings",
+        "SELECT count(*) total,sum(CASE WHEN status='complete' AND detail_json IS NOT NULL THEN 1 ELSE 0 END) complete,sum(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed,sum(CASE WHEN status='unavailable' THEN 1 ELSE 0 END) unavailable FROM listings",
       )
       .get()!;
     const total = Number(row.total),
       complete = Number(row.complete || 0),
       failedDetail = Number(row.failed || 0),
-      waitingDetail = total - complete;
+      waitingDetail = total - complete - Number(row.unavailable || 0);
     return {
       total,
       complete,
@@ -252,7 +252,7 @@ export class AnalysisStore {
   }
   run(id: string): AnalysisRun | null {
     const row = this.db
-      .prepare(`SELECT r.*,count(t.id) total,
+      .prepare(`SELECT r.*,count(CASE WHEN t.status!='skipped' THEN t.id END) total,
       coalesce(sum(t.status='completed'),0) completed,coalesce(sum(t.status='failed'),0) failed,
       coalesce(sum(t.status='queued'),0) queued,coalesce(sum(t.reused),0) reused,
       coalesce(sum(t.status='running'),0) running_count,
@@ -780,14 +780,38 @@ export class AnalysisStore {
     }
   }
 
+  skipUnavailableQueued(runId: string): number {
+    return Number(
+      this.db
+        .prepare(`UPDATE analysis_tasks SET status='skipped',error=(SELECT error FROM listings WHERE key=analysis_tasks.listing_key)
+      WHERE run_id=? AND status IN ('queued','waiting_pricing','failed')
+      AND listing_key IN (SELECT key FROM listings WHERE status='unavailable')`)
+        .run(runId).changes,
+    );
+  }
+  /** Stop work before a new request; already dispatched attempts remain historical evidence. */
+  skipUnavailableTask(task: AnalysisTask, owner: string): boolean {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    const unavailable = this.db
+      .prepare("SELECT error FROM listings WHERE key=? AND status='unavailable'")
+      .get(task.document.productKey);
+    if (!unavailable) return false;
+    this.db
+      .prepare(`UPDATE analysis_tasks SET status='skipped',error=? WHERE id=?
+      AND status IN ('queued','running','waiting_pricing','failed')
+      AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')`)
+      .run(String(unavailable.error), task.id, task.id);
+    return true;
+  }
   next(runId: string, preferredLane?: AnalysisLane): AnalysisTask | null {
+    this.skipUnavailableQueued(runId);
     const row = this.db
       .prepare(
         `SELECT t.*,r.profile_json,
           (SELECT length(trim(coalesce(a.raw_response,'')))>0 FROM analysis_attempts a
            WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1) last_attempt_had_response
-         FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id
-         WHERE t.run_id=? AND t.status='queued'
+         FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id JOIN listings l ON l.key=t.listing_key
+         WHERE t.run_id=? AND t.status='queued' AND l.status='complete' AND l.detail_json IS NOT NULL
          ORDER BY CASE WHEN t.queue_lane=? THEN 0 ELSE 1 END,t.ordinal ASC LIMIT 1`,
       )
       .get(runId, preferredLane ?? null);

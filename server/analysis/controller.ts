@@ -67,8 +67,6 @@ export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[
           captureActivity: {
             running: capture.running,
             phase: capture.phase,
-            roleLimit: capture.roleLimit,
-            totalRoles: capture.totalRoles,
             ...(capture.running && capture.phase === "collecting"
               ? { inFlight: (capture.newRunning || 0) + (capture.oldRunning || 0) }
               : {}),

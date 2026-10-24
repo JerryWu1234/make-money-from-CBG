@@ -15,7 +15,9 @@ const mocks = vi.hoisted(() => ({
   waitForFunction: vi.fn(),
   goto: vi.fn(),
   close: vi.fn(),
+  captureBrowserStep: vi.fn(),
 }));
+vi.mock("../browser-evidence", () => ({ captureBrowserStep: mocks.captureBrowserStep }));
 vi.mock("../session", () => ({
   getBrowser: mocks.getBrowser,
   createHiddenPage: mocks.createHiddenPage,
@@ -108,6 +110,10 @@ describe("宝宝装备同会话公开入口", () => {
   it("通过共享浏览器会话连接，在自有工作页读取已观察入口", async () => {
     const source = await createPetGearSource(new AbortController().signal, "1");
     await source.discover();
+    expect(mocks.captureBrowserStep.mock.calls.map((call) => call[1].stage)).toEqual([
+      "pet_gear.search.opened",
+      "pet_gear.form.read",
+    ]);
     expect(mocks.getBrowser).toHaveBeenCalledExactlyOnceWith(true);
     expect(mocks.goto).toHaveBeenCalledWith(
       PET_GEAR_SEARCH_URL,
@@ -149,4 +155,20 @@ it("缺失目标服时宝宝装备source不创建页面", async () => {
     createPetGearSource(new AbortController().signal, undefined as unknown as string),
   ).rejects.toThrow("目标服务器");
   expect(mocks.getBrowser).not.toHaveBeenCalled();
+});
+
+it("宝宝装备开页失败记录实际页面与原始错误，不吞掉导航错误", async () => {
+  const failure = new Error("fixture navigation failure");
+  mocks.goto.mockRejectedValueOnce(failure);
+  const signal = new AbortController().signal;
+  const source = await createPetGearSource(signal, "1");
+  try {
+    await expect(source.discover()).rejects.toBe(failure);
+    expect(mocks.captureBrowserStep.mock.calls.map((call) => call[1])).toEqual([
+      { flow: "analysis", stage: "pet_gear.search.opened.failed", error: failure },
+      { flow: "analysis", stage: "pet_gear.discover.failed", error: failure },
+    ]);
+  } finally {
+    await source.close();
+  }
 });

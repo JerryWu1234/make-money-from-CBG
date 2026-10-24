@@ -20,6 +20,8 @@ vp dev
 
 当前自动连接支持 macOS 上的日常 Chrome。默认读取 `~/Library/Application Support/Google/Chrome/DevToolsActivePort`；自定义用户数据目录可设置 `CBG_CHROME_USER_DATA_DIR`。这里只读取调试地址，不复制浏览器配置。旧 `.chrome-cbg-profile` 不再使用。
 
+排查原始网页时，可设置 `CBG_SHOW_WORK_PAGES=1` 后启动服务，例如 `CBG_SHOW_WORK_PAGES=1 pnpm dev:stable`。程序会在 Chrome 的独立窗口显示列表，详情进入该窗口的标签栏；停止采集后保留这些页面，便于人工查看错误。运行中请避免手动修改工作页筛选条件；检查结束后可手动关闭标签。取消该环境变量或设为 `0` 后重新启动服务，即恢复默认隐藏模式。
+
 日常 Chrome 请正常启动，不要添加 `--remote-debugging-port` 或 `--remote-debugging-pipe`。新版 Chrome 使用默认用户目录时，这些旧参数会阻止调试服务及界面开关生效；需要完全退出后去掉参数重新打开。程序会检查调试地址对应的端口，区分旧地址失效、连接权限错误和授权握手失败；修复后再次点击开始会重新读取地址。
 
 连接采用 [Playwright connectOverCDP](https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp)。使用 Chrome 默认用户上下文创建隐藏工作页，并在 [Target.createTarget](https://chromedevtools.github.io/devtools-protocol/tot/Target/#method-createTarget) 时设置 `hidden: true`、`background: true` 和 `forTab: false`，保留创建会话以维持工作页生命周期。隐藏工作页不出现在标签栏，也没有可见浏览器窗口。Chrome 授权提示本身仍需要用户允许，说明见 [Chrome 官方文档](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session)。
@@ -103,7 +105,9 @@ node scripts/window-regression.mjs
 
 连接日常 Chrome 时，只挂接本程序创建的隐藏工作页；不等待用户已有标签页初始化，避免某个无响应的标签页拖住整个连接。日志中的 `browser.websocket_connected` 表示调试握手成功；之后的初始化错误不会再误报成未开启远程调试或等待授权超时。
 
-连接 Chrome、登录状态变化、查询步骤、翻页、商品详情开始/完成及错误会自动追加保存到 `data/logs/run-*.jsonl`。每行是一个独立 JSON，包含时间、运行编号、顺序及耗时；服务异常退出时已写入的记录仍保留。页面仍显示标签和召唤兽采集进度，日志只保存关键节点。日志与估价数据分开保存，不记录 Cookie、二维码内容、登录账号或完整商品 JSON。
+连接 Chrome、登录状态变化、查询步骤、翻页、商品详情开始/完成及错误会自动追加保存到 `data/logs/run-*.jsonl`。每行是一个独立 JSON，包含时间、运行编号、顺序及耗时；服务异常退出时已写入的记录仍保留。结构化日志不记录 Cookie、二维码内容、登录账号或完整商品 JSON。
+
+本程序创建的 Playwright 工作页默认按业务步骤截图：开页、切换标签或结果页、读取完成、报错。角色采集与商品分析共用 `data/logs/browser-steps/<运行编号>/`，每步保存 PNG 和同名 JSON，`index.jsonl` 按步骤记录时间、页面编号、角色或资产 key、步骤、截图路径及错误；运行日志中的 `browser.step` 可关联这些文件。登录页面也会保留当时画面，仅保存到本机日志目录；不会挂接或截图用户的其他 Chrome 标签。同时最多执行两次截图，同一页面串行，其余页面停在当前业务步骤等待；截图使用 Playwright 原生 15 秒超时，等待超时或取消清理完成后才继续，失败时保留原始调用日志。装备查价原有严格证据保存在同一运行目录的 `pricing/` 下，仍保留原有稳定性核验和 SHA256。旧日志与截图不会自动删除；下载运行日志导出 JSON，PNG 留在本地目录。运行数据、日志、截图和本地诊断产物已通过 `.gitignore` 排除。
 
 点击页面中的 **下载运行日志**，可将当前服务的日志导出为一个 `cbg-run-log.json` 文件（`GET /api/logs/export`）。服务重启且尚未开始新流程时，导出上次记录；历史文件保留在 `data/logs/`。状态轮询不会重复记录相同登录状态。日志从本次功能更新后开始记录，不能还原此前未保存的步骤。
 

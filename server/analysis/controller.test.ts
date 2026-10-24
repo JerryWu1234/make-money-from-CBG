@@ -72,17 +72,15 @@ it("行情等待期间开始关停，不会在返回后启动模型批次", asyn
   expect(crawl.db.prepare("SELECT count(*) AS n FROM analysis_runs").get()?.n).toBe(0);
 });
 
-it("整轮采集错误独立于单件失败数，保留目标进度供分析页展示", async () => {
+it("整轮采集错误独立于单件失败数，分析页仍能读取暂停原因", async () => {
   crawl.observe(analysisRecord("pending").listing);
   mocks.status.mockReturnValue({
     running: false,
     phase: "error",
-    roleLimit: 500,
-    totalRoles: 103,
   });
   const controller = await import("./controller");
   expect(controller.analysisOverview({})).toMatchObject({
-    captureActivity: { running: false, phase: "error", roleLimit: 500, totalRoles: 103 },
+    captureActivity: { running: false, phase: "error" },
     counts: { pendingDetail: 1, failedDetail: 0 },
   });
 });

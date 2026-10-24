@@ -5,13 +5,16 @@ function replaceUrl(params: URLSearchParams) {
 }
 
 export function savedRecordsPage() {
-  const value = new URLSearchParams(window.location.search).get("recordsPage");
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("recordsScope") === "tasks") return 1;
+  const value = params.get("recordsPage");
   const page = value == null ? NaN : Number(value);
   return Number.isSafeInteger(page) && page > 0 ? page : 1;
 }
 
 export function savedRecordKey() {
-  return new URLSearchParams(window.location.search).get("record") || null;
+  const params = new URLSearchParams(window.location.search);
+  return params.get("recordsScope") === "tasks" ? null : params.get("record") || null;
 }
 
 export function replaceSavedRecordsPage(page: number) {
@@ -21,11 +24,14 @@ export function replaceSavedRecordsPage(page: number) {
   replaceUrl(params);
 }
 
-export function replaceSavedRecordsScope(scope: "complete" | "tasks") {
+export function normalizeSavedRecordsView() {
   const params = new URLSearchParams(window.location.search);
-  if (scope === "tasks") params.set("recordsScope", scope);
-  else params.delete("recordsScope");
-  params.delete("recordsPage");
+  if (!params.has("recordsScope")) return;
+  if (params.get("recordsScope") === "tasks") {
+    params.delete("recordsPage");
+    params.delete("record");
+  }
+  params.delete("recordsScope");
   replaceUrl(params);
 }
 

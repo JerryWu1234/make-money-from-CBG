@@ -14,7 +14,12 @@ import { finishPricingSearch } from "./pricing-progress";
 
 vi.mock("node:fs/promises", () => ({ mkdir: vi.fn(), writeFile: vi.fn() }));
 const diagnosticRecord = vi.hoisted(() => vi.fn());
-vi.mock("../diagnostics", () => ({ diagnostics: { record: diagnosticRecord } }));
+vi.mock("../diagnostics", () => ({
+  diagnostics: {
+    record: diagnosticRecord,
+    evidenceDirectory: () => "/tmp/browser-steps/fixture-run",
+  },
+}));
 beforeEach(() => vi.resetAllMocks());
 const input = {
   stage: "filled",
@@ -52,6 +57,8 @@ it("截图与真实填写参数按角色和装备绑定，稳定性核验通过�
     plannedArgs: { init_damage_raw: 592 },
     form: { controls: [{ id: "txt_init_damage_raw", value: "592" }] },
   });
+  expect(result.screenshot).toMatch(/^\/tmp\/browser-steps\/fixture-run\/pricing\//);
+  expect(result.parameters).toMatch(/^\/tmp\/browser-steps\/fixture-run\/pricing\//);
   expect(result.screenshotSha256).toMatch(/^[a-f0-9]{64}$/);
 });
 it("截图期间表单变化时不保存图片或参数，不产生成功凭证", async () => {

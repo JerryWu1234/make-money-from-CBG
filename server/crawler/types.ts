@@ -34,6 +34,13 @@ export class ListingDisappearedError extends ListingChangedError {
     this.name = "ListingDisappearedError";
   }
 }
+/** Only official detail evidence can make a listing permanently unavailable. */
+export class ListingUnavailableError extends Error {
+  constructor(evidence: string) {
+    super(`官网商品已不存在，无法补齐，已跳过且不再重试：${evidence}`);
+    this.name = "ListingUnavailableError";
+  }
+}
 export class SellingOrderUnavailableError extends Error {
   constructor() {
     super("网站未提供上架时间倒序，无法持续检查新上架角色");
@@ -150,7 +157,7 @@ export interface RoleDetail {
 export interface SavedRoleRecord {
   listing: Listing;
   detail: RoleDetail | null;
-  status: "pending" | "complete" | "failed";
+  status: "pending" | "complete" | "failed" | "unavailable";
   error: string | null;
 }
 export interface Checkpoint {
@@ -161,8 +168,6 @@ export interface Checkpoint {
   savedAt: string;
 }
 export interface CrawlStatus {
-  roleLimit?: number;
-  totalRoles?: number;
   concurrency?: number;
   newRunning?: number;
   oldRunning?: number;

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import type { SavedListingPage } from "../server/crawler/types";
 import {
   replaceSavedRecordsPage,
-  replaceSavedRecordsScope,
+  normalizeSavedRecordsView,
   savedRecordsPage,
 } from "./saved-view-state";
 
@@ -22,19 +22,15 @@ export function SavedRoleList({
   onSelect: (key: string) => void;
 }) {
   const [page, setPage] = useState(savedRecordsPage);
-  const [scope, setScope] = useState<"complete" | "tasks">(() =>
-    new URLSearchParams(window.location.search).get("recordsScope") === "tasks"
-      ? "tasks"
-      : "complete",
-  );
   const [data, setData] = useState<SavedListingPage | null>(null);
   const [error, setError] = useState("");
+  useEffect(normalizeSavedRecordsView, []);
   useEffect(() => {
     const control = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const load = async () => {
       try {
-        const response = await fetch(`/api/crawl/records?page=${page}&pageSize=20&scope=${scope}`, {
+        const response = await fetch(`/api/crawl/records?page=${page}&pageSize=20&scope=complete`, {
           cache: "no-store",
           signal: AbortSignal.any([control.signal, AbortSignal.timeout(8000)]),
         });
@@ -62,30 +58,12 @@ export function SavedRoleList({
       control.abort();
       clearTimeout(timer);
     };
-  }, [page, running, scope]);
+  }, [page, running]);
   return (
-    <section className="saved-roles" aria-label={scope === "complete" ? "已采集角色" : "采集任务"}>
-      <h2>{scope === "complete" ? "已采集角色" : "采集任务"}</h2>
-      <div className="crawl-actions" aria-label="记录范围">
-        {(["complete", "tasks"] as const).map((value) => (
-          <button
-            key={value}
-            className="btn-secondary"
-            aria-pressed={scope === value}
-            onClick={() => {
-              setScope(value);
-              setPage(1);
-              replaceSavedRecordsScope(value);
-            }}
-          >
-            {value === "complete" ? "完整商品" : "采集任务"}
-          </button>
-        ))}
-      </div>
+    <section className="saved-roles" aria-label="已采集角色">
+      <h2>已采集角色</h2>
       <p className="status-note">
-        {scope === "complete"
-          ? "仅展示资料完整并已入库的商品，完整入库后会自动进入正在运行的分析队列。"
-          : "发现链接、在途和失败记录属于采集任务；资料完整前不会发布为商品或进入分析。任务、来源和重试进度均保留。"}
+        仅展示资料完整并已入库的商品；未完整资料在后台继续补齐，完整入库后自动显示并进入正在运行的分析队列。
         点击任意一行查看详情，时间均为北京时间。
       </p>
       {error && (
@@ -178,11 +156,7 @@ export function SavedRoleList({
               </table>
             </div>
           ) : (
-            <p>
-              {scope === "complete"
-                ? "尚无完整商品，完整采集入库后会自动显示。"
-                : "暂无待处理采集任务。"}
-            </p>
+            <p>尚无完整商品，完整采集入库后会自动显示。</p>
           )}
           <div className="crawl-actions" aria-label="采集记录分页">
             <button

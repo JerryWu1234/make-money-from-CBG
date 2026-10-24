@@ -8,7 +8,7 @@ import {
   MAIN_TABS,
 } from "./detail";
 import { CAPTURE_VERSION, itemFromAttributes } from "./compact";
-import type { Listing, RoleDetail, TabSnapshot } from "./types";
+import { ListingUnavailableError, type Listing, type RoleDetail, type TabSnapshot } from "./types";
 import { createCrawlSource } from "./source";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -16,7 +16,8 @@ import { equipmentInventory } from "../analysis/equipment-pricing";
 import { hoverListing, readListings } from "./page";
 import { hoverForInspection } from "../viewport";
 import { captureValuation } from "./valuation-capture";
-import { captureIssues } from "./capture-readiness";
+import { captureIssues, IncompleteCaptureError } from "./capture-readiness";
+import { CrawlStore } from "./store";
 
 vi.mock("./page", async (original) => ({
   ...(await original<typeof import("./page")>()),
@@ -103,6 +104,143 @@ describe("装备局部补采", () => {
   });
   afterAll(async () => {
     await browser?.close();
+  });
+  it.each([404, 410, 200])(
+    "官网确证不存在HTTP %s只请求一次，不做三轮资料重试",
+    async (status) => {
+      const page = await browser.newPage();
+      let visits = 0;
+      try {
+        await page.route(url, async (route) => {
+          visits++;
+          await route.fulfill({
+            status,
+            contentType: "text/html",
+            body: "<meta charset=utf-8><main>很抱歉，您查询的商品不存在。</main>",
+          });
+        });
+        const source = createCrawlSource({
+          listPage: page,
+          detailPage: page,
+          signal: new AbortController().signal,
+          onDetailProgress: vi.fn(),
+          log: vi.fn(),
+        });
+        const error = await source.detail(listing).catch((error: unknown) => error);
+        expect(error).toBeInstanceOf(ListingUnavailableError);
+        expect((error as Error).message).toContain("不再重试");
+        expect(visits).toBe(1);
+      } finally {
+        await page.close();
+      }
+    },
+    10000,
+  );
+  it.each([
+    ["登录", 404, "<script>window.IsLogin=0</script><p>商品不存在</p>", "登录"],
+    ["布尔登录", 404, "<script>window.IsLogin=false</script><p>商品不存在</p>", "登录"],
+    [
+      "布尔LoginInfo",
+      410,
+      "<script>window.LoginInfo={login:false}</script><p>商品不存在</p>",
+      "登录",
+    ],
+    ["验证码", 410, "<div id=captcha_container>安全验证</div><p>商品不存在</p>", "安全验证"],
+    ["降低频率", 404, "<p>系统繁忙</p><p>商品不存在</p>", "繁忙"],
+    ["登录面板", 404, "<div id=loginContainer>扫码登录</div><p>商品不存在</p>", "登录"],
+  ] as const)("%s优先于不存在证据，不能终止补齐", async (_label, status, body, message) => {
+    const page = await browser.newPage();
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ status, contentType: "text/html", body: `<meta charset=utf-8>${body}` }),
+      );
+      const error = await isOnShelf(page, listing, new AbortController().signal).catch(
+        (error: unknown) => error,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(ListingUnavailableError);
+      expect((error as Error).message).toContain(message);
+    } finally {
+      await page.close();
+    }
+  });
+  it.each([
+    ["已售出", "<main>商品已售出</main>"],
+    ["已下架", "<main>商品已下架</main>"],
+    ["推荐内容", "<main>页面加载中</main><aside>商品不存在</aside>"],
+    ["其他说明", "<main>如遇商品不存在，请重试</main>"],
+  ])("%s不等于商品不存在", async (_label, body) => {
+    const page = await browser.newPage();
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ contentType: "text/html", body: `<meta charset=utf-8>${body}` }),
+      );
+      await expect(isOnShelf(page, listing, new AbortController().signal)).resolves.toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+  it.each([404, 410])("HTTP %s伴随明确已售/下架状态不足以认定商品删除", async (status) => {
+    const page = await browser.newPage();
+    try {
+      for (const state of ["商品已售出", "商品已下架", "状态：已下架"]) {
+        await page.route(url, (route) =>
+          route.fulfill({
+            status,
+            contentType: "text/html",
+            body: `<meta charset=utf-8><main>${state}</main>`,
+          }),
+        );
+        await expect(isOnShelf(page, listing, new AbortController().signal)).resolves.toBe(false);
+        await page.unroute(url);
+      }
+    } finally {
+      await page.close();
+    }
+  });
+  it.each([
+    "<main>页面加载中</main><aside><div role=alert>商品不存在</div></aside>",
+    "<aside><div class=error_msg>商品不存在</div></aside>",
+    "<main>页面加载中</main><div id=recommend><div class=error_box>商品不存在</div></div>",
+  ])("推荐或侧栏错误提示不作为主商品不存在证据：%s", async (body) => {
+    const page = await browser.newPage();
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ contentType: "text/html", body: `<meta charset=utf-8>${body}` }),
+      );
+      await expect(isOnShelf(page, listing, new AbortController().signal)).resolves.toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+  it("跳转到其他商品的404不能作为目标商品不存在的证据", async () => {
+    const page = await browser.newPage();
+    const other = url.replace("equipment-fixture", "other-role");
+    try {
+      await page.route("**/*", (route) =>
+        route.fulfill({
+          status: 404,
+          contentType: "text/html",
+          body: "<meta charset=utf-8><main>商品不存在</main>",
+        }),
+      );
+      const goto = page.goto.bind(page);
+      // Redirected HTTP requests bypass route handlers; navigate the routed alternate page directly.
+      vi.spyOn(page, "goto").mockImplementationOnce(async (_url, options) => goto(other, options));
+      await expect(isOnShelf(page, listing, new AbortController().signal)).resolves.toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+  it("详情导航超时原样抛出，不能转成不存在", async () => {
+    const page = await browser.newPage();
+    const timeout = Object.assign(new Error("page.goto: Timeout"), { name: "TimeoutError" });
+    try {
+      vi.spyOn(page, "goto").mockRejectedValueOnce(timeout);
+      await expect(isOnShelf(page, listing, new AbortController().signal)).rejects.toBe(timeout);
+    } finally {
+      await page.close();
+    }
   });
   it.each([
     {},
@@ -550,6 +688,95 @@ describe("装备局部补采", () => {
       await page.close();
     }
   }, 20000);
+  it.each([false, true])(
+    "前四页已读后坐骑超时，保存部分资料且完整重读后才发布；恢复：%s",
+    async (recover) => {
+      const page = await browser.newPage();
+      const store = new CrawlStore(":memory:");
+      let visits = 0;
+      await page.route("**/*", async (route) => {
+        if (route.request().isNavigationRequest()) visits++;
+        await route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, "", "等级 100"),
+        });
+      });
+      const waitForLoadState = page.waitForLoadState.bind(page);
+      vi.spyOn(page, "waitForLoadState").mockImplementation(async (...args) => {
+        if (
+          (await page.locator("#panel").innerText()).includes("坐骑：新资料") &&
+          (!recover || visits === 1)
+        )
+          throw Object.assign(new Error("page.waitForLoadState: Timeout 15000ms exceeded. 坐骑"), {
+            name: "TimeoutError",
+          });
+        return waitForLoadState(...args);
+      });
+      const source = createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        signal: new AbortController().signal,
+        onDetailProgress: vi.fn(),
+        log: vi.fn(),
+      });
+      try {
+        store.observe(listing);
+        if (recover) {
+          const result = await source.detail(listing);
+          expect(visits).toBe(2);
+          expect(captureIssues(result, true, true, listing)).toEqual([]);
+          expect(result.tabs.map((tab) => tab.name)).toEqual(expect.arrayContaining(MAIN_TABS));
+          expect(store.save(listing, result)).toBe(true);
+          expect(store.count()).toBe(1);
+        } else {
+          const error = await source.detail(listing).catch((error: unknown) => error);
+          expect(error).toBeInstanceOf(IncompleteCaptureError);
+          expect(visits).toBe(3);
+          const failed = error as IncompleteCaptureError;
+          expect(failed.message).toContain("坐骑");
+          expect(failed.detail.tabs.map((tab) => tab.name)).toEqual(MAIN_TABS.slice(0, 4));
+          expect(failed.detail.tabs[1].items).toHaveLength(7);
+          expect(failed.detail.tabs[2].items![0].description).toContain("伤害 +420");
+          expect(store.save(listing, failed.detail)).toBe(false);
+          expect(store.count()).toBe(0);
+          expect(store.checkpoint()).toBeUndefined();
+          expect(store.detail(listing.key)).toMatchObject({
+            status: "failed",
+            detail: { tabs: expect.arrayContaining([expect.objectContaining({ name: "技能" })]) },
+          });
+          const dir = path.resolve("artifacts/partial-capture-regression");
+          await mkdir(dir, { recursive: true });
+          await page.screenshot({
+            path: path.join(dir, "mount-timeout-partial-preserved.png"),
+            fullPage: true,
+          });
+          await writeFile(
+            path.join(dir, "partial-evidence.json"),
+            JSON.stringify(
+              {
+                simulatedFailure: true,
+                attempts: visits,
+                error: failed.message,
+                savedStatus: "failed",
+                tabs: failed.detail.tabs.map((tab) => ({
+                  name: tab.name,
+                  items: tab.items?.length || 0,
+                })),
+                publishedProducts: store.count(),
+                checkpoint: store.checkpoint() || null,
+              },
+              null,
+              2,
+            ),
+          );
+        }
+      } finally {
+        store.close();
+        await page.close();
+      }
+    },
+    30000,
+  );
   it("同一采集流程先缺武器属性，自动重新打开并读全后才返回完成", async () => {
     const page = await browser.newPage();
     let visits = 0;
@@ -907,6 +1134,60 @@ describe("装备局部补采", () => {
       await page.close();
     }
   });
+
+  it.each(["parent", "grandparent", "unknown-icon"])(
+    "宝宝装备属性在%s时，空人物库存证据与实际读取物品一致",
+    async (kind) => {
+      const page = await browser.newPage();
+      try {
+        const attributes =
+          'data_equip_name="琅琊衣" data_equip_type="9235" data_equip_desc="等级 105#r防御 +15#r耐久 385" data_equip_type_desc="【装备对象】召唤兽#r【装备条件】等级105"';
+        const image = '<img width="40" height="40">';
+        const icon =
+          kind === "grandparent"
+            ? `<td ${attributes}><a>${image}</a></td>`
+            : `<td><a ${attributes}>${image}</a></td>`;
+        const body = `<p>现金：100</p><table id="RoleUsingEquips"><tr><td></td></tr></table><table id="RoleStoreEquips"><tr>${icon}${kind === "unknown-icon" ? '<td><img width="40" height="40"></td>' : ""}</tr></table>`;
+        await page.route(url, (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: fixture(false, undefined, undefined, "", "", body),
+          }),
+        );
+        const captured = await collectValuationDetail(
+          page,
+          listing,
+          previous(),
+          new AbortController().signal,
+        );
+        const inventory = captured.tabs.find((tab) => tab.name === "道具/法宝")!;
+        expect(inventory.items?.[0]).toMatchObject({
+          name: "琅琊衣",
+          modelId: "9235",
+          attributes: { 装备对象: "召唤兽" },
+        });
+        if (kind === "unknown-icon") {
+          expect(captured.equipmentCapture?.complete).toBe(false);
+          expect(captured.equipmentCapture?.emptyProof).toBeUndefined();
+          expect(captured.equipmentCapture?.issues.join(" ")).toContain("库存是否为空尚未核对");
+        } else {
+          expect(captured.equipmentCapture).toMatchObject({
+            complete: true,
+            emptyProof: "official-containers",
+            issues: [],
+          });
+          expect(
+            inventory.equipmentContainers
+              ?.flatMap((container) => container.icons)
+              .every((icon) => icon.name === "琅琊衣" && icon.modelId === "9235"),
+          ).toBe(true);
+        }
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
 
   it("新采保存官网模型号，玉魄、技能书和镶嵌材料不误报装备属性缺失", async () => {
     const page = await browser.newPage();

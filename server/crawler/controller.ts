@@ -9,6 +9,7 @@ import { DEFAULT_CRAWL_CONCURRENCY, type CrawlStatus, type SavedRoleRecord } fro
 import { diagnostics, watchWorkPage } from "../diagnostics";
 import { loadProfile, saveProfile } from "../analysis/profile";
 import { assertServiceOpen } from "../service-lifecycle";
+import { showBrowserWorkPages } from "../config";
 
 type CrawlRuntime = {
   storage?: CrawlStore;
@@ -35,30 +36,6 @@ const cache = (runtime[runtimeKey] ??= {
   activeRun: null,
 });
 const store = () => (cache.storage ||= new CrawlStore());
-class RoleTargetReachedError extends Error {
-  constructor(readonly limit: number) {
-    super(`已达到 ${limit} 个完整角色，已停止抓取；分析继续处理本批角色。`);
-    this.name = "RoleTargetReachedError";
-  }
-}
-function isRoleTargetReached(error: unknown): error is RoleTargetReachedError {
-  return (
-    error instanceof Error &&
-    error.name === "RoleTargetReachedError" &&
-    Number.isSafeInteger((error as RoleTargetReachedError).limit) &&
-    (error as RoleTargetReachedError).limit > 0
-  );
-}
-function reachedTarget() {
-  const limit = store().roleLimit();
-  return limit && store().countRoles() >= limit ? new RoleTargetReachedError(limit) : undefined;
-}
-export function setCaptureRoleLimit(value: unknown) {
-  store().setRoleLimit(value);
-  const reached = reachedTarget();
-  if (reached) cache.abort?.abort(reached);
-  return crawlStatus();
-}
 export type CrawlOrigin = "manual" | "scheduled";
 export interface ActiveCrawl {
   origin: CrawlOrigin;
@@ -71,11 +48,8 @@ export interface CrawlStartResult {
   activity: ActiveCrawl | null;
 }
 export function crawlStatus() {
-  const roleLimit = store().roleLimit();
   return {
     ...cache.status,
-    roleLimit,
-    totalRoles: roleLimit ? store().countRoles() : undefined,
     totalSaved: store().count(),
     checkpoint: store().checkpoint(),
     recent: store().recent(),
@@ -148,16 +122,6 @@ export async function startCrawl(
   validateCrawlOptions(options);
   if (options.refresh) store().retryItems(options.keys, true);
   if (isCrawling()) return { status: crawlStatus(), started: false, activity: cache.activeRun };
-  const reached = reachedTarget();
-  if (reached) {
-    cache.status = {
-      ...cache.status,
-      running: false,
-      phase: "completed",
-      message: reached.message,
-    };
-    return { status: crawlStatus(), started: false, activity: null };
-  }
   const current = await checkCbgStatus();
   assertServiceOpen();
   const page = getCbgPage();
@@ -244,9 +208,6 @@ export async function startCrawl(
           const captured = (update.saved || 0) > cache.status.saved;
           cache.status = { ...cache.status, ...update };
           if (captured) {
-            // 每次完整入库后同步检查；后续在途保存会先收到中止信号，分析不随采集停止。
-            const reached = reachedTarget();
-            if (reached) control.abort(reached);
             void import("../analysis/controller")
               .then((analysis) => analysis.appendCapturedAnalysis())
               .catch((error: unknown) =>
@@ -257,36 +218,23 @@ export async function startCrawl(
         { ...options, watch: options.watch ?? !options.backfillOnly },
       );
     } finally {
-      await Promise.allSettled(detailPages.map((page) => page.close()));
+      if (!showBrowserWorkPages())
+        await Promise.allSettled(detailPages.map((page) => page.close()));
     }
   })()
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      // 任务会跨模块重载保留，不能用新旧模块不同的构造器判断中止原因。
-      const targetReached = isRoleTargetReached(error);
-      log(
-        targetReached
-          ? "crawl.target_reached"
-          : control.signal.aborted
-            ? "crawl.paused"
-            : "crawl.error",
-        {
-          error,
-          ...(targetReached ? { roleLimit: error.limit, totalRoles: db.countRoles() } : {}),
-          page: cache.status.page,
-          itemIndex: cache.status.itemIndex,
-          detailProgress: cache.status.detailProgress,
-        },
-      );
+      log(control.signal.aborted ? "crawl.paused" : "crawl.error", {
+        error,
+        page: cache.status.page,
+        itemIndex: cache.status.itemIndex,
+        detailProgress: cache.status.detailProgress,
+      });
       cache.status = {
         ...cache.status,
         running: false,
-        phase: targetReached ? "completed" : control.signal.aborted ? "paused" : "error",
-        message: targetReached
-          ? message
-          : control.signal.aborted
-            ? "采集已暂停，断点已保留。"
-            : message,
+        phase: control.signal.aborted ? "paused" : "error",
+        message: control.signal.aborted ? "采集已暂停，断点已保留。" : message,
         error: control.signal.aborted ? undefined : message,
         detailProgress: undefined,
       };

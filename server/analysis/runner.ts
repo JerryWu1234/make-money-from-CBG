@@ -187,6 +187,8 @@ export class AnalysisRunner {
         throw new Error("请先暂停当前分析，再修改并发数");
       return id;
     }
+    // Retire terminal collection items before deciding whether the user must retry failures.
+    const skippedUnavailable = this.store.skipUnavailableQueued(id);
     const run = this.store.run(id);
     if (!run) throw new Error("分析任务不存在");
     if (run.marketExpired) throw new Error(EXPIRED_MARKET_NOTICE);
@@ -195,6 +197,7 @@ export class AnalysisRunner {
       throw new Error("请先重试失败或待补齐的商品，再继续分析");
     if (
       !run.queued &&
+      !skippedUnavailable &&
       !(retryFailed && (run.failed || run.waitingPricing)) &&
       !this.store.hasCapturedPending(id) &&
       !this.store.followsCapture(id)
@@ -343,6 +346,7 @@ export class AnalysisRunner {
     };
     const budget = { started: Date.now(), rounds: 0 };
     while (!stop.aborted && this.store.owns(owner)) {
+      if (this.store.skipUnavailableTask(task, owner)) return;
       if (
         (task.profile || isCurrentRoleCapture(task.record.detail)) &&
         (!task.record.detail ||
@@ -593,6 +597,7 @@ export class AnalysisRunner {
         }
         continue;
       }
+      if (this.store.skipUnavailableTask(task, owner)) return;
       if (
         task.profile &&
         task.previousResult?.inputHash === task.document.contentHash &&

@@ -244,12 +244,6 @@ export function CrawlPanel({
           {status.running && (
             <p>本轮并发上限：{status.concurrency ?? DEFAULT_CRAWL_CONCURRENCY} 个角色</p>
           )}
-          {status.roleLimit && (
-            <p>
-              完整角色目标：{status.totalRoles ?? 0} / {status.roleLimit} ·
-              达到后停止采集，分析继续。
-            </p>
-          )}
           {status.phase !== "retrying" &&
             status.newLimit !== undefined &&
             status.oldLimit !== undefined && (

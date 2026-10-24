@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import { diagnostics } from "./diagnostics";
+import { showBrowserWorkPages } from "./config";
 import { ScheduleConfigError } from "./crawler/schedule-time";
 import { validateSampleSelection } from "./analysis/sample-selection";
 import { analysisConcurrency } from "./analysis/types";
@@ -26,7 +27,6 @@ const postRoutes = new Set([
   "/api/browser/open",
   "/api/crawl/start",
   "/api/crawl/settings/save",
-  "/api/crawl/target/save",
   "/api/crawl/backfill",
   "/api/crawl/stop",
   "/api/crawl/clear",
@@ -339,9 +339,6 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
       const params = new URL(req.url!, expectedOrigin).searchParams;
       let result: unknown;
       switch (pathname) {
-        case "/api/crawl/target/save":
-          result = crawler.setCaptureRoleLimit((body as Record<string, unknown>).roleLimit);
-          break;
         case "/api/crawl/settings":
           result = crawler.equipmentAnalysisSettings();
           break;
@@ -437,7 +434,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
     const browser = await import("./browser");
     const result =
       pathname === "/api/browser/status" ? await browser.checkCbgStatus() : browser.openCbg();
-    res.end(JSON.stringify(result));
+    res.end(JSON.stringify({ ...result, workPagesVisible: showBrowserWorkPages() }));
   } catch (error) {
     diagnostics.record("api.error", { route: pathname, error });
     if (res.destroyed) return;

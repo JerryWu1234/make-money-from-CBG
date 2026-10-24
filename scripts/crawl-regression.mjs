@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ts from "typescript";
+import { browserEvidenceUrl } from "./regression-browser-evidence.mjs";
 import { chromium } from "playwright-core";
 import {
   detailDocument,
@@ -22,7 +23,10 @@ async function moduleUrl(file, replacements = {}) {
 }
 const listingUrl = await moduleUrl("server/crawler/listing.ts");
 const viewportUrl = await moduleUrl("server/viewport.ts");
-const compactUrl = await moduleUrl("server/crawler/compact.ts");
+const schoolSkillsUrl = await moduleUrl("server/crawler/school-skills.ts");
+const compactUrl = await moduleUrl("server/crawler/compact.ts", {
+  "./school-skills": schoolSkillsUrl,
+});
 const { CAPTURE_VERSION } = await import(compactUrl);
 const typesUrl = await moduleUrl("server/crawler/types.ts");
 const pageUrl = await moduleUrl("server/crawler/page.ts", {
@@ -30,31 +34,57 @@ const pageUrl = await moduleUrl("server/crawler/page.ts", {
   "./types": typesUrl,
   "../viewport": viewportUrl,
 });
-const petsUrl = await moduleUrl("server/crawler/pets.ts", { "../viewport": viewportUrl });
+const identityUrl = await moduleUrl("server/crawler/role-identity.ts", { "./compact": compactUrl });
+const readinessUrl = await moduleUrl("server/crawler/capture-readiness.ts", {
+  "./compact": compactUrl,
+  "./school-skills": schoolSkillsUrl,
+  "./role-identity": identityUrl,
+});
+const petsUrl = await moduleUrl("server/crawler/pets.ts", {
+  "../viewport": viewportUrl,
+  "../browser-evidence": browserEvidenceUrl,
+});
 const { collectPets } = await import(petsUrl);
-const { collectDetail, MAIN_TABS } = await import(
-  await moduleUrl("server/crawler/detail.ts", {
-    "./page": pageUrl,
-    "../viewport": viewportUrl,
-    "./compact": compactUrl,
-    "./pets": petsUrl,
-    "./valuation-capture": await moduleUrl("server/crawler/valuation-capture.ts"),
-  })
-);
+const detailUrl = await moduleUrl("server/crawler/detail.ts", {
+  "./page": pageUrl,
+  "../viewport": viewportUrl,
+  "./compact": compactUrl,
+  "./pets": petsUrl,
+  "./valuation-capture": await moduleUrl("server/crawler/valuation-capture.ts", {
+    "./role-identity": identityUrl,
+  }),
+  "./role-identity": identityUrl,
+  "./capture-readiness": readinessUrl,
+  "../browser-evidence": browserEvidenceUrl,
+});
+const { collectDetail, MAIN_TABS } = await import(detailUrl);
 const { prepareList, gotoPage, hoverListing, readListings } = await import(pageUrl);
 const { CrawlStore } = await import(
-  await moduleUrl("server/crawler/store.ts", { "./compact": compactUrl })
+  await moduleUrl("server/crawler/store.ts", {
+    "./compact": compactUrl,
+    "./capture-readiness": readinessUrl,
+  })
 );
 const { crawl } = await import(
   await moduleUrl("server/crawler/runner.ts", {
     "./resume": await moduleUrl("server/crawler/resume.ts"),
     "./types": typesUrl,
+    "./compact": compactUrl,
+    "./detail": detailUrl,
+    "./capture-readiness": readinessUrl,
+    "./watch": await moduleUrl("server/crawler/watch.ts", {
+      "./compact": compactUrl,
+      "./capture-readiness": readinessUrl,
+      "./resume": await moduleUrl("server/crawler/resume.ts"),
+      "./types": typesUrl,
+    }),
   })
 );
 const { createHiddenPage } = await import(
   await moduleUrl("server/session.ts", {
     "./chrome": await moduleUrl("server/chrome.ts"),
     "./work-transport": await moduleUrl("server/work-transport.ts"),
+    "./browser-evidence": browserEvidenceUrl,
     "./diagnostics": await moduleUrl("server/diagnostics.ts"),
     "./viewport": await moduleUrl("server/viewport.ts"),
     "./config": await moduleUrl("server/config.ts"),

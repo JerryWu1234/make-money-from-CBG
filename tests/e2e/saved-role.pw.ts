@@ -141,14 +141,13 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   assert.equal(schedule.config.maxDurationMinutes, 60);
   await page.getByText("正在读取标签 4/7：召唤兽/孩子", { exact: true }).waitFor();
   assert.match(await page.locator(".crawl-panel").innerText(), /本页进度：1 \/ 15/);
-  await page.getByRole("button", { name: "采集任务", exact: true }).click();
-  await page.getByRole("button", { name: /角色a ·/ }).click();
-  await page
-    .getByText("这是正在处理的采集任务；资料完整入库后才会发布为商品并进入分析。", { exact: true })
-    .waitFor();
+  await expect(page.getByRole("button", { name: /角色a ·/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "采集任务", exact: true })).toHaveCount(0);
   ready = true;
+  await page.getByRole("button", { name: /角色a ·/ }).waitFor({ timeout: 6000 });
+  await page.getByRole("button", { name: /角色a ·/ }).click();
   await page.getByRole("tab", { name: "人物/修炼", exact: true }).waitFor({ timeout: 6000 });
-  assert.ok(detailReads >= 2, "pending record should refresh without another click");
+  assert.ok(detailReads >= 1, "completed record should appear through list polling");
   assert.equal(await page.getByRole("tab").count(), 8);
   assert.match(await page.getByRole("tabpanel").innerText(), /估价资料清单/);
   await page.getByRole("tab", { name: "召唤兽/孩子", exact: true }).click();
@@ -170,9 +169,7 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   assert.match(await page.locator(".detail-item").nth(1).innerText(), /防御：90/);
   await page.keyboard.press("Escape");
   assert.equal(await page.getByRole("dialog").count(), 0);
-  // 任务采齐后已移入商品范围，原任务行消失时焦点应落回范围按钮。
-  await expect(page.getByRole("button", { name: "采集任务", exact: true })).toBeFocused();
-  await page.getByRole("button", { name: "完整商品", exact: true }).click();
+  await expect(page.getByRole("button", { name: /角色a ·/ })).toBeFocused();
   await page.getByRole("button", { name: /角色a ·/ }).click();
   await page.getByRole("dialog").waitFor();
   await page.keyboard.press("Escape");
@@ -220,7 +217,6 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   await page.keyboard.press("Escape");
   await page.setViewportSize({ width: 1100, height: 1000 });
 
-  await page.getByRole("button", { name: "完整商品", exact: true }).click();
   const results = page.getByRole("region", { name: "已采集角色" });
   await expect(results.getByText("共 45 条", { exact: false })).toBeVisible();
   assert.match(await results.innerText(), /测试服/);

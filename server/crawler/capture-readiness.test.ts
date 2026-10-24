@@ -61,6 +61,93 @@ it("连续重读失败保留最后一次部分资料，供本地详情定位缺�
   expect(error.detail).toBe(partial);
   expect(captureIssues(error.detail, true)).toContain("装备库存未核验");
 });
+it("中途超时携带已读资料，三次耗尽仍保留快照与原始错误", async () => {
+  const partial = complete();
+  delete (partial as RoleDetail).valuation;
+  const timeout = Object.assign(new Error("坐骑标签读取超时"), { name: "TimeoutError" });
+  const interrupted = new IncompleteCaptureError("详情读取中断（坐骑）", partial, timeout);
+  const read = vi.fn().mockRejectedValue(interrupted);
+  const error = await collectCompleteCapture(read, new AbortController().signal, vi.fn()).catch(
+    (error: unknown) => error,
+  );
+  expect(error).toBeInstanceOf(IncompleteCaptureError);
+  expect((error as IncompleteCaptureError).detail).toBe(partial);
+  expect((error as IncompleteCaptureError).cause).toBe(interrupted);
+  expect(read).toHaveBeenCalledTimes(3);
+  expect(captureIssues(partial, true)).toContain("角色本体资料未核验");
+});
+it("携带部分资料的超时重读成功后只返回新一轮完整资料", async () => {
+  const partial = complete();
+  delete (partial as RoleDetail).valuation;
+  const full = complete();
+  const read = vi
+    .fn()
+    .mockRejectedValueOnce(
+      new IncompleteCaptureError(
+        "详情读取中断",
+        partial,
+        Object.assign(new Error("超时"), { name: "TimeoutError" }),
+      ),
+    )
+    .mockResolvedValueOnce(full);
+  await expect(collectCompleteCapture(read, new AbortController().signal, vi.fn())).resolves.toBe(
+    full,
+  );
+  expect(read).toHaveBeenCalledTimes(2);
+});
+it.each(["网站要求安全验证", "page.goto: net::ERR_CONNECTION_CLOSED"])(
+  "部分资料包装不能吞掉不可重试原因：%s",
+  async (message) => {
+    const cause = new Error(message);
+    const read = vi
+      .fn()
+      .mockRejectedValue(new IncompleteCaptureError("部分资料", complete(), cause));
+    await expect(collectCompleteCapture(read, new AbortController().signal, vi.fn())).rejects.toBe(
+      cause,
+    );
+    expect(read).toHaveBeenCalledOnce();
+  },
+);
+it("中途携带快照时收到暂停立即退出，不保存为采集失败或继续重读", async () => {
+  const control = new AbortController();
+  const reason = new Error("用户暂停采集");
+  const read = vi.fn(async () => {
+    control.abort(reason);
+    throw new IncompleteCaptureError(
+      "部分资料",
+      complete(),
+      Object.assign(new Error("超时"), { name: "TimeoutError" }),
+    );
+  });
+  await expect(collectCompleteCapture(read, control.signal, vi.fn())).rejects.toBe(reason);
+  expect(read).toHaveBeenCalledOnce();
+});
+it.each(["读取返回时", "下一轮开始前", "第二轮等待时"])(
+  "已返回的部分资料在%s暂停仍随异常保留，cause为原暂停原因",
+  async (stage) => {
+    const control = new AbortController();
+    const reason = new Error("用户暂停采集");
+    const partial = complete();
+    partial.equipmentCapture.complete = false;
+    partial.equipmentCapture.issues = ["装备库存未核验"];
+    const read = vi.fn(async () => {
+      if (read.mock.calls.length === 1) {
+        if (stage === "读取返回时") control.abort(reason);
+        return partial;
+      }
+      control.abort(reason);
+      control.signal.throwIfAborted();
+      return complete();
+    });
+    const error = await collectCompleteCapture(read, control.signal, () => {
+      if (stage === "下一轮开始前") control.abort(reason);
+    }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(IncompleteCaptureError);
+    expect((error as IncompleteCaptureError).detail).toBe(partial);
+    expect((error as IncompleteCaptureError).cause).toBe(reason);
+    expect(read).toHaveBeenCalledTimes(stage === "第二轮等待时" ? 2 : 1);
+  },
+);
 it("登录或安全验证不自动重试，停止采集而不越过访问限制", async () => {
   const read = vi
     .fn()
@@ -324,7 +411,7 @@ it.each(["no-mode", "old-version", "no-valuation"])(
     expect(captureIssues(detail).some((issue) => issue.includes("师门技能"))).toBe(false);
   },
 );
-it("六项师门不得入完整库或占角色额度，补全后才推进断点并保留归档源码", () => {
+it("六项师门不得入完整库，补全后才推进断点并保留归档源码", () => {
   const store = new CrawlStore(":memory:");
   const record = analysisRecord("school-contract");
   const partial = schoolCapture(6, 6);
@@ -337,17 +424,16 @@ it("六项师门不得入完整库或占角色额度，补全后才推进断点�
     savedAt: partial.collectedAt,
   };
   try {
-    store.setRoleLimit(500);
     store.observe(record.listing);
     expect(store.save(record.listing, partial, point)).toBe(false);
     expect(store.count()).toBe(0);
-    expect(store.countRoles()).toBe(0);
+    expect(store.count()).toBe(0);
     expect(store.checkpoint()).toBeUndefined();
     expect(store.detail(record.listing.key)).toMatchObject({ status: "failed" });
     const correctable = schoolCapture(6, 7);
     correctable.valuation!.source = { serverId: record.listing.serverId, eid: record.listing.eid };
     expect(store.save(record.listing, correctable, point)).toBe(true);
-    expect(store.countRoles()).toBe(1);
+    expect(store.count()).toBe(1);
     expect(store.checkpoint()).toEqual(point);
     const saved = store.detail(record.listing.key) as { detail: RoleDetail };
     expect(schoolTab(saved.detail).items).toHaveLength(7);

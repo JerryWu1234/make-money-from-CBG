@@ -1,9 +1,10 @@
 import { chromium, type Browser, type Page } from "playwright-core";
 import { CONNECTION_HELP, resolveCdpEndpoint, verifyCdpEndpoint } from "./chrome";
-import { CBG_HOME_URL } from "./config";
+import { CBG_HOME_URL, showBrowserWorkPages } from "./config";
 import { ensureWorkViewport } from "./viewport";
 import { openWorkTransport, type WorkTransport } from "./work-transport";
 import { diagnostics } from "./diagnostics";
+import { captureBrowserStep, registerBrowserEvidence } from "./browser-evidence";
 
 type BrowserSession = {
   cachedBrowser: Browser | null;
@@ -83,6 +84,7 @@ export async function createBackgroundPage(browser: Browser): Promise<Page> {
   const existing = getCbgPage();
   if (existing) {
     await ensureWorkViewport(existing);
+    registerBrowserEvidence(existing);
     return existing;
   }
   cache.selectedPage = await createHiddenPage(browser);
@@ -108,13 +110,16 @@ async function openHiddenPage(browser: Browser): Promise<Page> {
   const previousAttachOther = process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
   process.env.PW_CHROMIUM_ATTACH_TO_OTHER = "1";
   try {
-    // 同一日常配置内创建隐藏页面，不创建可见窗口或标签页。
+    const visible = showBrowserWorkPages();
+    const firstVisible = visible && !getCbgPage();
+    // 调试时在独立窗口展示列表，后续详情加入标签栏，供用户直接观察。
     const { targetId } = await session.send("Target.createTarget", {
       url: "about:blank",
-      hidden: true,
+      hidden: !visible,
       forTab: false,
-      background: true,
-      focus: false,
+      background: !visible,
+      focus: visible,
+      ...(visible ? { newWindow: firstVisible } : {}),
     });
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
@@ -125,6 +130,8 @@ async function openHiddenPage(browser: Browser): Promise<Page> {
           const { targetInfo } = await targetSession.send("Target.getTargetInfo");
           if (targetInfo.targetId === targetId) {
             await ensureWorkViewport(page);
+            registerBrowserEvidence(page);
+            await captureBrowserStep(page, { flow: "browser", stage: "page.created" });
             // 隐藏目标的生命周期绑定创建它的会话，不能在返回时 detach。
             retained = true;
             page.once("close", () => {

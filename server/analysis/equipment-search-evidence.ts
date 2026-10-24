@@ -14,7 +14,8 @@ export function equipmentSearchEvidence(
   signal?: AbortSignal,
 ): EquipmentEvidenceCapture {
   const directory = resolve(
-    "data/equipment-search-evidence",
+    diagnostics.evidenceDirectory(),
+    "pricing",
     new Date().toISOString().replaceAll(":", "-") + "-" + randomUUID(),
   );
   let sequence = 0;

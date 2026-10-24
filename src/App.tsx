@@ -159,8 +159,10 @@ export function App() {
                   : "开始查询角色"}
         </button>
         <p className="status-note">
-          藏宝阁在隐藏工作页中运行，本页显示二维码、进度与查询结果。首次连接可能需要允许 Chrome
-          的连接提示。{" "}
+          {result?.workPagesVisible
+            ? "已开启原始工作页显示，可在 Chrome 窗口查看列表和详情；停止后保留页面供检查。"
+            : "藏宝阁在隐藏工作页中运行，本页显示二维码、进度与查询结果。"}
+          首次连接可能需要允许 Chrome 的连接提示。{" "}
           <a href="/api/logs/export" download="cbg-run-log.json">
             下载运行日志
           </a>

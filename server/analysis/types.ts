@@ -134,7 +134,7 @@ export type AnalysisResultItem = {
 };
 export type AnalysisOverview = {
   captureTasks?: { total: number; pending: number; failed: number };
-  captureActivity?: Pick<CrawlStatus, "running" | "phase" | "roleLimit" | "totalRoles"> & {
+  captureActivity?: Pick<CrawlStatus, "running" | "phase"> & {
     inFlight?: number;
   };
   capturePreparation?: {

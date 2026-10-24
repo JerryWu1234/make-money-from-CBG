@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ts from "typescript";
+import { browserEvidenceUrl } from "./regression-browser-evidence.mjs";
 import { chromium } from "playwright-core";
 
 async function moduleUrl(file, replacements = {}) {
@@ -17,6 +18,7 @@ const { createBackgroundPage } = await import(
   await moduleUrl("server/session.ts", {
     "./chrome": await moduleUrl("server/chrome.ts"),
     "./work-transport": await moduleUrl("server/work-transport.ts"),
+    "./browser-evidence": browserEvidenceUrl,
     "./diagnostics": await moduleUrl("server/diagnostics.ts"),
     "./viewport": await moduleUrl("server/viewport.ts"),
     "./config": await moduleUrl("server/config.ts"),
