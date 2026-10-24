@@ -129,6 +129,8 @@ test("推荐榜差额阶梯与已查看筛选→全部商品与详情→刷新�
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== "http://cbg-recommendation.test") return route.abort();
+      if (url.pathname === "/api/runtime/settings")
+        return route.fulfill({ json: { saveScreenshots: false } });
       if (url.pathname.startsWith("/api/")) {
         let body: unknown;
         if (url.pathname === "/api/ai/status")

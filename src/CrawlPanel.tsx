@@ -3,6 +3,7 @@ import { DEFAULT_CRAWL_CONCURRENCY, type CrawlStatus } from "../server/crawler/t
 import { RoleDetailDrawer } from "./RoleDetailDrawer";
 import { SavedRoleList, displayTime } from "./SavedRoleList";
 import { ScanSchedulePanel } from "./ScanSchedulePanel";
+import { RunRecordSettings } from "./RunRecordSettings";
 import { replaceSavedRecordKey, savedRecordKey } from "./saved-view-state";
 
 type Status = CrawlStatus & {
@@ -174,6 +175,7 @@ export function CrawlPanel({
               : "已关闭（默认）：只分析裸号本体，不查装备、灵饰、宝宝及玉魄价格；采集仍保留全部资料。"}
         开关只影响新分析任务；已开始的分析沿用原设置。
       </p>
+      <RunRecordSettings />
       <label className="crawl-concurrency">
         并发抓取数
         <input

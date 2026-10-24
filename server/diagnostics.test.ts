@@ -1,9 +1,22 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { cleanDiagnostic, DiagnosticLog, workflowDiagnostic } from "./diagnostics";
 import { disconnectedState } from "./page-state";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:fs")>();
+  return { ...original, writeFileSync: vi.fn(original.writeFileSync) };
+});
 
 const directories: string[] = [];
 function temporaryDirectory() {
@@ -86,6 +99,36 @@ describe("durable diagnostic logs", () => {
     expect(log.export()).toMatchObject({
       events: [],
       writeError: expect.stringContaining("无法保存运行日志"),
+    });
+  });
+
+  it("cleans a marker created before ENOSPC and resumes logging when disk writes recover", () => {
+    const directory = temporaryDirectory();
+    const writers = path.join(directory, ".writers");
+    const log = new DiagnosticLog(directory);
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(writeFileSync).mockImplementationOnce(() => {
+      // openSync already created this temporary file; its first write now fails.
+      const [temporary] = readdirSync(writers);
+      expect(temporary).toMatch(/\.tmp$/);
+      expect(statSync(path.join(writers, temporary)).size).toBe(0);
+      throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    });
+    expect(() => log.record("before-recovery")).not.toThrow();
+    expect(error).toHaveBeenCalledOnce();
+    expect(readdirSync(writers)).toEqual([]);
+    expect(log.export()).toMatchObject({ events: [], writeError: expect.any(String) });
+
+    log.record("after-recovery");
+    expect(log.export()).toMatchObject({
+      events: [{ sequence: 1, event: "after-recovery" }],
+      writeError: null,
+    });
+    const { runId } = log.storageContext();
+    expect(readdirSync(writers)).toEqual([runId + ".json"]);
+    expect(JSON.parse(readFileSync(path.join(writers, runId + ".json"), "utf8"))).toEqual({
+      runId,
+      pid: process.pid,
     });
   });
 });

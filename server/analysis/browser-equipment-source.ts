@@ -80,11 +80,12 @@ export type EquipmentSearchConfig = {
 };
 type Query = Record<string, string | number>;
 type EquipmentEvidence = {
-  screenshot: string;
   parameters: string;
-  screenshotSha256: string;
   parametersSha256: string;
-};
+} & (
+  | { screenshot: string; screenshotSha256: string; screenshotDisabled?: false }
+  | { screenshotDisabled: true; screenshot?: never; screenshotSha256?: never }
+);
 export type EquipmentEvidenceCapture = (
   page: Page,
   input: {

@@ -61,6 +61,8 @@ for (const cancel of [false, true]) {
       const url = new URL(route.request().url());
       // 只访问本地构建与固定模拟接口，不连接日常 Chrome 或真实官网。
       if (url.origin !== "http://resume-ui.test") return route.abort();
+      if (url.pathname === "/api/runtime/settings")
+        return route.fulfill({ json: { saveScreenshots: false } });
       if (url.pathname.startsWith("/api/")) {
         let body: unknown;
         switch (url.pathname) {

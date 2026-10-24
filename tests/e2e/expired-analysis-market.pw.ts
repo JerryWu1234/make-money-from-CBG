@@ -39,6 +39,8 @@ test("过期行情显示重新分析入口，点击建立新批次而非恢复�
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.origin !== "http://cbg-expiry.test") return route.abort();
+    if (url.pathname === "/api/runtime/settings")
+      return route.fulfill({ json: { saveScreenshots: false } });
     if (url.pathname.startsWith("/api/")) {
       let body: unknown;
       const run = store.run(id)!;

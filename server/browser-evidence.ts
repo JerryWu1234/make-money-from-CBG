@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Page } from "playwright-core";
 import { cleanDiagnostic, diagnostics } from "./diagnostics";
+import { screenshotsEnabled } from "./runtime-settings";
 
 export interface BrowserStep {
   flow: "browser" | "query" | "collection" | "analysis";
@@ -53,6 +54,7 @@ export async function captureBrowserStep(page: Page, step: BrowserStep, signal?:
   let screenshotError: unknown;
   let savedScreenshot: string | undefined;
   let captureStartedAt: string | undefined;
+  let screenshotDisabled = !screenshotsEnabled();
   let url = "";
   try {
     url = page.url();
@@ -63,19 +65,25 @@ export async function captureBrowserStep(page: Page, step: BrowserStep, signal?:
     url = "unavailable";
   }
   try {
-    await mkdir(directory, { recursive: true, mode: 0o700 });
-    const bytes = await queueScreenshot(page, async () => {
-      if (signal?.aborted) return undefined;
-      captureStartedAt = new Date().toISOString();
-      // Playwright 1.63 forwards AbortSignal to its server-side progress controller.
-      // Await its native timeout/abort result so cleanup finishes before the next step;
-      // an outer Promise.race would leave screenshot preparation running on this page.
-      return page.screenshot({ fullPage: true, timeout: 15000, signal });
-    });
+    const bytes = screenshotDisabled
+      ? undefined
+      : await queueScreenshot(page, async () => {
+          if (signal?.aborted) return undefined;
+          await mkdir(directory, { recursive: true, mode: 0o700 });
+          // A setting changed while this page waited must apply before capture begins.
+          if (!screenshotsEnabled()) {
+            screenshotDisabled = true;
+            return undefined;
+          }
+          captureStartedAt = new Date().toISOString();
+          // Await native timeout/abort cleanup before another step changes this page.
+          return page.screenshot({ fullPage: true, timeout: 15000, signal });
+        });
     if (signal?.aborted) return;
-    if (!bytes) return;
-    await writeFile(screenshot, bytes, { mode: 0o600 });
-    savedScreenshot = screenshot;
+    if (bytes) {
+      await writeFile(screenshot, bytes, { mode: 0o600 });
+      savedScreenshot = screenshot;
+    }
   } catch (error) {
     screenshotError = error;
   }
@@ -93,6 +101,7 @@ export async function captureBrowserStep(page: Page, step: BrowserStep, signal?:
     finishedAt: new Date().toISOString(),
     url,
     screenshot: savedScreenshot,
+    screenshotDisabled: screenshotDisabled || undefined,
     screenshotError,
     metadata,
   });

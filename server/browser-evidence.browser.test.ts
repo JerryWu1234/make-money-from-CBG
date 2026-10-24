@@ -1,12 +1,16 @@
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, expect, it, vi } from "vite-plus/test";
+import { afterAll, beforeAll, beforeEach, expect, it, vi } from "vite-plus/test";
 import { chromium, type Browser, type Route } from "playwright-core";
 import { captureBrowserStep, registerBrowserEvidence } from "./browser-evidence";
 import { diagnostics } from "./diagnostics";
 import { createHiddenPage } from "./session";
 import { openWorkTransport } from "./work-transport";
+import { screenshotsEnabled } from "./runtime-settings";
+
+vi.mock("./runtime-settings", () => ({ screenshotsEnabled: vi.fn(() => true) }));
+beforeEach(() => vi.mocked(screenshotsEnabled).mockReturnValue(true));
 
 let browser: Browser;
 beforeAll(async () => {
@@ -14,6 +18,49 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await browser?.close();
+});
+
+it("真实工作页关闭截图后仍留步骤日志，重新开启才生成PNG", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cbg-toggle-screenshot-"));
+  const destination = vi.spyOn(diagnostics, "evidenceDirectory").mockReturnValue(directory);
+  const page = await browser.newPage();
+  const screenshot = vi.spyOn(page, "screenshot");
+  registerBrowserEvidence(page);
+  try {
+    await page.setContent("<h1>过程截图开关验证</h1><p>隔离模拟页</p>");
+    vi.mocked(screenshotsEnabled).mockReturnValue(false);
+    await captureBrowserStep(page, { flow: "collection", stage: "disabled", key: "1:first" });
+    vi.mocked(screenshotsEnabled).mockReturnValue(true);
+    await captureBrowserStep(page, { flow: "analysis", stage: "enabled", key: "1:second" });
+    vi.mocked(screenshotsEnabled).mockReturnValue(false);
+    await captureBrowserStep(page, {
+      flow: "analysis",
+      stage: "disabled.error",
+      error: new Error("读取结果失败"),
+    });
+    const entries = (await readFile(path.join(directory, "index.jsonl"), "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(screenshot).toHaveBeenCalledOnce();
+    expect(entries[0]).toMatchObject({ screenshotDisabled: true, key: "1:first" });
+    expect(entries[1].screenshot).toBeTruthy();
+    expect((await readFile(entries[1].screenshot)).subarray(0, 8).toString("hex")).toBe(
+      "89504e470d0a1a0a",
+    );
+    expect(entries[2]).toMatchObject({
+      screenshotDisabled: true,
+      key: "1:second",
+      error: { message: "读取结果失败" },
+    });
+    expect(entries[2].screenshot).toBeUndefined();
+    expect(entries[2].screenshotError).toBeUndefined();
+  } finally {
+    screenshot.mockRestore();
+    destination.mockRestore();
+    await page.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 it("实际Playwright将开页、切页、读取完成及报错现场写入同一索引", async () => {

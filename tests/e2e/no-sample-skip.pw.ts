@@ -292,6 +292,8 @@ for (const rule of [
       await page.context().route("**/*", async (route) => {
         const url = new URL(route.request().url());
         if (url.origin !== "http://cbg-skip.test") return route.abort();
+        if (url.pathname === "/api/runtime/settings")
+          return route.fulfill({ json: { saveScreenshots: false } });
         if (url.pathname.startsWith("/api/")) {
           let body: unknown;
           switch (url.pathname) {

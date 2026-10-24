@@ -41,6 +41,8 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.origin !== "http://cbg-ui.test") return route.abort();
+    if (url.pathname === "/api/runtime/settings")
+      return route.fulfill({ json: { saveScreenshots: false } });
     if (url.pathname.startsWith("/api/")) {
       let body: unknown;
       if (url.pathname === "/api/crawl/detail") {

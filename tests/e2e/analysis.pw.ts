@@ -45,6 +45,8 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== "http://cbg-ui.test") return route.abort();
+      if (url.pathname === "/api/runtime/settings")
+        return route.fulfill({ json: { saveScreenshots: false } });
       if (url.pathname.startsWith("/api/")) {
         let body: unknown;
         const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
@@ -391,6 +393,8 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
       await page.context().route("**/*", async (route) => {
         const url = new URL(route.request().url());
         if (url.origin !== "http://cbg-rule-version.test") return route.abort();
+        if (url.pathname === "/api/runtime/settings")
+          return route.fulfill({ json: { saveScreenshots: false } });
         if (url.pathname.startsWith("/api/")) {
           const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
           let body: unknown;
@@ -530,6 +534,8 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== "http://cbg-waiting.test") return route.abort();
+      if (url.pathname === "/api/runtime/settings")
+        return route.fulfill({ json: { saveScreenshots: false } });
       if (url.pathname.startsWith("/api/")) {
         const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
         let body: unknown;

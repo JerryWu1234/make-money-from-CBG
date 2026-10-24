@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { errors } from "playwright-core";
 import { diagnostics } from "../diagnostics";
+import { screenshotsEnabled } from "../runtime-settings";
 import type { EquipmentEvidenceCapture } from "./browser-equipment-source";
 
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -21,11 +22,14 @@ export function equipmentSearchEvidence(
   let sequence = 0;
   return async (page, input, verifyStable) => {
     const timeout = 15_000;
-    let png!: Buffer;
+    let png: Buffer | undefined;
     let attempt = 0;
     for (attempt = 1; attempt <= 2; attempt++) {
       signal?.throwIfAborted();
+      if (!screenshotsEnabled()) break;
       if (attempt > 1) await verifyStable();
+      signal?.throwIfAborted();
+      if (!screenshotsEnabled()) break;
       const started = Date.now();
       const context = { productKey, equipmentKey: input.equipmentKey, stage: input.stage, attempt };
       diagnostics.record("equipment.evidence_screenshot_started", { ...context, timeout });
@@ -63,23 +67,25 @@ export function equipmentSearchEvidence(
     const stem = String(++sequence).padStart(4, "0") + "-" + input.stage;
     const screenshot = resolve(directory, stem + ".png"),
       parameters = resolve(directory, stem + ".json");
+    const image = png
+      ? { screenshot, screenshotSha256: hash(png) }
+      : { screenshotDisabled: true as const };
     const json = JSON.stringify(
       {
         productKey,
         serverId,
         capturedAt: new Date().toISOString(),
         ...input,
-        screenshot,
-        screenshotSha256: hash(png),
-        screenshotAttempts: attempt,
-        screenshotTimeoutMs: timeout,
+        ...image,
+        screenshotAttempts: png ? attempt : 0,
+        ...(png ? { screenshotTimeoutMs: timeout } : {}),
       },
       null,
       2,
     );
     await mkdir(directory, { recursive: true });
-    await writeFile(screenshot, png, { mode: 0o600 });
+    if (png) await writeFile(screenshot, png, { mode: 0o600 });
     await writeFile(parameters, json, { mode: 0o600 });
-    return { screenshot, parameters, screenshotSha256: hash(png), parametersSha256: hash(json) };
+    return { ...image, parameters, parametersSha256: hash(json) };
   };
 }

@@ -73,6 +73,7 @@ test("截图超时后实际Chrome重新截图，保留全页、账号遮盖和�
       },
     );
     expect(calls).toBe(2);
+    if (result.screenshotDisabled) throw new Error("隔离截图回归必须开启截图");
     const png = await readFile(result.screenshot);
     expect(png.readUInt32BE(16)).toBe(800);
     expect(png.readUInt32BE(20)).toBeGreaterThan(600);

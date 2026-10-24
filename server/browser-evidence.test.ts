@@ -2,9 +2,13 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { errors, type Page } from "playwright-core";
-import { afterEach, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { captureBrowserStep, registerBrowserEvidence } from "./browser-evidence";
 import { diagnostics } from "./diagnostics";
+import { screenshotsEnabled } from "./runtime-settings";
+
+vi.mock("./runtime-settings", () => ({ screenshotsEnabled: vi.fn(() => true) }));
+beforeEach(() => vi.mocked(screenshotsEnabled).mockReturnValue(true));
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -201,4 +205,48 @@ it("暂停前未开始截图或排队时暂停不会新发起截图", async () =
   control.abort();
   await captureBrowserStep(page, { flow: "collection", stage: "cancelled" }, control.signal);
   expect(screenshot).not.toHaveBeenCalled();
+});
+
+it("关闭截图仍记录业务错误和步骤，重新开启后关联关闭期间切换的角色", async () => {
+  const { directory, page, screenshot } = await setup();
+  await captureBrowserStep(page, { flow: "collection", stage: "opened", key: "367:a" });
+  vi.mocked(screenshotsEnabled).mockReturnValue(false);
+  await captureBrowserStep(page, {
+    flow: "collection",
+    stage: "读取失败",
+    key: "367:b",
+    error: new Error("原始读取错误"),
+  });
+  vi.mocked(screenshotsEnabled).mockReturnValue(true);
+  await captureBrowserStep(page, { flow: "analysis", stage: "读取完成" });
+  const records = await entries(directory);
+  expect(screenshot).toHaveBeenCalledTimes(2);
+  expect(records[1]).toMatchObject({
+    key: "367:b",
+    screenshotDisabled: true,
+    error: { message: "原始读取错误" },
+  });
+  expect(records[1].screenshot).toBeUndefined();
+  expect(records[1].screenshotError).toBeUndefined();
+  expect(records[2].key).toBe("367:b");
+  expect(records[2].screenshot).toBeTruthy();
+});
+
+it("运行中关闭让当前截图完成，排队截图在开始前读取最新开关", async () => {
+  const { directory, page, screenshot } = await setup();
+  let finish!: (value: Buffer) => void;
+  screenshot.mockImplementationOnce(() => new Promise<Buffer>((resolve) => (finish = resolve)));
+  const first = captureBrowserStep(page, { flow: "analysis", stage: "in-progress" });
+  await vi.waitFor(() => expect(screenshot).toHaveBeenCalledOnce());
+  const queued = captureBrowserStep(page, { flow: "analysis", stage: "queued" });
+  vi.mocked(screenshotsEnabled).mockReturnValue(false);
+  finish(Buffer.from("completed-before-disable"));
+  await Promise.all([first, queued]);
+  expect(screenshot).toHaveBeenCalledOnce();
+  const records = await entries(directory);
+  expect(records.find((entry) => entry.stage === "in-progress").screenshot).toBeTruthy();
+  expect(records.find((entry) => entry.stage === "queued")).toMatchObject({
+    screenshotDisabled: true,
+  });
+  expect((await readdir(directory)).filter((name) => name.endsWith(".png"))).toHaveLength(1);
 });

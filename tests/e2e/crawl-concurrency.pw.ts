@@ -25,7 +25,16 @@ const detailDocument = (id: string) => {
         ? gear
         : name === "召唤兽/孩子"
           ? "<p>召唤兽(0/10)</p>"
-          : `<p>${name}：模拟角色${id}</p>`,
+          : name === "技能"
+            ? "<p>师门技能</p>" +
+              ["一", "二", "三", "四", "五", "六", "七"]
+                .map(
+                  (suffix) =>
+                    `<p>150</p><img width="30" height="30" data_skill_type="school_skill" data_equip_name="测试技能${suffix}" data_equip_level="150"><p>测试技能${suffix}</p>`,
+                )
+                .join("") +
+              "<p>生活技能</p>"
+            : `<p>${name}：模拟角色${id}</p>`,
     ]),
   );
   return `<meta charset="utf-8"><script>var IsLogin=1,LoginInfo={login:1},EquipInfo={eid:'${id}',server_id:367};window.decode_desc=v=>v;window.RoleInfoParser=class{constructor(){this.raw_info={AllRider:{},jinjie_rider_info:{isJinJie:0},all_skills:{201:140},i3FlyLv:0};this.result={shenqi:false,basic_info:{is_gold_id:false}}}};var content=${JSON.stringify(tabs)};function show(name){document.getElementById('panel').innerHTML=content[name]}</script><section><nav>${MAIN_TABS.map((name) => `<button onclick="show('${name}')">${name}</button>`).join("")}</nav><div id="panel">${"模拟角色完整资料。".repeat(30)}</div><div id="RoleEquipTipsBox" style="display:none"></div><textarea id="equip_desc_value" hidden>fixture-source-${id}</textarea></section>`;
@@ -71,6 +80,8 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
       return route.fulfill({ contentType: "text/html", body });
     }
     if (url.origin !== "http://cbg-ui.test") return route.abort();
+    if (url.pathname === "/api/runtime/settings")
+      return route.fulfill({ json: { saveScreenshots: false } });
     if (url.pathname.startsWith("/api/")) {
       let body: unknown;
       switch (url.pathname) {

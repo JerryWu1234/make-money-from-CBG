@@ -15,6 +15,8 @@ const getRoutes = new Set([
   "/api/crawl/records",
   "/api/scan/status",
   "/api/logs/export",
+  "/api/logs/storage",
+  "/api/runtime/settings",
   "/api/ai/status",
   "/api/ai/models",
   "/api/ai/login/status",
@@ -30,6 +32,8 @@ const postRoutes = new Set([
   "/api/crawl/backfill",
   "/api/crawl/stop",
   "/api/crawl/clear",
+  "/api/logs/clear",
+  "/api/runtime/settings/save",
   "/api/scan/configure",
   "/api/scan/enable",
   "/api/scan/disable",
@@ -140,6 +144,30 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             pathname === "/api/analysis/settings/save" ? 128 * 1024 : 4096,
           )
         : {};
+    if (pathname === "/api/runtime/settings" || pathname === "/api/runtime/settings/save") {
+      const input = body as Record<string, unknown>;
+      if (pathname === "/api/runtime/settings/save" && typeof input.saveScreenshots !== "boolean") {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: "保存截图选项必须为布尔值" }));
+        return;
+      }
+      const settings = await import("./runtime-settings");
+      const result =
+        pathname === "/api/runtime/settings"
+          ? settings.runtimeSettings()
+          : settings.saveRuntimeSettings(input.saveScreenshots);
+      res.end(JSON.stringify(result));
+      return;
+    }
+    if (pathname === "/api/logs/storage" || pathname === "/api/logs/clear") {
+      const { logStorage } = await import("./log-storage");
+      const result =
+        pathname === "/api/logs/storage"
+          ? await logStorage.preview()
+          : await logStorage.clear((body as Record<string, unknown>).token);
+      if (!res.destroyed) res.end(JSON.stringify(result));
+      return;
+    }
     if (pathname.startsWith("/api/analysis/")) {
       switch (pathname) {
         case "/api/analysis/equipment/check":
@@ -443,7 +471,8 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
         ? 400
         : error instanceof Error && error.name === "SchoolFormulaConfirmationError"
           ? 400
-          : error instanceof Error && error.name === "CapturePreparationError"
+          : error instanceof Error &&
+              ["CapturePreparationError", "LogStorageTokenError"].includes(error.name)
             ? 409
             : 500;
     res.end(JSON.stringify({ error: error instanceof Error ? error.message : "请求失败" }));
