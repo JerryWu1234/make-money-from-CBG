@@ -13,6 +13,110 @@ const raw = (id: string) => ({
   game_ordersn: `order-${id}`,
   expire_time: 1900000100 - id.charCodeAt(0),
 });
+
+test("新号优先状态显示实际在途，10并发上限不会显示成已满", async ({ page }, testInfo) => {
+  let status: CrawlStatus = {
+    running: true,
+    phase: "collecting",
+    message: "本地模拟采集状态",
+    captureStrategy: "new-first",
+    concurrency: 10,
+    newRunning: 0,
+    oldRunning: 4,
+    newQueued: 0,
+    oldQueued: 6,
+    page: 1,
+    totalPages: 20,
+    saved: 0,
+    skipped: 0,
+    totalSaved: 0,
+    database: "fixture-only.sqlite",
+  };
+  await page.context().route("**/*", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.origin !== "http://capture-status.test") return route.abort();
+    if (url.pathname.startsWith("/api/")) {
+      let body: unknown;
+      switch (url.pathname) {
+        case "/api/browser/settings":
+          body = { mode: "daily", connected: true, busy: false };
+          break;
+        case "/api/browser/status":
+          body = browserStatus;
+          break;
+        case "/api/crawl/settings":
+          body = { analyzeEquipment: false };
+          break;
+        case "/api/runtime/settings":
+          body = { saveScreenshots: false };
+          break;
+        case "/api/crawl/status":
+          body = status;
+          break;
+        case "/api/crawl/records":
+          body = { page: 1, total: 0, totalPages: 1, items: [] };
+          break;
+        case "/api/scan/status":
+          body = {
+            config: {
+              scheduleType: "daily",
+              daily: { startTime: "09:00" },
+              days: [],
+              maxDurationMinutes: null,
+            },
+            mode: "disabled",
+            state: "disabled",
+            message: "未启用",
+            timezone: "Asia/Shanghai",
+          };
+          break;
+        default:
+          throw new Error("未模拟接口：" + url.pathname);
+      }
+      return route.fulfill({ json: body });
+    }
+    const file = path.join("dist", url.pathname === "/" ? "index.html" : url.pathname);
+    return route.fulfill({
+      contentType: file.endsWith(".js")
+        ? "application/javascript"
+        : file.endsWith(".css")
+          ? "text/css"
+          : "text/html",
+      body: await readFile(file),
+    });
+  });
+  await page.goto("http://capture-status.test");
+  const panel = page.getByRole("region", { name: "详情采集" });
+  const queues = page.getByLabel("采集双队列状态");
+  await expect(panel).toContainText("本轮并发上限：10 个角色");
+  await expect(queues).toContainText("新号优先 · 当前在途 4 个");
+  await expect(queues).toContainText("新号在途 0 · 老号在途 4");
+  await expect(queues).toContainText("新号排队 0 · 老号排队 6");
+  await expect(queues).not.toContainText("/5");
+  await expect(panel).not.toContainText("借用");
+  await panel.screenshot({ path: testInfo.outputPath("old-four-of-ten.png") });
+  status = {
+    ...status,
+    newRunning: 2,
+    oldRunning: 3,
+    newQueued: 5,
+    oldQueued: 10,
+    retryTotal: 20,
+    retryCompleted: 0,
+  };
+  await expect(queues).toContainText("新号优先 · 当前在途 5 个");
+  await expect(queues).toContainText("新号在途 2 · 老号在途 3");
+  await expect(queues).toContainText("新号排队 5 · 老号排队 10");
+  await panel.screenshot({ path: testInfo.outputPath("new-first-with-existing-old.png") });
+  status = { ...status, phase: "retrying", captureStrategy: undefined };
+  await expect(queues).toContainText("已保存任务优先补采 · 当前在途 5 个");
+  await expect(queues).not.toContainText("新号优先");
+  await panel.screenshot({ path: testInfo.outputPath("saved-capture-first.png") });
+  status = { ...status, phase: "collecting", captureStrategy: undefined };
+  await expect(queues).not.toContainText("已保存任务优先补采");
+  await expect(queues).not.toContainText("新号优先");
+  await expect(queues).toContainText("当前在途 5 个");
+});
 const listHtml = (number: number) =>
   `<table id="soldList"><tr id="order_menu"><th><a data_attr_name="expire_time">剩余时间</a></th></tr>${pages[number].map((id) => `<tr><td><a class="soldImg" href="https://xyq.cbg.163.com/equip?s=367&eid=${id}"><img width="40" height="40" data_serverid="367" data_ordersn="order-${id}" data_equip_name="角色${id}" data_price="222" data_selling_time="2026-09-07 12:00:00"></a></td></tr>`).join("")}</table><div id="pager_bar">第${number}页, 共2页 <a href="javascript:goto(${number === 1 ? 2 : 1})">翻页</a></div>`;
 const listDocument = `<meta charset="utf-8"><script>var IsLogin=1,LoginInfo={login:1},QueryArgs={server_type:'3',page:1,order_by:'expire_time DESC'},QueryResult=${JSON.stringify(pages[1].map(raw))};var records=${JSON.stringify(Object.fromEntries(Object.entries(pages).map(([n, ids]) => [n, ids.map(raw)])))};function goto(n){fetch('/mock-list?page='+n).then(r=>r.text()).then(html=>{document.getElementById('query_result').innerHTML=html;QueryArgs.page=n;QueryResult=records[n]})}</script><div id="query_result">${listHtml(1)}</div>`;
@@ -202,10 +306,13 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
     await expect(start).toBeEnabled();
     await count.fill("4");
     await start.click();
-    // 首次准备列表及逐项悬停带有真实节流，等待条件成立后再检查在途配额。
+    // 首次准备列表及逐项悬停带有真实节流，等待条件成立后再检查实际在途数。
     await expect.poll(() => active, { timeout: 30000 }).toBe(4);
     await expect(page.getByText(/定时检查首页新增/)).toBeVisible();
-    await expect(page.getByLabel("采集双队列状态")).toContainText("/2");
+    await expect(page.getByLabel("采集双队列状态")).toContainText("新号优先 · 当前在途 4 个");
+    expect(status.captureStrategy).toBe("new-first");
+    expect(status.newLimit).toBeUndefined();
+    expect(status.oldLimit).toBeUndefined();
     await expect(count).toBeDisabled();
     await page.getByRole("button", { name: "暂停采集", exact: true }).click();
     await expect(count).toBeEnabled();
@@ -221,7 +328,7 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
     await count.fill("2");
     await start.click();
     await expect.poll(() => store.count(), { timeout: 180000 }).toBe(5);
-    await expect(page.getByLabel("采集双队列状态")).toContainText("/1");
+    await expect(page.getByLabel("采集双队列状态")).toContainText("新号优先");
     await expect(page.getByText(/首页下次检查/)).toBeVisible();
     await page.getByRole("button", { name: "暂停采集", exact: true }).click();
     await completion;

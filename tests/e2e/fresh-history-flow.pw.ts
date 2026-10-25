@@ -18,7 +18,7 @@ import { valuationRecord } from "../fixtures/analysis";
 import { browserStatus } from "../fixtures/saved-role";
 
 const failureModes = [
-  "新号、老号共享一个详情队列，慢老号挡住首页检查或新号抓取",
+  "新号排队时仍派发老号、没有新号待派时空着名额，或新号出现后打断老号在途任务",
   "只查看首页或遇到一个旧商品就停止，漏掉跨页、同秒新增商品",
   "跨页重复商品重复入库，详情或报价串到另一个商品",
   "暂停后仍然落库，重启后首页检查进度覆盖历史回补进度",
@@ -363,10 +363,11 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
     await startCapture.click();
     await expect.poll(() => countLanes(activeCapture)).toEqual({ new: 2, old: 2 });
     await expect(crawlCount).toBeDisabled();
-    await expect(page.getByLabel("采集双队列状态")).toContainText("新号在途 2/2 · 老号在途 2/2");
+    await expect(page.getByLabel("采集双队列状态")).toContainText("新号在途 2 · 老号在途 2");
+    expect(status.captureStrategy).toBe("new-first");
     await expect(page.getByText(/首页下次检查：/)).toBeVisible();
     await page.screenshot({
-      path: testInfo.outputPath("capture-two-plus-two.png"),
+      path: testInfo.outputPath("capture-new-priority-old-fill.png"),
       fullPage: true,
     });
     listKeys = [
@@ -378,22 +379,28 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
     await renderList();
     const discoveredNew = () =>
       store.db.prepare("SELECT count(*) n FROM listings WHERE capture_lane='new'").get()!.n;
-    await expect.poll(discoveredNew).toBe(5);
+    await expect.poll(discoveredNew).toBe(6);
     await expect
       .poll(() => ({ new: status.newQueued, old: status.oldQueued }))
       .toEqual({
-        new: 3,
+        new: 4,
         old: 1,
       });
-    expect(store.detail("n6")).toBeNull();
     expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
-    await expect(page.getByLabel("采集双队列状态")).toContainText("新号排队 3");
-    // 待采最多再保留一池；逐个完成新号后继续跨页发现，慢老号仍保持在途。
-    for (let number = 1; number <= 3; number++) {
-      release(`n${number}`, captureGates, allowedCapture);
-      await expect.poll(discoveredNew).toBe(5 + number);
-      expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
-    }
+    await expect(page.getByLabel("采集双队列状态")).toContainText("新号排队 4");
+    // 已在途老号继续；有新号排队时，空出的名额优先给新号。
+    release("n1", captureGates, allowedCapture);
+    await expect.poll(() => activeCapture.has("n3")).toBe(true);
+    await expect.poll(discoveredNew).toBe(7);
+    expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
+    release("n2", captureGates, allowedCapture);
+    await expect.poll(() => activeCapture.has("n4")).toBe(true);
+    await expect.poll(discoveredNew).toBe(8);
+    expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
+    release("n3", captureGates, allowedCapture);
+    await expect.poll(() => activeCapture.has("n5")).toBe(true);
+    expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
+    expect(capturedCalls).not.toContain("o3");
     for (let number = 1; number <= 8; number++) release(`n${number}`, captureGates, allowedCapture);
     await expect.poll(() => store.count()).toBe(8);
     release("o1", captureGates, allowedCapture);
@@ -528,7 +535,11 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
     expect(analysisCalls.filter((key) => key.startsWith("n"))).toHaveLength(9);
     expect(captureConfigurations).toEqual([4, 4]);
     expect(Math.max(...captureStates.map((state) => state.new + state.old))).toBe(4);
-    expect(Math.max(...captureQueuedStates.map((state) => state.new + state.old))).toBe(4);
+    expect(Math.max(...captureQueuedStates.map((state) => state.new))).toBe(4);
+    expect(Math.max(...captureQueuedStates.map((state) => state.old))).toBeLessThanOrEqual(4);
+    expect(
+      Math.max(...captureQueuedStates.map((state) => state.new + state.old)),
+    ).toBeLessThanOrEqual(8);
     expect(Math.max(...analysisStates.map((state) => state.new + state.old))).toBe(10);
     await analysisPage.screenshot({
       path: testInfo.outputPath("fifteen-final-quotes.png"),

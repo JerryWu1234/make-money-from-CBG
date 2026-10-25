@@ -8,6 +8,7 @@ import {
   ListingDisappearedError,
   ListingUnavailableError,
   SellingOrderUnavailableError,
+  type CrawlStatus,
   type CrawlSource,
   type Listing,
   type ListingPage,
@@ -15,7 +16,7 @@ import {
   type SavedRoleRecord,
 } from "./types";
 
-// 失败方式：超出总并发或丢失 2/2 配额、借位打断在途、详情阻挡头扫、同秒跨页漏采、
+// 失败方式：超出总并发、新号排队时先派老、空位未补满、抢占旧在途、详情阻挡头扫、同秒跨页漏采、
 // 水位早于 pending 落库、新号覆盖历史断点、旧失败阻挡新号、异常或暂停未等在途退出。
 const stores: CrawlStore[] = [];
 const memory = () => {
@@ -94,6 +95,74 @@ afterEach(() => {
 });
 
 describe("持续发现新号和历史详情共享采集池", () => {
+  it("历史待采池满时让出头扫，旧在途逐个释放的空位优先派新且两侧队列有界", async () => {
+    vi.useFakeTimers();
+    const db = memory(),
+      known = item(10, 1000),
+      fresh = Array.from({ length: 6 }, (_, index) => item(index + 1, 2000 - index)),
+      old = Array.from({ length: 12 }, (_, index) => item(20 + index)),
+      pages: Listing[][] = [[known], old],
+      src = source(pages),
+      active = holdDetails(src),
+      control = new AbortController();
+    db.observe(known);
+    db.save(known, detail(known));
+    let maximumPending = 0;
+    const publish = vi.fn((_state: Partial<CrawlStatus>) => {
+      maximumPending = Math.max(maximumPending, db.retryItems().length);
+    });
+    const outcome = crawl(src, db, control.signal, publish, {
+      watch: true,
+      concurrency: 4,
+      headIntervalMs: 100,
+    }).catch((error: unknown) => error);
+    try {
+      await flush();
+      await flush();
+      expect(active.size).toBe(4);
+      expect(db.retryItems()).toHaveLength(8);
+      pages[0] = fresh;
+      await vi.advanceTimersByTimeAsync(100);
+      await flush();
+      expect(src.prepare).toHaveBeenCalledTimes(2);
+      expect(fresh.slice(0, 4).every((row) => readSaved(db, row.key)?.status === "pending")).toBe(
+        true,
+      );
+      expect(db.detail(fresh[4]!.key)).toBeNull();
+      expect([...active.keys()]).toEqual(old.slice(0, 4).map((row) => row.key));
+      for (let index = 0; index < 4; index++) {
+        active.get(old[index]!.key)!();
+        await flush();
+        expect(active.has(fresh[index]!.key)).toBe(true);
+        expect(old.slice(index + 1, 4).every((row) => active.has(row.key))).toBe(true);
+        expect(old.slice(4).every((row) => !active.has(row.key))).toBe(true);
+        expect(active.size).toBe(4);
+      }
+      active.get(fresh[0]!.key)!();
+      active.get(fresh[1]!.key)!();
+      await flush();
+      expect(active.has(fresh[4]!.key)).toBe(true);
+      expect(active.has(fresh[5]!.key)).toBe(true);
+      expect([...active.keys()].every((key) => db.captureLane(key) === "new")).toBe(true);
+      active.get(fresh[2]!.key)!();
+      await flush();
+      expect(active.has(old[4]!.key)).toBe(true);
+      expect(active.size).toBe(4);
+      expect(maximumPending).toBe(12);
+      expect(
+        publish.mock.calls.every(
+          ([state]) =>
+            (state.newQueued ?? 0) <= 4 &&
+            (state.oldQueued ?? 0) <= 4 &&
+            (state.newRunning ?? 0) + (state.oldRunning ?? 0) <= 4,
+        ),
+      ).toBe(true);
+    } finally {
+      control.abort(new Error("暂停"));
+      active.forEach((release) => release());
+      await outcome;
+    }
+  });
   it("官网确证不存在的详情在持续采集中只跳过一次，重现不再派发且其它商品继续保存", async () => {
     const db = memory(),
       gone = item(1),
@@ -195,7 +264,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
       await outcome;
     }
   });
-  it("续采先用全部10个名额补齐已保存详情，再开始列表发现", async () => {
+  it("续采先用全部10个名额混合补齐已保存详情，再开始列表发现", async () => {
     const db = memory(),
       old = Array.from({ length: 12 }, (_, i) => item(i + 20)),
       fresh = item(1),
@@ -210,12 +279,16 @@ describe("持续发现新号和历史详情共享采集池", () => {
     try {
       await flush();
       expect(active.size).toBe(10);
+      expect([...active.keys()].filter((key) => db.captureLane(key) === "new")).toHaveLength(5);
+      expect([...active.keys()].filter((key) => db.captureLane(key) === "old")).toHaveLength(5);
       expect(src.prepare).not.toHaveBeenCalled();
       expect(src.hover).not.toHaveBeenCalled();
       [...active.values()].forEach((release) => release());
       await flush();
       expect(active.size).toBe(2);
       expect(db.count()).toBe(10);
+      expect([...active.keys()].filter((key) => db.captureLane(key) === "new")).toHaveLength(1);
+      expect([...active.keys()].filter((key) => db.captureLane(key) === "old")).toHaveLength(1);
       expect(src.prepare).not.toHaveBeenCalled();
       [...active.values()].forEach((release) => release());
       await flush();
@@ -396,14 +469,13 @@ describe("持续发现新号和历史详情共享采集池", () => {
   });
 
   it.each([undefined, 4, 6, 8, 10])(
-    "无上架排序时 %s 并发（默认10）实际各分一半，首页刷新不等详情结束",
+    "无上架排序时 %s 并发（默认10）新号排队优先，排队清空后老号补满空位",
     async (concurrency) => {
       vi.useFakeTimers();
       const db = memory(),
         pool = concurrency ?? 10,
-        half = pool / 2,
         fresh = Array.from({ length: pool + 2 }, (_, i) => item(i + 1)),
-        old = Array.from({ length: half }, (_, i) => item(i + 20));
+        old = Array.from({ length: pool }, (_, i) => item(i + 20));
       const src = source([fresh, old]);
       const read = (page: number): ListingPage => ({
         page,
@@ -413,7 +485,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
       });
       src.prepare = vi.fn(async (order) => {
         if (order === "selling_time DESC") throw new SellingOrderUnavailableError();
-        // 启动补采结束后才进入稳态；此时到达的老号仍应和新号平分名额。
+        // 启动补采结束后登记老号，验证稳态新号优先而非启动补采排序。
         old.forEach((row) => db.observe(row, "old"));
         return read(1);
       });
@@ -426,32 +498,47 @@ describe("持续发现新号和历史详情共享采集池", () => {
         concurrency,
         headIntervalMs: 100,
       }).catch((error: unknown) => error);
-      await flush();
-      expect([...active.keys()].filter((key) => db.captureLane(key) === "new")).toHaveLength(half);
-      expect([...active.keys()].filter((key) => db.captureLane(key) === "old")).toHaveLength(half);
-      const added = item(0, 2000);
-      fresh.unshift(added);
-      await vi.advanceTimersByTimeAsync(100);
-      await flush();
-      expect(db.retryItems().some((row) => row.key === added.key)).toBe(pool > 4);
-      expect(src.detail).toHaveBeenCalledTimes(pool);
-      expect(publish).toHaveBeenCalledWith(
-        expect.objectContaining({ newLimit: half, oldLimit: half }),
-      );
-      old.forEach((row) => active.get(row.key)!());
-      await flush();
-      expect(db.detail(added.key)).not.toBeNull();
-      expect(active.size).toBe(pool);
-      expect([...active.keys()].every((key) => db.captureLane(key) === "new")).toBe(true);
-      // 借位不会中断在途；有老号后，逐个归还借用名额。
-      for (let i = 0; i < half; i++) db.observe(item(i + 40), "old");
-      for (const key of [...active.keys()].slice(0, half)) active.get(key)!();
-      await flush();
-      expect([...active.keys()].filter((key) => db.captureLane(key) === "old")).toHaveLength(half);
-      expect([...active.keys()].filter((key) => db.captureLane(key) === "new")).toHaveLength(half);
-      control.abort(new Error("暂停"));
-      active.forEach((release) => release());
-      expect(await outcome).toMatchObject({ message: "暂停" });
+      try {
+        await flush();
+        expect(active.size).toBe(pool);
+        expect([...active.keys()].every((key) => db.captureLane(key) === "new")).toBe(true);
+        const added = item(0, 2000);
+        fresh.unshift(added);
+        await vi.advanceTimersByTimeAsync(100);
+        await flush();
+        expect(db.retryItems().some((row) => row.key === added.key)).toBe(true);
+        expect(src.detail).toHaveBeenCalledTimes(pool);
+        expect(publish).toHaveBeenCalledWith(
+          expect.objectContaining({
+            captureStrategy: "new-first",
+            newRunning: pool,
+            oldRunning: 0,
+          }),
+        );
+        [...active.values()].forEach((release) => release());
+        await flush();
+        expect(active.size).toBe(pool);
+        const remainingNew = [...active.keys()].filter((key) => db.captureLane(key) === "new");
+        expect(remainingNew).toHaveLength(3);
+        expect([...active.keys()].filter((key) => db.captureLane(key) === "old")).toHaveLength(
+          pool - 3,
+        );
+        for (const key of remainingNew.slice(0, 2)) active.get(key)!();
+        await flush();
+        expect(active.size).toBe(pool);
+        expect([...active.keys()].filter((key) => db.captureLane(key) === "new")).toHaveLength(1);
+        expect([...active.keys()].filter((key) => db.captureLane(key) === "old")).toHaveLength(
+          pool - 1,
+        );
+        active.get(remainingNew[2]!)!();
+        await flush();
+        expect([...active.keys()].sort()).toEqual(old.map((row) => row.key).sort());
+        expect(db.count()).toBe(pool + 3);
+      } finally {
+        control.abort(new Error("暂停"));
+        active.forEach((release) => release());
+        await outcome;
+      }
     },
   );
 
@@ -469,10 +556,10 @@ describe("持续发现新号和历史详情共享采集池", () => {
     },
   );
 
-  it("双方待采时分配 2 新 2 老；老号清空后新号借用空位", async () => {
+  it("新号排队时全部四个名额给新号，排队清空后不等在途清空就由老号补满", async () => {
     const db = memory(),
       fresh = [item(1), item(2), item(3), item(4), item(5)],
-      old = [item(20), item(21)];
+      old = [item(20), item(21), item(22), item(23)];
     const src = source([fresh]),
       active = holdDetails(src),
       control = new AbortController(),
@@ -485,23 +572,31 @@ describe("持续发现新号和历史详情共享采集池", () => {
     const outcome = crawl(src, db, control.signal, publish, { watch: true, concurrency: 4 }).catch(
       (error: unknown) => error,
     );
-    await flush();
-    expect(active.size).toBe(4);
-    expect([...active.keys()].filter((key) => db.captureLane(key) === "new")).toHaveLength(2);
-    expect([...active.keys()].filter((key) => db.captureLane(key) === "old")).toHaveLength(2);
-    old.forEach((row) => active.get(row.key)!());
-    await flush();
-    expect(active.size).toBe(4);
-    expect([...active.keys()].every((key) => db.captureLane(key) === "new")).toBe(true);
-    expect(publish).toHaveBeenCalledWith(
-      expect.objectContaining({ newRunning: 4, oldRunning: 0, newLimit: 2, oldLimit: 2 }),
-    );
-    control.abort(new Error("暂停"));
-    active.forEach((release) => release());
-    expect(await outcome).toMatchObject({ message: "暂停" });
+    try {
+      await flush();
+      expect(active.size).toBe(4);
+      expect([...active.keys()].every((key) => db.captureLane(key) === "new")).toBe(true);
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({ captureStrategy: "new-first", newRunning: 4, oldRunning: 0 }),
+      );
+      [...active.values()].forEach((release) => release());
+      await flush();
+      expect(active.has(fresh[4]!.key)).toBe(true);
+      expect(active.size).toBe(4);
+      expect([...active.keys()].filter((key) => db.captureLane(key) === "old")).toHaveLength(3);
+      expect(src.detail).toHaveBeenCalledTimes(8);
+      expect(db.retryItems().filter((row) => db.captureLane(row.key) === "old")).toHaveLength(4);
+      active.get(fresh[4]!.key)!();
+      await flush();
+      expect([...active.keys()].sort()).toEqual(old.map((row) => row.key).sort());
+    } finally {
+      control.abort(new Error("暂停"));
+      active.forEach((release) => release());
+      await outcome;
+    }
   });
 
-  it("历史列表与头部定时检查均不等待详情池清空，借位也不打断在途", async () => {
+  it("新号在途时头扫和有界历史发现继续，新号排队优先占用下一个空位", async () => {
     vi.useFakeTimers();
     const db = memory(),
       fresh = [item(1), item(2), item(3), item(4)],
@@ -515,25 +610,34 @@ describe("持续发现新号和历史详情共享采集池", () => {
       concurrency: 4,
       headIntervalMs: 100,
     }).catch((error: unknown) => error);
-    await flush();
-    expect(active.size).toBe(4);
-    expect(src.page).toHaveBeenCalledWith(2);
-    expect(db.captureLane(old[0]!.key)).toBe("old");
-    const added = item(0, 1001);
-    pages[0] = [added, ...fresh];
-    await vi.advanceTimersByTimeAsync(100);
-    await flush();
-    expect(src.prepare).toHaveBeenCalledTimes(2);
-    expect(src.prepare).toHaveBeenLastCalledWith("selling_time DESC");
-    expect(db.retryItems().some((row) => row.key === added.key)).toBe(true);
-    expect(active.size).toBe(4);
-    expect(src.detail).toHaveBeenCalledTimes(4);
-    active.get(fresh[0]!.key)!();
-    await flush();
-    expect([...active.keys()].some((key) => db.captureLane(key) === "old")).toBe(true);
-    control.abort(new Error("暂停"));
-    active.forEach((release) => release());
-    expect(await outcome).toMatchObject({ message: "暂停" });
+    try {
+      await flush();
+      expect(active.size).toBe(4);
+      expect(src.page).toHaveBeenCalledWith(2);
+      expect(db.detail(old[0]!.key)).not.toBeNull();
+      const added = item(0, 1001);
+      pages[0] = [added, ...fresh];
+      await vi.advanceTimersByTimeAsync(100);
+      await flush();
+      expect(src.prepare).toHaveBeenCalledTimes(2);
+      expect(src.prepare).toHaveBeenLastCalledWith("selling_time DESC");
+      expect(db.retryItems().some((row) => row.key === added.key)).toBe(true);
+      expect(src.detail).toHaveBeenCalledTimes(4);
+      active.get(fresh[0]!.key)!();
+      await flush();
+      expect(active.has(added.key)).toBe(true);
+      expect(active.size).toBe(4);
+      expect([...active.keys()].every((key) => db.captureLane(key) === "new")).toBe(true);
+      active.get(fresh[1]!.key)!();
+      await flush();
+      expect([...active.keys()].filter((key) => db.captureLane(key) === "old")).toHaveLength(1);
+      expect(active.has(added.key)).toBe(true);
+      expect(active.size).toBe(4);
+    } finally {
+      control.abort(new Error("暂停"));
+      active.forEach((release) => release());
+      await outcome;
+    }
   });
 
   it("头扫越过已知 key 并覆盖旧水位的整秒，登记后才推进水位", async () => {
@@ -743,10 +847,10 @@ describe("持续发现新号和历史详情共享采集池", () => {
     await outcome;
   });
 
-  it("详情排队已满时先处理已有任务，释放名额后继续检查首页", async () => {
+  it("新号待采池已满时有界等待，释放名额后继续头扫", async () => {
     vi.useFakeTimers();
     const db = memory(),
-      fresh = [item(1), item(2), item(3), item(4)],
+      fresh = Array.from({ length: 8 }, (_, index) => item(index + 1)),
       old = Array.from({ length: 7 }, (_, index) => item(20 + index)),
       pages = [fresh, old, [item(40)]],
       src = source(pages),
@@ -757,22 +861,33 @@ describe("持续发现新号和历史详情共享采集池", () => {
       concurrency: 4,
       headIntervalMs: 100,
     }).catch((error: unknown) => error);
-    await flush();
-    expect(src.page).toHaveBeenCalledWith(2);
-    expect(src.page).not.toHaveBeenCalledWith(3);
-    pages[0] = [item(0, 1001), ...fresh];
-    await vi.advanceTimersByTimeAsync(100);
-    await flush();
-    expect(src.prepare).toHaveBeenCalledTimes(1);
-    expect(db.detail("1:0")).toBeNull();
-    [...active.values()].forEach((release) => release());
-    await flush();
-    expect(src.prepare).toHaveBeenCalledTimes(2);
-    expect(db.detail("1:0")).not.toBeNull();
-    expect(src.page).not.toHaveBeenCalledWith(3);
-    control.abort(new Error("暂停"));
-    active.forEach((release) => release());
-    await outcome;
+    try {
+      await flush();
+      expect(active.size).toBe(4);
+      expect(db.retryItems()).toHaveLength(8);
+      expect(src.page).not.toHaveBeenCalledWith(2);
+      pages[0] = [item(0, 1001), ...fresh];
+      await vi.advanceTimersByTimeAsync(100);
+      await flush();
+      expect(src.prepare).toHaveBeenCalledTimes(2);
+      expect(db.detail("1:0")).toBeNull();
+      active.get(fresh[0]!.key)!();
+      await flush();
+      expect(db.detail("1:0")).not.toBeNull();
+      expect(db.retryItems().length).toBeLessThanOrEqual(8);
+      for (let round = 0; round < 4 && db.count() < 9; round++) {
+        [...active.entries()]
+          .filter(([key]) => db.captureLane(key) === "new")
+          .forEach(([, release]) => release());
+        await flush();
+      }
+      expect(db.count()).toBe(9);
+      expect(src.page).toHaveBeenCalledWith(2);
+    } finally {
+      control.abort(new Error("暂停"));
+      active.forEach((release) => release());
+      await outcome;
+    }
   });
 
   // 失败方式：正常整页上新使历史页后移，却被跨首页刷新保留的签名误判成重复页。
@@ -791,37 +906,40 @@ describe("持续发现新号和历史详情共享采集池", () => {
       concurrency: 4,
       headIntervalMs: 100,
     }).catch((error: unknown) => error);
-    await flush();
-    expect(src.page).toHaveBeenCalledWith(2);
-    expect(src.page).not.toHaveBeenCalledWith(3);
-    if (sameSecond)
-      pages.splice(
-        1,
-        0,
-        [100, 101, 102, 103].map((id) => item(id, 1000)),
-      );
-    else pages.unshift([item(0, 1004), item(100, 1003), item(101, 1002), item(102, 1001)]);
-    await vi.advanceTimersByTimeAsync(100);
-    await flush();
-    expect(src.prepare).toHaveBeenCalledTimes(2);
-    // 队列未腾出空间时不能提前推进新首页的水位。
-    if (sameSecond) expect(db.headCheckpoint()?.keys).toHaveLength(4);
-    fresh.forEach((row) => active.get(row.key)!());
-    await flush();
-    if (sameSecond) expect(db.headCheckpoint()?.keys).toHaveLength(8);
-    const runningOld = old.filter((row) => active.has(row.key));
-    expect(runningOld).toHaveLength(4);
-    runningOld.slice(0, 2).forEach((row) => active.get(row.key)!());
-    await flush();
-    expect(src.page).toHaveBeenCalledWith(3);
-    expect(src.page).toHaveBeenCalledWith(4);
-    expect(db.detail(tail.key)).not.toBeNull();
-    expect(
-      vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old[0]!.key),
-    ).toHaveLength(1);
-    control.abort(new Error("暂停"));
-    active.forEach((release) => release());
-    expect(await outcome).toMatchObject({ message: "暂停" });
+    try {
+      await flush();
+      expect(src.page).toHaveBeenCalledWith(2);
+      expect(src.page).not.toHaveBeenCalledWith(3);
+      const added = sameSecond
+        ? [100, 101, 102, 103].map((id) => item(id, 1000))
+        : [item(0, 1004), item(100, 1003), item(101, 1002), item(102, 1001)];
+      if (sameSecond) pages.splice(1, 0, added);
+      else pages.unshift(added);
+      await vi.advanceTimersByTimeAsync(100);
+      await flush();
+      expect(src.prepare).toHaveBeenCalledTimes(2);
+      expect(added.every((row) => readSaved(db, row.key)?.status === "pending")).toBe(true);
+      // 同秒新增全部持久登记后可推进发现水位；不要求详情先完成。
+      if (sameSecond) expect(db.headCheckpoint()?.keys).toHaveLength(8);
+      fresh.forEach((row) => active.get(row.key)!());
+      await flush();
+      expect([...active.keys()].sort()).toEqual(added.map((row) => row.key).sort());
+      if (sameSecond) expect(db.headCheckpoint()?.keys).toHaveLength(8);
+      added.slice(0, 2).forEach((row) => active.get(row.key)!());
+      await flush();
+      expect(old.filter((row) => active.has(row.key))).toHaveLength(2);
+      expect(added.slice(2).every((row) => active.has(row.key))).toBe(true);
+      expect(src.page).toHaveBeenCalledWith(3);
+      expect(src.page).toHaveBeenCalledWith(4);
+      expect(db.detail(tail.key)).not.toBeNull();
+      expect(
+        vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old[0]!.key),
+      ).toHaveLength(1);
+    } finally {
+      control.abort(new Error("暂停"));
+      active.forEach((release) => release());
+      await outcome;
+    }
   });
 
   it("同一次首页刷新周期内的真实重复历史页仍安全停止", async () => {
@@ -965,16 +1083,23 @@ describe("持续发现新号和历史详情共享采集池", () => {
     const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true, concurrency: 4 }).catch(
       (error: unknown) => error,
     );
-    await flush();
-    for (const row of [...old].reverse()) {
-      active.get(row.key)!();
+    try {
       await flush();
-      expect(db.checkpoint()?.key).toBe(old[2]!.key);
+      expect(active.has(fresh.key)).toBe(true);
+      active.get(fresh.key)!();
+      await flush();
+      expect([...active.keys()].sort()).toEqual(old.map((row) => row.key).sort());
+      for (const row of [...old].reverse()) {
+        active.get(row.key)!();
+        await flush();
+        expect(db.checkpoint()?.key).toBe(old[2]!.key);
+      }
+      expect(db.backfillComplete()).toBe(true);
+    } finally {
+      control.abort(new Error("暂停"));
+      active.forEach((release) => release());
+      await outcome;
     }
-    expect(db.backfillComplete()).toBe(true);
-    control.abort(new Error("暂停"));
-    active.forEach((release) => release());
-    await outcome;
   });
 
   it.each(["head", "history"])("%s 商品消失时重读当前页，保留已发现项且继续采集", async (where) => {
@@ -1030,9 +1155,9 @@ describe("持续发现新号和历史详情共享采集池", () => {
       src = source([fresh, [item(20)]]),
       active = holdDetails(src),
       control = new AbortController();
-    src.page = vi.fn(async (number) => {
-      if (number === 2) throw new ListingChangedError();
-      return { page: 1, totalPages: 2, order: "selling_time DESC", items: fresh };
+    src.hover = vi.fn(async (row) => {
+      if (row.key === fresh[4]!.key) throw new ListingChangedError();
+      return row;
     });
     let settled = false;
     const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true, concurrency: 4 }).catch(
@@ -1041,14 +1166,20 @@ describe("持续发现新号和历史详情共享采集池", () => {
         return error;
       },
     );
-    await flush();
-    expect(settled).toBe(false);
-    expect(src.detail).toHaveBeenCalledTimes(4);
-    active.forEach((release) => release());
-    expect(await outcome).toBeInstanceOf(ListingChangedError);
-    expect(src.detail).toHaveBeenCalledTimes(4);
-    expect(db.count()).toBe(0);
-    expect(db.backfillComplete()).toBe(false);
+    try {
+      await flush();
+      expect(settled).toBe(false);
+      expect(src.detail).toHaveBeenCalledTimes(4);
+      active.forEach((release) => release());
+      expect(await outcome).toBeInstanceOf(ListingChangedError);
+      expect(src.detail).toHaveBeenCalledTimes(4);
+      expect(db.count()).toBe(0);
+      expect(db.backfillComplete()).toBe(false);
+    } finally {
+      control.abort(new Error("暂停"));
+      active.forEach((release) => release());
+      await outcome;
+    }
   });
 
   it.each([null, "price", "sellingTime"] as const)(
@@ -1058,35 +1189,44 @@ describe("持续发现新号和历史详情共享采集池", () => {
         fresh = [item(1), item(2), item(3), item(4), item(5)],
         src = source([fresh, [item(20)]]),
         active = holdDetails(src),
-        publish = vi.fn();
+        publish = vi.fn(),
+        control = new AbortController();
       const error = Object.assign(new Error("locator.hover: Timeout 5000ms exceeded"), {
         name: "TimeoutError",
       });
       src.hover = vi.fn(async (row) => {
-        if (row.eid === "20") throw error;
+        if (row.key === fresh[4]!.key) throw error;
         return row;
       });
-      const outcome = crawl(src, db, new AbortController().signal, publish, {
+      const outcome = crawl(src, db, control.signal, publish, {
         watch: true,
         concurrency: 4,
       }).catch((failure: unknown) => failure);
-      await flush();
-      expect(active.size).toBe(4);
-      expect(publish).toHaveBeenCalledWith(
-        expect.objectContaining({ message: expect.stringContaining("已停止派发") }),
-      );
-      if (changed)
-        db.observe({
-          ...fresh[0],
-          ...(changed === "price" ? { price: "200" } : { sellingTime: item(1, 2000).sellingTime }),
-        });
-      active.forEach((release) => release());
-      expect(await outcome).toBe(error);
-      expect(db.count()).toBe(changed ? 3 : 4);
-      expect(src.detail).toHaveBeenCalledTimes(4);
-      expect(readSaved(db, fresh[0].key)?.status).toBe(changed ? "pending" : "complete");
-      expect(db.checkpoint()).toBeUndefined();
-      expect(db.backfillComplete()).toBe(false);
+      try {
+        await flush();
+        expect(active.size).toBe(4);
+        expect(publish).toHaveBeenCalledWith(
+          expect.objectContaining({ message: expect.stringContaining("已停止派发") }),
+        );
+        if (changed)
+          db.observe({
+            ...fresh[0],
+            ...(changed === "price"
+              ? { price: "200" }
+              : { sellingTime: item(1, 2000).sellingTime }),
+          });
+        active.forEach((release) => release());
+        expect(await outcome).toBe(error);
+        expect(db.count()).toBe(changed ? 3 : 4);
+        expect(src.detail).toHaveBeenCalledTimes(4);
+        expect(readSaved(db, fresh[0].key)?.status).toBe(changed ? "pending" : "complete");
+        expect(db.checkpoint()).toBeUndefined();
+        expect(db.backfillComplete()).toBe(false);
+      } finally {
+        control.abort(new Error("暂停"));
+        active.forEach((release) => release());
+        await outcome;
+      }
     },
   );
 

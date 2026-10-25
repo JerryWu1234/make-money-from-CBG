@@ -89,12 +89,12 @@ afterEach(async () => {
   delete runtime[serviceKey];
   crawl.close();
 });
-it("分析概览单列真实详情在途数，不把排队商品都称为正在采集", async () => {
+it.each(["collecting", "retrying"])("分析概览在 %s 阶段单列真实详情在途数", async (phase) => {
   for (let i = 0; i < 5; i++) crawl.observe(analysisRecord(`pending-${i}`).listing);
   mocks.crawling.mockReturnValue(true);
   mocks.status.mockReturnValue({
     running: true,
-    phase: "collecting",
+    phase,
     newRunning: 3,
     oldRunning: 2,
   });

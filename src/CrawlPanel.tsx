@@ -219,8 +219,9 @@ export function CrawlPanel({
       )}
       <p className="status-note">
         并发数只支持正偶数，默认 {DEFAULT_CRAWL_CONCURRENCY}
-        个。开始或继续时，先用全部名额处理已保存的未完成采集任务，再恢复新号、历史角色各占一半；失败任务独立保留，完整入库后才发布为商品并进入分析。
-        空闲名额可互借，有新任务后随在途任务结束恢复各一半。列表首页约每 60
+        个。开始或继续时，先用全部并发名额补采已保存的未完成任务，不分新老；补采结束后再发现商品。
+        持续采集时，有新号排队就优先派发新号，没有新号待派时用老号补空位；已经在途的老号继续完成。
+        失败任务独立保留，完整入库后才发布为商品并进入分析。列表首页约每 60
         秒检查一次，同时逐页核对历史列表。修改后在下次开始或继续采集时生效。
       </p>
       <p className="status-note">手动开始采集会关闭已启用的定时计划。</p>
@@ -246,20 +247,20 @@ export function CrawlPanel({
           {status.running && (
             <p>本轮并发上限：{status.concurrency ?? DEFAULT_CRAWL_CONCURRENCY} 个角色</p>
           )}
-          {status.phase !== "retrying" &&
-            status.newLimit !== undefined &&
-            status.oldLimit !== undefined && (
-              <p aria-label="采集双队列状态">
-                新号在途 {status.newRunning ?? 0}/{status.newLimit} · 老号在途{" "}
-                {status.oldRunning ?? 0}/{status.oldLimit}
-                {` · 新号排队 ${status.newQueued ?? 0} · 老号排队 ${status.oldQueued ?? 0}`}
-                {(status.newRunning ?? 0) > status.newLimit
-                  ? ` · 新号借用 ${(status.newRunning ?? 0) - status.newLimit} 个空闲名额`
-                  : (status.oldRunning ?? 0) > status.oldLimit
-                    ? ` · 老号借用 ${(status.oldRunning ?? 0) - status.oldLimit} 个空闲名额`
-                    : ""}
-              </p>
-            )}
+          {(status.captureStrategy === "new-first" ||
+            status.newRunning !== undefined ||
+            status.oldRunning !== undefined) && (
+            <p aria-label="采集双队列状态">
+              {status.phase === "retrying"
+                ? "已保存任务优先补采 · "
+                : status.captureStrategy === "new-first"
+                  ? "新号优先 · "
+                  : ""}
+              当前在途 {(status.newRunning ?? 0) + (status.oldRunning ?? 0)} 个 · 新号在途{" "}
+              {status.newRunning ?? 0} · 老号在途 {status.oldRunning ?? 0}
+              {` · 新号排队 ${status.newQueued ?? 0} · 老号排队 ${status.oldQueued ?? 0}`}
+            </p>
+          )}
           {status.phase !== "retrying" && status.nextHeadCheckAt && (
             <p className="status-note">
               首页下次检查：{displayTime(status.nextHeadCheckAt)}

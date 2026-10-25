@@ -56,7 +56,6 @@ export async function watchCrawl(
   const ordered = order === ORDER;
   const concurrency = options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
   const interval = options.headIntervalMs ?? 60000;
-  const limits = { new: concurrency / 2, old: concurrency / 2 };
   const running = { new: 0, old: 0 };
   const inFlight = new Map<string, Promise<void>>();
   const runningItems = new Map<string, Listing>();
@@ -94,12 +93,11 @@ export async function watchCrawl(
     const queues = queued();
     publish({
       concurrency,
+      captureStrategy: "new-first",
       newRunning: running.new,
       oldRunning: running.old,
       newQueued: queues.new.length,
       oldQueued: queues.old.length,
-      newLimit: limits.new,
-      oldLimit: limits.old,
       saved,
       skipped,
       failed,
@@ -185,9 +183,7 @@ export async function watchCrawl(
     while (!failure && !signal.aborted && inFlight.size < concurrency) {
       const queues = queued();
       let lane: CrawlLane;
-      if (queues.new.length && queues.old.length) {
-        lane = running.new < limits.new ? "new" : "old";
-      } else if (queues.new.length) lane = "new";
+      if (queues.new.length) lane = "new";
       else if (queues.old.length) lane = "old";
       else break;
       const item = queues[lane][0]!;
@@ -214,10 +210,10 @@ export async function watchCrawl(
     try {
       while (true) {
         check();
-        // 列表发现不能持续超过详情处理速度；除在途外最多再保留一池待采任务。
-        while (queued().new.length + queued().old.length >= concurrency) {
+        // 两侧分别有界，老号排队不能阻止刚发现的新号登记。
+        while (queued()[lane].length >= concurrency) {
           pump();
-          if (queued().new.length + queued().old.length < concurrency) break;
+          if (queued()[lane].length < concurrency) break;
           publish({ detailProgress: "详情待采队列已满，先处理已发现商品，再继续扫描…" });
           await waitForWork(true);
           check();
@@ -331,7 +327,10 @@ export async function watchCrawl(
       if (signal.aborted || failure) finish();
     });
 
-  publish({ phase: "collecting", message: "持续检查新上架角色，并从原断点补齐历史角色…" });
+  publish({
+    phase: "collecting",
+    message: "优先采集新上架角色，空闲名额继续从原断点补齐历史角色…",
+  });
   try {
     const first = await retryDiscovery(async () => {
       const first = await source.prepare(order);
@@ -376,8 +375,8 @@ export async function watchCrawl(
           historyPass++;
           previousSignature = "";
         }
-      } else if (!historyDone && queued().old.length < Math.max(1, limits.old)) {
-        const signature = await retryDiscovery(async () => {
+      } else if (!historyDone && !queued().new.length && queued().old.length < concurrency) {
+        const discovered = await retryDiscovery(async () => {
           const page = await source.page(historyPage);
           check();
           checkPage(page, historyPage, order);
@@ -388,6 +387,9 @@ export async function watchCrawl(
           publish({ historyPage, page: historyPage, totalPages });
           for (const listed of page.items) {
             const lane = !ordered && historyPass > 0 && !store.detail(listed.key) ? "new" : "old";
+            // 队列满时保留当前历史页，让出发现流程供到期头扫使用。
+            // 下次重读同页；只有全页登记后才推进页码和重复页签名。
+            if (queued()[lane].length >= concurrency) return { signature, complete: false };
             const item = await observe(listed, lane);
             if (store.captureLane(item.key) === "old")
               historyPoints.set(item.key, {
@@ -401,11 +403,13 @@ export async function watchCrawl(
                 },
               });
           }
-          return signature;
+          return { signature, complete: true };
         });
-        previousSignature = signature;
-        historyDone = historyPage >= totalPages;
-        historyPage++;
+        if (discovered.complete) {
+          previousSignature = discovered.signature;
+          historyDone = historyPage >= totalPages;
+          historyPage++;
+        }
         pump();
       } else await waitForWork();
     }

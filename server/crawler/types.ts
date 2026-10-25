@@ -169,6 +169,7 @@ export interface Checkpoint {
 }
 export interface CrawlStatus {
   concurrency?: number;
+  captureStrategy?: "new-first";
   newRunning?: number;
   oldRunning?: number;
   newQueued?: number;

@@ -67,7 +67,7 @@ export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[
           captureActivity: {
             running: capture.running,
             phase: capture.phase,
-            ...(capture.running && capture.phase === "collecting"
+            ...(capture.running && (capture.phase === "collecting" || capture.phase === "retrying")
               ? { inFlight: (capture.newRunning || 0) + (capture.oldRunning || 0) }
               : {}),
           },
