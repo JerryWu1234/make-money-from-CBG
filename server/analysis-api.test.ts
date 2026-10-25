@@ -13,7 +13,10 @@ const mocks = vi.hoisted(() => ({
   saveAnalysisSettings: vi.fn(),
   record: vi.fn(),
 }));
-vi.mock("./analysis/controller", () => mocks);
+vi.mock("./analysis/controller", () => ({
+  ...mocks,
+  analysisOverviewAsync: mocks.analysisOverview,
+}));
 vi.mock("./ai-connection", () => ({
   aiProvider: (value: unknown) => {
     if (value !== "codex" && value !== "deepseek") throw new Error("请选择 Codex 或 DeepSeek");

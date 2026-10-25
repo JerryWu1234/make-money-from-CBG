@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { pollingError } from "./request-error";
 import { DEFAULT_CRAWL_CONCURRENCY, type CrawlStatus } from "../server/crawler/types";
 import { RoleDetailDrawer } from "./RoleDetailDrawer";
 import { SavedRoleList, displayTime } from "./SavedRoleList";
@@ -85,7 +86,7 @@ export function CrawlPanel({
           onRunning(data.running);
         }
       } catch (e) {
-        if (!closed) setTransportError(e instanceof Error ? e.message : "采集服务不可用");
+        if (!closed) setTransportError(pollingError(e, "读取采集进度"));
       } finally {
         if (!closed) timer = setTimeout(() => void poll(), 1500);
       }

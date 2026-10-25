@@ -55,13 +55,10 @@ function service() {
 export function appendCapturedAnalysis() {
   return runtime[serviceKey]?.runner.appendCaptured() || 0;
 }
-export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[0]) {
-  service().store.recover();
-  const profile = loadProfile(service().store.db);
+function overviewStatus(profile: ReturnType<typeof loadProfile>) {
   const preparation = service().preparing;
   const capture = preparation?.ownsCapture ? preparation.status() : crawlStatus();
   return {
-    ...service().store.overview({ ...options, currentProfile: profile }),
     ...(capture
       ? {
           captureActivity: {
@@ -94,6 +91,21 @@ export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[
     },
   };
 }
+export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[0]) {
+  service().store.recover();
+  const profile = loadProfile(service().store.db);
+  return {
+    ...service().store.overview({ ...options, currentProfile: profile }),
+    ...overviewStatus(profile),
+  };
+}
+export async function analysisOverviewAsync(options: Parameters<AnalysisStore["overview"]>[0]) {
+  service().store.recover();
+  const profile = loadProfile(service().store.db);
+  const overview = await service().store.overviewAsync({ ...options, currentProfile: profile });
+  return { ...overview, ...overviewStatus(profile) };
+}
+
 async function prepareCaptures(keys?: string[]) {
   const analysis = service();
   if (analysis.preparing) throw new Error("正在采集角色完整资料，请等待当前准备完成");

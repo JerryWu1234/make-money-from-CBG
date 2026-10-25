@@ -275,7 +275,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
           break;
         case "/api/analysis/status": {
           const provider = params.get("provider");
-          result = analysis.analysisOverview({
+          result = await analysis.analysisOverviewAsync({
             provider: provider ? (await import("./ai-connection")).aiProvider(provider) : undefined,
             runId: params.get("runId") || undefined,
             page: Number(params.get("page") || 1),

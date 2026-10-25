@@ -32,7 +32,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./crawler/controller", () => mocks);
 vi.mock("./crawler/schedule", () => mocks);
 vi.mock("./browser", () => mocks);
-vi.mock("./analysis/controller", () => mocks);
+vi.mock("./analysis/controller", () => ({
+  ...mocks,
+  analysisOverviewAsync: mocks.analysisOverview,
+}));
 vi.mock("./ai-connection", () => mocks);
 vi.mock("./analysis/equipment-check", () => mocks);
 vi.mock("./analysis/pet-check", () => mocks);
@@ -62,7 +65,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.doMock("./analysis/controller", () => {
     mocks.analysisControllerImported();
-    return mocks;
+    return { ...mocks, analysisOverviewAsync: mocks.analysisOverview };
   });
   vi.doMock("./analysis/equipment-check", () => {
     mocks.equipmentCheckImported();
@@ -104,6 +107,25 @@ it("正式商品分析接口转交完整范围，拒绝无效范围", async () =
     await (await import("./api")).apiMiddleware(invalid, res, vi.fn());
     expect(res.statusCode).toBe(400);
   }
+});
+
+it("分析状态接口等待异步汇总结果，不提前返回空Promise对象", async () => {
+  let finish!: (value: unknown) => void;
+  mocks.analysisOverview.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const req = request("/api/analysis/status");
+  req.method = "GET";
+  const res = response();
+  const pending = (await import("./api")).apiMiddleware(req, res, vi.fn());
+  while (!finish) await Promise.resolve();
+  expect(res.end).not.toHaveBeenCalled();
+  finish({ ranking: [], records: { total: 707 } });
+  await pending;
+  expect(JSON.parse(res.end.mock.calls[0][0])).toMatchObject({ records: { total: 707 } });
 });
 
 it("资料待补采返回409并保留明确的角色提示", async () => {

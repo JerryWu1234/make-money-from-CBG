@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { setImmediate as yieldThread } from "node:timers/promises";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import type { AiProvider } from "../ai/types";
 import type { Listing, SavedRoleRecord } from "../crawler/types";
@@ -126,6 +127,15 @@ function profileScope(
 
 export class AnalysisStore {
   private idleAppendSnapshot?: { runId: string; changes: number; version: number };
+  private recommendationCache = new Map<
+    string,
+    {
+      signature: string;
+      recommendation?: AnalysisItem["recommendation"];
+      assetSummary?: AnalysisItem["assetSummary"];
+    }
+  >();
+  private overviewRequests = new Map<string, Promise<AnalysisOverview>>();
   constructor(readonly db: DatabaseSync) {
     db.exec(`CREATE TABLE IF NOT EXISTS analysis_runs (
       id TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, rule_version TEXT NOT NULL,
@@ -1179,7 +1189,35 @@ export class AnalysisStore {
       .run(key, now());
     return { key, viewed: true };
   }
-  overview(
+  overview(options: Parameters<AnalysisStore["overviewSteps"]>[0] = {}): AnalysisOverview {
+    const steps = this.overviewSteps(options);
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    return step.value;
+  }
+  async overviewAsync(
+    options: Parameters<AnalysisStore["overviewSteps"]>[0] = {},
+  ): Promise<AnalysisOverview> {
+    const key = JSON.stringify(options);
+    const existing = this.overviewRequests.get(key);
+    if (existing) return existing;
+    const request = (async () => {
+      const steps = this.overviewSteps(options);
+      let step = steps.next();
+      while (!step.done) {
+        await yieldThread();
+        step = steps.next();
+      }
+      return step.value;
+    })();
+    this.overviewRequests.set(key, request);
+    try {
+      return await request;
+    } finally {
+      if (this.overviewRequests.get(key) === request) this.overviewRequests.delete(key);
+    }
+  }
+  private *overviewSteps(
     options: {
       provider?: AiProvider;
       runId?: string;
@@ -1192,13 +1230,15 @@ export class AnalysisStore {
       showViewed?: boolean;
       scope?: import("../crawler/types").SavedListingScope;
     } = {},
-  ): AnalysisOverview {
+  ): Generator<void, AnalysisOverview, void> {
+    yield;
     const ids = this.db
       .prepare(
         `SELECT id FROM analysis_runs ${options.provider ? "WHERE provider=?" : ""} ORDER BY created_at DESC LIMIT 30`,
       )
       .all(...(options.provider ? [options.provider] : []));
     const runs = ids.map((row) => this.run(String(row.id))!);
+    yield;
     const activeRun = this.activeRun();
     const run = options.runId ? this.run(options.runId) : activeRun || runs[0] || null;
     const sourceValues = options.runId ? [run?.id || ""] : [];
@@ -1248,39 +1288,102 @@ export class AnalysisStore {
       .prepare(`${query} ORDER BY key ASC LIMIT 20 OFFSET ?`)
       .all(...values, (page - 1) * 20)
       .map((row) => this.item(row, options.currentProfile, options.summary));
+    yield;
     const ranking: AnalysisItem[] = [];
     const manualReview: AnalysisItem[] = [];
-    // Sort only identity and numeric keys; hydrate evidence in that order afterward.
-    // The removed summary fields do not affect eligibility or the ranking values.
+    const profileKey = textHash(JSON.stringify(options.currentProfile || null));
+    const signature = (row: Row) =>
+      textHash(
+        JSON.stringify([
+          row.listing_json,
+          row.detail_json,
+          row.result_json,
+          row.profile_json,
+          profileKey,
+        ]),
+      );
+    // Materialize only keys before yielding: never leave a SQLite iterator open
+    // while collection can update the same connection's tables.
     const rankedRows = this.db
       .prepare(
         `SELECT l.key,t.id task_id,views.viewed_at FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN recommendation_views views ON views.listing_key=l.key WHERE (${stateSql})='completed' AND json_type(t.result_json,'$.valuation.bare_role_value') IN ('integer','real')${options.showViewed ? "" : " AND views.listing_key IS NULL"} ORDER BY coalesce(json_extract(t.result_json,'$.valuation.price_difference_ratio'),json_extract(t.result_json,'$.valuation.margin_of_safety')) DESC,json_extract(t.result_json,'$.score') DESC,l.key ASC`,
       )
-      .iterate(...sourceValues);
+      .all(...sourceValues);
+    yield;
     const rankedProduct = this.db.prepare(
-      `SELECT ${productColumns},l.detail_json FROM listings l JOIN analysis_tasks t ON t.listing_key=l.key JOIN analysis_runs selected_run ON selected_run.id=t.run_id WHERE l.key=? AND t.id=?`,
+      `SELECT ${productColumns},l.detail_json,views.viewed_at FROM listings l JOIN analysis_tasks t ON t.listing_key=l.key JOIN analysis_runs selected_run ON selected_run.id=t.run_id LEFT JOIN recommendation_views views ON views.listing_key=l.key WHERE l.key=? AND t.id=? AND (${taskSelection})`,
     );
+    const selected = new Map<string, { taskId: SQLOutputValue; signature: string }>();
+    let deadline = performance.now() + 8;
     for (const candidate of rankedRows) {
-      const row = rankedProduct.get(candidate.key, candidate.task_id)!;
-      const item = this.item(row, options.currentProfile, options.summary);
-      item.recommendationViewed = !!candidate.viewed_at;
-      if (!item.profileChanged) {
-        const record: SavedRoleRecord = {
+      if (performance.now() >= deadline) {
+        yield;
+        deadline = performance.now() + 8;
+      }
+      const row = rankedProduct.get(candidate.key, candidate.task_id, ...sourceValues);
+      if (!row || row.state !== "completed" || (!options.showViewed && row.viewed_at)) continue;
+      const key = String(row.key),
+        fingerprint = signature(row);
+      let cached = this.recommendationCache.get(key);
+      let item: AnalysisItem | undefined;
+      let record: SavedRoleRecord | undefined;
+      if (!cached || cached.signature !== fingerprint) {
+        item = this.item(row, options.currentProfile, options.summary);
+        record = {
           listing: JSON.parse(String(row.listing_json)),
           detail: JSON.parse(String(row.detail_json)),
           status: "complete",
           error: null,
         };
-        item.recommendation = recommendationFor(record, item.valuation);
-        if (item.recommendation.status === "recommended" && ranking.length < 10) {
-          item.assetSummary = capturedAssetSummary(record);
+        cached = {
+          signature: fingerprint,
+          ...(!item.profileChanged
+            ? { recommendation: recommendationFor(record, item.valuation) }
+            : {}),
+        };
+      }
+      // Keep a bounded LRU of small decisions, never entire role source documents.
+      this.recommendationCache.delete(key);
+      this.recommendationCache.set(key, cached);
+      if (this.recommendationCache.size > 2048)
+        this.recommendationCache.delete(this.recommendationCache.keys().next().value!);
+      const status = cached.recommendation?.status;
+      if (
+        (status === "recommended" && ranking.length < 10) ||
+        (status === "manual" && manualReview.length < 10)
+      ) {
+        item ||= this.item(row, options.currentProfile, options.summary);
+        item.recommendationViewed = !!row.viewed_at;
+        item.recommendation = structuredClone(cached.recommendation);
+        if (status === "recommended") {
+          record ||= {
+            listing: JSON.parse(String(row.listing_json)),
+            detail: JSON.parse(String(row.detail_json)),
+            status: "complete",
+            error: null,
+          };
+          cached.assetSummary ??= capturedAssetSummary(record);
+          item.assetSummary = structuredClone(cached.assetSummary);
           ranking.push(item);
-        }
-        if (item.recommendation.status === "manual" && manualReview.length < 10)
-          manualReview.push(item);
+        } else manualReview.push(item);
+        selected.set(key, { taskId: candidate.task_id, signature: fingerprint });
       }
       if (ranking.length === 10 && manualReview.length === 10) break;
     }
+    // A yielding overview may overlap capture, deletion, quote expiry or a view action.
+    // Revalidate displayed rows synchronously before publishing; do not resurrect stale results.
+    const stillCurrent = (item: AnalysisItem) => {
+      const chosen = selected.get(item.key)!;
+      const row = rankedProduct.get(item.key, chosen.taskId, ...sourceValues);
+      return (
+        !!row &&
+        row.state === "completed" &&
+        (options.showViewed || !row.viewed_at) &&
+        signature(row) === chosen.signature
+      );
+    };
+    const currentRanking = ranking.filter(stillCurrent),
+      currentManual = manualReview.filter(stillCurrent);
     const history = this.db
       .prepare(
         `SELECT a.id,a.state,a.created_at,a.finished_at,a.error,t.id task_id,json_extract(t.source_listing_json,'$.name') name FROM analysis_attempts a JOIN analysis_tasks t ON a.task_id=t.id WHERE t.run_id=? ORDER BY a.created_at DESC,a.id ASC LIMIT 30`,
@@ -1365,8 +1468,8 @@ export class AnalysisStore {
       run,
       activeRun,
       runs,
-      ranking,
-      manualReview,
+      ranking: currentRanking,
+      manualReview: currentManual,
       records: { page, totalPages, total, items: records },
       history,
       results: {

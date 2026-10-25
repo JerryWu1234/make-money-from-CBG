@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { pollingError } from "./request-error";
 import type { AiProvider } from "../server/ai/types";
 import {
   analysisConcurrency,
@@ -170,7 +171,7 @@ export function AnalysisPreview() {
         timer = setTimeout(refresh, next.activeRun || next.capturePreparation ? 1500 : 5000);
       } catch (failure) {
         if (controller.signal.aborted) return;
-        setLoadError(failure instanceof Error ? failure.message : "无法加载分析记录");
+        setLoadError(pollingError(failure, "读取分析进度"));
         timer = setTimeout(refresh, 5000);
       }
     }
