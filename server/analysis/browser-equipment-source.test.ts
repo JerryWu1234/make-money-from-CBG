@@ -21,11 +21,13 @@ const runtime = vi.hoisted(() => ({
   createHiddenPage: vi.fn(),
   getBrowser: vi.fn(),
   crawlDatabase: vi.fn(),
+  captureBrowserStep: vi.fn(),
 }));
 vi.mock("../session", () => ({
   createHiddenPage: runtime.createHiddenPage,
   getBrowser: runtime.getBrowser,
 }));
+vi.mock("../browser-evidence", () => ({ captureBrowserStep: runtime.captureBrowserStep }));
 vi.mock("../crawler/controller", () => ({ crawlDatabase: runtime.crawlDatabase }));
 vi.mock("../crawler/page", () => ({
   assertAvailable: vi.fn(),
@@ -1744,4 +1746,51 @@ it("官网类型已确认的衣服使用可还原初防，不因非核心气血�
   expect(query.args.init_defense).toBe(0);
   expect(query.args).not.toHaveProperty("init_hp");
   expect(query.coreSkipReason).toBeNull();
+});
+
+it("装备开页完成与后续页面错误按顺序留图，保留原始错误", async () => {
+  runtime.captureBrowserStep.mockClear();
+  const failure = new Error("fixture bootstrap failure");
+  const search = {
+    goto: vi.fn().mockResolvedValue(null),
+    waitForFunction: vi.fn().mockRejectedValue(failure),
+    close: vi.fn(),
+  } as unknown as Page;
+  const detail = { close: vi.fn() } as unknown as Page;
+  const signal = new AbortController().signal;
+  const source = equipmentSourceFromPages(search, detail, signal, "1");
+  try {
+    await expect(source.discover(item(), signal)).rejects.toBe(failure);
+    expect(runtime.captureBrowserStep.mock.calls.map((call) => call[1])).toEqual([
+      { flow: "analysis", stage: "equipment.search.opened", key: "道具/法宝:0" },
+      { flow: "analysis", stage: "equipment.discover.failed", key: "道具/法宝:0", error: failure },
+    ]);
+  } finally {
+    await source.close();
+  }
+});
+
+it("装备详情导航失败先留图再传播原错，不将截图当作报价凭证", async () => {
+  runtime.captureBrowserStep.mockClear();
+  const failure = new Error("HTTP 403 Forbidden");
+  const search = { close: vi.fn() } as unknown as Page;
+  const detail = { goto: vi.fn().mockRejectedValue(failure), close: vi.fn() } as unknown as Page;
+  const signal = new AbortController().signal;
+  const source = equipmentSourceFromPages(search, detail, signal, "1");
+  try {
+    await expect(
+      source.readSource("https://xyq.cbg.163.com/equip?s=1&eid=fixture", signal),
+    ).rejects.toBe(failure);
+    expect(runtime.captureBrowserStep).toHaveBeenCalledWith(
+      detail,
+      expect.objectContaining({
+        flow: "analysis",
+        stage: "equipment.detail.opened.failed",
+        error: failure,
+      }),
+      expect.any(AbortSignal),
+    );
+  } finally {
+    await source.close();
+  }
 });

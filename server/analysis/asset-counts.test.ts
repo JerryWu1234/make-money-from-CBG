@@ -9,6 +9,12 @@ import type { PetSnapshot } from "../crawler/types";
 function recordWithAssets() {
   const record = valuationRecord();
   record.detail!.captureMode = "all";
+  record.detail!.valuation = {
+    version: 1,
+    fields: [],
+    issues: [],
+    source: { serverId: "367", eid: "item-a" },
+  };
   const helmet = {
     index: 0,
     name: "测试头盔",

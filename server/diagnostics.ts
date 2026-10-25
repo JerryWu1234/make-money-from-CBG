@@ -1,4 +1,16 @@
-import { appendFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import {
+  appendFileSync,
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
@@ -44,15 +56,58 @@ export class DiagnosticLog {
   private readonly runId = randomUUID();
   private sequence = 0;
   private writeError: string | null = null;
+  private writerRegistered = false;
 
   constructor(
     private readonly directory = path.resolve("data/logs"),
     private readonly enabled = true,
   ) {}
 
+  storageContext() {
+    return { directory: this.directory, runId: this.runId };
+  }
+
+  private registerWriter() {
+    if (!this.enabled || this.writerRegistered) return;
+    mkdirSync(this.directory, { recursive: true, mode: 0o700 });
+    const directory = path.join(this.directory, ".writers");
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (lstatSync(this.directory).isSymbolicLink() || lstatSync(directory).isSymbolicLink())
+      throw new Error("运行日志目录不能使用符号链接");
+    const temporary = path.join(directory, `${this.runId}-${randomUUID()}.tmp`);
+    const descriptor = openSync(temporary, "wx", 0o600);
+    try {
+      try {
+        writeFileSync(descriptor, JSON.stringify({ runId: this.runId, pid: process.pid }));
+        fsyncSync(descriptor);
+      } finally {
+        closeSync(descriptor);
+      }
+      renameSync(temporary, path.join(directory, this.runId + ".json"));
+      this.writerRegistered = true;
+    } catch (error) {
+      try {
+        unlinkSync(temporary);
+      } catch {
+        // Keep the original write error; a unique temporary name cannot block a retry.
+      }
+      throw error;
+    }
+  }
+
+  evidenceDirectory() {
+    try {
+      this.registerWriter();
+    } catch {
+      // Screenshot/log write failures are reported by their existing callers.
+    }
+    return path.join(this.directory, "browser-steps", this.runId);
+  }
+
   record(event: string, data: Record<string, unknown> = {}) {
     if (!this.enabled) return;
     try {
+      this.registerWriter();
       mkdirSync(this.directory, { recursive: true, mode: 0o700 });
       this.file ||= path.join(
         this.directory,

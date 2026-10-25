@@ -5,6 +5,7 @@ import { CrawlStore } from "../../server/crawler/store";
 import type { SavedRoleRecord } from "../../server/crawler/types";
 import { AnalysisRunner } from "../../server/analysis/runner";
 import { AnalysisStore } from "../../server/analysis/store";
+import type { AnalysisOverview } from "../../server/analysis/types";
 import { CALCULATION_VERSION, createProfile, PROMPT_FILE } from "../../server/analysis/profile";
 import { analysisRecord, analysisResponse } from "../fixtures/analysis";
 
@@ -44,6 +45,10 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== "http://cbg-ui.test") return route.abort();
+      if (url.pathname === "/api/runtime/settings")
+        return route.fulfill({ json: { saveScreenshots: false } });
+      if (url.pathname === "/api/browser/settings")
+        return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
       if (url.pathname.startsWith("/api/")) {
         let body: unknown;
         const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
@@ -390,6 +395,10 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
       await page.context().route("**/*", async (route) => {
         const url = new URL(route.request().url());
         if (url.origin !== "http://cbg-rule-version.test") return route.abort();
+        if (url.pathname === "/api/runtime/settings")
+          return route.fulfill({ json: { saveScreenshots: false } });
+        if (url.pathname === "/api/browser/settings")
+          return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
         if (url.pathname.startsWith("/api/")) {
           const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
           let body: unknown;
@@ -513,6 +522,7 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
   };
   let calls = 0;
   let connects = 0;
+  let captureActivity: AnalysisOverview["captureActivity"];
   const runner = new AnalysisRunner(store, async () => {
     connects++;
     return {
@@ -528,6 +538,10 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== "http://cbg-waiting.test") return route.abort();
+      if (url.pathname === "/api/runtime/settings")
+        return route.fulfill({ json: { saveScreenshots: false } });
+      if (url.pathname === "/api/browser/settings")
+        return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
       if (url.pathname.startsWith("/api/")) {
         const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
         let body: unknown;
@@ -547,7 +561,10 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
             };
             break;
           case "/api/analysis/status":
-            body = store.overview();
+            body = {
+              ...store.overview({ scope: url.searchParams.get("scope") as "complete" }),
+              ...(captureActivity ? { captureActivity } : {}),
+            };
             break;
           case "/api/analysis/start":
             body = store.run(await runner.start("codex"));
@@ -584,6 +601,11 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
     const waiting = page.getByRole("button", { name: "等待新角色…", exact: true });
     await expect(waiting).toBeDisabled();
     await expect(page.getByText(/正在等待首个角色资料采集完整/)).toBeVisible();
+    await expect(page.getByLabel("采集续采提示")).toContainText("当前没有正在执行的模型分析");
+    await expect(page.getByRole("link", { name: "前往采集工作台抓取新角色" })).toHaveAttribute(
+      "href",
+      "/",
+    );
     const id = store.activeRun()!.id;
     expect(store.activeRun()).toMatchObject({ total: 0, phase: "waiting_capture" });
     expect(calls).toBe(0);
@@ -604,9 +626,39 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
     const pending = add("b", false);
     await page.reload();
     await expect(waiting).toBeDisabled();
+    await expect(page.getByLabel("采集续采提示")).toContainText(
+      "另有 1 项采集任务：1 件待采或采集中 · 0 件采集失败待重试。完整入库后才会成为商品并进入分析。",
+    );
+    await expect(page.getByRole("link", { name: "前往采集工作台查看任务" })).toHaveAttribute(
+      "href",
+      "/",
+    );
     await expect(page.getByLabel("分析模型")).toHaveValue("waiting-fixture-model");
     expect(calls).toBe(1);
     expect(connects).toBe(1);
+    captureActivity = { running: true, phase: "collecting", inFlight: 1 };
+    await page.reload();
+    await expect(page.getByLabel("采集续采提示")).toContainText(
+      "1 件正在采集 · 0 件排队待采 · 0 件采集失败待重试",
+    );
+    captureActivity = { running: false, phase: "error" };
+    await page.reload();
+    await expect(page.getByLabel("采集续采提示")).toContainText(
+      "采集已因错误停止，分析正在等待资料",
+    );
+    await expect(page.getByLabel("采集续采提示")).toContainText("0 件采集失败待重试");
+    await page.screenshot({
+      path: testInfo.outputPath("capture-stopped-with-pending.png"),
+      fullPage: true,
+    });
+    captureActivity = undefined;
+    crawl.fail(pending.listing.key, "详情页读取超时");
+    await page.reload();
+    await expect(page.getByLabel("采集续采提示")).toContainText(
+      "另有 1 项采集任务：0 件待采或采集中 · 1 件采集失败待重试。完整入库后才会成为商品并进入分析。",
+    );
+    await expect(page.getByLabel("分析页面概览")).toContainText("完整商品");
+    expect(calls).toBe(1);
     await page.screenshot({
       path: testInfo.outputPath("waiting-for-new-roles.png"),
       fullPage: true,
@@ -617,6 +669,8 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
     );
     await expect(waiting).toBeDisabled();
     expect(store.activeRun()).toMatchObject({ id, completed: 2, phase: "waiting_capture" });
+    await expect(page.getByRole("link", { name: "前往采集工作台补采" })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "前往采集工作台抓取新角色" })).toBeVisible();
     expect(calls).toBe(2);
     expect(connects).toBe(1);
     await page.getByRole("button", { name: "暂停分析", exact: true }).click();

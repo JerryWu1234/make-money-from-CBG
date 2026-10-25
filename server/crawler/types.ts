@@ -1,4 +1,4 @@
-export const DEFAULT_CRAWL_CONCURRENCY = 4;
+export const DEFAULT_CRAWL_CONCURRENCY = 10;
 export type CrawlLane = "new" | "old";
 export interface HeadCheckpoint {
   time: string;
@@ -26,6 +26,25 @@ export class ListingChangedError extends Error {
   constructor() {
     super("列表在采集中发生变化，正在按当前列表继续匹配");
     this.name = "ListingChangedError";
+  }
+}
+export class ListingDisappearedError extends ListingChangedError {
+  constructor() {
+    super();
+    this.name = "ListingDisappearedError";
+  }
+}
+/** Only official detail evidence can make a listing permanently unavailable. */
+export class ListingUnavailableError extends Error {
+  constructor(evidence: string) {
+    super(`官网商品已不存在，无法补齐，已跳过且不再重试：${evidence}`);
+    this.name = "ListingUnavailableError";
+  }
+}
+export class SellingOrderUnavailableError extends Error {
+  constructor() {
+    super("网站未提供上架时间倒序，无法持续检查新上架角色");
+    this.name = "SellingOrderUnavailableError";
   }
 }
 export interface ListingPage {
@@ -138,7 +157,7 @@ export interface RoleDetail {
 export interface SavedRoleRecord {
   listing: Listing;
   detail: RoleDetail | null;
-  status: "pending" | "complete" | "failed";
+  status: "pending" | "complete" | "failed" | "unavailable";
   error: string | null;
 }
 export interface Checkpoint {
@@ -150,6 +169,7 @@ export interface Checkpoint {
 }
 export interface CrawlStatus {
   concurrency?: number;
+  captureStrategy?: "new-first";
   newRunning?: number;
   oldRunning?: number;
   newQueued?: number;
@@ -183,7 +203,10 @@ export interface CrawlStatus {
   database: string;
 }
 
+export type SavedListingScope = "all" | "complete" | "tasks";
+
 export interface SavedListingPage {
+  scope?: SavedListingScope;
   page: number;
   pageSize: number;
   total: number;
@@ -202,6 +225,7 @@ export interface SavedListingPage {
     lastAttemptAt: string | null;
     attemptCount: number;
     status: string;
+    published?: boolean;
     valuationReady?: boolean;
     captureMode?: "body" | "all";
     error: string | null;

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { analysisRecord, analysisResponse, valuationRecord } from "../../tests/fixtures/analysis";
 import { CrawlStore } from "../crawler/store";
 import type { SavedRoleRecord } from "../crawler/types";
@@ -10,8 +10,10 @@ import { createProfile, DEFAULT_SETTINGS, PROMPT_FILE } from "./profile";
 import { calculateValuation } from "./valuation-calculator";
 import { searchEquipmentPrices } from "./equipment-pricing";
 import { searchPetPricing } from "./pet-pricing";
+import { beginServiceShutdown, resetServiceLifecycle } from "../service-lifecycle";
 
 const cleanups: (() => Promise<void>)[] = [];
+beforeEach(() => resetServiceLifecycle());
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
 });
@@ -136,6 +138,129 @@ function untilAborted(signal: AbortSignal): Promise<never> {
 }
 
 describe("持久化的商品分析队列", () => {
+  it("已入队角色确认不存在后继续分析时跳过，不发模型且不进入失败统计", async () => {
+    const { crawl, store, runner, analyze } = setup(["a"]);
+    const id = store.createRun("codex", "test-model");
+    crawl.markUnavailable("a", "官网商品已不存在，无法补齐，已跳过且不再重试：HTTP 404");
+    await runner.resume(id);
+    await runner.settled();
+    expect(analyze).not.toHaveBeenCalled();
+    expect(store.run(id)).toMatchObject({ status: "completed", total: 0, queued: 0, failed: 0 });
+    expect(
+      crawl.db.prepare("SELECT status,error FROM analysis_tasks WHERE run_id=?").get(id),
+    ).toMatchObject({ status: "skipped", error: expect.stringContaining("不再重试") });
+  });
+  it("异步查价期间确认不存在，返回后在发模型前跳过并保留已保存查价证据", async () => {
+    const { crawl, store, runner, analyze, profile, pricing, searchEquipment } =
+      await valuationSetup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    searchEquipment.mockImplementationOnce(async () => {
+      await gate;
+      return pricing;
+    });
+    const id = await runner.start("codex", true, profile);
+    await vi.waitFor(() => expect(searchEquipment).toHaveBeenCalledOnce());
+    crawl.markUnavailable("a", "官网商品已不存在，无法补齐，已跳过且不再重试：HTTP 410");
+    release();
+    await runner.settled();
+    expect(analyze).not.toHaveBeenCalled();
+    expect(store.run(id)).toMatchObject({ status: "completed", total: 0, queued: 0, failed: 0 });
+    expect(
+      crawl.db
+        .prepare("SELECT status,equipment_pricing_json FROM analysis_tasks WHERE run_id=?")
+        .get(id),
+    ).toMatchObject({ status: "skipped", equipment_pricing_json: JSON.stringify(pricing) });
+    expect(crawl.db.prepare("SELECT count(*) n FROM analysis_attempts").get()?.n).toBe(0);
+  });
+  it.each(["failed", "waiting_pricing"])(
+    "暂停批次的%s商品确认不存在后，默认继续即可清理且不要求重试",
+    async (state) => {
+      const { crawl, store, runner, analyze } = setup(["a"]);
+      const id = store.createRun("codex", "test-model");
+      crawl.db
+        .prepare("UPDATE analysis_tasks SET status=?,error='历史失败或待查价' WHERE run_id=?")
+        .run(state, id);
+      crawl.db.prepare("UPDATE analysis_runs SET status='paused' WHERE id=?").run(id);
+      crawl.markUnavailable("a", "官网商品已不存在，无法补齐，已跳过且不再重试：HTTP 410");
+      await expect(runner.resume(id)).resolves.toBe(id);
+      await runner.settled();
+      expect(analyze).not.toHaveBeenCalled();
+      expect(store.run(id)).toMatchObject({
+        status: "completed",
+        total: 0,
+        queued: 0,
+        failed: 0,
+        waitingPricing: 0,
+      });
+      expect(
+        crawl.db.prepare("SELECT status FROM analysis_tasks WHERE run_id=?").get(id),
+      ).toMatchObject({ status: "skipped" });
+    },
+  );
+  it("查价期间商品确认不存在但同时发生登录失效，仍暂停整批而不吞掉访问错误", async () => {
+    const { crawl, store, runner, analyze, profile, searchEquipment } = await valuationSetup();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    searchEquipment.mockImplementationOnce(async () => {
+      await gate;
+      throw new Error("网站登录已失效，请扫码登录");
+    });
+    const id = await runner.start("codex", true, profile);
+    await vi.waitFor(() => expect(searchEquipment).toHaveBeenCalledOnce());
+    crawl.markUnavailable("a", "官网商品已不存在，无法补齐，已跳过且不再重试：HTTP 410");
+    release();
+    await runner.settled();
+    expect(analyze).not.toHaveBeenCalled();
+    expect(store.run(id)).toMatchObject({
+      status: "paused",
+      error: expect.stringContaining("登录已失效"),
+    });
+  });
+  it("已发出的模型请求在确认不存在后保留历史attempt，商品不再发布或重试", async () => {
+    const { crawl, store, runner, analyze } = setup(["a"]);
+    const original = analyze.getMockImplementation()!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    analyze.mockImplementationOnce(async (...args) => {
+      const response = await original(...args);
+      await gate;
+      return response;
+    });
+    const id = await runner.start("codex", true);
+    await vi.waitFor(() => expect(analyze).toHaveBeenCalledOnce());
+    crawl.markUnavailable("a", "官网商品已不存在，无法补齐，已跳过且不再重试：HTTP 404");
+    release();
+    await runner.settled();
+    expect(crawl.records(1, 20, "complete").items).toEqual([]);
+    expect(crawl.retryItems()).toEqual([]);
+    expect(
+      crawl.db.prepare("SELECT state,raw_response FROM analysis_attempts").get(),
+    ).toMatchObject({ state: "completed", raw_response: expect.any(String) });
+    expect(store.run(id)).toMatchObject({ queued: 0, failed: 0 });
+  });
+  it.each(["start", "resume"] as const)(
+    "%s 连接 AI 期间开始关停，连接返回后不启动分析或获取租约",
+    async (operation) => {
+      const { store, runner, connect, analyze } = setup();
+      const id = operation === "resume" ? store.createRun("codex", "test-model") : undefined;
+      const acquire = vi.spyOn(store, "acquire");
+      connect.mockImplementation(async () => {
+        beginServiceShutdown();
+        return { model: "test-model", analyze };
+      });
+      await expect(id ? runner.resume(id) : runner.start("codex")).rejects.toThrow("正在关闭");
+      expect(analyze).not.toHaveBeenCalled();
+      expect(acquire).not.toHaveBeenCalled();
+    },
+  );
+
   it("仅上次实际返回错误输出时附加校验反馈，后续无输出超时不沿用旧反馈", async () => {
     const { store, runner, analyze, profile } = await valuationSetup();
     analyze
@@ -798,7 +923,13 @@ describe("持久化的商品分析队列", () => {
     expect(analyze).toHaveBeenCalledTimes(2);
     expect(store.run(id)).toMatchObject({ status: "completed", total: 2, completed: 2 });
     const overview = store.overview({ runId: id });
-    expect(overview.counts).toEqual({ total: 3, complete: 2, waitingDetail: 1 });
+    expect(overview.counts).toEqual({
+      total: 3,
+      complete: 2,
+      waitingDetail: 1,
+      pendingDetail: 1,
+      failedDetail: 0,
+    });
     const detail = store.detail(overview.records.items[0].taskId!)!;
     expect(detail.inputText).toBe(buildProductDocument(crawl.detail("a") as SavedRoleRecord).text);
     expect(analyze.mock.calls[0][0]).toContain(detail.inputText);

@@ -8,18 +8,28 @@ import {
   MAIN_TABS,
 } from "./detail";
 import { CAPTURE_VERSION, itemFromAttributes } from "./compact";
-import type { Listing, RoleDetail, TabSnapshot } from "./types";
+import { ListingUnavailableError, type Listing, type RoleDetail, type TabSnapshot } from "./types";
 import { createCrawlSource } from "./source";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { equipmentInventory } from "../analysis/equipment-pricing";
+import { hoverListing, readListings } from "./page";
+import { hoverForInspection } from "../viewport";
+import { captureValuation } from "./valuation-capture";
+import { captureIssues, IncompleteCaptureError } from "./capture-readiness";
+import { CrawlStore } from "./store";
 
 vi.mock("./page", async (original) => ({
   ...(await original<typeof import("./page")>()),
   pace: async () => {},
 }));
 vi.mock("./valuation-capture", () => ({
-  captureValuation: async () => ({ version: 1, fields: [], issues: [], source: {} }),
+  captureValuation: vi.fn(async () => ({
+    version: 1,
+    fields: [],
+    issues: [],
+    source: { serverId: "367", eid: "equipment-fixture" },
+  })),
 }));
 
 const url = "https://xyq.cbg.163.com/equip?s=367&eid=equipment-fixture";
@@ -68,12 +78,21 @@ const fixture = (
   equipmentHtml?: string,
 ) => {
   const gear = `<p>道具和法宝</p><div id="RoleEquip"><a data_kindid="999" data_equip_name="新武器" data_equip_desc="${equipmentDescription}" data_equip_category="武器" data_tip_box="RoleEquipTipsBox"><img ${iconKindId ? `data_kindid="${iconKindId}"` : ""} width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseout="document.getElementById('RoleEquipTipsBox').style.display='none'" onmouseover="${missingTooltip ? "" : "document.getElementById('RoleEquipTipsBox').style.display='block';document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'"}"></a></div>`;
+  const skills =
+    "<p>师门技能</p>" +
+    ["甲", "乙", "丙", "丁", "戊", "己", "庚"]
+      .map(
+        (suffix) =>
+          `<p>150</p><img width="30" height="30" data_skill_type="school_skill" data_equip_name="测试技能${suffix}" data_equip_level="150"><p>测试技能${suffix}</p>`,
+      )
+      .join("") +
+    "<p>生活技能</p>";
   return `<meta charset="utf-8"><section><nav>${MAIN_TABS.map(
     (name) =>
       `<button onclick="show(${JSON.stringify(name).replaceAll('"', "&quot;")})">${name}</button>`,
   ).join(
     "",
-  )}</nav><div id="panel">${"基本资料。".repeat(60)}</div><div id="RoleEquipTipsBox" style="display:none"></div></section><script>function show(name){document.getElementById('panel').innerHTML=name==='道具/法宝'?${JSON.stringify((equipmentHtml ?? gear) + nonEquipmentHtml)}:name==='召唤兽/孩子'?${JSON.stringify(petHtml)}:'<p>'+name+'：新资料</p>'}</script>`;
+  )}</nav><div id="panel">${"基本资料。".repeat(60)}</div><div id="RoleEquipTipsBox" style="display:none"></div></section><script>function show(name){document.getElementById('panel').innerHTML=name==='道具/法宝'?${JSON.stringify((equipmentHtml ?? gear) + nonEquipmentHtml)}:name==='召唤兽/孩子'?${JSON.stringify(petHtml)}:name==='技能'?${JSON.stringify(skills)}:'<p>'+name+'：新资料</p>'}</script>`;
 };
 const completePet = () =>
   `<p>召唤兽(1/10)</p><img width="30" height="30" data_idx="0" src="/images/pets/small/0.gif"><section><p>详细信息</p><p>类型：幽灵</p><p>等级：0</p><p>成长：1.23</p>${["攻击资质", "防御资质", "体力资质", "法力资质", "速度资质", "躲闪资质"].map((name) => `<p>${name}：1400</p>`).join("")}<p>技能（2）</p><img width="30" height="30" data_skill_type="cifu" data_equip_name="鬼魂术"><img width="30" height="30" data_skill_type="cifu" data_equip_name="死亡召唤"><p>装备（1）</p><img width="30" height="30" data_equip_name="宝宝项圈" data_equip_desc="等级 80#r速度 +20"><p>内丹（1）</p><img width="30" height="30" data_skill_type="neidan" data_equip_name="玄武躯" data_equip_level="5"></section><p>孩子</p><img width="30" height="30" data_skill_type="cifu" data_equip_name="孩子技能">`;
@@ -86,6 +105,468 @@ describe("装备局部补采", () => {
   afterAll(async () => {
     await browser?.close();
   });
+  it.each([404, 410, 200])(
+    "官网确证不存在HTTP %s只请求一次，不做三轮资料重试",
+    async (status) => {
+      const page = await browser.newPage();
+      let visits = 0;
+      try {
+        await page.route(url, async (route) => {
+          visits++;
+          await route.fulfill({
+            status,
+            contentType: "text/html",
+            body: "<meta charset=utf-8><main>很抱歉，您查询的商品不存在。</main>",
+          });
+        });
+        const source = createCrawlSource({
+          listPage: page,
+          detailPage: page,
+          signal: new AbortController().signal,
+          onDetailProgress: vi.fn(),
+          log: vi.fn(),
+        });
+        const error = await source.detail(listing).catch((error: unknown) => error);
+        expect(error).toBeInstanceOf(ListingUnavailableError);
+        expect((error as Error).message).toContain("不再重试");
+        expect(visits).toBe(1);
+      } finally {
+        await page.close();
+      }
+    },
+    10000,
+  );
+  it.each([
+    ["登录", 404, "<script>window.IsLogin=0</script><p>商品不存在</p>", "登录"],
+    ["布尔登录", 404, "<script>window.IsLogin=false</script><p>商品不存在</p>", "登录"],
+    [
+      "布尔LoginInfo",
+      410,
+      "<script>window.LoginInfo={login:false}</script><p>商品不存在</p>",
+      "登录",
+    ],
+    ["验证码", 410, "<div id=captcha_container>安全验证</div><p>商品不存在</p>", "安全验证"],
+    ["降低频率", 404, "<p>系统繁忙</p><p>商品不存在</p>", "繁忙"],
+    ["登录面板", 404, "<div id=loginContainer>扫码登录</div><p>商品不存在</p>", "登录"],
+  ] as const)("%s优先于不存在证据，不能终止补齐", async (_label, status, body, message) => {
+    const page = await browser.newPage();
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ status, contentType: "text/html", body: `<meta charset=utf-8>${body}` }),
+      );
+      const error = await isOnShelf(page, listing, new AbortController().signal).catch(
+        (error: unknown) => error,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(ListingUnavailableError);
+      expect((error as Error).message).toContain(message);
+    } finally {
+      await page.close();
+    }
+  });
+  it.each([
+    ["已售出", "<main>商品已售出</main>"],
+    ["已下架", "<main>商品已下架</main>"],
+    ["推荐内容", "<main>页面加载中</main><aside>商品不存在</aside>"],
+    ["其他说明", "<main>如遇商品不存在，请重试</main>"],
+  ])("%s不等于商品不存在", async (_label, body) => {
+    const page = await browser.newPage();
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ contentType: "text/html", body: `<meta charset=utf-8>${body}` }),
+      );
+      await expect(isOnShelf(page, listing, new AbortController().signal)).resolves.toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+  it.each([404, 410])("HTTP %s伴随明确已售/下架状态不足以认定商品删除", async (status) => {
+    const page = await browser.newPage();
+    try {
+      for (const state of ["商品已售出", "商品已下架", "状态：已下架"]) {
+        await page.route(url, (route) =>
+          route.fulfill({
+            status,
+            contentType: "text/html",
+            body: `<meta charset=utf-8><main>${state}</main>`,
+          }),
+        );
+        await expect(isOnShelf(page, listing, new AbortController().signal)).resolves.toBe(false);
+        await page.unroute(url);
+      }
+    } finally {
+      await page.close();
+    }
+  });
+  it.each([
+    "<main>页面加载中</main><aside><div role=alert>商品不存在</div></aside>",
+    "<aside><div class=error_msg>商品不存在</div></aside>",
+    "<main>页面加载中</main><div id=recommend><div class=error_box>商品不存在</div></div>",
+  ])("推荐或侧栏错误提示不作为主商品不存在证据：%s", async (body) => {
+    const page = await browser.newPage();
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ contentType: "text/html", body: `<meta charset=utf-8>${body}` }),
+      );
+      await expect(isOnShelf(page, listing, new AbortController().signal)).resolves.toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+  it("跳转到其他商品的404不能作为目标商品不存在的证据", async () => {
+    const page = await browser.newPage();
+    const other = url.replace("equipment-fixture", "other-role");
+    try {
+      await page.route("**/*", (route) =>
+        route.fulfill({
+          status: 404,
+          contentType: "text/html",
+          body: "<meta charset=utf-8><main>商品不存在</main>",
+        }),
+      );
+      const goto = page.goto.bind(page);
+      // Redirected HTTP requests bypass route handlers; navigate the routed alternate page directly.
+      vi.spyOn(page, "goto").mockImplementationOnce(async (_url, options) => goto(other, options));
+      await expect(isOnShelf(page, listing, new AbortController().signal)).resolves.toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+  it("详情导航超时原样抛出，不能转成不存在", async () => {
+    const page = await browser.newPage();
+    const timeout = Object.assign(new Error("page.goto: Timeout"), { name: "TimeoutError" });
+    try {
+      vi.spyOn(page, "goto").mockRejectedValueOnce(timeout);
+      await expect(isOnShelf(page, listing, new AbortController().signal)).rejects.toBe(timeout);
+    } finally {
+      await page.close();
+    }
+  });
+  it.each([
+    {},
+    { serverId: "367" },
+    { serverId: "750", eid: "equipment-fixture" },
+    { serverId: "367", eid: "another-item" },
+  ])("刷新详情身份缺失或不同不能绕过：%j", async (source) => {
+    const page = await browser.newPage();
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ contentType: "text/html", body: fixture(false) }),
+      );
+      vi.mocked(captureValuation).mockResolvedValueOnce({
+        version: 1,
+        fields: [],
+        issues: [],
+        source,
+      });
+      await expect(
+        collectValuationDetail(page, listing, previous(), new AbortController().signal),
+      ).rejects.toMatchObject({
+        name: "IncompleteDetailError",
+        message: expect.stringContaining("身份"),
+      });
+    } finally {
+      await page.close();
+    }
+  });
+  it.each([
+    ["scroll", false],
+    ["scroll", true],
+    ["visibility", false],
+    ["visibility", true],
+  ] as const)("原生悬停卡在 %s 阶段时核对命中目标，遮罩存在：%s", async (stage, covered) => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        '<button style="margin-top:1500px;width:120px;height:50px" onmouseover="window.inspected=event.isTrusted">测试物品</button>',
+      );
+      const target = page.locator("button");
+      const recovered = vi.fn();
+      const error = Object.assign(
+        new Error(
+          "locator.hover: Timeout 5000ms exceeded.\n" +
+            (stage === "scroll"
+              ? "  element is visible and stable\n  scrolling into view if needed"
+              : "  waiting for element to be visible and stable"),
+        ),
+        { name: "TimeoutError" },
+      );
+      vi.spyOn(target, "hover").mockImplementationOnce(async () => {
+        if (covered)
+          await page.evaluate(() => {
+            const dialog = document.createElement("div");
+            dialog.setAttribute("role", "dialog");
+            dialog.style.cssText = "position:fixed;inset:0;background:white;z-index:9999";
+            document.body.appendChild(dialog);
+          });
+        throw error;
+      });
+      if (covered) {
+        await expect(hoverForInspection(page, target, recovered)).rejects.toBe(error);
+        expect(recovered).not.toHaveBeenCalled();
+        expect(
+          await page.evaluate(() => (window as Window & { inspected?: boolean }).inspected),
+        ).not.toBe(true);
+      } else {
+        await hoverForInspection(page, target, recovered);
+        expect(recovered).toHaveBeenCalledOnce();
+        expect(recovered).toHaveBeenCalledWith(stage);
+        expect(
+          await page.evaluate(() => (window as Window & { inspected?: boolean }).inspected),
+        ).toBe(true);
+      }
+    } finally {
+      await page.close();
+    }
+  });
+  it.each([false, true])(
+    "悬停前列表行消失：%s，按商品身份定位且区分目标消失",
+    async (removeTarget) => {
+      const page = await browser.newPage();
+      page.setDefaultTimeout(300);
+      await page.route("**/*", (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: `<style>a{display:block;width:100px;height:30px}</style><div id="soldList">${Array.from({ length: 15 }, (_, index) => `<a class="soldImg" href="https://xyq.cbg.163.com/equip?s=1&eid=fixture-${index}" onmouseover="window.hovered='fixture-${index}'">角色${index}</a>`).join("")}</div><div id="pager_bar">第 1 页 共 1 页</div><script>window.QueryArgs={server_type:'3',page:1,order_by:'expire_time DESC'};</script>`,
+        }),
+      );
+      try {
+        await page.goto("https://xyq.cbg.163.com/cgi-bin/list-fixture.py", {
+          timeout: 5000,
+          waitUntil: "domcontentloaded",
+        });
+        const target = (await readListings(page)).items[13]!;
+        const move = page.mouse.move.bind(page.mouse);
+        vi.spyOn(page.mouse, "move").mockImplementationOnce(async (x, y) => {
+          await page.evaluate(
+            (index) => document.querySelectorAll("#soldList a")[index].remove(),
+            removeTarget ? 13 : 0,
+          );
+          await move(x, y);
+        });
+        const outcome = hoverListing(page, target, new AbortController().signal);
+        if (removeTarget)
+          await expect(outcome).rejects.toMatchObject({ name: "ListingDisappearedError" });
+        else {
+          await expect(outcome).resolves.toMatchObject({ key: target.key });
+          expect(await page.evaluate(() => (window as Window & { hovered?: string }).hovered)).toBe(
+            target.eid,
+          );
+        }
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
+  it.each(["tracking", "replace"] as const)(
+    "列表同一商品在滚动后变更追踪链接：%s，仍按服务器和eid悬停",
+    async (mode) => {
+      const page = await browser.newPage();
+      page.setDefaultTimeout(500);
+      try {
+        await page.setContent(
+          `<base href="https://xyq.cbg.163.com"><style>a{display:block;width:240px;height:40px}</style><h1>隔离回归：同一商品追踪链接变化</h1><div id="soldList">${[
+            ["wrong-server", "?s=11&eid=fixture-13"],
+            ["wrong-eid", "?s=1&eid=fixture-130"],
+            ["target", "?s=1&eid=fixture-13&reco_request_id=before"],
+          ]
+            .map(
+              ([id, query]) =>
+                `<a id="${id}" class="soldImg" href="/equip${query}" onmouseover="window.hovered={id:this.id,trusted:event.isTrusted}">${id}</a>`,
+            )
+            .join(
+              "",
+            )}</div><div id="pager_bar">第 1 页 共 1 页</div><script>window.QueryArgs={server_type:'3',page:1,order_by:'expire_time DESC'};</script>`,
+          { waitUntil: "domcontentloaded", timeout: 10000 },
+        );
+        const target = (await readListings(page)).items.find((row) => row.key === "1:fixture-13")!;
+        await page.locator("#target").evaluate((el, mode) => {
+          const scroll = el.scrollIntoView.bind(el);
+          el.scrollIntoView = (options) => {
+            scroll(options);
+            const current = mode === "replace" ? (el.cloneNode(true) as Element) : el;
+            current.setAttribute("href", "/equip?reco_request_id=after&eid=fixture-13&s=1#detail");
+            if (current !== el) el.replaceWith(current);
+          };
+        }, mode);
+        await expect(
+          hoverListing(page, target, new AbortController().signal),
+        ).resolves.toMatchObject({
+          key: target.key,
+        });
+        expect(
+          await page.evaluate(() => (window as Window & { hovered?: unknown }).hovered),
+        ).toEqual({
+          id: "target",
+          trusted: true,
+        });
+        const directory = path.resolve("data/service-runtime/goal-round5-list-identity");
+        await mkdir(directory, { recursive: true });
+        await page.screenshot({ path: path.join(directory, `${mode}.png`) });
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
+  it.each([
+    "reappear",
+    "price",
+    "time",
+    "server",
+    "captcha",
+    "covered",
+    "repeat",
+    "disappear",
+    "page",
+    "order",
+    "abort",
+    "after-price",
+    "after-time",
+  ] as const)(
+    "第六轮列表定位：短暂缺失后重现及保护边界 %s",
+    async (mode) => {
+      const page = await browser.newPage();
+      const diagnostics = vi.fn();
+      const control = new AbortController();
+      if (mode === "abort")
+        diagnostics.mockImplementation(() => control.abort(new Error("用户暂停采集")));
+      let hoverCalls = 0;
+      try {
+        await page.setContent(
+          `<base href="https://xyq.cbg.163.com"><style>body{font:18px sans-serif;padding:32px;background:#f4f6fa}a{display:block;width:300px;height:48px;margin:16px;background:#fff}#result{padding:20px;background:#fff3c4}</style><h1>隔离回归：列表目标短暂消失后重现</h1><p id="result">等待采集核对</p><div id="soldList"><a id="target" class="soldImg" href="/equip?s=421&eid=round6-target&reco_request_id=fixture&token=redact-me#secret-fragment" data_price="5684" data_selling_time="2026-10-24T03:25:36Z" onmouseover="window.hovered={key:'421:round6-target',trusted:event.isTrusted}">421:round6-target</a><a class="soldImg" href="/equip?s=4211&eid=round6-target">其他服务器</a><a class="soldImg" href="/equip?s=421&eid=round6-target-other">其他角色</a></div><div id="pager_bar">第 3 页 共 100 页</div><script>window.QueryArgs={server_type:'3',page:3,order_by:'expire_time DESC'};</script>`,
+        );
+        const target = (await readListings(page)).items.find(
+          (row) => row.key === "421:round6-target",
+        )!;
+        const locator = page.locator.bind(page);
+        vi.spyOn(page, "locator").mockImplementation((selector, options) => {
+          const matches = locator(selector, options);
+          if (!selector.startsWith("#soldList a.soldImg:is(")) return matches;
+          const selected = matches.first();
+          vi.spyOn(matches, "first").mockReturnValue(selected);
+          const hover = selected.hover.bind(selected);
+          vi.spyOn(selected, "hover").mockImplementation(async (options) => {
+            hoverCalls++;
+            if (hoverCalls === 1 || mode === "repeat") {
+              if (mode === "covered") {
+                await page.evaluate(() => {
+                  const cover = document.createElement("div");
+                  cover.style.cssText = "position:fixed;inset:0;background:white;z-index:9999";
+                  cover.setAttribute("role", "dialog");
+                  document.body.appendChild(cover);
+                });
+                return hover({ ...options, timeout: 150 });
+              }
+              const html = await selected.evaluate((el) => el.outerHTML);
+              await selected.evaluate((el) => el.remove());
+              try {
+                await hover({ ...options, timeout: mode === "reappear" ? 5000 : 120 });
+              } catch (error) {
+                await page.evaluate(
+                  ({ html, mode }) => {
+                    if (mode === "disappear") return;
+                    document.querySelector("#soldList")!.insertAdjacentHTML("afterbegin", html);
+                    const anchor = document.querySelector("#target")!;
+                    if (mode === "price") anchor.setAttribute("data_price", "6000");
+                    if (mode === "time")
+                      anchor.setAttribute("data_selling_time", "2026-10-24T03:26:00Z");
+                    if (mode === "server")
+                      anchor.setAttribute("href", "/equip?s=422&eid=round6-target");
+                    if (mode === "captcha")
+                      (window as Window & { CaptchaCheck?: unknown }).CaptchaCheck = {
+                        need_captcha: true,
+                      };
+                    const globals = window as Window & {
+                      QueryArgs?: { page: number; order_by: string };
+                    };
+                    if (mode === "page") {
+                      globals.QueryArgs!.page = 4;
+                      document.querySelector("#pager_bar")!.textContent = "第 4 页 共 100 页";
+                    }
+                    if (mode === "order") globals.QueryArgs!.order_by = "selling_time DESC";
+                    document.querySelector("#result")!.textContent =
+                      "第一次定位超时后，同一角色重新出现在列表，等待有界重读";
+                  },
+                  { html, mode },
+                );
+                if (mode === "reappear") {
+                  const directory = path.resolve("data/service-runtime/goal-round6-list-identity");
+                  await mkdir(directory, { recursive: true });
+                  await page.screenshot({ path: path.join(directory, "reappear-before.png") });
+                }
+                throw error;
+              }
+            }
+            await hover(options);
+            if (mode === "after-price" || mode === "after-time")
+              await selected.evaluate((el, mode) => {
+                el.setAttribute(
+                  mode === "after-price" ? "data_price" : "data_selling_time",
+                  mode === "after-price" ? "6000" : "2026-10-24T03:26:00Z",
+                );
+              }, mode);
+          });
+          return matches;
+        });
+        const outcome = hoverListing(page, target, control.signal, undefined, diagnostics);
+        if (mode === "reappear") {
+          await expect(outcome).resolves.toMatchObject({ key: target.key, price: "5684" });
+          expect(hoverCalls).toBe(2);
+          expect(diagnostics).toHaveBeenCalledWith(
+            expect.objectContaining({
+              event: "timeout",
+              key: target.key,
+              matches: 1,
+              page: 3,
+              retrying: true,
+            }),
+          );
+          expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("redact-me");
+          expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("secret-fragment");
+          expect(
+            await page.evaluate(() => (window as Window & { hovered?: unknown }).hovered),
+          ).toEqual({
+            key: target.key,
+            trusted: true,
+          });
+          await page.locator("#result").evaluate((el) => {
+            el.textContent = "重读后同身份、同价格、同上架时间，原生悬停成功；其他角色未被误采";
+          });
+          await page.screenshot({
+            path: path.resolve("data/service-runtime/goal-round6-list-identity/reappear-after.png"),
+          });
+        } else {
+          await expect(outcome).rejects.toMatchObject(
+            mode === "price" ||
+              mode === "time" ||
+              mode === "page" ||
+              mode === "order" ||
+              mode === "after-price" ||
+              mode === "after-time"
+              ? { name: "ListingChangedError" }
+              : mode === "server" || mode === "disappear"
+                ? { name: "ListingDisappearedError" }
+                : mode === "captcha"
+                  ? { message: expect.stringContaining("安全验证") }
+                  : mode === "abort"
+                    ? { message: "用户暂停采集" }
+                    : { name: "TimeoutError" },
+          );
+          const retried = ["repeat", "after-price", "after-time"].includes(mode);
+          expect(hoverCalls).toBe(retried ? 2 : 1);
+          if (!mode.startsWith("after-"))
+            expect(
+              await page.evaluate(() => (window as Window & { hovered?: unknown }).hovered),
+            ).toBeUndefined();
+        }
+      } finally {
+        await page.close();
+      }
+    },
+    20000,
+  );
   // 失败方式：共享详情页串号、读取失败未归还页面、每件都新开页而没有复用。
   it("并发角色使用独立详情页，完整读取后复用空闲页", async () => {
     const context = await browser.newContext();
@@ -95,9 +576,19 @@ describe("装备局部补采", () => {
         contentType: "text/html",
         body:
           fixture(false).replaceAll("新武器", `武器${id}`) +
-          `<script>window.RoleData={id:${JSON.stringify(id)}}</script>`,
+          `<script>window.RoleData={id:${JSON.stringify(id)}};window.EquipInfo={serverId:"367",eid:${JSON.stringify(id)}}</script>`,
       });
     });
+    vi.mocked(captureValuation).mockImplementation(async (page) => ({
+      version: 1,
+      fields: [],
+      issues: [],
+      source: await page.evaluate(
+        () =>
+          (window as unknown as Window & { EquipInfo: { serverId: string; eid: string } })
+            .EquipInfo,
+      ),
+    }));
     try {
       const page = await context.newPage();
       const createDetailPage = vi.fn(() => context.newPage());
@@ -128,8 +619,48 @@ describe("装备局部补采", () => {
       expect(createDetailPage).toHaveBeenCalledTimes(2);
     } finally {
       await context.close();
+      vi.mocked(captureValuation).mockImplementation(async () => ({
+        version: 1,
+        fields: [],
+        issues: [],
+        source: { serverId: "367", eid: "equipment-fixture" },
+      }));
     }
   }, 30000);
+  it("旧详情来源合法但属于其他商品时全量重采，不沿用错源师门技能", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.route("**/*", (route) =>
+        route.fulfill({ contentType: "text/html", body: fixture(false) }),
+      );
+      const old = structuredClone(await collectDetail(page, listing, new AbortController().signal));
+      old.valuation!.source.eid = "another-role";
+      const oldSkills = old.tabs.find((tab) => tab.name === "技能")!.items!;
+      oldSkills.forEach((skill, index) => {
+        skill.name = `错源技能${index}`;
+      });
+      // Without the expected listing, the foreign identity is syntactically valid.
+      expect(captureIssues(old, true)).toEqual([]);
+      const source = createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        signal: new AbortController().signal,
+        savedRecord: () => ({ listing, detail: old, status: "complete", error: null }),
+        onDetailProgress: vi.fn(),
+        log: vi.fn(),
+      });
+      const result = await source.detail(listing);
+      expect(result.valuation!.source).toEqual({ serverId: "367", eid: "equipment-fixture" });
+      const names = result.tabs
+        .find((tab) => tab.name === "技能")!
+        .items!.map((skill) => skill.name);
+      expect(names).toHaveLength(7);
+      expect(names.every((name) => name!.startsWith("测试技能"))).toBe(true);
+      expect(names.some((name) => name!.startsWith("错源技能"))).toBe(false);
+    } finally {
+      await page.close();
+    }
+  }, 20000);
   it("采集始终读取所有标签、装备及宝宝，不受只分析裸号的设置影响", async () => {
     const page = await browser.newPage();
     await page.route("**/*", (route) =>
@@ -157,6 +688,95 @@ describe("装备局部补采", () => {
       await page.close();
     }
   }, 20000);
+  it.each([false, true])(
+    "前四页已读后坐骑超时，保存部分资料且完整重读后才发布；恢复：%s",
+    async (recover) => {
+      const page = await browser.newPage();
+      const store = new CrawlStore(":memory:");
+      let visits = 0;
+      await page.route("**/*", async (route) => {
+        if (route.request().isNavigationRequest()) visits++;
+        await route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, "", "等级 100"),
+        });
+      });
+      const waitForLoadState = page.waitForLoadState.bind(page);
+      vi.spyOn(page, "waitForLoadState").mockImplementation(async (...args) => {
+        if (
+          (await page.locator("#panel").innerText()).includes("坐骑：新资料") &&
+          (!recover || visits === 1)
+        )
+          throw Object.assign(new Error("page.waitForLoadState: Timeout 15000ms exceeded. 坐骑"), {
+            name: "TimeoutError",
+          });
+        return waitForLoadState(...args);
+      });
+      const source = createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        signal: new AbortController().signal,
+        onDetailProgress: vi.fn(),
+        log: vi.fn(),
+      });
+      try {
+        store.observe(listing);
+        if (recover) {
+          const result = await source.detail(listing);
+          expect(visits).toBe(2);
+          expect(captureIssues(result, true, true, listing)).toEqual([]);
+          expect(result.tabs.map((tab) => tab.name)).toEqual(expect.arrayContaining(MAIN_TABS));
+          expect(store.save(listing, result)).toBe(true);
+          expect(store.count()).toBe(1);
+        } else {
+          const error = await source.detail(listing).catch((error: unknown) => error);
+          expect(error).toBeInstanceOf(IncompleteCaptureError);
+          expect(visits).toBe(3);
+          const failed = error as IncompleteCaptureError;
+          expect(failed.message).toContain("坐骑");
+          expect(failed.detail.tabs.map((tab) => tab.name)).toEqual(MAIN_TABS.slice(0, 4));
+          expect(failed.detail.tabs[1].items).toHaveLength(7);
+          expect(failed.detail.tabs[2].items![0].description).toContain("伤害 +420");
+          expect(store.save(listing, failed.detail)).toBe(false);
+          expect(store.count()).toBe(0);
+          expect(store.checkpoint()).toBeUndefined();
+          expect(store.detail(listing.key)).toMatchObject({
+            status: "failed",
+            detail: { tabs: expect.arrayContaining([expect.objectContaining({ name: "技能" })]) },
+          });
+          const dir = path.resolve("artifacts/partial-capture-regression");
+          await mkdir(dir, { recursive: true });
+          await page.screenshot({
+            path: path.join(dir, "mount-timeout-partial-preserved.png"),
+            fullPage: true,
+          });
+          await writeFile(
+            path.join(dir, "partial-evidence.json"),
+            JSON.stringify(
+              {
+                simulatedFailure: true,
+                attempts: visits,
+                error: failed.message,
+                savedStatus: "failed",
+                tabs: failed.detail.tabs.map((tab) => ({
+                  name: tab.name,
+                  items: tab.items?.length || 0,
+                })),
+                publishedProducts: store.count(),
+                checkpoint: store.checkpoint() || null,
+              },
+              null,
+              2,
+            ),
+          );
+        }
+      } finally {
+        store.close();
+        await page.close();
+      }
+    },
+    30000,
+  );
   it("同一采集流程先缺武器属性，自动重新打开并读全后才返回完成", async () => {
     const page = await browser.newPage();
     let visits = 0;
@@ -242,32 +862,46 @@ describe("装备局部补采", () => {
     },
     15000,
   );
-  it("宝宝饰品带切换索引但只有提示框时仍读取，不能误当头像跳过", async () => {
-    const page = await browser.newPage();
-    const pet = completePet()
-      .replace("装备（1）", "装备（2）")
-      .replace(
-        "<p>内丹（1）</p>",
-        `<div id="RolePetShipin" data_idx="0" data_tip_box="PetAccessoryTipsBox"><img width="30" height="30" src="/images/pet_shipin/small/1.gif" onmouseover="document.getElementById('PetAccessoryTipsBox').style.display='block'" onmouseout="document.getElementById('PetAccessoryTipsBox').style.display='none'"></div><div id="PetAccessoryTipsBox" style="display:none">雷龙饰品<br>装备对象：雷龙<br>完整的外观说明</div><p>内丹（1）</p>`,
+  it.each([
+    [false, true],
+    [true, true],
+    [true, false],
+  ])(
+    "宝宝饰品缺名称，部分描述：%s，完整提示：%s",
+    async (partialDescription, completeTooltip) => {
+      const page = await browser.newPage();
+      const pet = completePet()
+        .replace("装备（1）", "装备（2）")
+        .replace(
+          "<p>内丹（1）</p>",
+          `<div id="RolePetShipin" data_idx="0" data_tip_box="PetAccessoryTipsBox" ${partialDescription ? 'data_equip_desc="装备对象：雷龙"' : ""}><img width="30" height="30" src="/images/pet_shipin/small/1.gif" onmouseover="${completeTooltip ? "document.getElementById('PetAccessoryTipsBox').style.display='block'" : ""}" onmouseout="document.getElementById('PetAccessoryTipsBox').style.display='none'"></div><div id="PetAccessoryTipsBox" style="display:none">雷龙饰品<br>装备对象：雷龙<br>完整的外观说明</div><p>内丹（1）</p>`,
+        );
+      await page.route("**/*", (route) =>
+        route.fulfill({ contentType: "text/html", body: fixture(false, pet) }),
       );
-    await page.route("**/*", (route) =>
-      route.fulfill({ contentType: "text/html", body: fixture(false, pet) }),
-    );
-    try {
-      const result = await collectValuationDetail(
-        page,
-        listing,
-        previous(),
-        new AbortController().signal,
-      );
-      expect(result.petCapture).toMatchObject({ complete: true, issues: [] });
-      const captured = result.tabs.find((tab) => tab.name === "召唤兽/孩子")!.pets![0];
-      expect(captured.equipment).toHaveLength(2);
-      expect(captured.equipment[1]).toMatchObject({ name: "雷龙饰品", location: "RolePetShipin" });
-    } finally {
-      await page.close();
-    }
-  });
+      try {
+        const result = await collectValuationDetail(
+          page,
+          listing,
+          previous(),
+          new AbortController().signal,
+        );
+        expect(result.petCapture?.complete).toBe(completeTooltip);
+        if (completeTooltip) {
+          expect(result.petCapture?.issues).toEqual([]);
+          const captured = result.tabs.find((tab) => tab.name === "召唤兽/孩子")!.pets![0];
+          expect(captured.equipment).toHaveLength(2);
+          expect(captured.equipment[1]).toMatchObject({
+            name: "雷龙饰品",
+            location: "RolePetShipin",
+          });
+        } else expect(result.petCapture?.issues.length).toBeGreaterThan(0);
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
   it("名称和等级已显示时仍等待延迟的完整属性，不能提前当作读全", async () => {
     const page = await browser.newPage();
     const original =
@@ -501,6 +1135,60 @@ describe("装备局部补采", () => {
     }
   });
 
+  it.each(["parent", "grandparent", "unknown-icon"])(
+    "宝宝装备属性在%s时，空人物库存证据与实际读取物品一致",
+    async (kind) => {
+      const page = await browser.newPage();
+      try {
+        const attributes =
+          'data_equip_name="琅琊衣" data_equip_type="9235" data_equip_desc="等级 105#r防御 +15#r耐久 385" data_equip_type_desc="【装备对象】召唤兽#r【装备条件】等级105"';
+        const image = '<img width="40" height="40">';
+        const icon =
+          kind === "grandparent"
+            ? `<td ${attributes}><a>${image}</a></td>`
+            : `<td><a ${attributes}>${image}</a></td>`;
+        const body = `<p>现金：100</p><table id="RoleUsingEquips"><tr><td></td></tr></table><table id="RoleStoreEquips"><tr>${icon}${kind === "unknown-icon" ? '<td><img width="40" height="40"></td>' : ""}</tr></table>`;
+        await page.route(url, (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: fixture(false, undefined, undefined, "", "", body),
+          }),
+        );
+        const captured = await collectValuationDetail(
+          page,
+          listing,
+          previous(),
+          new AbortController().signal,
+        );
+        const inventory = captured.tabs.find((tab) => tab.name === "道具/法宝")!;
+        expect(inventory.items?.[0]).toMatchObject({
+          name: "琅琊衣",
+          modelId: "9235",
+          attributes: { 装备对象: "召唤兽" },
+        });
+        if (kind === "unknown-icon") {
+          expect(captured.equipmentCapture?.complete).toBe(false);
+          expect(captured.equipmentCapture?.emptyProof).toBeUndefined();
+          expect(captured.equipmentCapture?.issues.join(" ")).toContain("库存是否为空尚未核对");
+        } else {
+          expect(captured.equipmentCapture).toMatchObject({
+            complete: true,
+            emptyProof: "official-containers",
+            issues: [],
+          });
+          expect(
+            inventory.equipmentContainers
+              ?.flatMap((container) => container.icons)
+              .every((icon) => icon.name === "琅琊衣" && icon.modelId === "9235"),
+          ).toBe(true);
+        }
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
+
   it("新采保存官网模型号，玉魄、技能书和镶嵌材料不误报装备属性缺失", async () => {
     const page = await browser.newPage();
     try {
@@ -569,7 +1257,7 @@ describe("装备局部补采", () => {
   }, 15000);
 
   // 失败方式：材料被当作装备要求属性或悬停；普通装备因此被一并跳过。
-  it("钟灵石和百炼精铁无需装备属性，仍完整读取同页的普通装备", async () => {
+  it("制造指南书、点化石等材料无需装备属性，仍完整读取同页的普通装备", async () => {
     const page = await browser.newPage();
     try {
       await page.route(url, (route) =>
@@ -579,7 +1267,7 @@ describe("装备局部补采", () => {
             false,
             undefined,
             undefined,
-            '<img width="40" height="40" data_equip_name="钟灵石" data_equip_type="50344"><img width="40" height="40" data_equip_name="百炼精铁" data_equip_type="4001" data_equip_desc="等级 150">',
+            '<img width="40" height="40" data_equip_name="钟灵石" data_equip_type="50344"><img width="40" height="40" data_equip_name="百炼精铁" data_equip_type="4001" data_equip_desc="等级 150"><img width="40" height="40" data_equip_name="制造指南书" data_equip_type="612" data_equip_desc="制造指南书#r种类：头盔#r可制造等级：150"><img width="40" height="40" data_equip_name="点化石" data_equip_type="4034" data_equip_desc="附加技能：高级幸运" data_tip_box="MissingStoneTipsBox">',
           ),
         }),
       );
@@ -595,12 +1283,163 @@ describe("装备局部补采", () => {
       expect(items.slice(1).map((item) => item.category)).toEqual([
         "材料 · 钟灵石",
         "材料 · 百炼精铁",
+        "材料 · 制造指南书",
+        "材料 · 点化石",
       ]);
       expect(items[2].description).toBe("等级 150");
+      expect(items[3].description).toContain("可制造等级：150");
+      expect(items[4].description).toBe("附加技能：高级幸运");
     } finally {
       await page.close();
     }
   }, 15000);
+
+  it("4002太阳石保留原等级且不等待不存在的装备提示框，同页武器仍读取完整属性", async () => {
+    const page = await browser.newPage();
+    try {
+      const stones = ["saved-stone-one", "saved-stone-two"]
+        .map(
+          (location) =>
+            `<img width="40" height="40" data_equip_name="太阳石" data_equip_type="4002" data_equip_location="${location}" data_equip_desc="等级 6  " data_tip_box="MissingSunStoneTipsBox">`,
+        )
+        .join("");
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, stones),
+        }),
+      );
+      const detail = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(detail.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      const items = detail.tabs.find((entry) => entry.name === "道具/法宝")!.items!;
+      expect(items[0].description).toContain("伤害 +420");
+      expect(items.slice(1)).toEqual([
+        expect.objectContaining({
+          name: "太阳石",
+          modelId: "4002",
+          category: "材料 · 太阳石",
+          description: "等级 6",
+          location: "saved-stone-one",
+        }),
+        expect.objectContaining({
+          name: "太阳石",
+          modelId: "4002",
+          category: "材料 · 太阳石",
+          description: "等级 6",
+          location: "saved-stone-two",
+        }),
+      ]);
+      expect(
+        equipmentInventory({ listing, detail, status: "complete", error: null }).items.map(
+          (item) => item.name,
+        ),
+      ).toEqual(["新武器"]);
+    } finally {
+      await page.close();
+    }
+  }, 15000);
+
+  it("同名未核对型号的太阳石和缺等级武器仍保留采集失败，不能按4002材料跳过", async () => {
+    const page = await browser.newPage();
+    try {
+      const unknowns =
+        '<img width="40" height="40" data_equip_name="太阳石" data_equip_type="4003" data_equip_desc="等级 6" data_tip_box="MissingUnknownStoneTipsBox"><img width="40" height="40" data_equip_name="未知武器" data_equip_type="31301" data_equip_desc="伤害 +750" data_tip_box="MissingUnknownWeaponTipsBox">';
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, unknowns),
+        }),
+      );
+      const detail = await collectValuationDetail(
+        page,
+        listing,
+        previous(),
+        new AbortController().signal,
+      );
+      expect(detail.equipmentCapture?.complete).toBe(false);
+      expect(detail.equipmentCapture?.issues.join("；")).toContain("太阳石 的装备属性未完整读取");
+      expect(detail.equipmentCapture?.issues.join("；")).toContain("未知武器 的装备等级未完整读取");
+      const weapon = detail.tabs
+        .find((entry) => entry.name === "道具/法宝")!
+        .items!.find((item) => item.modelId === "31301")!;
+      expect(weapon.description).toBe("伤害 +750");
+      expect(weapon.attributes?.等级).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  }, 15000);
+
+  it.each([
+    "named-zero",
+    "unnamed-zero",
+    "unnamed-agility-zero",
+    "wrong-role",
+    "missing-level",
+    "decode-throws",
+    "parser-throws",
+    "malformed-raw",
+  ])(
+    "原始穿戴等级按同商品槽位型号和描述绑定，属性首行不能成为名称：%s",
+    async (mode) => {
+      const page = await browser.newPage();
+      try {
+        const description = "五行 土#r伤害 +15 命中 +20#r耐久度 100#Y  ";
+        const name = mode.startsWith("unnamed-") ? "" : "模拟已核对武器";
+        const firstLine = mode === "unnamed-agility-zero" ? "敏捷 +15" : "五行 土";
+        const tooltip = [name, firstLine, "伤害 +15 命中 +20", "耐久度 100"]
+          .filter(Boolean)
+          .join("\n");
+        const gear = `<div id="RoleEquip"><img width="40" height="40" data_equip_name="${name}" data_equip_type="31301" data_equip_location="role_using_equip_6" data_equip_desc="${description}" data_tip_box="WornRawTipsBox" onmouseover="document.getElementById('WornRawTipsBox').style.display='block'"><div id="WornRawTipsBox" style="display:none;white-space:pre-line">${tooltip}</div></div>`;
+        const raw = {
+          AllEquip: {
+            6: {
+              iType: 31301,
+              cDesc: description,
+              ...(mode === "missing-level" ? {} : { obj_level: 0 }),
+            },
+          },
+        };
+        const html =
+          fixture(false, undefined, undefined, "", "", gear) +
+          `<textarea id="equip_desc_value" hidden>isolated-raw-fixture</textarea><script>window.EquipInfo=${JSON.stringify({ server_id: mode === "wrong-role" ? "750" : listing.serverId, eid: listing.eid })};window.decode_desc=()=>{${mode === "decode-throws" ? 'throw new Error("isolated decode failure")' : 'return "isolated raw"'}};window.RoleInfoParser=class {constructor(){${mode === "parser-throws" ? 'throw new Error("isolated parser failure")' : `this.raw_info=${mode === "malformed-raw" ? "null" : JSON.stringify(raw)}`}}};</script>`;
+        await page.route(url, (route) => route.fulfill({ contentType: "text/html", body: html }));
+        const detail = await collectValuationDetail(
+          page,
+          listing,
+          previous(),
+          new AbortController().signal,
+        );
+        const item = detail.tabs.find((entry) => entry.name === "道具/法宝")!.items![0];
+        if (mode === "named-zero") {
+          expect(detail.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+          expect(item).toMatchObject({
+            name,
+            attributes: { 等级: "0" },
+            modelId: "31301",
+            location: "role_using_equip_6",
+          });
+        } else {
+          expect(detail.equipmentCapture?.complete).toBe(false);
+          if (mode.startsWith("unnamed-")) {
+            expect(item.attributes?.等级).toBe("0");
+            expect(item.name).not.toBe(firstLine);
+            expect(detail.equipmentCapture?.issues.join("；")).toContain("装备名称未完整读取");
+          } else {
+            expect(item.attributes?.等级).toBeUndefined();
+            expect(detail.equipmentCapture?.issues.join("；")).toContain("装备等级未完整读取");
+          }
+        }
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
 
   it("空描述也读取提示框，新装备和宝宝替换旧快照，其余资料保留", async () => {
     const page = await browser.newPage();
@@ -867,6 +1706,7 @@ describe("装备局部补采", () => {
   }, 15000);
   it("技能图标漏读或标题数量不符不能标完整", async () => {
     const page = await browser.newPage();
+    const report = vi.fn();
     try {
       const body = completePet()
         .replace("技能（2）", "技能（3）")
@@ -879,6 +1719,7 @@ describe("装备局部补采", () => {
         listing,
         previous(),
         new AbortController().signal,
+        report,
       );
       expect(detail.petCapture?.complete).toBe(false);
       expect(detail.petCapture?.issues).toEqual(
@@ -887,6 +1728,17 @@ describe("装备局部补采", () => {
           "第 1 只召唤兽技能数量与页面不一致",
         ]),
       );
+      const diagnostic = report.mock.calls
+        .map(([message]) => String(message))
+        .find((message) => message.startsWith("召唤兽图标核对异常："));
+      expect(JSON.parse(diagnostic!.slice("召唤兽图标核对异常：".length))).toMatchObject({
+        pet: 1,
+        section: "skills",
+        expected: 2,
+        captured: 1,
+        icons: [{ name: "鬼魂术" }, { name: "" }],
+        capturedItems: [{ name: "鬼魂术" }],
+      });
     } finally {
       await page.close();
     }

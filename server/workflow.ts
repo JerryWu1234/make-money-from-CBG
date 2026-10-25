@@ -2,6 +2,7 @@ import type { Page } from "playwright-core";
 import { CBG_HOME_URL, CBG_CROSS_SERVER_URL } from "./config";
 import { buildPageState, readPageSnapshot, type PageSnapshot } from "./page-state";
 import type { OpenCbgResult, RoleList, WorkflowStep } from "./types";
+import { captureBrowserStep } from "./browser-evidence";
 
 type Publish = (state: Partial<OpenCbgResult>) => void;
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -145,9 +146,15 @@ export async function completeLogin(
   const deadline = Date.now() + timeout;
   let enteredServer = false;
   let submittedAt = 0;
+  let lastView = "";
   while (Date.now() < deadline) {
     const snapshot = await readStableSnapshot(page);
     const state = buildPageState(snapshot);
+    const view = `${state.step}:${snapshot.hasQr}:${snapshot.hasRoles}:${snapshot.hasDialog}:${state.isLoggedIn}`;
+    if (view !== lastView) {
+      await captureBrowserStep(page, { flow: "query", stage: `登录页面读取完成：${state.step}` });
+      lastView = view;
+    }
     publish({
       ...state,
       qrCodeUrl: state.qrCodeUrl,
@@ -163,7 +170,10 @@ export async function completeLogin(
         .locator(".popupDialog a, .popupDialog button, .dialogWrap a")
         .filter({ hasText: /^我知道了$/ })
         .first();
-      if (await button.isVisible()) await button.evaluate((el) => (el as HTMLElement).click());
+      if (await button.isVisible()) {
+        await button.evaluate((el) => (el as HTMLElement).click());
+        await captureBrowserStep(page, { flow: "query", stage: "登录提示关闭完成" });
+      }
     } else if (snapshot.hasRoles && !snapshot.hasQr) {
       if (!submittedAt) {
         const role = page.locator('li[id^="role_el_"]:visible').first();
@@ -171,6 +181,7 @@ export async function completeLogin(
         await ((await image.count()) ? image : role).evaluate((el) => (el as HTMLElement).click());
         submittedAt = Date.now();
         await clickInWorkPage(page, "#login_btn");
+        await captureBrowserStep(page, { flow: "query", stage: "登录角色提交完成" });
       } else if (Date.now() - submittedAt > 45000) {
         throw new Error("角色已提交，但网站尚未确认进入服务器。请重试；不会重复点击登录。");
       }
@@ -183,6 +194,7 @@ export async function completeLogin(
       if (await page.locator("#server_pos_1_a").isVisible()) {
         enteredServer = true;
         await clickInWorkPage(page, "#server_pos_1_a");
+        await captureBrowserStep(page, { flow: "query", stage: "登录服务器入口打开完成" });
       }
     }
     await pause(750);
@@ -190,7 +202,7 @@ export async function completeLogin(
   throw new Error("等待扫码登录超时，请点击重新开始获取当前二维码。");
 }
 
-export async function runFixedWorkflow(page: Page, publish: Publish): Promise<OpenCbgResult> {
+async function executeFixedWorkflow(page: Page, publish: Publish): Promise<OpenCbgResult> {
   const stage = (workflowStep: WorkflowStep, message: string) =>
     publish({ workflowStep, message, running: true, qrCodeUrl: undefined });
   stage("logging_in", "正在核验已有藏宝阁登录状态…");
@@ -200,6 +212,7 @@ export async function runFixedWorkflow(page: Page, publish: Publish): Promise<Op
     if (!isNavigationTransition(error)) throw error;
   }
   const current = buildPageState(await readStableSnapshot(page));
+  await captureBrowserStep(page, { flow: "query", stage: "跨服购买页面读取完成" });
   if (current.isLoggedIn) {
     publish({ ...current, workflowStep: "cross_server", running: true });
     stage("cross_server", "当前登录仍有效，正在复用跨服购买入口…");
@@ -209,22 +222,32 @@ export async function runFixedWorkflow(page: Page, publish: Publish): Promise<Op
     } catch (error) {
       if (!isNavigationTransition(error)) throw error;
     }
+    await captureBrowserStep(page, { flow: "query", stage: "登录首页打开完成" });
     await completeLogin(page, publish);
     stage("cross_server", "已登录，正在进入跨服购买…");
-    await clickInWorkPage(page, "#cross_server_buy");
+    // 登录回跳可能是没有跨服入口的商品详情页；复用已确认登录的同一工作页。
+    try {
+      await page.goto(CBG_CROSS_SERVER_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    } catch (error) {
+      if (!isNavigationTransition(error)) throw error;
+    }
+    await captureBrowserStep(page, { flow: "query", stage: "登录后跨服购买页面打开完成" });
   }
   await page.locator("#server_type_panel li").first().waitFor({ state: "visible", timeout: 30000 });
   stage("server_age", "正在选择开服时间：3年以上服…");
   await selectServerAge(page, "#server_type_panel");
+  await captureBrowserStep(page, { flow: "query", stage: "开服时间选择完成" });
 
   stage("role_search", "正在进入角色搜索，并确认开服时间条件…");
   await clickInWorkPage(page, "#sub_role");
   await page.locator("#btn_do_query").waitFor({ state: "visible", timeout: 30000 });
+  await captureBrowserStep(page, { flow: "query", stage: "角色搜索页面打开完成" });
   await selectServerAge(page, "#server_type");
   await clearServerFilter(page);
   await page.locator('form[name="query_form"]').evaluate((form) => {
     (form as HTMLFormElement).target = "_self";
   });
+  await captureBrowserStep(page, { flow: "query", stage: "角色搜索条件准备完成" });
   stage("role_list", "正在加载3年以上服的角色列表…");
   await clickInWorkPage(page, "#btn_do_query");
   await page.waitForFunction(
@@ -247,6 +270,7 @@ export async function runFixedWorkflow(page: Page, publish: Publish): Promise<Op
   const roleList = await readRoleList(page);
   const auth = buildPageState(await readStableSnapshot(page));
   if (!auth.isLoggedIn) throw new Error("网站登录状态已失效，请重新扫码后继续。");
+  await captureBrowserStep(page, { flow: "query", stage: "角色查询列表读取完成" });
   return {
     ...auth,
     running: false,
@@ -254,4 +278,17 @@ export async function runFixedWorkflow(page: Page, publish: Publish): Promise<Op
     roleList,
     message: `已进入3年以上服的角色列表，当前页 ${roleList.rows.length} 条。`,
   };
+}
+
+export async function runFixedWorkflow(page: Page, publish: Publish): Promise<OpenCbgResult> {
+  let currentStage: WorkflowStep = "logging_in";
+  try {
+    return await executeFixedWorkflow(page, (state) => {
+      if (state.workflowStep) currentStage = state.workflowStep;
+      publish(state);
+    });
+  } catch (error) {
+    await captureBrowserStep(page, { flow: "query", stage: `${currentStage}失败`, error });
+    throw error;
+  }
 }

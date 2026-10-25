@@ -1,4 +1,4 @@
-import { expect, it } from "vite-plus/test";
+import { expect, it, vi } from "vite-plus/test";
 import { analysisRecord } from "../../tests/fixtures/analysis";
 import { recommendationFor } from "./recommendation";
 import type { ValuationResult } from "./valuation-types";
@@ -57,6 +57,86 @@ function record(options: { grade?: number; sets?: number; jewelry?: number; pets
 }
 const valuation = (bare = 20000) =>
   ({ bare_role_value: bare, decision: "PASS" }) as ValuationResult;
+
+function emptyRecord() {
+  const r = record();
+  r.listing.price = "1000";
+  const equipment = r.detail!.tabs.find((tab) => tab.name === "道具/法宝")!;
+  equipment.items = [];
+  equipment.text = "没有装备";
+  r.detail!.equipmentCapture!.emptyProof = "explicit-text";
+  return r;
+}
+
+// A verified empty inventory must not fail the old equipment/pet configuration gate
+// when the listing alone is already below the complete bare-role estimate.
+it("确认空库存的裸号挂牌低于裸号预估价时，也纳入推荐榜", () => {
+  expect(recommendationFor(emptyRecord(), valuation(1200))).toMatchObject({
+    status: "recommended",
+    basis: "bare-role-discount",
+    gap: -200,
+    factors: [],
+    strongerFactors: [],
+  });
+  const equipped = recommendationFor(
+    record({ grade: 6, sets: 5, jewelry: 2, pets: 2 }),
+    valuation(20600),
+  );
+  expect(equipped).toMatchObject({ status: "recommended", basis: "bare-role-discount" });
+  expect(equipped.factors).toHaveLength(4);
+  expect(equipped.strongerFactors).toHaveLength(4);
+});
+
+it.each([
+  [1000.11, "recommended", -0.01],
+  [1000.104, "excluded", 0],
+  [1000.1, "excluded", 0],
+  [1000.09, "excluded", 0.01],
+] as const)("空号按分核对价格方向，裸号估值%s时为%s", (bare, expected, gap) => {
+  const r = emptyRecord();
+  r.listing.price = "1000.10";
+  const result = recommendationFor(r, valuation(bare));
+  expect(result).toMatchObject({ status: expected, gap });
+  if (expected === "recommended") expect(result).toHaveProperty("basis", "bare-role-discount");
+  else expect(result).not.toHaveProperty("basis");
+});
+
+it("裸号直入条件仍拒绝无效金额、缺失估值与待确认结果", () => {
+  const r = emptyRecord();
+  for (const bare of [null, 0, -1, NaN, Infinity])
+    expect(recommendationFor(r, { ...valuation(1200), bare_role_value: bare }).status).toBe(
+      "excluded",
+    );
+  expect(recommendationFor(r).status).toBe("excluded");
+  expect(recommendationFor(r, { ...valuation(1200), decision: "NEED_INFO" }).status).toBe(
+    "excluded",
+  );
+  for (const asking of ["", "0", "-1", "NaN", "Infinity"])
+    expect(
+      recommendationFor({ ...r, listing: { ...r.listing, price: asking } }, valuation(1200)).status,
+    ).toBe("excluded");
+});
+
+it.each(["equipmentCapture", "petCapture"] as const)(
+  "裸号直入不能绕过%s的完整性核验",
+  (capture) => {
+    for (const state of ["unfinished", "missing", "issues"] as const) {
+      const r = emptyRecord();
+      if (state === "missing") delete r.detail![capture];
+      else if (state === "unfinished") r.detail![capture]!.complete = false;
+      else r.detail![capture]!.issues = ["库存尚未核验完整"];
+      expect(recommendationFor(r, valuation(1200)).status).toBe("excluded");
+    }
+  },
+);
+
+it("空装备没有明确核验依据时，不能作为裸号直接推荐", () => {
+  const r = emptyRecord();
+  r.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.text = "装备区域加载中";
+  delete r.detail!.equipmentCapture!.emptyProof;
+  expect(recommendationFor(r, valuation(1200)).status).toBe("excluded");
+});
+
 it("不限制差额百分比，仍按金额阶梯核对配置", () => {
   const r = record({ grade: 6, sets: 5, jewelry: 2, pets: 2 });
   r.listing.price = "1000";
@@ -224,6 +304,89 @@ it("榜单应用阶梯、分出人工复核，并排除过期或参数变化的�
   }
 });
 
+it("空号直入榜单沿用原排序、已查看和有效结果约束，并保留配置阶梯", () => {
+  const crawl = new CrawlStore(":memory:");
+  try {
+    const bareValues = {
+      "discount-best": 2500,
+      "discount-viewed": 2000,
+      "discount-listing-changed": 1900,
+      "discount-detail-changed": 1800,
+      "discount-expired": 1700,
+      "discount-need-info": 2000,
+      "empty-equal": 1000,
+      "empty-overpriced": 900,
+      "legacy-tier": 900,
+      "legacy-manual": 3000,
+    };
+    for (const key of Object.keys(bareValues)) {
+      const r = key.startsWith("legacy") ? record() : emptyRecord();
+      r.listing.key = key;
+      r.listing.price = key === "legacy-manual" ? "5000" : "1000";
+      crawl.observe(r.listing);
+      expect(crawl.save(r.listing, r.detail!)).toBe(true);
+    }
+    const store = new AnalysisStore(crawl.db);
+    const profile = createProfile("空号直入榜单回归");
+    const runId = store.createRun("codex", "test", false, profile);
+    for (const [key, bare] of Object.entries(bareValues)) {
+      const asking = key === "legacy-manual" ? 5000 : 1000;
+      crawl.db
+        .prepare("UPDATE analysis_tasks SET status='completed',result_json=? WHERE listing_key=?")
+        .run(
+          JSON.stringify({
+            valuation: {
+              ...valuation(bare),
+              decision: key === "discount-need-info" ? "NEED_INFO" : "PASS",
+              price_difference_ratio: (bare - asking) / asking,
+            },
+          }),
+          key,
+        );
+    }
+    const overview = () => store.overview({ runId, currentProfile: profile });
+    expect(overview().ranking.map((item) => item.key)).toEqual([
+      "discount-best",
+      "discount-viewed",
+      "discount-listing-changed",
+      "discount-detail-changed",
+      "discount-expired",
+      "legacy-tier",
+    ]);
+    expect(overview().ranking[0].recommendation).toMatchObject({
+      basis: "bare-role-discount",
+      gap: -1500,
+      factors: [],
+    });
+    expect(overview().manualReview?.map((item) => item.key)).toEqual(["legacy-manual"]);
+    expect(overview().ranking.at(-1)?.recommendation).not.toHaveProperty("basis");
+
+    store.markRecommendationViewed("discount-viewed");
+    const changedListing = crawl.detail("discount-listing-changed") as SavedRoleRecord;
+    changedListing.listing.price = "1001";
+    crawl.observe(changedListing.listing);
+    const changedDetail = crawl.detail("discount-detail-changed") as SavedRoleRecord;
+    changedDetail.detail!.tabs[0].fields.push({ name: "称谓", value: "资料已变化" });
+    expect(crawl.save(changedDetail.listing, changedDetail.detail!)).toBe(true);
+    crawl.db
+      .prepare(
+        "UPDATE analysis_tasks SET result_json=json_set(result_json,'$.valuation.pet_pricing',json(?)) WHERE listing_key='discount-expired'",
+      )
+      .run(JSON.stringify({ searchedAt: new Date(Date.now() - 25 * 3600000).toISOString() }));
+    expect(overview().ranking.map((item) => item.key)).toEqual(["discount-best", "legacy-tier"]);
+    expect(
+      store
+        .overview({ runId, currentProfile: profile, showViewed: true })
+        .ranking.map((item) => item.key),
+    ).toEqual(["discount-best", "discount-viewed", "legacy-tier"]);
+    expect(
+      store.overview({ runId, currentProfile: createProfile("已变更的裸号计算规则") }).ranking,
+    ).toEqual([]);
+  } finally {
+    crawl.close();
+  }
+});
+
 // Failure cases: viewed rows reappear after refresh, top ten are not replenished,
 // showing all bypasses eligibility, invalid keys mutate history, or clear retains old views.
 it("查看记录持久化，默认隐藏并补足10条，显示全部保留已查看标记", () => {
@@ -258,6 +421,102 @@ it("查看记录持久化，默认隐藏并补足10条，显示全部保留已�
     expect(store.overview().results.total).toBe(12);
     crawl.clear();
     expect(crawl.db.prepare("SELECT count(*) n FROM recommendation_views").get()!.n).toBe(0);
+  } finally {
+    crawl.close();
+  }
+});
+
+it("大资料榜单只排序轻量候选，再按原序补足推荐和人工复核", () => {
+  const crawl = new CrawlStore(":memory:");
+  try {
+    for (const kind of ["excluded", "recommended", "manual"]) {
+      for (let index = 0; index < 12; index++) {
+        const r = record();
+        r.listing.key = `${kind}-${String(index).padStart(2, "0")}`;
+        r.detail!.tabs[0].text += "采集证据".repeat(8192);
+        crawl.observe(r.listing);
+        crawl.save(r.listing, r.detail!);
+      }
+    }
+    const store = new AnalysisStore(crawl.db);
+    const profile = createProfile("大资料榜单回归");
+    const runId = store.createRun("codex", "test", false, profile);
+    const complete = crawl.db.prepare(
+      "UPDATE analysis_tasks SET status='completed',result_json=? WHERE listing_key=?",
+    );
+    for (const kind of ["excluded", "recommended", "manual"]) {
+      for (let index = 0; index < 12; index++)
+        complete.run(
+          JSON.stringify({
+            score: 12 - index,
+            valuation: {
+              ...valuation(kind === "excluded" ? 19000 : kind === "manual" ? 18000 : 20000),
+              ...(index % 2
+                ? { margin_of_safety: kind === "excluded" ? 100 : 12 - index }
+                : { price_difference_ratio: kind === "excluded" ? 100 : 12 - index }),
+            },
+          }),
+          `${kind}-${String(index).padStart(2, "0")}`,
+        );
+    }
+    const prepare = crawl.db.prepare.bind(crawl.db);
+    const sortQueries: { sql: string; columns: string[]; fields: number }[] = [];
+    const spy = vi.spyOn(crawl.db, "prepare").mockImplementation((sql) => {
+      const statement = prepare(sql);
+      if (sql.includes("ORDER BY coalesce("))
+        sortQueries.push({
+          sql,
+          columns: statement.columns().map((column) => column.name),
+          fields: Math.max(
+            ...prepare("EXPLAIN " + sql)
+              .all(...(sql.includes("t.run_id=?") ? [runId] : []))
+              .filter((row) => row.opcode === "SorterInsert")
+              .map((row) => Number(row.p4)),
+          ),
+        });
+      return statement;
+    });
+    try {
+      const first = store.overview({ runId, summary: true, currentProfile: profile });
+      const keys = (kind: string, start = 0) =>
+        Array.from(
+          { length: 10 },
+          (_, index) => `${kind}-${String(index + start).padStart(2, "0")}`,
+        );
+      expect(first.ranking.map((item) => item.key)).toEqual(keys("recommended"));
+      expect(first.manualReview?.map((item) => item.key)).toEqual(keys("manual"));
+      expect(first.ranking[0].taskId).toBe(
+        crawl.db
+          .prepare("SELECT id FROM analysis_tasks WHERE run_id=? AND listing_key=?")
+          .get(runId, "recommended-00")!.id,
+      );
+      store.markRecommendationViewed("recommended-00");
+      const filtered = store.overview({
+        runId,
+        summary: true,
+        currentProfile: profile,
+        search: "没有对应商品",
+        filter: "ready",
+      });
+      expect(filtered.records.total).toBe(0);
+      expect(filtered.ranking.map((item) => item.key)).toEqual(keys("recommended", 1));
+      expect(filtered.manualReview?.map((item) => item.key)).toEqual(keys("manual"));
+      expect(store.overview({ runId, showViewed: true }).ranking[0]).toMatchObject({
+        key: "recommended-00",
+        recommendationViewed: true,
+      });
+      const nextRun = store.createRun("codex", "test", false, profile);
+      expect(store.overview().ranking.map((item) => item.key)).toEqual(keys("recommended", 1));
+      expect(store.overview({ runId: nextRun }).ranking).toEqual([]);
+      expect(sortQueries.length).toBeGreaterThan(0);
+      for (const query of sortQueries) {
+        expect(query.columns).toEqual(["key", "task_id", "viewed_at"]);
+        expect(query.sql).not.toContain("json_remove(");
+        expect(query.fields).toBeLessThanOrEqual(6);
+      }
+    } finally {
+      spy.mockRestore();
+    }
   } finally {
     crawl.close();
   }

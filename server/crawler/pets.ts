@@ -1,6 +1,7 @@
 import type { Page } from "playwright-core";
 import type { PetSnapshot, RoleDetail, TabSnapshot } from "./types";
 import { hoverForInspection } from "../viewport";
+import { captureBrowserStep } from "../browser-evidence";
 
 export function petCaptureSummary(
   count: number | null,
@@ -213,6 +214,11 @@ export async function collectPets(
         .filter(Boolean)
         .join("\n");
       const counts = { skills: 0, equipment: 0, innerSkills: 0 };
+      const icons: Record<keyof typeof counts, { name: string; modelId: string; src: string }[]> = {
+        skills: [],
+        equipment: [],
+        innerSkills: [],
+      };
       for (const icon of root.querySelectorAll("img")) {
         if (
           !visible(icon) ||
@@ -245,10 +251,19 @@ export async function collectPets(
             if (attr.name.startsWith("data"))
               attrs[attr.name.replace(/^data-/, "data_")] ||= attr.value;
         const skill = attrs.data_skill_type;
-        if (skill === "neidan") counts.innerSkills++;
-        else if (skill) counts.skills++;
+        let kind: keyof typeof counts | undefined;
+        if (skill === "neidan") kind = "innerSkills";
+        else if (skill) kind = "skills";
         else if (attrs.data_equip_name || attrs.data_tip_box || attrs.data_equip_desc)
-          counts.equipment++;
+          kind = "equipment";
+        if (kind) {
+          counts[kind]++;
+          icons[kind].push({
+            name: attrs.data_equip_name || "",
+            modelId: attrs.data_equip_type || "",
+            src: icon.getAttribute("src") || "",
+          });
+        }
       }
       const declared = (label: string) => {
         const match = text.match(new RegExp(`(?:^|\\n)\\s*${label}\\s*[（(]\\s*(\\d+)\\s*[）)]`));
@@ -257,6 +272,7 @@ export async function collectPets(
       return {
         text,
         counts,
+        icons,
         sections: {
           skills:
             counts.skills > 0 ||
@@ -315,13 +331,30 @@ export async function collectPets(
       ] as const) {
         if (!proof.sections[key])
           issues.push(`第 ${index + 1} 只召唤兽${label}区域未确认，不能按空列表处理`);
-        if (pet[key].length !== proof.counts[key])
+        if (pet[key].length !== proof.counts[key]) {
           issues.push(`第 ${index + 1} 只召唤兽${label}图标未完整读取`);
+          report(
+            "召唤兽图标核对异常：" +
+              JSON.stringify({
+                pet: index + 1,
+                section: key,
+                expected: proof.counts[key],
+                captured: pet[key].length,
+                icons: proof.icons[key],
+                capturedItems: pet[key].map((item) => ({ name: item.name, modelId: item.modelId })),
+              }),
+          );
+        }
         if (proof.declared[key] !== null && pet[key].length !== proof.declared[key])
           issues.push(`第 ${index + 1} 只召唤兽${label}数量与页面不一致`);
       }
     }
     pets.push(pet);
+    await captureBrowserStep(
+      page,
+      { flow: "collection", stage: `宝宝读取完成-${index + 1}` },
+      signal,
+    );
   }
   return { count: discovered.expected, pets, issues };
 }

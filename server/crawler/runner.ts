@@ -1,6 +1,8 @@
 import {
   DEFAULT_CRAWL_CONCURRENCY,
   ListingChangedError,
+  ListingUnavailableError,
+  SellingOrderUnavailableError,
   type Checkpoint,
   type CrawlSource,
   type CrawlStatus,
@@ -23,9 +25,11 @@ export interface CrawlOptions {
 export function validateCrawlOptions(options: CrawlOptions) {
   if (
     options.concurrency !== undefined &&
-    (!Number.isSafeInteger(options.concurrency) || options.concurrency < 1)
+    (!Number.isSafeInteger(options.concurrency) ||
+      options.concurrency < 2 ||
+      options.concurrency % 2 !== 0)
   )
-    throw new Error("并发数必须是正整数");
+    throw new Error("并发数必须是正偶数（2、4、6…）");
   if (
     options.headIntervalMs !== undefined &&
     (!Number.isSafeInteger(options.headIntervalMs) || options.headIntervalMs < 1)
@@ -75,8 +79,6 @@ export async function crawl(
 ) {
   signal.throwIfAborted();
   validateCrawlOptions(options);
-  if (options.watch && !options.backfillOnly)
-    return watchCrawl(source, store, signal, publish, options);
   const concurrency = options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
   publish({ concurrency });
   let saved = 0,
@@ -85,23 +87,43 @@ export async function crawl(
   const retries = store.retryItems(options.keys, options.refresh);
   const retryFailed = new Set<string>();
   if (retries.length) {
+    const retryRunning = { new: 0, old: 0 };
+    const retryQueued = {
+      new: retries.filter((item) => store.captureLane(item.key) === "new").length,
+      old: retries.filter((item) => store.captureLane(item.key) === "old").length,
+    };
+    const reportRetries = () =>
+      publish({
+        newRunning: retryRunning.new,
+        oldRunning: retryRunning.old,
+        newQueued: retryQueued.new,
+        oldQueued: retryQueued.old,
+      });
     publish({
       phase: "retrying",
       page: 0,
       totalPages: 0,
       retryTotal: retries.length,
       retryCompleted: 0,
-      message: `优先补采 ${retries.length} 条未完成详情…`,
+      captureStrategy: "new-first",
+      message: `优先补采 ${retries.length} 条未完成详情，本轮最多同时 ${Math.min(retries.length, concurrency)} 条（并发上限 ${concurrency}）…`,
     });
+    reportRetries();
     let retryCompleted = 0;
+    // 已保存的补采优先于列表发现，不分新老占满整个池，清完后才开启新号发现。
     await captureConcurrently(retries, concurrency, signal, async (item, index) => {
+      const lane = store.captureLane(item.key);
       signal.throwIfAborted();
       store.beginRetry(item.key, options.refresh);
+      retryQueued[lane]--;
+      retryRunning[lane]++;
+      reportRetries();
       publish({
         current: item.name || item.eid,
         retryCompleted,
         detailProgress: `正在补采 ${index + 1}/${retries.length}：打开已保存商品链接…`,
       });
+      let settled = false;
       try {
         if (options.refresh && !(await source.onShelf(item)))
           throw new Error("刷新前未确认商品仍在售，旧详情已保留");
@@ -145,13 +167,30 @@ export async function crawl(
             name: "IncompleteDetailError",
           });
         saved++;
+        settled = true;
         publish({ saved, retryCompleted: ++retryCompleted, totalSaved: store.count() });
       } catch (error) {
+        if (signal.aborted && error instanceof IncompleteCaptureError && !options.refresh)
+          store.savePartial(item, error.detail);
         signal.throwIfAborted();
+        if (error instanceof ListingUnavailableError) {
+          store.markUnavailable(item.key, error.message);
+          settled = true;
+          skipped++;
+          publish({
+            skipped,
+            retryCompleted: ++retryCompleted,
+            current: item.name || item.eid,
+            detailProgress: error.message,
+            totalSaved: store.count(),
+          });
+          return;
+        }
         if (error instanceof IncompleteCaptureError && !options.refresh)
           store.save(item, error.detail);
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
+        settled = true;
         failed++;
         retryFailed.add(item.key);
         publish({
@@ -161,6 +200,10 @@ export async function crawl(
           detailProgress: "该商品详情待重试，继续正常采集",
         });
         if (!(error instanceof Error && error.name === "IncompleteDetailError")) throw error;
+      } finally {
+        retryRunning[lane]--;
+        if (signal.aborted && !settled) retryQueued[lane]++;
+        reportRetries();
       }
     });
   }
@@ -171,11 +214,33 @@ export async function crawl(
       current: undefined,
       detailProgress: undefined,
       saved,
+      skipped,
       failed,
       totalSaved: store.count(),
-      message: `估值资料补采完成：更新 ${saved} 件，${failed} 件待重试。`,
+      message: `估值资料补采完成：更新 ${saved} 件，跳过 ${skipped} 件无法补齐商品，${failed} 件待重试。`,
     });
     return;
+  }
+  if (options.watch) {
+    // 先用全部名额处理启动时已保存的未完成详情，再开启新号发现和双队列。
+    // 失败版本本轮隔离；续采进度也不能在切换双队列或排序回退时归零。
+    const seed = {
+      saved,
+      skipped,
+      failed,
+      failedItems: retries.filter((item) => retryFailed.has(item.key)),
+    };
+    try {
+      return await watchCrawl(source, store, signal, publish, options, undefined, seed);
+    } catch (error) {
+      signal.throwIfAborted();
+      if (!(error instanceof SellingOrderUnavailableError)) throw error;
+      const notice =
+        "网站没有上架时间排序入口：定时检查首页新增，并持续逐页核对完整列表；优先派发新号，无新号待派时由历史角色补足空闲名额";
+      publish({ phase: "locating", message: notice, strategy: notice });
+      // 到期排序不代表上架顺序：不用时间水位截断发现，也不据此跳过历史页。
+      return watchCrawl(source, store, signal, publish, options, "expire_time DESC", seed);
+    }
   }
   const plan = await prepareCrawlPages(source, store, signal, publish);
   const { numbers, backfillComplete, fullScan } = plan;
@@ -249,7 +314,10 @@ export async function crawl(
       publish({ current: item.name || item.eid });
       if (store.observe(item)) {
         skipped++;
-        publish({ skipped, detailProgress: "详情已完整保存，跳过重复采集" });
+        publish({
+          skipped,
+          detailProgress: store.unavailableReason(item.key) || "详情已完整保存，跳过重复采集",
+        });
         continue;
       }
       pending.push(item);
@@ -259,6 +327,7 @@ export async function crawl(
     publish({ itemIndex: completed });
     await captureConcurrently(pending, concurrency, signal, async (item, index) => {
       signal.throwIfAborted();
+      store.beginRetry(item.key);
       publish({ current: item.name || item.eid });
       try {
         const detail = await source.detail(item);
@@ -284,7 +353,20 @@ export async function crawl(
           ...(advance ? { checkpoint } : {}),
         });
       } catch (error) {
+        if (signal.aborted && error instanceof IncompleteCaptureError)
+          store.savePartial(item, error.detail);
         signal.throwIfAborted();
+        if (error instanceof ListingUnavailableError) {
+          store.markUnavailable(item.key, error.message);
+          skipped++;
+          publish({
+            skipped,
+            current: item.name || item.eid,
+            detailProgress: error.message,
+            totalSaved: store.count(),
+          });
+          return;
+        }
         if (error instanceof IncompleteCaptureError) store.save(item, error.detail);
         store.fail(item.key, error instanceof Error ? error.message : String(error));
         if (error instanceof Error && error.name === "IncompleteDetailError") {
@@ -308,7 +390,7 @@ export async function crawl(
     running: false,
     current: undefined,
     detailProgress: undefined,
-    message: `本轮完成：新增或更新 ${saved} 条，跳过 ${skipped} 条已采集商品，${failed} 条详情待重试。`,
+    message: `本轮完成：新增或更新 ${saved} 条，跳过 ${skipped} 条已采集或无法补齐商品，${failed} 条详情待重试。`,
     saved,
     skipped,
     failed,

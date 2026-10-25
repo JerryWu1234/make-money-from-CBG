@@ -94,6 +94,10 @@ test("分析并发10→保留报价并暂停→改为2继续→自动分析新�
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.origin !== "http://cbg-analysis.test") return route.abort();
+    if (url.pathname === "/api/runtime/settings")
+      return route.fulfill({ json: { saveScreenshots: false } });
+    if (url.pathname === "/api/browser/settings")
+      return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
     if (url.pathname.startsWith("/api/")) {
       const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
       let body: unknown;

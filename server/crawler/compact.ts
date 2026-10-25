@@ -1,4 +1,5 @@
 import type { DetailItem, Listing, RoleDetail, TabSnapshot } from "./types";
+import { completeSchoolSkillsFromText } from "./school-skills";
 
 export const CAPTURE_VERSION = 9;
 export function cleanDescription(value: string) {
@@ -7,6 +8,63 @@ export function cleanDescription(value: string) {
     .replace(/<br\s*\/?\s*>/gi, "\n")
     .replace(/#[RGBYWKnbu]|#c[0-9a-f]{6}/gi, "")
     .trim();
+}
+
+export function equipmentNameUnresolved(name: string) {
+  const text = name.trim();
+  return (
+    !text ||
+    /^图标\s+\d+$/.test(text) ||
+    /^五行\s*[：:]?\s*[金木水火土](?:\s|$)/.test(text) ||
+    /^(?:等级|耐久度?|命中|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|抗物理暴击|抗法术暴击|抗固伤|固伤暴击|穿刺|狂暴|治疗能力|格挡|抵抗|固定伤害|法术伤害结果|气血回复效果|回复|固伤|法伤结果|法伤|法防|封印|抗封|治疗|抗封印)(?:等级|值)?\s*[：:]?\s*[+＋−-]?\d/.test(
+      text,
+    )
+  );
+}
+
+export interface WornEquipmentSource {
+  serverId: string;
+  eid: string;
+  allEquip: Record<string, unknown>;
+}
+
+/** Only a matching worn slot may supply its explicitly stored level, including zero. */
+export function mergeWornEquipmentLevel(
+  attrs: Record<string, string>,
+  listing: Pick<Listing, "serverId" | "eid">,
+  source?: WornEquipmentSource | null,
+): { attrs: Record<string, string>; rawLevel?: string; issue?: string } {
+  const slot = attrs.data_equip_location?.match(/^role_using_equip_([1-6])$/)?.[1];
+  if (!source || source.serverId !== listing.serverId || source.eid !== listing.eid || !slot)
+    return { attrs };
+  const value = Object.hasOwn(source.allEquip, slot) ? source.allEquip[slot] : undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { attrs };
+  const raw = value as Record<string, unknown>;
+  if (
+    typeof raw.iType !== "number" ||
+    raw.iType <= 0 ||
+    !Number.isSafeInteger(raw.iType) ||
+    String(raw.iType) !== attrs.data_equip_type?.trim() ||
+    typeof raw.cDesc !== "string" ||
+    !cleanDescription(raw.cDesc) ||
+    cleanDescription(raw.cDesc) !== cleanDescription(attrs.data_equip_desc || "") ||
+    !Object.hasOwn(raw, "obj_level") ||
+    typeof raw.obj_level !== "number" ||
+    !Number.isSafeInteger(raw.obj_level) ||
+    raw.obj_level < 0 ||
+    raw.obj_level > 999
+  )
+    return { attrs };
+  const rawLevel = String(raw.obj_level);
+  const levels = [
+    ...(attrs.data_equip_level ? [attrs.data_equip_level] : []),
+    ...cleanDescription(attrs.data_equip_desc || "").matchAll(
+      /(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})(?=\s|$)/g,
+    ),
+  ].map((level) => (typeof level === "string" ? level : level[1]));
+  if (levels.some((level) => !/^\d{1,3}$/.test(level) || Number(level) !== raw.obj_level))
+    return { attrs, issue: "原始穿戴装备等级与页面等级不一致" };
+  return { attrs: { ...attrs, data_equip_level: rawLevel }, rawLevel };
 }
 
 /** Only these role slots have been observed with an unambiguous category on the official page. */
@@ -26,6 +84,9 @@ export function observedEquipmentCategory(category = "", location = "", modelId 
   // Model identifiers observed on the official role inventory in live capture.
   if (modelId === "50344") return "材料 · 钟灵石";
   if (modelId === "4001") return "材料 · 百炼精铁";
+  if (modelId === "4002") return "材料 · 太阳石";
+  if (modelId === "612") return "材料 · 制造指南书";
+  if (modelId === "4034") return "材料 · 点化石";
   if ([611, 18521, 56870].includes(Number(modelId))) return "道具 · 召唤兽技能书";
   if (modelId === "4103") return "道具 · 召唤兽内丹";
   if (category.trim() && !/^(?:\d+|人物装备|装备|武器|灵饰)$/.test(category.trim()))
@@ -79,7 +140,13 @@ export function equipmentEmptyProof(tabs: TabSnapshot[]) {
                   (item) =>
                     item.name === icon.name &&
                     item.modelId === icon.modelId &&
-                    item.attributes?.装备对象 === "召唤兽",
+                    (item.attributes?.装备对象 === "召唤兽" ||
+                      // Observed in RoleSplitEquips alongside pet gear. Its read material
+                      // description is evidence of a non-role item, never of an unread icon.
+                      (icon.modelId === "4034" &&
+                        icon.name === "点化石" &&
+                        item.category === "材料 · 点化石" &&
+                        !!item.description?.trim())),
                 )),
           ),
       );
@@ -353,7 +420,10 @@ export function compactListing(listing: Listing): Listing {
   return { ...listing, attrs, highlights };
 }
 export function compactDetail(detail: RoleDetail): RoleDetail {
-  if (detail.formatVersion === 3) return detail;
+  if (detail.formatVersion === 3) {
+    const tabs = detail.tabs.map(completeSchoolSkillsFromText);
+    return tabs.some((tab, index) => tab !== detail.tabs[index]) ? { ...detail, tabs } : detail;
+  }
   return {
     ...detail,
     formatVersion: 3,
@@ -366,7 +436,7 @@ export function compactDetail(detail: RoleDetail): RoleDetail {
           .filter((el) => el.tag !== "TEXTAREA")
           .map(itemFromAttributes)
           .filter((item) => item.description || item.attributes || !item.name.startsWith("图标 "));
-      return {
+      return completeSchoolSkillsFromText({
         ...tab,
         text: (header >= 0 ? tab.text.slice(header + "玩家之家\n".length) : tab.text)
           .replace(/\n{3,}/g, "\n\n")
@@ -374,7 +444,7 @@ export function compactDetail(detail: RoleDetail): RoleDetail {
         elements: [],
         items,
         tooltips: [...new Set(tab.tooltips)],
-      };
+      });
     }),
   };
 }

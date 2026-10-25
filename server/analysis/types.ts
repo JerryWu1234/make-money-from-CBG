@@ -1,5 +1,5 @@
 import type { AiProvider } from "../ai/types";
-import type { Listing } from "../crawler/types";
+import type { CrawlStatus, Listing } from "../crawler/types";
 import type { AnalysisProfile, ValuationResult } from "./valuation-types";
 import type { EquipmentPricingSnapshot } from "./equipment-pricing";
 import type { PetPricingSnapshot } from "./pet-pricing";
@@ -86,6 +86,7 @@ export type AnalysisRun = {
     | "waiting_capture"
     | null;
   profileHash?: string;
+  marketExpired?: boolean;
   calculationVersion?: string;
 };
 export type AnalysisItemState =
@@ -104,6 +105,7 @@ export type AnalysisItem = {
   price: string;
   url: string;
   collectedAt: string | null;
+  lastSeenAt?: string | null;
   collectionStatus: string;
   state: AnalysisItemState;
   taskId: string | null;
@@ -131,6 +133,10 @@ export type AnalysisResultItem = {
   result: ProductAnalysis;
 };
 export type AnalysisOverview = {
+  captureTasks?: { total: number; pending: number; failed: number };
+  captureActivity?: Pick<CrawlStatus, "running" | "phase"> & {
+    inFlight?: number;
+  };
   capturePreparation?: {
     total: number;
     completed: number;
@@ -147,7 +153,13 @@ export type AnalysisOverview = {
     | "equipmentSearch"
     | "petSearch"
   >;
-  counts: { total: number; complete: number; waitingDetail: number };
+  counts: {
+    total: number;
+    complete: number;
+    waitingDetail: number;
+    pendingDetail: number;
+    failedDetail: number;
+  };
   run: AnalysisRun | null;
   activeRun: AnalysisRun | null;
   runs: AnalysisRun[];

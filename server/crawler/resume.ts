@@ -1,5 +1,12 @@
 import type { CrawlStore } from "./store";
-import type { Checkpoint, CrawlSource, CrawlStatus, Listing, ListingPage } from "./types";
+import {
+  ListingUnavailableError,
+  type Checkpoint,
+  type CrawlSource,
+  type CrawlStatus,
+  type Listing,
+  type ListingPage,
+} from "./types";
 
 function timeRange(page: ListingPage): [string, string] | null {
   const times = page.items.map((item) => item.orderTime);
@@ -22,8 +29,8 @@ export async function locateCheckpoint(
   )
     return null;
   let low = 1,
-    high = first.totalPages,
-    result = first.totalPages;
+    high = first.totalPages;
+  let result: number | null = null;
   const sampled = new Map<number, ListingPage>([[1, first]]);
   while (low <= high) {
     signal.throwIfAborted();
@@ -45,7 +52,7 @@ export async function locateCheckpoint(
     } else low = mid + 1;
   }
   // 从相等时间的第一批开始；同秒发布、多页同时间和断点商品下架都不能跳过。
-  return Math.max(1, result - 1);
+  return result === null ? null : Math.max(1, result - 1);
 }
 
 export async function prepareCrawlPages(
@@ -65,9 +72,16 @@ export async function prepareCrawlPages(
         current: item.name || item.eid,
         message: `正在核对上次入库锚点 ${index + 1}/${candidates.length} 是否仍上架…`,
       });
-      if (await source.onShelf(item)) {
-        anchor = item;
-        break;
+      try {
+        if (await source.onShelf(item)) {
+          anchor = item;
+          break;
+        }
+      } catch (error) {
+        signal.throwIfAborted();
+        if (!(error instanceof ListingUnavailableError)) throw error;
+        store.markUnavailable(item.key, error.message);
+        publish({ current: item.name || item.eid, detailProgress: error.message });
       }
     }
   }

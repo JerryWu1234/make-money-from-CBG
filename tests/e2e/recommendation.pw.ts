@@ -13,15 +13,28 @@ import type { SavedRoleRecord } from "../../server/crawler/types";
 
 // Failure cases: backend filter omitted, tier boundary excluded, manual products automatically
 // included, viewed products reappear, showing all overrides eligibility,
-// refresh loses view history, stale results remain, missing inventory summary, or wild/future
-// pet skills appear as usable assets. All records are simulated; SQLite and UI are real.
-test("推荐榜差额阶梯与已查看筛选→全部商品与详情→刷新→过期结果移出", async ({ page }, testInfo) => {
+// refresh loses view history, stale results remain, missing inventory summary, bare-role
+// discounts require assets, or wild/future pet skills appear as usable assets.
+// All records are simulated; SQLite and UI are real.
+test("推荐榜裸号折价与原差额阶梯→已查看筛选→全部商品与详情→刷新→过期结果移出", async ({
+  page,
+}, testInfo) => {
   const database = testInfo.outputPath("recommendation.sqlite");
   await mkdir(path.dirname(database), { recursive: true });
   const crawl = new CrawlStore(database);
   const store = new AnalysisStore(crawl.db);
   try {
-    for (const key of ["gem", "pet", "wild", "far", "manual", "wide"]) {
+    for (const key of [
+      "gem",
+      "pet",
+      "wild",
+      "far",
+      "manual",
+      "wide",
+      "bare-discount",
+      "bare-equal",
+      "bare-over",
+    ]) {
       const r = analysisRecord(key);
       r.listing.price =
         key === "manual" ? "20000" : key === "gem" ? "2000" : key === "far" ? "3000" : "1000";
@@ -92,7 +105,7 @@ test("推荐榜差额阶梯与已查看筛选→全部商品与详情→刷新�
         );
       }
       pets.petCount = pets.pets.length;
-      if (key === "pet" || key === "wild") {
+      if (key === "pet" || key === "wild" || key.startsWith("bare-")) {
         r.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.text = "没有装备";
         r.detail!.equipmentCapture!.emptyProof = "explicit-text";
       }
@@ -107,6 +120,9 @@ test("推荐榜差额阶梯与已查看筛选→全部商品与详情→刷新�
       far: 2799.99,
       manual: 18500,
       wide: 849.99,
+      "bare-discount": 1200,
+      "bare-equal": 1000,
+      "bare-over": 999.99,
     })) {
       const r = crawl.detail(key) as SavedRoleRecord;
       const result = {
@@ -129,6 +145,10 @@ test("推荐榜差额阶梯与已查看筛选→全部商品与详情→刷新�
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== "http://cbg-recommendation.test") return route.abort();
+      if (url.pathname === "/api/runtime/settings")
+        return route.fulfill({ json: { saveScreenshots: false } });
+      if (url.pathname === "/api/browser/settings")
+        return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
       if (url.pathname.startsWith("/api/")) {
         let body: unknown;
         if (url.pathname === "/api/ai/status")
@@ -170,12 +190,15 @@ test("推荐榜差额阶梯与已查看筛选→全部商品与详情→刷新�
     await page.goto("http://cbg-recommendation.test/analysis-preview");
     await page.getByRole("tab", { name: /推荐榜/ }).click();
     const ranking = page.getByRole("tabpanel", { name: "推荐榜" });
-    await expect(ranking.getByRole("article")).toHaveCount(3);
+    await expect(ranking.getByRole("article")).toHaveCount(4);
     await expect(ranking).toContainText("角色gem");
     await expect(ranking).toContainText("角色pet");
     await expect(ranking).not.toContainText("角色wild");
     await expect(ranking).not.toContainText("角色far");
     await expect(ranking).toContainText("角色wide");
+    await expect(ranking).toContainText("角色bare-discount");
+    await expect(ranking).not.toContainText("角色bare-equal");
+    await expect(ranking).not.toContainText("角色bare-over");
     await expect(ranking).toContainText("不限制差额百分比");
     await expect(ranking).toContainText("相差不超过 10 级");
     await expect(ranking.getByRole("region", { name: "人工复核" })).toHaveCount(0);
@@ -184,6 +207,12 @@ test("推荐榜差额阶梯与已查看筛选→全部商品与详情→刷新�
     await expect(ranking.getByRole("article").filter({ hasText: "角色manual" })).toHaveCount(0);
     const gearCard = ranking.getByRole("article").filter({ hasText: "角色gem" });
     const petCard = ranking.getByRole("article").filter({ hasText: "角色pet" });
+    const bareCard = ranking.getByRole("article").filter({ hasText: "角色bare-discount" });
+    await expect(bareCard).toContainText("挂牌低于裸号预估价");
+    await expect(bareCard).toContainText("裸号预估价 ¥1,200.00");
+    await expect(bareCard).toContainText("0 类配置");
+    await bareCard.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("bare-role-discount.png"), fullPage: true });
     await expect(gearCard.getByLabel("装备和宝宝简要信息")).toContainText("装备 3件 · 灵饰 1件");
     await expect(gearCard).toContainText("带宝石/星辉石 4件");
     await expect(gearCard).toContainText("特技：罗汉金钟");
@@ -220,20 +249,20 @@ test("推荐榜差额阶梯与已查看筛选→全部商品与详情→刷新�
       .click();
     await expect(page.getByRole("dialog", { name: "角色gem" })).toBeVisible();
     await page.getByRole("button", { name: "关闭分析详情" }).click();
-    await expect(ranking.getByRole("article")).toHaveCount(2);
+    await expect(ranking.getByRole("article")).toHaveCount(3);
     await expect(ranking).not.toContainText("角色gem");
     await page.screenshot({ path: testInfo.outputPath("viewed-hidden.png"), fullPage: true });
     await showViewed.check();
-    await expect(ranking.getByRole("article")).toHaveCount(3);
+    await expect(ranking.getByRole("article")).toHaveCount(4);
     await expect(ranking).not.toContainText("角色manual");
     await expect(ranking.getByRole("article").filter({ hasText: "角色gem" })).toContainText(
       "已查看",
     );
     await page.screenshot({ path: testInfo.outputPath("viewed-shown.png"), fullPage: true });
     await showViewed.uncheck();
-    await expect(ranking.getByRole("article")).toHaveCount(2);
+    await expect(ranking.getByRole("article")).toHaveCount(3);
     await page.getByRole("tab", { name: /全部商品/ }).click();
-    await expect(page.getByRole("tabpanel", { name: "全部商品" }).getByRole("row")).toHaveCount(7);
+    await expect(page.getByRole("tabpanel", { name: "全部商品" }).getByRole("row")).toHaveCount(10);
     await page
       .getByRole("row")
       .filter({ hasText: "角色gem" })
@@ -243,14 +272,14 @@ test("推荐榜差额阶梯与已查看筛选→全部商品与详情→刷新�
     await page.reload();
     await page.getByRole("tab", { name: /推荐榜/ }).click();
     await expect(showViewed).not.toBeChecked();
-    await expect(ranking.getByRole("article")).toHaveCount(2);
+    await expect(ranking.getByRole("article")).toHaveCount(3);
     await expect(ranking).not.toContainText("角色gem");
     await showViewed.check();
-    await expect(ranking.getByRole("article")).toHaveCount(3);
+    await expect(ranking.getByRole("article")).toHaveCount(4);
     const changed = crawl.detail("gem") as SavedRoleRecord;
     changed.listing.price = "2100";
     crawl.observe(changed.listing);
-    await expect(ranking.getByRole("article")).toHaveCount(2, { timeout: 10000 });
+    await expect(ranking.getByRole("article")).toHaveCount(3, { timeout: 10000 });
     await expect(ranking).toContainText("角色pet");
     await page.screenshot({ path: testInfo.outputPath("stale-excluded.png"), fullPage: true });
     const evidence = testInfo.outputPath("evidence.json");
@@ -264,10 +293,18 @@ test("推荐榜差额阶梯与已查看筛选→全部商品与详情→刷新�
             .ranking.map(({ key, assetSummary }) => ({ key, assetSummary })),
           inventoryDisplay:
             "Observed gear/pets only; wild and level-zero pets separately labelled; future skills excluded; desktop and 390px mobile verified",
-          eligible: ["gem", "pet", "wide"],
+          eligible: ["gem", "pet", "wide", "bare-discount"],
+          bareRoleDiscount: {
+            listing: 1000,
+            bareRoleEstimate: 1200,
+            inventoryFactors: 0,
+            reason: "挂牌低于裸号预估价",
+          },
           excluded: {
             wild: "野生宝宝",
             far: "差额200.01元，仅1类配置不足",
+            "bare-equal": "空号挂牌1000元，裸号预估1000元，未严格低于",
+            "bare-over": "空号挂牌1000元，裸号预估999.99元，未满足折价或原配置规则",
           },
           aboveLimitExcluded: !store
             .overview({ showViewed: true })

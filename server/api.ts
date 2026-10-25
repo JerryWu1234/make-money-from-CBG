@@ -1,17 +1,24 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { diagnostics } from "./diagnostics";
+import { showBrowserWorkPages } from "./config";
 import { ScheduleConfigError } from "./crawler/schedule-time";
 import { validateSampleSelection } from "./analysis/sample-selection";
 import { analysisConcurrency } from "./analysis/types";
+import type { SavedListingScope } from "./crawler/types";
+import { browserControl, browserBusyError, isBrowserMode } from "./browser-settings";
 
 const getRoutes = new Set([
   "/api/browser/status",
+  "/api/browser/settings",
   "/api/crawl/status",
   "/api/crawl/settings",
   "/api/crawl/detail",
   "/api/crawl/records",
   "/api/scan/status",
   "/api/logs/export",
+  "/api/logs/storage",
+  "/api/runtime/settings",
   "/api/ai/status",
   "/api/ai/models",
   "/api/ai/login/status",
@@ -22,11 +29,14 @@ const getRoutes = new Set([
 ]);
 const postRoutes = new Set([
   "/api/browser/open",
+  "/api/browser/settings/save",
   "/api/crawl/start",
   "/api/crawl/settings/save",
   "/api/crawl/backfill",
   "/api/crawl/stop",
   "/api/crawl/clear",
+  "/api/logs/clear",
+  "/api/runtime/settings/save",
   "/api/scan/configure",
   "/api/scan/enable",
   "/api/scan/disable",
@@ -41,7 +51,23 @@ const postRoutes = new Set([
   "/api/analysis/pet/check",
   "/api/analysis/pet-gear/check",
   "/api/analysis/settings/save",
+  "/api/analysis/school-formula/confirm",
   "/api/analysis/recommendation/view",
+]);
+
+const controlRoutes = new Set([
+  "/api/browser/open",
+  "/api/crawl/start",
+  "/api/crawl/backfill",
+  "/api/analysis/start",
+  "/api/analysis/resume",
+  "/api/analysis/retry",
+]);
+const browserUseRoutes = new Set([
+  ...controlRoutes,
+  "/api/analysis/equipment/check",
+  "/api/analysis/pet/check",
+  "/api/analysis/pet-gear/check",
 ]);
 
 async function verifyRequestBody(request: IncomingMessage, limit = 4096) {
@@ -66,8 +92,37 @@ async function verifyRequestBody(request: IncomingMessage, limit = 4096) {
 }
 
 export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, next: () => void) {
+  const control = browserUseRoutes.has(req.url?.split("?")[0] || "");
+  if (control) browserControl.pending++;
+  try {
+    await handleApi(req, res, next);
+  } finally {
+    if (control) browserControl.pending--;
+  }
+}
+
+async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => void) {
   const pathname = req.url?.split("?")[0];
   if (!pathname || (!getRoutes.has(pathname) && !postRoutes.has(pathname))) return next();
+  if (controlRoutes.has(pathname)) {
+    const requestId = randomUUID();
+    const started = Date.now();
+    const finish = () => complete("api.control_finished");
+    const close = () => complete("api.control_closed");
+    const complete = (event: string) => {
+      res.removeListener("finish", finish);
+      res.removeListener("close", close);
+      diagnostics.record(event, {
+        requestId,
+        route: pathname,
+        status: res.statusCode,
+        durationMs: Date.now() - started,
+      });
+    };
+    diagnostics.record("api.control_received", { requestId, route: pathname, method: req.method });
+    res.once("finish", finish);
+    res.once("close", close);
+  }
   res.setHeader("Content-Type", "application/json");
   res.setHeader("Cache-Control", "no-store");
   if (req.method !== (getRoutes.has(pathname) ? "GET" : "POST")) {
@@ -78,6 +133,15 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
 
   const expectedOrigin = `http://${req.headers.host}`;
   try {
+    const scope = new URL(req.url!, expectedOrigin).searchParams.get("scope") || "all";
+    if (
+      (pathname === "/api/crawl/records" || pathname === "/api/analysis/status") &&
+      !["all", "complete", "tasks"].includes(scope)
+    ) {
+      res.statusCode = 400;
+      res.end(JSON.stringify({ error: "记录范围无效" }));
+      return;
+    }
     if (
       (req.headers.origin && req.headers.origin !== expectedOrigin) ||
       (req.headers.referer && new URL(req.headers.referer).origin !== expectedOrigin)
@@ -99,6 +163,63 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             pathname === "/api/analysis/settings/save" ? 128 * 1024 : 4096,
           )
         : {};
+    if (browserUseRoutes.has(pathname) && browserControl.changing) throw browserBusyError();
+    if (pathname === "/api/browser/settings" || pathname === "/api/browser/settings/save") {
+      const mode = (body as Record<string, unknown>).mode;
+      if (pathname.endsWith("/save") && !isBrowserMode(mode)) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: "浏览器运行方式无效" }));
+        return;
+      }
+      const [session, workflow, capture, analysis] = await Promise.all([
+        import("./session"),
+        import("./cbg"),
+        import("./crawler/controller"),
+        import("./analysis/controller"),
+      ]);
+      const busy = () =>
+        browserControl.pending > 0 ||
+        workflow.isBrowserWorkflowRunning() ||
+        capture.isCrawling() ||
+        analysis.isAnalyzing();
+      if (pathname.endsWith("/save"))
+        await session.changeBrowserMode(
+          mode as "daily" | "dedicated",
+          busy,
+          workflow.resetBrowserWorkflow,
+        );
+      res.end(
+        JSON.stringify({
+          ...session.browserSessionSettings(),
+          busy: busy() || session.browserSessionSettings().busy,
+        }),
+      );
+      return;
+    }
+    if (pathname === "/api/runtime/settings" || pathname === "/api/runtime/settings/save") {
+      const input = body as Record<string, unknown>;
+      if (pathname === "/api/runtime/settings/save" && typeof input.saveScreenshots !== "boolean") {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: "保存截图选项必须为布尔值" }));
+        return;
+      }
+      const settings = await import("./runtime-settings");
+      const result =
+        pathname === "/api/runtime/settings"
+          ? settings.runtimeSettings()
+          : settings.saveRuntimeSettings(input.saveScreenshots);
+      res.end(JSON.stringify(result));
+      return;
+    }
+    if (pathname === "/api/logs/storage" || pathname === "/api/logs/clear") {
+      const { logStorage } = await import("./log-storage");
+      const result =
+        pathname === "/api/logs/storage"
+          ? await logStorage.preview()
+          : await logStorage.clear((body as Record<string, unknown>).token);
+      if (!res.destroyed) res.end(JSON.stringify(result));
+      return;
+    }
     if (pathname.startsWith("/api/analysis/")) {
       switch (pathname) {
         case "/api/analysis/equipment/check":
@@ -135,6 +256,9 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
         case "/api/analysis/settings/save":
           result = analysis.saveAnalysisSettings(input);
           break;
+        case "/api/analysis/school-formula/confirm":
+          result = analysis.confirmSchoolFormula(input.productKeys, input.confirmed);
+          break;
         case "/api/analysis/status": {
           const provider = params.get("provider");
           result = analysis.analysisOverview({
@@ -146,6 +270,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             search: params.get("search") || undefined,
             filter: params.get("filter") || undefined,
             showViewed: params.get("showViewed") === "true",
+            ...(scope === "all" ? {} : { scope: scope as SavedListingScope }),
           });
           break;
         }
@@ -310,9 +435,10 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
               concurrency !== undefined &&
               (typeof concurrency !== "number" ||
                 !Number.isSafeInteger(concurrency) ||
-                concurrency < 1)
+                concurrency < 2 ||
+                concurrency % 2 !== 0)
             )
-              throw new Error("并发数必须是正整数");
+              throw new Error("并发数必须是正偶数（2、4、6…）");
             if (
               keys !== undefined &&
               (!Array.isArray(keys) ||
@@ -367,6 +493,7 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
           result = crawler.savedRecords(
             Number(params.get("page") || 1),
             Number(params.get("pageSize") || 20),
+            scope as SavedListingScope,
           );
           break;
         case "/api/crawl/detail":
@@ -387,16 +514,23 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
     const browser = await import("./browser");
     const result =
       pathname === "/api/browser/status" ? await browser.checkCbgStatus() : browser.openCbg();
-    res.end(JSON.stringify(result));
+    res.end(JSON.stringify({ ...result, workPagesVisible: showBrowserWorkPages() }));
   } catch (error) {
     diagnostics.record("api.error", { route: pathname, error });
     if (res.destroyed) return;
     res.statusCode =
       error instanceof ScheduleConfigError
         ? 400
-        : error instanceof Error && error.name === "CapturePreparationError"
-          ? 409
-          : 500;
+        : error instanceof Error && error.name === "SchoolFormulaConfirmationError"
+          ? 400
+          : error instanceof Error &&
+              [
+                "CapturePreparationError",
+                "LogStorageTokenError",
+                "BrowserSessionBusyError",
+              ].includes(error.name)
+            ? 409
+            : 500;
     res.end(JSON.stringify({ error: error instanceof Error ? error.message : "请求失败" }));
   }
 }

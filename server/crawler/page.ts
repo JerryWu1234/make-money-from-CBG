@@ -1,7 +1,60 @@
 import type { Page } from "playwright-core";
 import { ensureWorkViewport, hoverForInspection } from "../viewport";
 import { parseListing } from "./listing";
-import { ListingChangedError, type Listing, type ListingPage } from "./types";
+import {
+  ListingChangedError,
+  ListingDisappearedError,
+  SellingOrderUnavailableError,
+  type Listing,
+  type ListingPage,
+} from "./types";
+
+export interface ListingHoverDiagnostic {
+  event: "timeout" | "retry_recovered";
+  key: string;
+  attempt: number;
+  matches: number;
+  page: number;
+  order: string;
+  keys: string[];
+  hrefs: string[];
+  retrying: boolean;
+}
+
+async function matchingListingHrefs(page: Page, item: Listing) {
+  const hrefs = await page.locator("#soldList a.soldImg[href]").evaluateAll(
+    (anchors, { serverId, eid }) =>
+      anchors
+        .filter((anchor) => {
+          try {
+            const url = new URL((anchor as HTMLAnchorElement).href.replaceAll("&amp;", "&"));
+            return url.searchParams.get("s") === serverId && url.searchParams.get("eid") === eid;
+          } catch {
+            return false;
+          }
+        })
+        .slice(0, 5)
+        .map((anchor) => anchor.getAttribute("href") || ""),
+    { serverId: item.serverId, eid: item.eid },
+  );
+  return hrefs.map((href) =>
+    href
+      .replace(/\/\/[^/?#]*@/, "//[redacted]@")
+      .replace(/([?&])([^=&#]+)=([^&#]*)/g, (part, prefix: string, name: string) => {
+        let parameter = name;
+        try {
+          parameter = decodeURIComponent(name);
+        } catch {
+          // 非法编码的参数不保留其值。
+        }
+        return ["s", "eid", "reco_request_id"].includes(parameter)
+          ? part
+          : `${prefix}${name}=[redacted]`;
+      })
+      .replace(/#.*$/, "#[redacted]")
+      .slice(0, 2000),
+  );
+}
 
 export function checkAborted(signal: AbortSignal) {
   signal.throwIfAborted();
@@ -167,7 +220,7 @@ export async function prepareList(
     !(await selling.count()) &&
     (await readListings(page)).order !== preferredOrder
   )
-    throw new Error("网站未提供上架时间倒序，已暂停采集");
+    throw new SellingOrderUnavailableError();
   const field =
     preferredOrder === "selling_time DESC"
       ? "selling_time"
@@ -198,20 +251,81 @@ export async function hoverListing(
   page: Page,
   item: Listing,
   signal: AbortSignal,
+  recoveredActionability?: (stage: "scroll" | "visibility") => void,
+  onDiagnostic?: (diagnostic: ListingHoverDiagnostic) => void,
 ): Promise<Listing> {
   checkAborted(signal);
-  const anchors = page.locator("#soldList a.soldImg[href]");
-  const hrefs = await anchors.evaluateAll((elements) =>
-    elements.map((el) => (el as HTMLAnchorElement).href),
-  );
-  const index = hrefs.findIndex((href) => {
-    const url = new URL(href);
-    return url.searchParams.get("eid") === item.eid && url.searchParams.get("s") === item.serverId;
-  });
-  if (index < 0) throw new ListingChangedError();
-  await hoverForInspection(page, anchors.nth(index));
+  if (!/^\d+$/.test(item.serverId) || !/^[\w-]+$/.test(item.eid))
+    throw new Error("商品缺少稳定的服务器编号或 eid，不能安全定位");
+  const parameter = (name: string, value: string) =>
+    `:is(${["?", "&"]
+      .flatMap((prefix) => {
+        const part = `${prefix}${name}=${value}`;
+        return [`[href*="${part}&"]`, `[href*="${part}#"]`, `[href$="${part}"]`];
+      })
+      .join(",")})`;
+  // 追踪参数会在滚动或重绘时变化。定位器只匹配稳定身份及参数边界，
+  // 每次动作重新解析当前节点，不冻结旧 href，也不按列表序号定位。
+  const selector = `#soldList a.soldImg${parameter("s", item.serverId)}${parameter("eid", item.eid)}`;
+  const before = await readListings(page);
+  const sameVersion = (value: Listing) =>
+    value.key === item.key && value.price === item.price && value.sellingTime === item.sellingTime;
+  let diagnostic: ListingHoverDiagnostic | undefined;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    checkAborted(signal);
+    const targets = page.locator(selector);
+    const target = targets.first();
+    if (!(await target.count())) throw new ListingDisappearedError();
+    try {
+      await hoverForInspection(page, target, recoveredActionability);
+      break;
+    } catch (error) {
+      checkAborted(signal);
+      if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+      const current = await readListings(page);
+      const refreshed = current.items.find((value) => value.key === item.key);
+      const matches = await targets.count();
+      // 仅恢复尚未解析到目标的定位超时；遮挡、不可见和鼠标动作错误仍安全失败。
+      const lookupTimeout =
+        error.message.startsWith("locator.hover:") &&
+        error.message.includes("waiting for locator") &&
+        !/locator resolved|intercepts pointer events|visible and stable|not visible|not stable|performing hover action/.test(
+          error.message,
+        );
+      const retrying =
+        attempt === 1 &&
+        lookupTimeout &&
+        matches === 1 &&
+        !!refreshed &&
+        sameVersion(refreshed) &&
+        current.page === before.page &&
+        current.order === before.order;
+      diagnostic = {
+        event: "timeout",
+        key: item.key,
+        attempt,
+        matches,
+        page: current.page,
+        order: current.order,
+        keys: current.items.map((value) => value.key),
+        hrefs: await matchingListingHrefs(page, item),
+        retrying,
+      };
+      onDiagnostic?.(diagnostic);
+      if (!refreshed) throw new ListingDisappearedError();
+      if (!sameVersion(refreshed) || current.page !== before.page || current.order !== before.order)
+        throw new ListingChangedError();
+      if (!retrying) throw error;
+    }
+  }
   await pace(signal, 350, 350);
-  const refreshed = (await readListings(page)).items.find((value) => value.key === item.key);
-  if (!refreshed) throw new ListingChangedError();
+  const current = await readListings(page);
+  const refreshed = current.items.find((value) => value.key === item.key);
+  if (!refreshed) throw new ListingDisappearedError();
+  if (diagnostic) {
+    if (!sameVersion(refreshed) || current.page !== before.page || current.order !== before.order)
+      throw new ListingChangedError();
+    onDiagnostic?.({ ...diagnostic, event: "retry_recovered", attempt: 2, retrying: false });
+  }
   return refreshed;
 }

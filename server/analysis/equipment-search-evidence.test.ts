@@ -11,11 +11,22 @@ import { AnalysisRunner } from "./runner";
 import { createProfile, PROMPT_FILE } from "./profile";
 import { equipmentPricingPlan } from "./equipment-pricing";
 import { finishPricingSearch } from "./pricing-progress";
+import { screenshotsEnabled } from "../runtime-settings";
+
+vi.mock("../runtime-settings", () => ({ screenshotsEnabled: vi.fn(() => true) }));
 
 vi.mock("node:fs/promises", () => ({ mkdir: vi.fn(), writeFile: vi.fn() }));
 const diagnosticRecord = vi.hoisted(() => vi.fn());
-vi.mock("../diagnostics", () => ({ diagnostics: { record: diagnosticRecord } }));
-beforeEach(() => vi.resetAllMocks());
+vi.mock("../diagnostics", () => ({
+  diagnostics: {
+    record: diagnosticRecord,
+    evidenceDirectory: () => "/tmp/browser-steps/fixture-run",
+  },
+}));
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.mocked(screenshotsEnabled).mockReturnValue(true);
+});
 const input = {
   stage: "filled",
   equipmentKey: "道具/法宝:0",
@@ -52,6 +63,8 @@ it("截图与真实填写参数按角色和装备绑定，稳定性核验通过�
     plannedArgs: { init_damage_raw: 592 },
     form: { controls: [{ id: "txt_init_damage_raw", value: "592" }] },
   });
+  expect(result.screenshot).toMatch(/^\/tmp\/browser-steps\/fixture-run\/pricing\//);
+  expect(result.parameters).toMatch(/^\/tmp\/browser-steps\/fixture-run\/pricing\//);
   expect(result.screenshotSha256).toMatch(/^[a-f0-9]{64}$/);
 });
 it("截图期间表单变化时不保存图片或参数，不产生成功凭证", async () => {
@@ -65,6 +78,61 @@ it("截图期间表单变化时不保存图片或参数，不产生成功凭证"
     }),
   ).rejects.toThrow("表单已变化");
   expect(writeFile).not.toHaveBeenCalled();
+});
+
+it("关闭截图仍保存真实参数和核验稳定性，不伪造PNG凭证或报截图错误", async () => {
+  vi.mocked(screenshotsEnabled).mockReturnValue(false);
+  const screenshot = vi.fn();
+  const verify = vi.fn().mockResolvedValue(undefined);
+  const result = await equipmentSearchEvidence("fixture:role", "1")(
+    { screenshot } as unknown as Page,
+    input,
+    verify,
+  );
+  expect(verify).toHaveBeenCalledOnce();
+  expect(screenshot).not.toHaveBeenCalled();
+  expect(writeFile).toHaveBeenCalledOnce();
+  const written = JSON.parse(vi.mocked(writeFile).mock.calls[0][1] as string);
+  expect(written).toMatchObject({
+    screenshotDisabled: true,
+    screenshotAttempts: 0,
+    plannedArgs: input.plannedArgs,
+    form: input.form,
+  });
+  expect(written.screenshot).toBeUndefined();
+  expect(written.screenshotSha256).toBeUndefined();
+  expect(result).toMatchObject({ screenshotDisabled: true, parameters: expect.any(String) });
+  expect(result.screenshot).toBeUndefined();
+  expect(diagnosticRecord).not.toHaveBeenCalledWith(
+    "equipment.evidence_screenshot_failed",
+    expect.anything(),
+  );
+});
+
+it("关闭截图时表单变化仍拒绝生成参数凭证", async () => {
+  vi.mocked(screenshotsEnabled).mockReturnValue(false);
+  await expect(
+    equipmentSearchEvidence("fixture:role", "1")({} as Page, input, async () => {
+      throw new Error("表单已变化");
+    }),
+  ).rejects.toThrow("表单已变化");
+  expect(writeFile).not.toHaveBeenCalled();
+});
+
+it("重试核验期间关闭截图后不再启动下一张截图", async () => {
+  const screenshot = vi.fn().mockRejectedValueOnce(new errors.TimeoutError("截图超时"));
+  const verify = vi.fn().mockImplementationOnce(async () => {
+    vi.mocked(screenshotsEnabled).mockReturnValue(false);
+  });
+  const result = await equipmentSearchEvidence("fixture:role", "1")(
+    { screenshot, locator: vi.fn() } as unknown as Page,
+    input,
+    verify,
+  );
+  expect(screenshot).toHaveBeenCalledOnce();
+  expect(verify).toHaveBeenCalledTimes(2);
+  expect(result).toMatchObject({ screenshotDisabled: true });
+  expect(writeFile).toHaveBeenCalledOnce();
 });
 
 it("字体已加载后的截图超时也重试，重新核验表单后保留真实截图和重试次数", async () => {

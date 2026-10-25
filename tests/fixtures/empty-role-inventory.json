@@ -1,0 +1,162 @@
+{
+  "name": "道具/法宝",
+  "text": "现金：0",
+  "fields": [],
+  "tables": [],
+  "elements": [],
+  "tooltips": [],
+  "equipmentContainers": [
+    {
+      "id": "RoleUsingEquips",
+      "present": true,
+      "visible": true,
+      "icons": []
+    },
+    {
+      "id": "RoleStoreEquips",
+      "present": true,
+      "visible": true,
+      "icons": [
+        {
+          "name": "玳瑁护腕",
+          "modelId": "9311"
+        },
+        {
+          "name": "玳瑁衣",
+          "modelId": "9111"
+        },
+        {
+          "name": "玳瑁环",
+          "modelId": "9211"
+        }
+      ]
+    },
+    {
+      "id": "RoleSplitEquips",
+      "present": true,
+      "visible": true,
+      "icons": [
+        {
+          "name": "点化石",
+          "modelId": "4034"
+        },
+        {
+          "name": "玳瑁衣",
+          "modelId": "9111"
+        },
+        {
+          "name": "玳瑁护腕",
+          "modelId": "9311"
+        },
+        {
+          "name": "玳瑁护腕",
+          "modelId": "9311"
+        },
+        {
+          "name": "玳瑁衣",
+          "modelId": "9111"
+        }
+      ]
+    },
+    {
+      "id": "RoleYuHun",
+      "present": false,
+      "visible": false,
+      "icons": []
+    }
+  ],
+  "items": [
+    {
+      "index": 0,
+      "name": "玳瑁护腕",
+      "kind": "equipment",
+      "modelId": "9311",
+      "description": "等级 105\n伤害 +53 命中率 +15%\n耐久度 600\n魔力 +14",
+      "attributes": {
+        "装备对象": "召唤兽",
+        "装备条件": "等级105"
+      }
+    },
+    {
+      "index": 1,
+      "name": "玳瑁衣",
+      "kind": "equipment",
+      "modelId": "9111",
+      "description": "等级 105\n防御 +86 伤害 +51\n耐久度 605",
+      "attributes": {
+        "装备对象": "召唤兽",
+        "装备条件": "等级105"
+      }
+    },
+    {
+      "index": 2,
+      "name": "玳瑁环",
+      "kind": "equipment",
+      "modelId": "9211",
+      "description": "等级 105\n速度 +36 伤害 +53\n耐久度 655",
+      "attributes": {
+        "装备对象": "召唤兽",
+        "装备条件": "等级105"
+      }
+    },
+    {
+      "index": 3,
+      "name": "点化石",
+      "kind": "equipment",
+      "category": "材料 · 点化石",
+      "modelId": "4034",
+      "description": "附加技能：高级反震"
+    },
+    {
+      "index": 4,
+      "name": "玳瑁衣",
+      "kind": "equipment",
+      "modelId": "9111",
+      "description": "等级 105\n防御 +83\n耐久度 510\n灵力 +7 法力 +9",
+      "attributes": {
+        "装备对象": "召唤兽",
+        "装备条件": "等级105"
+      }
+    },
+    {
+      "index": 5,
+      "name": "玳瑁护腕",
+      "kind": "equipment",
+      "modelId": "9311",
+      "description": "等级 105\n命中率 +13%\n耐久度 660\n体质 +6\n套装效果：附加状态高级必杀",
+      "attributes": {
+        "装备对象": "召唤兽",
+        "装备条件": "等级105"
+      }
+    },
+    {
+      "index": 6,
+      "name": "玳瑁护腕",
+      "kind": "equipment",
+      "modelId": "9311",
+      "description": "等级 105\n命中率 +13% 气血 +75\n耐久度 525\n灵力 +9",
+      "attributes": {
+        "装备对象": "召唤兽",
+        "装备条件": "等级105"
+      }
+    },
+    {
+      "index": 7,
+      "name": "玳瑁衣",
+      "kind": "equipment",
+      "modelId": "9111",
+      "description": "等级 105\n防御 +87\n耐久度 585",
+      "attributes": {
+        "装备对象": "召唤兽",
+        "装备条件": "等级105"
+      }
+    },
+    {
+      "index": 8,
+      "name": "月影虫盅",
+      "kind": "equipment",
+      "category": "法宝",
+      "modelId": "6136"
+    }
+  ]
+}

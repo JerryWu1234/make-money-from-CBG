@@ -133,6 +133,10 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== "http://cbg-valuation.test") return route.abort();
+      if (url.pathname === "/api/runtime/settings")
+        return route.fulfill({ json: { saveScreenshots: false } });
+      if (url.pathname === "/api/browser/settings")
+        return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
       if (url.pathname.startsWith("/api/")) {
         const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
         let body: unknown;

@@ -22,6 +22,10 @@ test("采集准备前置：无完整记录也能自动采集，显示进度且�
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== "http://cbg-capture.test") return route.abort();
+      if (url.pathname === "/api/runtime/settings")
+        return route.fulfill({ json: { saveScreenshots: false } });
+      if (url.pathname === "/api/browser/settings")
+        return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
       if (url.pathname.startsWith("/api/")) {
         if (url.pathname === "/api/analysis/start") {
           startCalls++;

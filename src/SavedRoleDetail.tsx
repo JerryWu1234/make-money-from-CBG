@@ -86,7 +86,7 @@ export function SavedRoleDetail({ recordKey, running }: { recordKey: string; run
                   : record.status === "failed"
                     ? "详情待重试"
                     : running
-                      ? "详情采集中"
+                      ? "待采或采集中"
                       : "详情待续采"}
               </span>
               <h3>
@@ -115,13 +115,13 @@ export function SavedRoleDetail({ recordKey, running }: { recordKey: string; run
           {record.status === "pending" && (
             <p role="status" className="detail-notice">
               {running
-                ? "已读取列表摘要，正在采集详情。完成后会自动显示各标签内容。"
-                : "采集暂停时详情尚未完成。继续采集会优先按原商品链接补采。"}
+                ? "这是正在处理的采集任务；资料完整入库后才会发布为商品并进入分析。"
+                : "这是尚未完成的采集任务，原链接与进度已保留；继续采集可处理该任务。"}
             </p>
           )}
           {record.status === "failed" && (
             <p role="alert" className="detail-notice notice-warning">
-              详情未完成：{record.error || "请继续采集重试"}
+              采集任务失败，尚未发布为商品：{record.error || "请继续采集重试"}
             </p>
           )}
           {record.status !== "complete" && record.detail && (

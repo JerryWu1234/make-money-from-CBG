@@ -6,6 +6,31 @@ import { expect, it } from "vite-plus/test";
 import { analysisRecord } from "../../tests/fixtures/analysis";
 import { CrawlStore } from "./store";
 
+it("发现和重复扫描只登记待采，实际派发详情时才累计尝试次数", () => {
+  const store = new CrawlStore(":memory:");
+  const row = analysisRecord("not-started");
+  const attempts = () =>
+    store.db
+      .prepare("SELECT attempt_count,last_attempt_at FROM listings WHERE key=?")
+      .get(row.listing.key);
+  try {
+    store.observe(row.listing);
+    store.observe(row.listing);
+    expect(attempts()).toMatchObject({ attempt_count: 0, last_attempt_at: null });
+    store.beginRetry(row.listing.key);
+    expect(attempts()).toMatchObject({ attempt_count: 1, last_attempt_at: expect.any(String) });
+    store.fail(row.listing.key, "详情未读完");
+    const failedAttempt = attempts();
+    store.observe(row.listing);
+    expect(attempts()).toEqual(failedAttempt);
+    expect(store.detail(row.listing.key)).toMatchObject({ status: "failed", error: "详情未读完" });
+    store.beginRetry(row.listing.key);
+    expect(attempts()).toMatchObject({ attempt_count: 2 });
+  } finally {
+    store.close();
+  }
+});
+
 // Failure cases: a lane changes frozen input, history demotes a new item, head discovery
 // overwrites history progress, restart loses either cursor, or migration deletes old records.
 it("新旧来源不改变商品原文，历史观察不降级新号，两个进度重启后分别保留", () => {

@@ -227,7 +227,11 @@ async function runCodexRequest(
   probe = false,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
+  const request = new AbortController();
+  const cancel = () => request.abort(signal.reason);
+  signal.addEventListener("abort", cancel, { once: true });
   try {
+    signal.throwIfAborted();
     const codex = new Codex({
       env: codexEnvironment(),
       config: {
@@ -261,7 +265,7 @@ async function runCodexRequest(
     });
     if (probe || options?.bareRoleReview) {
       const { events } = await thread.runStreamed(prompt, {
-        signal,
+        signal: request.signal,
         ...(options?.bareRoleReview ? { outputSchema: options.outputSchema } : {}),
       });
       let finalResponse = "";
@@ -280,10 +284,13 @@ async function runCodexRequest(
       throw new Error("Codex 调用未收到完整完成事件，请重试");
     }
     return await thread.run(prompt, {
-      signal,
+      signal: request.signal,
       ...(options ? { outputSchema: options.outputSchema } : {}),
     });
   } finally {
+    // The SDK removes child-process listeners when its stream closes. A later
+    // parent abort must not reach that completed process and emit an unhandled error.
+    signal.removeEventListener("abort", cancel);
     await rm(directory, { recursive: true, force: true });
   }
 }

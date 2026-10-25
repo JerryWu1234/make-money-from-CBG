@@ -3,11 +3,14 @@ import { buildPageState, disconnectedState } from "./page-state";
 import { isNavigationTransition, readStableSnapshot, runFixedWorkflow } from "./workflow";
 import type { OpenCbgResult } from "./types";
 import { diagnostics, watchWorkPage, workflowDiagnostic } from "./diagnostics";
+import { browserSettings } from "./browser-settings";
+import { assertServiceOpen } from "./service-lifecycle";
 
 type WorkflowCache = {
   state: OpenCbgResult;
   task: Promise<void> | null;
   lastDiagnostic: string;
+  generation?: number;
 };
 const workflowKey = Symbol.for("cbg.workflow-state.v1");
 const runtime = globalThis as typeof globalThis & { [workflowKey]?: WorkflowCache };
@@ -28,11 +31,17 @@ function recordState() {
 }
 
 export function openCbg(): OpenCbgResult {
+  assertServiceOpen();
   if (cache.task) return cache.state;
+  cache.generation = (cache.generation || 0) + 1;
   diagnostics.record("workflow.start");
   const started = Date.now();
   cache.state = {
-    ...disconnectedState("正在连接日常 Chrome，请留意首次连接的浏览器授权提示…"),
+    ...disconnectedState(
+      browserSettings().mode === "daily"
+        ? "正在连接日常 Chrome；重新连接时可能需要允许浏览器授权…"
+        : "正在启动项目专用浏览器，将复用已保存的登录状态…",
+    ),
     running: true,
     workflowStep: "connecting",
   };
@@ -84,10 +93,28 @@ export function openCbg(): OpenCbgResult {
   return cache.state;
 }
 
+export const isBrowserWorkflowRunning = () => cache.task !== null;
+
+export function resetBrowserWorkflow() {
+  if (cache.task) throw new Error("角色查询仍在运行，请等待结束后切换");
+  cache.generation = (cache.generation || 0) + 1;
+  cache.state = {
+    ...disconnectedState("浏览器运行方式已切换，请开始查询角色列表。"),
+    running: false,
+    workflowStep: "idle",
+  };
+  recordState();
+}
+
+export async function finishBrowserWorkflow() {
+  await cache.task;
+}
+
 export async function checkCbgStatus(): Promise<OpenCbgResult> {
   // 长时间等待扫码或导航时直接返回进度，不把 HTTP 请求挂在登录操作之后。
   if (cache.task || cache.state.workflowStep !== "completed") return cache.state;
   const page = getCbgPage();
+  const generation = cache.generation;
   if (!page) {
     cache.state = {
       ...disconnectedState("后台工作页已关闭，请重新开始。"),
@@ -99,6 +126,7 @@ export async function checkCbgStatus(): Promise<OpenCbgResult> {
   }
   try {
     const auth = buildPageState(await readStableSnapshot(page, 1500));
+    if (generation !== cache.generation || page !== getCbgPage()) return cache.state;
     if (!auth.isLoggedIn)
       cache.state = {
         ...auth,
@@ -116,6 +144,7 @@ export async function checkCbgStatus(): Promise<OpenCbgResult> {
         selectedRoleId: auth.selectedRoleId,
       };
   } catch (error) {
+    if (generation !== cache.generation || page !== getCbgPage()) return cache.state;
     if (!isNavigationTransition(error)) {
       diagnostics.record("workflow.status_error", { error });
       cache.state = {

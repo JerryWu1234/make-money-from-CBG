@@ -1,4 +1,5 @@
 import type { ConnectOverCDPTransport } from "playwright-core";
+import { diagnostics } from "./diagnostics";
 
 interface Message {
   id?: number;
@@ -21,8 +22,18 @@ export class WorkTransport implements ConnectOverCDPTransport {
 
   constructor(private readonly socket: WebSocket) {
     socket.addEventListener("message", (event) => this.receive(JSON.parse(String(event.data))));
-    socket.addEventListener("close", () => this.onclose?.());
-    socket.addEventListener("error", () => this.close());
+    socket.addEventListener("close", (event) => {
+      diagnostics.record("browser.transport_closed", {
+        code: event.code,
+        reason: event.reason,
+        clean: event.wasClean,
+      });
+      this.onclose?.(event.reason);
+    });
+    socket.addEventListener("error", () => {
+      diagnostics.record("browser.transport_error");
+      this.close();
+    });
   }
 
   send(message: Message) {

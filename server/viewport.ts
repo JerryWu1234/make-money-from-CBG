@@ -13,7 +13,11 @@ export async function ensureWorkViewport(page: Page) {
     await page.setViewportSize(WORK_VIEWPORT);
   }
 }
-export async function hoverForInspection(page: Page, element: Locator) {
+export async function hoverForInspection(
+  page: Page,
+  element: Locator,
+  recoveredActionability?: (stage: "scroll" | "visibility") => void,
+) {
   await ensureWorkViewport(page);
   // 移出上一个图标，触发网站自己的 mouseout；仅让提示框不拦截后续鼠标。
   // 不隐藏提示内容，不对验证码、登录框或其他遮罩使用 force。
@@ -42,13 +46,66 @@ export async function hoverForInspection(page: Page, element: Locator) {
   try {
     await element.hover({ timeout: 5000 });
   } catch (error) {
-    if (!(error instanceof Error) || !error.message.includes("outside of the viewport"))
-      throw error;
+    if (!(error instanceof Error)) throw error;
+    const actionabilityTimeout =
+      error.name === "TimeoutError" &&
+      (error.message.includes("waiting for element to be visible and stable") ||
+        (error.message.includes("element is visible and stable") &&
+          error.message.includes("scrolling into view if needed"))) &&
+      !error.message.includes("performing hover action");
+    if (actionabilityTimeout) {
+      // 隐藏工作页的帧等待或 CDP 滚动可能停滞。先核对当前 DOM 的可见性、
+      // 稳定几何和鼠标命中，再发一次原生鼠标动作；真实遮挡或不可见仍然失败。
+      const point = () =>
+        element.evaluate((el) => {
+          if (
+            !el.isConnected ||
+            !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+          )
+            return null;
+          const rect = el.getBoundingClientRect();
+          const left = Math.max(0, rect.left),
+            right = Math.min(window.innerWidth, rect.right),
+            top = Math.max(0, rect.top),
+            bottom = Math.min(window.innerHeight, rect.bottom);
+          if (right <= left || bottom <= top) return null;
+          const x = (left + right) / 2,
+            y = (top + bottom) / 2;
+          if (!el.contains(document.elementFromPoint(x, y))) return null;
+          return { x, y, width: rect.width, height: rect.height };
+        });
+      const before = await point();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const after = await point();
+      if (!before || !after || JSON.stringify(before) !== JSON.stringify(after)) throw error;
+      await page.mouse.move(after.x, after.y);
+      if (
+        !(await element.evaluate(
+          (el, { x, y }) => el.isConnected && el.contains(document.elementFromPoint(x, y)),
+          after,
+        ))
+      )
+        throw error;
+      recoveredActionability?.(
+        error.message.includes("scrolling into view if needed") ? "scroll" : "visibility",
+      );
+      return;
+    }
+    const outside = error.message.includes("outside of the viewport");
+    // Visible/stable/hit-target checks already passed. Retry a stalled native
+    // mouse action once; invisible elements and intercepting dialogs still fail.
+    const pointerTimeout =
+      error.name === "TimeoutError" &&
+      error.message.includes("performing hover action") &&
+      !error.message.includes("hover action done");
+    if (!outside && !pointerTimeout) throw error;
     // 老工作页或网站固定宽度布局可能使可视区域与文档不同步，重新设定后仅重试一次。
-    const width = await page.evaluate(() =>
-      Math.min(4096, Math.max(1440, document.documentElement.scrollWidth)),
-    );
-    await page.setViewportSize({ width, height: 1080 });
+    if (outside) {
+      const width = await page.evaluate(() =>
+        Math.min(4096, Math.max(1440, document.documentElement.scrollWidth)),
+      );
+      await page.setViewportSize({ width, height: 1080 });
+    }
     await element.evaluate((el) =>
       el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }),
     );

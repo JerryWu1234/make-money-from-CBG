@@ -10,6 +10,8 @@ import { collectCompleteCapture } from "../crawler/capture-readiness";
 import { buildProductDocument } from "./product-document";
 import { valuationPrompt } from "./valuation-contract";
 import { textHash } from "./contract";
+import { beginServiceShutdown, resetServiceLifecycle } from "../service-lifecycle";
+import { refreshMarket } from "./market";
 
 const mocks = vi.hoisted(() => ({
   database: vi.fn(),
@@ -32,7 +34,11 @@ vi.mock("../crawler/controller", () => ({
   stopCrawl: mocks.stopCrawl,
 }));
 vi.mock("../ai-connection", () => ({ prepareAnalysisClient: mocks.connect }));
-vi.mock("./market", () => ({ refreshMarket: vi.fn(), marketServers: () => [] }));
+vi.mock("./market", async (original) => ({
+  ...(await original<typeof import("./market")>()),
+  refreshMarket: vi.fn(),
+  marketServers: () => [],
+}));
 vi.mock("./profile", async (original) => ({
   ...(await original<typeof import("./profile")>()),
   loadProfile: mocks.profile,
@@ -41,6 +47,7 @@ const serviceKey = Symbol.for("cbg.analysis-service.v1");
 const runtime = globalThis as typeof globalThis & { [serviceKey]?: unknown };
 let crawl: CrawlStore;
 beforeEach(() => {
+  resetServiceLifecycle();
   delete runtime[serviceKey];
   vi.resetModules();
   vi.clearAllMocks();
@@ -52,13 +59,70 @@ beforeEach(() => {
   mocks.profile.mockReturnValue(createProfile("reload test", undefined, false));
   mocks.retries.mockImplementation((keys?: string[]) => crawl.retryItems(keys));
   mocks.crawling.mockReturnValue(false);
+  mocks.status.mockReturnValue(undefined);
+});
+it("行情等待期间开始关停，不会在返回后启动模型批次", async () => {
+  vi.mocked(refreshMarket).mockImplementationOnce(async () => {
+    beginServiceShutdown();
+    return [];
+  });
+  const controller = await import("./controller");
+  await expect(controller.startAnalysis("codex")).rejects.toThrow("正在关闭");
+  expect(mocks.connect).not.toHaveBeenCalled();
+  expect(crawl.db.prepare("SELECT count(*) AS n FROM analysis_runs").get()?.n).toBe(0);
+});
+
+it("整轮采集错误独立于单件失败数，分析页仍能读取暂停原因", async () => {
+  crawl.observe(analysisRecord("pending").listing);
+  mocks.status.mockReturnValue({
+    running: false,
+    phase: "error",
+  });
+  const controller = await import("./controller");
+  expect(controller.analysisOverview({})).toMatchObject({
+    captureActivity: { running: false, phase: "error" },
+    counts: { pendingDetail: 1, failedDetail: 0 },
+  });
 });
 afterEach(async () => {
   await (await import("./controller")).shutdownAnalysis();
   delete runtime[serviceKey];
   crawl.close();
 });
+it.each(["collecting", "retrying"])("分析概览在 %s 阶段单列真实详情在途数", async (phase) => {
+  for (let i = 0; i < 5; i++) crawl.observe(analysisRecord(`pending-${i}`).listing);
+  mocks.crawling.mockReturnValue(true);
+  mocks.status.mockReturnValue({
+    running: true,
+    phase,
+    newRunning: 3,
+    oldRunning: 2,
+  });
+  const controller = await import("./controller");
+  expect(controller.analysisOverview({})).toMatchObject({
+    captureActivity: { inFlight: 5 },
+    counts: { pendingDetail: 5, failedDetail: 0 },
+  });
+});
 describe("分析服务刷新恢复", () => {
+  it("过期批次在补采和连接AI之前拒绝恢复，保留旧批次", async () => {
+    const { AnalysisStore } = await import("./store");
+    const store = new AnalysisStore(crawl.db);
+    const id = store.createRun("codex", "old-model");
+    const profile = {
+      ...createProfile("过期批次"),
+      marketSources: [{ serverId: "367", source: "auto", fetchedAt: "2026-01-01T00:00:00Z" }],
+    };
+    crawl.db
+      .prepare("UPDATE analysis_runs SET profile_json=?,status='paused' WHERE id=?")
+      .run(JSON.stringify(profile), id);
+    const controller = await import("./controller");
+    await expect(controller.resumeAnalysis(id)).rejects.toThrow("区服行情已过期");
+    expect(mocks.retries).not.toHaveBeenCalled();
+    expect(mocks.connect).not.toHaveBeenCalled();
+    expect(store.run(id)?.status).toBe("paused");
+    expect(crawl.count()).toBe(1);
+  });
   it("模块重载保留执行中的队列；刷新状态不连接 AI，手动暂停不会自动重启", async () => {
     const analyze = vi.fn(
       (_prompt: string, _schema: unknown, signal: AbortSignal) =>
@@ -94,7 +158,12 @@ function captureFixture() {
   const record = valuationRecord("a");
   record.detail!.captureMode = "all";
   record.detail!.captureVersion = CAPTURE_VERSION;
-  record.detail!.valuation = { version: 1, fields: [], issues: [], source: {} };
+  record.detail!.valuation = {
+    version: 1,
+    fields: [],
+    issues: [],
+    source: { serverId: "367", eid: "item-a" },
+  };
   record.detail!.equipmentCapture = {
     version: 1,
     collectedAt: "now",
@@ -353,29 +422,42 @@ it("完整流程：采集发现缺项、自动重读、保存完整资料、查�
   expect(analyze).toHaveBeenCalledOnce();
 });
 
-it("普通分析在采集仍进行时立即处理已采齐角色，不等待后续补采", async () => {
-  const { record } = captureFixture();
-  crawl.save(record.listing, record.detail!);
-  crawl.observe(analysisRecord("pending-later").listing);
-  mocks.crawling.mockReturnValue(true);
-  mocks.activity.mockReturnValue({
-    completion: new Promise(() => {}),
-    origin: "manual",
-    startedAt: Date.now(),
-  });
-  const controller = await import("./controller");
-  const run = await controller.startAnalysis("codex");
-  expect(run).toMatchObject({ total: 1, status: "running" });
-  expect(mocks.startCrawl).not.toHaveBeenCalled();
-  expect(mocks.activity).not.toHaveBeenCalled();
-  expect(controller.analysisOverview({}).capturePreparation).toBeUndefined();
-  expect(controller.appendCapturedAnalysis()).toBe(0);
-});
+it.each([false, true])(
+  "普通分析先处理已采齐角色，保留后续补采（正在采集：%s）",
+  async (crawling) => {
+    const { record } = captureFixture();
+    crawl.save(record.listing, record.detail!);
+    crawl.observe(analysisRecord("pending-later").listing);
+    mocks.crawling.mockReturnValue(crawling);
+    mocks.activity.mockReturnValue({
+      completion: new Promise(() => {}),
+      origin: "manual",
+      startedAt: Date.now(),
+    });
+    const controller = await import("./controller");
+    const run = await controller.startAnalysis("codex");
+    expect(run).toMatchObject({ total: 1, status: "running" });
+    expect(mocks.startCrawl).not.toHaveBeenCalled();
+    expect(mocks.retries).not.toHaveBeenCalled();
+    expect(mocks.activity).not.toHaveBeenCalled();
+    expect(controller.analysisOverview({}).capturePreparation).toBeUndefined();
+    expect(controller.appendCapturedAnalysis()).toBe(0);
+    expect(crawl.retryItems()).toHaveLength(1);
+  },
+);
 
 it("只查装备批次冻结关闭宝宝查价，续跑不重新启用且不改通用设置", async () => {
   const { record, analyze } = captureFixture();
+  record.detail!.tabs[0].fields.find((field) => field.name === "飞升/渡劫/化圣")!.value = "已飞升";
+  [150, 154, 130, 130, 130, 150, 125].forEach((level, index) => {
+    record.detail!.tabs[1].items![index].level = String(level);
+  });
   crawl.save(record.listing, record.detail!);
-  const original = mocks.profile();
+  const original = {
+    ...mocks.profile(),
+    ascendedSchoolFormulaConfirmations: { [record.listing.key]: [154, 150, 150, 130, 130] },
+  };
+  mocks.profile.mockReturnValue(original);
   const client = await mocks.connect();
   const searchPets = vi.fn(client.searchPets);
   const searchPetGear = vi.fn();
@@ -398,6 +480,9 @@ it("只查装备批次冻结关闭宝宝查价，续跑不重新启用且不改�
     ),
   );
   expect(frozen).toMatchObject({ equipmentSearch: true, petSearch: false, petGearSearch: false });
+  expect(frozen.ascendedSchoolFormulaConfirmations).toEqual(
+    original.ascendedSchoolFormulaConfirmations,
+  );
   expect(frozen.hash).toBe(createProfile(original.template, original.settings, true, false).hash);
   expect(mocks.profile()).toBe(original);
   expect(original.petSearch).toBe(true);
@@ -416,6 +501,49 @@ it("只查装备批次冻结关闭宝宝查价，续跑不重新启用且不改�
       ),
     ),
   ).toEqual(frozen);
+});
+
+it("有限批次经controller恢复也只核验本批次区服，冻结行情不裁剪", async () => {
+  const { record, analyze } = captureFixture();
+  crawl.save(record.listing, record.detail!);
+  const server = {
+    serverId: record.listing.serverId,
+    source: "manual" as const,
+    age: "older" as const,
+    rank: 10,
+    goldPrice: 210,
+    goldUnit: 30000000,
+    baselineUnitConfirmed: true,
+  };
+  const profile = {
+    ...createProfile("finite manual", { ...mocks.profile().settings, servers: [server] }, false),
+    marketSources: [
+      {
+        ...server,
+        serverId: "unused-server",
+        serverName: "未参与本批次",
+        source: "auto" as const,
+        fetchedAt: new Date(Date.now() - 25 * 3600000).toISOString(),
+        sources: [],
+      },
+    ],
+  };
+  const { AnalysisStore } = await import("./store");
+  const store = new AnalysisStore(crawl.db);
+  const id = store.createRun("codex", "fixture-model", true, profile, true);
+  const frozen = crawl.db
+    .prepare("SELECT profile_json FROM analysis_runs WHERE id=?")
+    .get(id)!.profile_json;
+  const controller = await import("./controller");
+  expect(await controller.resumeAnalysis(id)).toMatchObject({
+    status: "running",
+    marketExpired: false,
+  });
+  await vi.waitFor(() => expect(analyze).toHaveBeenCalledOnce());
+  expect(controller.analysisOverview({ runId: id }).run?.marketExpired).toBe(false);
+  expect(
+    crawl.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(id)!.profile_json,
+  ).toBe(frozen);
 });
 
 it("已有普通批次时不能静默把只查装备请求当作已生效", async () => {

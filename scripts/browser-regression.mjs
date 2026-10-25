@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import ts from "typescript";
+import { browserEvidenceUrl } from "./regression-browser-evidence.mjs";
 import { chromium } from "playwright-core";
 import {
   authenticated,
@@ -12,7 +13,6 @@ import {
   html,
   idleCrawlStatus,
   login,
-  postLogin,
   roleForm,
   roleResults,
 } from "../tests/fixtures/browser-site.mjs";
@@ -31,12 +31,14 @@ const { runFixedWorkflow, readRoleList } = await import(
   await moduleUrl("server/workflow.ts", {
     "./config": await moduleUrl("server/config.ts"),
     "./page-state": stateUrl,
+    "./browser-evidence": browserEvidenceUrl,
   })
 );
 const { createBackgroundPage } = await import(
   await moduleUrl("server/session.ts", {
     "./chrome": await moduleUrl("server/chrome.ts"),
     "./work-transport": await moduleUrl("server/work-transport.ts"),
+    "./browser-evidence": browserEvidenceUrl,
     "./diagnostics": await moduleUrl("server/diagnostics.ts"),
     "./viewport": await moduleUrl("server/viewport.ts"),
     "./config": await moduleUrl("server/config.ts"),
@@ -121,12 +123,17 @@ try {
     requests.push(url.pathname + url.search);
     let body;
     if (url.pathname === "/") body = home;
-    else if (url.pathname.endsWith("show_login.py")) body = login;
-    else if (url.pathname.endsWith("query.py") && !url.pathname.endsWith("equipquery.py")) {
+    else if (url.pathname.endsWith("show_login.py"))
+      body = login.replace(
+        "location.href='/cgi-bin/query.py'",
+        "location.href='/cgi-bin/equip_detail.py'",
+      );
+    else if (url.pathname.endsWith("equip_detail.py")) {
       // 模拟角色已提交、网站 6 秒后才登录成功的真实导航，不重复点击。
       await new Promise((resolve) => setTimeout(resolve, 6000));
       sessionReady = true;
-      body = postLogin;
+      // 登录回跳可能落在商品详情页，该页没有 #cross_server_buy 入口。
+      body = authenticated("<main>登录回跳的商品详情页，没有跨服购买按钮</main>");
     } else if (url.pathname.endsWith("equipquery.py"))
       body = sessionReady ? equipment : html("尚未登录", false);
     else if (url.searchParams.get("act") === "show_search_role_form") body = roleForm;
@@ -191,6 +198,7 @@ try {
   assert.equal(startCount, 1);
   assert.equal(context.pages().length, 2);
   assert.equal(await workPage.evaluate(() => sessionStorage.getItem("submits")), "1");
+  assert.ok(requests.includes("/cgi-bin/equip_detail.py"));
   assert.deepEqual(searchArgs, { server_type: "3" });
   assert.equal(result.roleList.rows.length, 1);
   assert.equal(result.isLoggedIn, true);
@@ -200,7 +208,7 @@ try {
   assert.ok(requests.includes("/cgi-bin/equipquery.py?act=show_overall_search_equip"));
   assert.equal(await helper.locator("a[target='_blank']").count(), 0);
   console.log(
-    "PASS: delayed login succeeds after one submission; fixed cross-server → 3+ years → role search → result flow uses one work page",
+    "PASS: login redirects to a detail page without a cross-server link; one submission reaches cross-server → 3+ years → role search → results in one work page",
   );
   await helper.screenshot({ path: "/tmp/cbg-role-results-regression.png", fullPage: true });
 
@@ -265,7 +273,10 @@ try {
   );
 
   apiFailure = true;
-  await helper.getByText("测试本地服务暂时断开", { exact: true }).waitFor();
+  await helper
+    .locator(".workflow-alert")
+    .filter({ hasText: /^测试本地服务暂时断开$/ })
+    .waitFor();
   assert.equal(await helper.getByText("测试角色", { exact: true }).count(), 0);
   assert.equal(await helper.locator(".role-table").count(), 0);
   apiFailure = false;

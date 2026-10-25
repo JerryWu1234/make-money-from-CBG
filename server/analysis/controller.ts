@@ -11,11 +11,13 @@ import {
 } from "../crawler/controller";
 import { AnalysisRunner, pricingUntilAborted } from "./runner";
 import { AnalysisStore } from "./store";
-import { refreshMarket, marketServers } from "./market";
+import { EXPIRED_MARKET_NOTICE, refreshMarket, marketServers } from "./market";
 import { createProfile, loadProfile, saveProfile, PROMPT_FILE } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
 import { reconcileCapturedEquipmentCategories } from "./equipment-category-evidence";
 import { analysisConcurrency, DEFAULT_ANALYSIS_CONCURRENCY } from "./types";
+import { assertServiceOpen } from "../service-lifecycle";
+import { confirmAscendedSchoolFormula } from "./school-confirmation";
 
 type CapturePreparation = {
   controller: AbortController;
@@ -57,9 +59,20 @@ export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[
   service().store.recover();
   const profile = loadProfile(service().store.db);
   const preparation = service().preparing;
-  const capture = preparation?.ownsCapture ? preparation.status() : undefined;
+  const capture = preparation?.ownsCapture ? preparation.status() : crawlStatus();
   return {
     ...service().store.overview({ ...options, currentProfile: profile }),
+    ...(capture
+      ? {
+          captureActivity: {
+            running: capture.running,
+            phase: capture.phase,
+            ...(capture.running && (capture.phase === "collecting" || capture.phase === "retrying")
+              ? { inFlight: (capture.newRunning || 0) + (capture.oldRunning || 0) }
+              : {}),
+          },
+        }
+      : {}),
     ...(preparation
       ? {
           capturePreparation: {
@@ -173,6 +186,10 @@ export function saveAnalysisSettings(input: unknown) {
   const profile = saveProfile(service().store.db, input);
   return { profile };
 }
+export function confirmSchoolFormula(productKeys: unknown, confirmed: unknown) {
+  assertServiceOpen();
+  return confirmAscendedSchoolFormula(service().store.db, productKeys, confirmed);
+}
 export async function startAnalysis(
   provider: AiProvider,
   force = false,
@@ -183,12 +200,17 @@ export async function startAnalysis(
   equipmentOnly = false,
   concurrency = DEFAULT_ANALYSIS_CONCURRENCY,
 ) {
+  assertServiceOpen();
   analysisConcurrency(concurrency);
   validateSampleSelection(sample, sampleSize, productKeys);
   const analysis = service();
   if (
     !analysis.runner.isRunning() &&
-    !(!sample && !productKeys && (isCrawling() || analysis.store.counts().total === 0))
+    !(
+      !sample &&
+      !productKeys &&
+      (isCrawling() || analysis.store.counts().total === 0 || analysis.store.counts().complete > 0)
+    )
   ) {
     const keys =
       productKeys ||
@@ -210,8 +232,14 @@ export async function startAnalysis(
     ? {
         ...createProfile(currentProfile.template, currentProfile.settings, true, false),
         marketSources: currentProfile.marketSources,
+        ...(currentProfile.ascendedSchoolFormulaConfirmations
+          ? {
+              ascendedSchoolFormulaConfirmations: currentProfile.ascendedSchoolFormulaConfirmations,
+            }
+          : {}),
       }
     : currentProfile;
+  assertServiceOpen();
   const id = await service().runner.start(
     provider,
     force || sample,
@@ -233,8 +261,10 @@ export async function startAnalysis(
   return service().store.run(id);
 }
 export async function resumeAnalysis(id: string, retry = false, concurrency?: number) {
+  assertServiceOpen();
   if (concurrency !== undefined) analysisConcurrency(concurrency);
   const analysis = service();
+  if (analysis.store.run(id)?.marketExpired) throw new Error(EXPIRED_MARKET_NOTICE);
   if (!analysis.runner.isRunning()) {
     const row = analysis.store.db.prepare("SELECT id FROM analysis_runs WHERE id=?").get(id);
     if (!row) throw new Error("分析批次不存在");
@@ -247,6 +277,7 @@ export async function resumeAnalysis(id: string, retry = false, concurrency?: nu
     if (keys.length) await prepareCaptures(keys);
     analysis.store.refreshPendingCaptures(id);
   }
+  assertServiceOpen();
   await service().runner.resume(id, retry, concurrency);
   return service().store.run(id);
 }

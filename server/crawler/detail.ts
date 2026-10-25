@@ -1,6 +1,6 @@
-import type { Page } from "playwright-core";
+import type { Page, Response } from "playwright-core";
 import { hoverForInspection } from "../viewport";
-import type { Listing, RoleDetail, TabSnapshot } from "./types";
+import { ListingUnavailableError, type Listing, type RoleDetail, type TabSnapshot } from "./types";
 import { assertAvailable, checkAborted, pace } from "./page";
 import {
   CAPTURE_VERSION,
@@ -9,9 +9,15 @@ import {
   itemFromAttributes,
   preserveJewelryTooltipSections,
   observedEquipmentCategory,
+  equipmentNameUnresolved,
+  mergeWornEquipmentLevel,
+  type WornEquipmentSource,
 } from "./compact";
 import { collectPets, petCaptureSummary } from "./pets";
 import { captureValuation } from "./valuation-capture";
+import { roleIdentityIssues } from "./role-identity";
+import { IncompleteCaptureError } from "./capture-readiness";
+import { captureBrowserStep } from "../browser-evidence";
 
 export const MAIN_TABS = [
   "人物/修炼",
@@ -101,16 +107,32 @@ async function capture(page: Page, name: string): Promise<TabSnapshot> {
                       icon.getAttribute("src") || "",
                     ),
                 )
-                .map((icon) => ({
-                  name:
-                    icon.getAttribute("data_equip_name") ||
-                    icon.getAttribute("data-equip-name") ||
-                    "",
-                  modelId:
-                    icon.getAttribute("data_equip_type") ||
-                    icon.getAttribute("data-equip-type") ||
-                    "",
-                })),
+                .map((icon) => {
+                  // Match inspectItems: official equipment metadata may live on the a/td
+                  // around its image. Otherwise a fully read pet item leaves an anonymous
+                  // image in the inventory proof and falsely looks like unread role gear.
+                  const ancestors: Element[] = [icon];
+                  let parent = icon.parentElement;
+                  for (
+                    let depth = 0;
+                    depth < 2 && parent && parent !== root;
+                    depth++, parent = parent.parentElement
+                  )
+                    ancestors.unshift(parent);
+                  let name = "",
+                    modelId = "";
+                  for (const element of ancestors) {
+                    name =
+                      element.getAttribute("data_equip_name") ||
+                      element.getAttribute("data-equip-name") ||
+                      name;
+                    modelId =
+                      element.getAttribute("data_equip_type") ||
+                      element.getAttribute("data-equip-type") ||
+                      modelId;
+                  }
+                  return { name, modelId };
+                }),
             })),
           }
         : {}),
@@ -124,6 +146,7 @@ async function inspectItems(
   signal: AbortSignal,
   report: (message: string) => void,
   issues?: string[],
+  worn?: { listing: Listing; source: WornEquipmentSource | null },
 ) {
   const petItems = /^召唤兽 \d+$/.test(snapshot.name);
   const count = await page
@@ -150,7 +173,7 @@ async function inspectItems(
   for (let index = 0; index < count; index++) {
     checkAborted(signal);
     const icon = page.locator(`[data-cbg-inspect-index="${index}"]`);
-    const attrs = await icon.evaluate((el) => {
+    let attrs = await icon.evaluate((el) => {
       if (el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]')) return null;
       const attrs: Record<string, string> = {};
       // 装备数据和提示框标识可能在图片的 a/td 父元素上。
@@ -191,12 +214,19 @@ async function inspectItems(
       return attrs;
     });
     if (!attrs) continue;
+    let rawLevel: string | undefined;
+    if (worn) {
+      const merged = mergeWornEquipmentLevel(attrs, worn.listing, worn.source);
+      attrs = merged.attrs;
+      rawLevel = merged.rawLevel;
+      if (merged.issue) issues?.push(`${snapshot.name}：${merged.issue}`);
+    }
     report(`正在读取 ${snapshot.name} 的物品属性 ${index + 1}/${count}`);
     // 名称、技能类别或装备属性已在元素里时直接读取，不触发无意义的提示框。
     let item = itemFromAttributes(attrs, index);
     // 已明确不在人物装备计价范围内的物品不要求普通装备属性。
     if (
-      /^(?:法宝|灵宝|神器|道具 · 召唤兽(?:技能书|内丹)|材料 · (?:精魄灵石|钟灵石|百炼精铁))$/.test(
+      /^(?:法宝|灵宝|神器|道具 · 召唤兽(?:技能书|内丹)|材料 · (?:精魄灵石|钟灵石|百炼精铁|太阳石|制造指南书|点化石))$/.test(
         item.category || "",
       )
     ) {
@@ -225,7 +255,10 @@ async function inspectItems(
           .complete);
     // 官网元素可能只有等级；缺属性时仍须悬停，不能把非空描述当作已读完整。
     if (
-      (attrs.data_equip_desc?.trim() && !rawYupo && !incompleteEquipment) ||
+      (attrs.data_equip_desc?.trim() &&
+        !rawYupo &&
+        !incompleteEquipment &&
+        !item.name.startsWith("图标 ")) ||
       attrs.data_skill_type
     ) {
       if (!item.name.startsWith("图标 ")) snapshot.items!.push(item);
@@ -313,6 +346,13 @@ async function inspectItems(
       ].join("\n");
     }, tipId || "");
     if (tooltip) {
+      if (
+        rawLevel !== undefined &&
+        [...tooltip.matchAll(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})(?=\s|$)/g)].some(
+          (match) => Number(match[1]) !== Number(rawLevel),
+        )
+      )
+        issues?.push(`${snapshot.name}：原始穿戴装备等级与提示框等级不一致`);
       if (tooltip.split("\n").some((line) => line.trim() === "未鉴定物品")) {
         const level = unidentifiedEquipmentLevel(tooltip);
         if (
@@ -329,13 +369,19 @@ async function inspectItems(
         },
         index,
       );
-      if (item.name.startsWith("图标 ")) item.name = tooltip.split("\n")[0];
+      if (item.name.startsWith("图标 ") && !equipmentNameUnresolved(tooltip.split("\n")[0]))
+        item.name = tooltip.split("\n")[0];
     }
     if (!item.description && !item.attributes && item.name.startsWith("图标 "))
       issues?.push(`${snapshot.name}：第 ${index + 1} 个物品图标没有读取到名称和属性`);
     if (item.description || item.attributes || !item.name.startsWith("图标 "))
       snapshot.items!.push(item);
   }
+  await captureBrowserStep(
+    page,
+    { flow: "collection", stage: `物品读取完成-${snapshot.name}` },
+    signal,
+  );
 }
 
 async function inspectPets(
@@ -388,6 +434,8 @@ export function equipmentCaptureSummary(
         /装备对象[：:]?\s*召唤兽/.test(item.description || "")
       )
         continue;
+      if (equipmentNameUnresolved(item.name))
+        issues.push(`${tab.name}：型号 ${item.modelId || "未知"} 的装备名称未完整读取`);
       if (
         category === "上古玉魄" &&
         /^\s*\{\s*"minghun"\s*:\s*\{|<json>/i.test(item.description || "")
@@ -437,28 +485,117 @@ async function settled(page: Page, signal: AbortSignal) {
   await pace(signal, 600, 500);
   await assertAvailable(page);
 }
+async function assertDetailExists(page: Page, item: Listing, response: Response | null) {
+  // Access restrictions always take precedence over a missing-product response.
+  await assertAvailable(page);
+  const observed = await page.evaluate(() => {
+    const visible = (selector: string) =>
+      Array.from(document.querySelectorAll(selector)).some((el) => el.checkVisibility());
+    const globals = window as Window & {
+      IsLogin?: number | boolean;
+      LoginInfo?: { login?: number | boolean };
+    };
+    const login =
+      globals.IsLogin === false ||
+      globals.LoginInfo?.login === false ||
+      /\/(?:show_login|login)(?:\.py)?(?:\/|$)/.test(location.pathname) ||
+      visible("#qrcode,#loginContainer,input[type=password]");
+    // A sale/off-shelf page may still contain readable detail; it is not deletion evidence.
+    const inactive =
+      /商品已下架|商品已售出|(?:状态|是否上架)\s*[：:]?\s*(?:已下架|未上架|已售出)/.test(
+        document.body.innerText,
+      );
+    const excluded =
+      "aside,nav,footer,#search_result,#bottomRecommands,#recommd_list,#recommend,.recommend,.recommd,.recommandWrp,.goodsRemmds,[data-cbg-hover-tip],[id$=TipsBox],[role=tooltip]";
+    // Only a standalone main error message is evidence; recommendations and unrelated prose do not count.
+    const explicit = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        "main,[role=alert],#error_msg,.error_msg,#error_box,.error_box,body",
+      ),
+    ).some((el) => {
+      if (!el.checkVisibility() || el.closest(excluded)) return false;
+      if (
+        el !== document.body &&
+        !el.closest("main") &&
+        el.innerText.replace(/\s/g, "") !== document.body.innerText.replace(/\s/g, "")
+      )
+        return false;
+      if (
+        el === document.body &&
+        Array.from(el.querySelectorAll(excluded)).some(
+          (node) => node.checkVisibility() && node.textContent?.trim(),
+        )
+      )
+        return false;
+      const text = el.innerText
+        .replace(/\s/g, "")
+        .replace(/(?:返回上一页|返回首页|返回商品列表)+$/, "");
+      return /^(?:很抱歉[，,！!]?|对不起[，,！!]?|抱歉[，,！!]?)?(?:(?:您(?:所)?(?:查看|查询|访问)的|该|此)(?:件)?)?(?:商品|物品|角色)(?:不存在|(?:已|已经)(?:不存在|被删除|删除)|被删除)(?:[，,](?:可能)?(?:已|已经)?被删除)?[。.!！]?$/.test(
+        text,
+      );
+    });
+    return { login, inactive, explicit };
+  });
+  if (observed.login) throw new Error("网站登录已失效，已暂停采集");
+  const sameProduct = (address: string) => {
+    try {
+      const url = new URL(address);
+      return (
+        url.origin === "https://xyq.cbg.163.com" &&
+        url.pathname === "/equip" &&
+        url.searchParams.get("s") === item.serverId &&
+        url.searchParams.get("eid") === item.eid
+      );
+    } catch {
+      return false;
+    }
+  };
+  if (!sameProduct(page.url()) || !response || !sameProduct(response.url()) || observed.inactive)
+    return;
+  if (await page.getByText(MAIN_TABS[0], { exact: true }).filter({ visible: true }).count()) return;
+  const status = response.status();
+  if (status === 404 || status === 410)
+    throw new ListingUnavailableError(`目标详情返回 HTTP ${status}`);
+  if (status >= 200 && status < 300 && observed.explicit)
+    throw new ListingUnavailableError("目标详情主错误区明确显示商品不存在或已删除");
+}
+
 async function openDetail(
   page: Page,
   item: Listing,
   signal: AbortSignal,
   report: (message: string) => void,
 ) {
-  checkAborted(signal);
-  report("正在打开商品详情页…");
-  await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 45000 });
-  await assertAvailable(page);
-  const first = page.getByText(MAIN_TABS[0], { exact: true }).filter({ visible: true }).first();
-  await first.waitFor({ state: "visible", timeout: 20000 });
-  for (const name of MAIN_TABS) {
-    if (!(await page.getByText(name, { exact: true }).filter({ visible: true }).count()))
-      throw new Error(`详情缺少「${name}」标签，未标记完整采集`);
+  try {
+    checkAborted(signal);
+    report("正在打开商品详情页…");
+    const response = await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await captureBrowserStep(
+      page,
+      { flow: "collection", stage: "角色详情打开", key: item.key },
+      signal,
+    );
+    await assertDetailExists(page, item, response);
+    const first = page.getByText(MAIN_TABS[0], { exact: true }).filter({ visible: true }).first();
+    await first.waitFor({ state: "visible", timeout: 20000 });
+    for (const name of MAIN_TABS) {
+      if (!(await page.getByText(name, { exact: true }).filter({ visible: true }).count()))
+        throw new Error(`详情缺少「${name}」标签，未标记完整采集`);
+    }
+    await first.evaluate((el) => {
+      let root = el.parentElement!;
+      // 包含标签栏和实际属性面板的最小祖先；不采集顶部登录账号或整个 window。
+      while (root.parentElement && root.innerText.trim().length < 160) root = root.parentElement;
+      root.setAttribute("data-cbg-detail-root", "true");
+    });
+  } catch (error) {
+    await captureBrowserStep(
+      page,
+      { flow: "collection", stage: "角色详情打开失败", key: item.key, error },
+      signal,
+    );
+    throw error;
   }
-  await first.evaluate((el) => {
-    let root = el.parentElement!;
-    // 包含标签栏和实际属性面板的最小祖先；不采集顶部登录账号或整个 window。
-    while (root.parentElement && root.innerText.trim().length < 160) root = root.parentElement;
-    root.setAttribute("data-cbg-detail-root", "true");
-  });
 }
 
 async function captureMountEntries(
@@ -474,6 +611,11 @@ async function captureMountEntries(
     await entries.nth(index).evaluate((el) => (el as HTMLElement).click());
     await pace(signal, 250, 150);
     tabs.push(await capture(page, `坐骑 / 第${index + 1}只`));
+    await captureBrowserStep(
+      page,
+      { flow: "collection", stage: `坐骑读取完成-${index + 1}` },
+      signal,
+    );
   }
   return tabs;
 }
@@ -484,9 +626,52 @@ async function inspectEquipmentTabs(
   signal: AbortSignal,
   report: (message: string) => void,
   issues: string[],
+  item: Listing,
 ) {
   const snapshots = [snapshot];
-  await inspectItems(page, snapshot, signal, report, issues);
+  const source = await page.evaluate(
+    ({ serverId, eid }): WornEquipmentSource | null => {
+      try {
+        const globals = window as unknown as Record<string, unknown>;
+        const equip = globals.EquipInfo as Record<string, unknown> | undefined;
+        if (String(equip?.server_id) !== serverId || String(equip?.eid) !== eid) return null;
+        const decode = globals.decode_desc;
+        const Parser = globals.RoleInfoParser as new (
+          text: string,
+          options: Record<string, unknown>,
+        ) => { raw_info: Record<string, unknown> };
+        const encoded = document.querySelector<HTMLTextAreaElement>("#equip_desc_value")?.value;
+        if (typeof decode !== "function" || typeof Parser !== "function" || !encoded) return null;
+        const raw = new Parser(decode(encoded), { resUrl: globals.ResUrl, serverId }).raw_info;
+        if (
+          !raw ||
+          !raw.AllEquip ||
+          typeof raw.AllEquip !== "object" ||
+          Array.isArray(raw.AllEquip)
+        )
+          return null;
+        const allEquip: Record<string, unknown> = {};
+        for (const slot of ["1", "2", "3", "4", "5", "6"]) {
+          if (!Object.hasOwn(raw.AllEquip, slot)) continue;
+          const equipment = (raw.AllEquip as Record<string, unknown>)[slot];
+          if (!equipment || typeof equipment !== "object" || Array.isArray(equipment)) continue;
+          const fields = equipment as Record<string, unknown>;
+          allEquip[slot] = {
+            iType: fields.iType,
+            cDesc: fields.cDesc,
+            ...(Object.hasOwn(fields, "obj_level") ? { obj_level: fields.obj_level } : {}),
+          };
+        }
+        return { serverId, eid, allEquip };
+      } catch {
+        // 可选原档解析失败时不补字段；连接、导航等 evaluate 外部错误仍正常抛出。
+        return null;
+      }
+    },
+    { serverId: item.serverId, eid: item.eid },
+  );
+  const worn = { listing: item, source };
+  await inspectItems(page, snapshot, signal, report, issues, worn);
   snapshot.itemsCollectedAt = new Date().toISOString();
   const nested = page.locator(
     '[data-cbg-detail-root] [role="tab"], [data-cbg-detail-root] [data-tab], [data-cbg-detail-root] .tab a, [data-cbg-detail-root] .tabs a',
@@ -508,9 +693,14 @@ async function inspectEquipmentTabs(
     await tab.evaluate((element) => (element as HTMLElement).click());
     await settled(page, signal);
     const child = await capture(page, `道具/法宝 / ${name}`);
-    await inspectItems(page, child, signal, report, issues);
+    await inspectItems(page, child, signal, report, issues, worn);
     child.itemsCollectedAt = new Date().toISOString();
     snapshots.push(child);
+    await captureBrowserStep(
+      page,
+      { flow: "collection", stage: `装备子页读取完成-${name}`, key: item.key },
+      signal,
+    );
   }
   return snapshots;
 }
@@ -523,68 +713,93 @@ export async function collectValuationDetail(
   signal: AbortSignal,
   report: (message: string) => void = () => {},
 ) {
-  await openDetail(page, item, signal, report);
-  const valuation = await captureValuation(page);
-  if (
-    valuation.source.eid &&
-    (valuation.source.eid !== item.eid || valuation.source.serverId !== item.serverId)
-  )
-    throw Object.assign(new Error("详情商品身份不一致，已停止补采"), {
-      name: "IncompleteDetailError",
-    });
-  const now = new Date().toISOString();
-  const equipmentIssues: string[] = [];
-  let petCapture: RoleDetail["petCapture"];
-  const tabs = previous.tabs
-    .filter(
-      (tab) =>
-        !/^(?:坐骑|道具\/法宝)\s*\//.test(tab.name) && !/^召唤兽\/孩子(?:\s*\/|$)/.test(tab.name),
-    )
-    .map((tab) => ({ ...tab, collectedAt: tab.collectedAt || previous.collectedAt }));
-  for (const name of ["人物/修炼", "道具/法宝", "召唤兽/孩子", "坐骑"]) {
-    checkAborted(signal);
-    report("正在补采估值资料：" + name);
-    await page
-      .getByText(name, { exact: true })
-      .filter({ visible: true })
-      .first()
-      .evaluate((el) => (el as HTMLElement).click());
-    await settled(page, signal);
-    const snapshot = { ...(await capture(page, name)), collectedAt: now };
-    if (name === "道具/法宝") {
-      const snapshots = await inspectEquipmentTabs(page, snapshot, signal, report, equipmentIssues);
-      tabs.push(...snapshots.slice(1).map((tab) => ({ ...tab, collectedAt: now })));
-    }
-    if (name === "召唤兽/孩子") petCapture = await inspectPets(page, snapshot, signal, report, now);
-    const index = tabs.findIndex((tab) => tab.name === name);
-    if (index >= 0 && name !== "道具/法宝")
-      tabs[index] = {
-        ...snapshot,
-        items: tabs[index].items,
-        itemsCollectedAt:
-          tabs[index].itemsCollectedAt || tabs[index].collectedAt || previous.collectedAt,
-      };
-    else if (index >= 0) tabs[index] = snapshot;
-    else tabs.push(snapshot);
-    if (name === "坐骑")
-      tabs.push(
-        ...(await captureMountEntries(page, signal, report)).map((tab) => ({
-          ...tab,
-          collectedAt: now,
-        })),
+  try {
+    await openDetail(page, item, signal, report);
+    const valuation = await captureValuation(page);
+    const identityIssues = roleIdentityIssues(valuation.source, item);
+    if (identityIssues.length)
+      throw Object.assign(new Error("详情商品身份未核验：" + identityIssues.join("；")), {
+        name: "IncompleteDetailError",
+      });
+    const now = new Date().toISOString();
+    const equipmentIssues: string[] = [];
+    let petCapture: RoleDetail["petCapture"];
+    const tabs = previous.tabs
+      .filter(
+        (tab) =>
+          !/^(?:坐骑|道具\/法宝)\s*\//.test(tab.name) && !/^召唤兽\/孩子(?:\s*\/|$)/.test(tab.name),
+      )
+      .map((tab) => ({ ...tab, collectedAt: tab.collectedAt || previous.collectedAt }));
+    for (const name of ["人物/修炼", "道具/法宝", "召唤兽/孩子", "坐骑"]) {
+      checkAborted(signal);
+      report("正在补采估值资料：" + name);
+      await page
+        .getByText(name, { exact: true })
+        .filter({ visible: true })
+        .first()
+        .evaluate((el) => (el as HTMLElement).click());
+      await settled(page, signal);
+      await captureBrowserStep(
+        page,
+        { flow: "collection", stage: `补采标签切换-${name}`, key: item.key },
+        signal,
       );
+      const snapshot = { ...(await capture(page, name)), collectedAt: now };
+      if (name === "道具/法宝") {
+        const snapshots = await inspectEquipmentTabs(
+          page,
+          snapshot,
+          signal,
+          report,
+          equipmentIssues,
+          item,
+        );
+        tabs.push(...snapshots.slice(1).map((tab) => ({ ...tab, collectedAt: now })));
+      }
+      if (name === "召唤兽/孩子")
+        petCapture = await inspectPets(page, snapshot, signal, report, now);
+      const index = tabs.findIndex((tab) => tab.name === name);
+      if (index >= 0 && name !== "道具/法宝")
+        tabs[index] = {
+          ...snapshot,
+          items: tabs[index].items,
+          itemsCollectedAt:
+            tabs[index].itemsCollectedAt || tabs[index].collectedAt || previous.collectedAt,
+        };
+      else if (index >= 0) tabs[index] = snapshot;
+      else tabs.push(snapshot);
+      if (name === "坐骑")
+        tabs.push(
+          ...(await captureMountEntries(page, signal, report)).map((tab) => ({
+            ...tab,
+            collectedAt: now,
+          })),
+        );
+    }
+    await captureBrowserStep(
+      page,
+      { flow: "collection", stage: "补采资料读取完成", key: item.key },
+      signal,
+    );
+    return {
+      ...previous,
+      captureMode: "all" as const,
+      captureVersion: CAPTURE_VERSION,
+      valuation,
+      equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
+      petCapture,
+      tabs,
+      collectedAt: now,
+      raw: {},
+    };
+  } catch (error) {
+    await captureBrowserStep(
+      page,
+      { flow: "collection", stage: "补采资料读取失败", key: item.key, error },
+      signal,
+    );
+    throw error;
   }
-  return {
-    ...previous,
-    captureMode: "all" as const,
-    captureVersion: CAPTURE_VERSION,
-    valuation,
-    equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
-    petCapture,
-    tabs,
-    collectedAt: now,
-    raw: {},
-  };
 }
 
 export async function collectDetail(
@@ -597,111 +812,185 @@ export async function collectDetail(
   const tabs: TabSnapshot[] = [];
   const equipmentIssues: string[] = [];
   let petCapture: RoleDetail["petCapture"];
-  for (const name of MAIN_TABS) {
-    checkAborted(signal);
-    report(`正在读取标签 ${MAIN_TABS.indexOf(name) + 1}/${MAIN_TABS.length}：${name}`);
-    const tab = page.getByText(name, { exact: true }).filter({ visible: true }).first();
-    if (!(await tab.count())) throw new Error(`详情缺少「${name}」标签，未标记完整采集`);
-    await pace(signal, 500, 600);
-    await hoverForInspection(page, tab);
-    // 仅操作已确认的详情标签，不点击购买、还价、收藏或站外链接。
-    await tab.evaluate((el) => (el as HTMLElement).click());
-    await settled(page, signal);
-    const snapshot = await capture(page, name);
-    tabs.push(snapshot);
-    if (name === "道具/法宝") {
-      const snapshots = await inspectEquipmentTabs(page, snapshot, signal, report, equipmentIssues);
-      tabs.push(...snapshots.slice(1));
-      continue;
-    }
-    if (name === "召唤兽/孩子") {
-      petCapture = await inspectPets(page, snapshot, signal, report, new Date().toISOString());
-    } else {
-      if (name === "坐骑") tabs.push(...(await captureMountEntries(page, signal, report)));
-      await inspectItems(page, snapshot, signal, report);
-    }
-    const nested = page.locator(
-      '[data-cbg-detail-root] [role="tab"], [data-cbg-detail-root] [data-tab], [data-cbg-detail-root] .tab a, [data-cbg-detail-root] .tabs a',
-    );
-    const names = await nested.evaluateAll((els) =>
-      els
-        .filter((el) => el.checkVisibility())
-        .map((el) => el.textContent?.trim() || "")
-        .filter(Boolean),
-    );
-    for (const child of [...new Set(names)].filter((value) => !MAIN_TABS.includes(value))) {
+  let step = "详情";
+  let raw: RoleDetail["raw"] = {};
+  try {
+    for (const name of MAIN_TABS) {
+      step = name;
       checkAborted(signal);
-      report(`正在读取 ${name} / ${child}`);
-      const childTab = nested.filter({ hasText: child }).filter({ visible: true }).first();
-      const exact = (await childTab.innerText()).trim();
-      if (exact !== child) continue;
-      const href = await childTab.getAttribute("href");
-      if (href && /^https?:|^\//.test(href)) continue;
-      await hoverForInspection(page, childTab);
-      await childTab.evaluate((el) => (el as HTMLElement).click());
+      report(`正在读取标签 ${MAIN_TABS.indexOf(name) + 1}/${MAIN_TABS.length}：${name}`);
+      const tab = page.getByText(name, { exact: true }).filter({ visible: true }).first();
+      if (!(await tab.count())) throw new Error(`详情缺少「${name}」标签，未标记完整采集`);
+      await pace(signal, 500, 600);
+      await hoverForInspection(page, tab);
+      // 仅操作已确认的详情标签，不点击购买、还价、收藏或站外链接。
+      await tab.evaluate((el) => (el as HTMLElement).click());
       await settled(page, signal);
-      const childSnapshot = await capture(page, `${name} / ${child}`);
-      tabs.push(childSnapshot);
-      await inspectItems(page, childSnapshot, signal, report);
-    }
-    const entries = page.locator(
-      "[data-cbg-detail-root] [data-child-id]:visible, [data-cbg-detail-root] .child_list li:visible",
-    );
-    const entryCount = await entries.count();
-    for (let index = 0; index < entryCount; index++) {
-      checkAborted(signal);
-      report(`正在读取 ${name} 的第 ${index + 1}/${entryCount} 个条目及装备`);
-      const entry = entries.nth(index);
-      const href = await entry.getAttribute("href");
-      if (href && /^https?:|^\//.test(href)) continue;
-      await hoverForInspection(page, entry);
-      await entry.evaluate((el) => (el as HTMLElement).click());
-      await settled(page, signal);
-      const entryName = (await entry.innerText()).trim() || `第 ${index + 1} 项`;
-      const entrySnapshot = await capture(page, `${name} / ${entryName}`);
-      tabs.push(entrySnapshot);
-      await inspectItems(page, entrySnapshot, signal, report);
-    }
-  }
-  const raw = await page.evaluate(() => {
-    const globals = window as unknown as Record<string, unknown>;
-    const result: Record<string, unknown> = {};
-    const encoded = document.querySelector<HTMLTextAreaElement>("#equip_desc_value")?.value;
-    if (encoded) result.encodedRoleData = encoded;
-    // 只保存商品详情的数据，不读取 Cookie、登录信息或其他页面的账户。
-    for (const key of [
-      "EquipInfo",
-      "RoleInfo",
-      "RoleData",
-      "role_info",
-      "role_data",
-      "equip_info",
-    ]) {
-      const value = globals[key];
-      if (value && typeof value === "object") {
-        try {
-          result[key] = JSON.parse(JSON.stringify(value));
-        } catch {
-          throw new Error(`商品原始数据 ${key} 无法完整序列化`);
-        }
+      await captureBrowserStep(
+        page,
+        { flow: "collection", stage: `标签切换-${name}`, key: item.key },
+        signal,
+      );
+      const snapshot = await capture(page, name);
+      tabs.push(snapshot);
+      if (name === "道具/法宝") {
+        const snapshots = await inspectEquipmentTabs(
+          page,
+          snapshot,
+          signal,
+          report,
+          equipmentIssues,
+          item,
+        );
+        tabs.push(...snapshots.slice(1));
+        await captureBrowserStep(
+          page,
+          { flow: "collection", stage: `标签读取完成-${name}`, key: item.key },
+          signal,
+        );
+        continue;
+      }
+      if (name === "召唤兽/孩子") {
+        petCapture = await inspectPets(page, snapshot, signal, report, new Date().toISOString());
+      } else {
+        if (name === "坐骑") tabs.push(...(await captureMountEntries(page, signal, report)));
+        await inspectItems(page, snapshot, signal, report);
+      }
+      const nested = page.locator(
+        '[data-cbg-detail-root] [role="tab"], [data-cbg-detail-root] [data-tab], [data-cbg-detail-root] .tab a, [data-cbg-detail-root] .tabs a',
+      );
+      const names = await nested.evaluateAll((els) =>
+        els
+          .filter((el) => el.checkVisibility())
+          .map((el) => el.textContent?.trim() || "")
+          .filter(Boolean),
+      );
+      for (const child of [...new Set(names)].filter((value) => !MAIN_TABS.includes(value))) {
+        checkAborted(signal);
+        report(`正在读取 ${name} / ${child}`);
+        const childTab = nested.filter({ hasText: child }).filter({ visible: true }).first();
+        const exact = (await childTab.innerText()).trim();
+        if (exact !== child) continue;
+        const href = await childTab.getAttribute("href");
+        if (href && /^https?:|^\//.test(href)) continue;
+        await hoverForInspection(page, childTab);
+        await childTab.evaluate((el) => (el as HTMLElement).click());
+        await settled(page, signal);
+        const childSnapshot = await capture(page, `${name} / ${child}`);
+        tabs.push(childSnapshot);
+        await inspectItems(page, childSnapshot, signal, report);
+        await captureBrowserStep(
+          page,
+          { flow: "collection", stage: `子页读取完成-${name}-${child}`, key: item.key },
+          signal,
+        );
+      }
+      const entries = page.locator(
+        "[data-cbg-detail-root] [data-child-id]:visible, [data-cbg-detail-root] .child_list li:visible",
+      );
+      const entryCount = await entries.count();
+      for (let index = 0; index < entryCount; index++) {
+        checkAborted(signal);
+        report(`正在读取 ${name} 的第 ${index + 1}/${entryCount} 个条目及装备`);
+        const entry = entries.nth(index);
+        const href = await entry.getAttribute("href");
+        if (href && /^https?:|^\//.test(href)) continue;
+        await hoverForInspection(page, entry);
+        await entry.evaluate((el) => (el as HTMLElement).click());
+        await settled(page, signal);
+        const entryName = (await entry.innerText()).trim() || `第 ${index + 1} 项`;
+        const entrySnapshot = await capture(page, `${name} / ${entryName}`);
+        tabs.push(entrySnapshot);
+        await inspectItems(page, entrySnapshot, signal, report);
+        await captureBrowserStep(
+          page,
+          { flow: "collection", stage: `条目读取完成-${name}-${index + 1}`, key: item.key },
+          signal,
+        );
       }
     }
-    return result;
-  });
-  checkAborted(signal);
-  report("全部标签读取完成，正在保存详情…");
-  const now = new Date().toISOString();
-  return {
-    captureMode: "all" as const,
-    captureVersion: CAPTURE_VERSION,
-    valuation: await captureValuation(page),
-    equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
-    petCapture,
-    url: item.url,
-    collectedAt: now,
-    tabs,
-    raw,
-  };
+    await captureBrowserStep(
+      page,
+      { flow: "collection", stage: "全部标签读取完成", key: item.key },
+      signal,
+    );
+    step = "商品原始资料";
+    raw = await page.evaluate(() => {
+      const globals = window as unknown as Record<string, unknown>;
+      const result: Record<string, unknown> = {};
+      const encoded = document.querySelector<HTMLTextAreaElement>("#equip_desc_value")?.value;
+      if (encoded) result.encodedRoleData = encoded;
+      // 只保存商品详情的数据，不读取 Cookie、登录信息或其他页面的账户。
+      for (const key of [
+        "EquipInfo",
+        "RoleInfo",
+        "RoleData",
+        "role_info",
+        "role_data",
+        "equip_info",
+      ]) {
+        const value = globals[key];
+        if (value && typeof value === "object") {
+          try {
+            result[key] = JSON.parse(JSON.stringify(value));
+          } catch {
+            throw new Error(`商品原始数据 ${key} 无法完整序列化`);
+          }
+        }
+      }
+      return result;
+    });
+    checkAborted(signal);
+    report("全部标签读取完成，正在保存详情…");
+    const now = new Date().toISOString();
+    step = "角色本体核验";
+    const valuation = await captureValuation(page);
+    valuation.issues = [
+      ...new Set([...valuation.issues, ...roleIdentityIssues(valuation.source, item)]),
+    ];
+    return {
+      captureMode: "all" as const,
+      captureVersion: CAPTURE_VERSION,
+      valuation,
+      equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
+      petCapture,
+      url: item.url,
+      collectedAt: now,
+      tabs,
+      raw,
+    };
+  } catch (error) {
+    await captureBrowserStep(
+      page,
+      { flow: "collection", stage: `详情读取失败-${step}`, key: item.key, error },
+      signal,
+    );
+    signal.throwIfAborted();
+    // 仅把本轮已读内容随超时带出；登录、访问限制及未知异常继续按原错误处理。
+    if (
+      !(error instanceof Error) ||
+      error.name !== "TimeoutError" ||
+      !tabs.length ||
+      /登录|验证码|安全验证|频繁|繁忙|权限|禁止/i.test(error.message)
+    )
+      throw error;
+    const now = new Date().toISOString();
+    throw new IncompleteCaptureError(
+      `详情读取中断（${step}）：${error.message}`,
+      {
+        captureMode: "all",
+        captureVersion: CAPTURE_VERSION,
+        url: item.url,
+        collectedAt: now,
+        tabs,
+        raw,
+        equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
+        petCapture,
+        // 未执行完本轮读取，不能附上完整本体核验凭据或借用上一轮资料。
+      },
+      error,
+    );
+  }
 }
 export function onShelfFromText(text: string): boolean {
   // The current official item header says “状态：上架中”; older pages say “是否上架：已上架”.
@@ -711,8 +1000,8 @@ export function onShelfFromText(text: string): boolean {
 }
 export async function isOnShelf(page: Page, item: Listing, signal: AbortSignal): Promise<boolean> {
   checkAborted(signal);
-  await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 45000 });
-  await assertAvailable(page);
+  const response = await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 45000 });
+  await assertDetailExists(page, item, response);
   checkAborted(signal);
   return onShelfFromText(await page.evaluate(() => document.body.innerText));
 }

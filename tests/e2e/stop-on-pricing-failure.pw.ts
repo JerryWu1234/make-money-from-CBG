@@ -85,6 +85,10 @@ test("并发1时查价失败立即停队，刷新后显式重试，按顺序完�
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== "http://cbg-stop.test") return route.abort();
+      if (url.pathname === "/api/runtime/settings")
+        return route.fulfill({ json: { saveScreenshots: false } });
+      if (url.pathname === "/api/browser/settings")
+        return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
       if (url.pathname.startsWith("/api/")) {
         try {
           let body: unknown;

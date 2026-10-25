@@ -8,21 +8,34 @@ import { CrawlStore } from "./store";
 import { DEFAULT_CRAWL_CONCURRENCY, type CrawlStatus, type SavedRoleRecord } from "./types";
 import { diagnostics, watchWorkPage } from "../diagnostics";
 import { loadProfile, saveProfile } from "../analysis/profile";
+import { assertServiceOpen } from "../service-lifecycle";
+import { showBrowserWorkPages } from "../config";
 
-let storage: CrawlStore | undefined;
-const store = () => (storage ||= new CrawlStore());
-let status: CrawlStatus = {
-  running: false,
-  phase: "idle",
-  message: "查询角色列表后，可开始采集或继续上次任务。",
-  page: 0,
-  totalPages: 0,
-  saved: 0,
-  skipped: 0,
-  totalSaved: 0,
-  database: "data/cbg.sqlite",
+type CrawlRuntime = {
+  storage?: CrawlStore;
+  status: CrawlStatus;
+  abort: AbortController | null;
+  activeRun: ActiveCrawl | null;
 };
-let abort: AbortController | null = null;
+const runtimeKey = Symbol.for("cbg.crawl-runtime.v1");
+const runtime = globalThis as typeof globalThis & { [runtimeKey]?: CrawlRuntime };
+// 模块重载后仍由同一份状态和暂停控制器管理在途采集，避免误报为其他服务。
+const cache = (runtime[runtimeKey] ??= {
+  status: {
+    running: false,
+    phase: "idle",
+    message: "查询角色列表后，可开始采集或继续上次任务。",
+    page: 0,
+    totalPages: 0,
+    saved: 0,
+    skipped: 0,
+    totalSaved: 0,
+    database: "data/cbg.sqlite",
+  },
+  abort: null,
+  activeRun: null,
+});
+const store = () => (cache.storage ||= new CrawlStore());
 export type CrawlOrigin = "manual" | "scheduled";
 export interface ActiveCrawl {
   origin: CrawlOrigin;
@@ -34,25 +47,24 @@ export interface CrawlStartResult {
   started: boolean;
   activity: ActiveCrawl | null;
 }
-let activeRun: ActiveCrawl | null = null;
 export function crawlStatus() {
   return {
-    ...status,
+    ...cache.status,
     totalSaved: store().count(),
     checkpoint: store().checkpoint(),
     recent: store().recent(),
   };
 }
 export function isCrawling() {
-  return status.running || activeRun !== null;
+  return cache.status.running || cache.activeRun !== null;
 }
 export function crawlActivity() {
-  return activeRun;
+  return cache.activeRun;
 }
 export function clearCrawl() {
   if (isCrawling()) throw new Error("请先暂停采集，再清空数据");
   store().clear();
-  status = {
+  cache.status = {
     running: false,
     phase: "idle",
     message: "历史采集数据已清空，可重新开始采集。",
@@ -87,13 +99,18 @@ export function setEquipmentAnalysis(value: unknown) {
   });
   return equipmentAnalysisSettings();
 }
-export function savedRecords(page: number, pageSize: number) {
-  return store().records(page, pageSize);
+export function savedRecords(
+  page: number,
+  pageSize: number,
+  scope: import("./types").SavedListingScope = "all",
+) {
+  return store().records(page, pageSize, scope);
 }
 export function stopCrawl(reason: "manual" | "time_limit" = "manual") {
   diagnostics.record("crawl.stop_requested", { running: isCrawling(), reason });
-  abort?.abort(new Error(reason === "time_limit" ? "达到最长运行时长" : "用户暂停采集"));
-  if (status.running) status = { ...status, message: "正在暂停，当前已入库数据和断点会保留…" };
+  cache.abort?.abort(new Error(reason === "time_limit" ? "达到最长运行时长" : "用户暂停采集"));
+  if (cache.status.running)
+    cache.status = { ...cache.status, message: "正在暂停，当前已入库数据和断点会保留…" };
   return crawlStatus();
 }
 export async function startCrawl(
@@ -101,15 +118,17 @@ export async function startCrawl(
   canStart?: () => boolean,
   options: CrawlOptions = {},
 ): Promise<CrawlStartResult> {
+  assertServiceOpen();
   validateCrawlOptions(options);
   if (options.refresh) store().retryItems(options.keys, true);
-  if (isCrawling()) return { status: crawlStatus(), started: false, activity: activeRun };
+  if (isCrawling()) return { status: crawlStatus(), started: false, activity: cache.activeRun };
   const current = await checkCbgStatus();
+  assertServiceOpen();
   const page = getCbgPage();
   if (current.running || !current.isLoggedIn || !page || current.workflowStep !== "completed")
     throw new Error("请先完成登录并进入角色列表，再开始采集");
   // checkCbgStatus 会等待页面，返回后再查一次，防止双击并发启动。
-  if (isCrawling()) return { status: crawlStatus(), started: false, activity: activeRun };
+  if (isCrawling()) return { status: crawlStatus(), started: false, activity: cache.activeRun };
   if (origin === "scheduled" && canStart && !canStart())
     return { status: crawlStatus(), started: false, activity: null };
   const owner = randomUUID();
@@ -127,9 +146,9 @@ export async function startCrawl(
     concurrency,
   });
   const control = new AbortController();
-  abort = control;
-  status = {
-    ...status,
+  cache.abort = control;
+  cache.status = {
+    ...cache.status,
     running: true,
     concurrency,
     includeAssets: true,
@@ -179,38 +198,40 @@ export async function startCrawl(
               ? (key) => db.detail(key) as SavedRoleRecord | null
               : undefined,
           onDetailProgress: (message) => {
-            status = { ...status, detailProgress: message };
+            cache.status = { ...cache.status, detailProgress: message };
           },
           log,
         }),
         db,
         control.signal,
         (update) => {
-          const captured = (update.saved || 0) > status.saved;
-          status = { ...status, ...update };
-          if (captured)
+          const captured = (update.saved || 0) > cache.status.saved;
+          cache.status = { ...cache.status, ...update };
+          if (captured) {
             void import("../analysis/controller")
               .then((analysis) => analysis.appendCapturedAnalysis())
               .catch((error: unknown) =>
                 diagnostics.record("analysis.capture_enqueue_failed", { error }),
               );
+          }
         },
         { ...options, watch: options.watch ?? !options.backfillOnly },
       );
     } finally {
-      await Promise.allSettled(detailPages.map((page) => page.close()));
+      if (!showBrowserWorkPages())
+        await Promise.allSettled(detailPages.map((page) => page.close()));
     }
   })()
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       log(control.signal.aborted ? "crawl.paused" : "crawl.error", {
         error,
-        page: status.page,
-        itemIndex: status.itemIndex,
-        detailProgress: status.detailProgress,
+        page: cache.status.page,
+        itemIndex: cache.status.itemIndex,
+        detailProgress: cache.status.detailProgress,
       });
-      status = {
-        ...status,
+      cache.status = {
+        ...cache.status,
         running: false,
         phase: control.signal.aborted ? "paused" : "error",
         message: control.signal.aborted ? "采集已暂停，断点已保留。" : message,
@@ -222,21 +243,21 @@ export async function startCrawl(
     .finally(() => {
       clearInterval(lease);
       db.release(owner);
-      abort = null;
-      status = { ...status, running: false };
+      cache.abort = null;
+      cache.status = { ...cache.status, running: false };
       log("crawl.finished", {
-        phase: status.phase,
-        saved: status.saved,
-        skipped: status.skipped,
+        phase: cache.status.phase,
+        saved: cache.status.saved,
+        skipped: cache.status.skipped,
         durationMs: Date.now() - started,
       });
     });
   const completion = runningTask
     .then(() => crawlStatus())
     .finally(() => {
-      activeRun = null;
+      cache.activeRun = null;
     });
   const activity = { origin, startedAt: started, completion };
-  activeRun = activity;
+  cache.activeRun = activity;
   return { status: crawlStatus(), started: true, activity };
 }

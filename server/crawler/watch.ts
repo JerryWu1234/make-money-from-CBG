@@ -1,24 +1,34 @@
 import type { CrawlOptions } from "./runner";
+import { isDeepStrictEqual } from "node:util";
 import type { CrawlStore } from "./store";
+import { compactListing } from "./compact";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { locateCheckpoint } from "./resume";
 import {
   DEFAULT_CRAWL_CONCURRENCY,
   ListingChangedError,
+  ListingDisappearedError,
+  ListingUnavailableError,
+  SellingOrderUnavailableError,
   type Checkpoint,
   type CrawlLane,
   type CrawlSource,
   type CrawlStatus,
   type Listing,
   type ListingPage,
+  type SavedRoleRecord,
 } from "./types";
 
 const ORDER = "selling_time DESC";
 
-function checkPage(page: ListingPage, number: number) {
-  if (page.order !== ORDER) throw new Error("持续采集必须使用上架时间倒序，已暂停采集");
+function checkPage(page: ListingPage, number: number, order = ORDER) {
+  if (page.order !== order)
+    throw new Error(
+      order === ORDER ? "持续采集必须使用上架时间倒序，已暂停采集" : "列表排序发生变化，已暂停采集",
+    );
   if (page.page !== number)
     throw new Error(`翻页未生效：请求第 ${number} 页，返回第 ${page.page} 页`);
+  if (order !== ORDER) return;
   let previous: string | undefined;
   for (const item of page.items) {
     const time = item.sellingTime;
@@ -36,27 +46,35 @@ export async function watchCrawl(
   signal: AbortSignal,
   publish: (state: Partial<CrawlStatus>) => void,
   options: CrawlOptions,
+  order = ORDER,
+  seed: { saved: number; skipped?: number; failed: number; failedItems: Listing[] } = {
+    saved: 0,
+    failed: 0,
+    failedItems: [],
+  },
 ) {
+  const ordered = order === ORDER;
   const concurrency = options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
   const interval = options.headIntervalMs ?? 60000;
-  const limits = { new: Math.ceil(concurrency / 2), old: Math.floor(concurrency / 2) };
   const running = { new: 0, old: 0 };
   const inFlight = new Map<string, Promise<void>>();
   const runningItems = new Map<string, Listing>();
-  const failedVersions = new Map<string, Listing["sellingTime"]>();
+  const failedVersions = new Map<string, Listing["sellingTime"]>(
+    seed.failedItems.map((item) => [item.key, item.sellingTime]),
+  );
   const historyPoints = new Map<string, { point: Checkpoint; index: number }>();
-  let failure: { error: unknown } | undefined;
+  let failure: { error: unknown; preserveCompleted?: boolean } | undefined;
   let wake: (() => void) | undefined;
-  let saved = 0,
-    skipped = 0,
-    failed = 0,
+  let saved = seed.saved,
+    skipped = seed.skipped || 0,
+    failed = seed.failed,
     historyIndex = 0,
     savedHistoryIndex = -1,
     historyPage = 1,
     totalPages = 1,
     nextHeadCheck = Date.now();
-  let historyDone = store.backfillComplete();
-  let lastLane: CrawlLane = "old";
+  let historyDone = ordered && store.backfillComplete();
+  let historyPass = 0;
   const check = () => {
     signal.throwIfAborted();
     if (failure) throw failure.error;
@@ -75,12 +93,11 @@ export async function watchCrawl(
     const queues = queued();
     publish({
       concurrency,
+      captureStrategy: "new-first",
       newRunning: running.new,
       oldRunning: running.old,
       newQueued: queues.new.length,
       oldQueued: queues.old.length,
-      newLimit: limits.new,
-      oldLimit: limits.old,
       saved,
       skipped,
       failed,
@@ -103,16 +120,26 @@ export async function watchCrawl(
       store.beginRetry(item.key);
       publish({ current: item.name || item.eid });
       const detail = await source.detail(item);
-      check();
+      signal.throwIfAborted();
+      if (failure) {
+        if (!failure.preserveCompleted) throw failure.error;
+        const current = store.detail(item.key) as SavedRoleRecord | null;
+        if (
+          current?.status !== "pending" ||
+          !isDeepStrictEqual(current.listing, JSON.parse(JSON.stringify(compactListing(item))))
+        )
+          throw new ListingChangedError();
+      }
       const history =
         lane === "old" && store.captureLane(item.key) === "old"
           ? historyPoints.get(item.key)
           : undefined;
       const currentPoint = store.checkpoint();
       const advance =
+        !failure &&
         history &&
         history.index > savedHistoryIndex &&
-        (!currentPoint?.time || history.point.time! <= currentPoint.time);
+        (!ordered || !currentPoint?.time || history.point.time! <= currentPoint.time);
       const checkpoint = advance ? { ...history.point, savedAt: detail.collectedAt } : undefined;
       if (!store.save(item, detail, checkpoint))
         throw Object.assign(new Error("采集完整性校验未通过，未推进成功断点"), {
@@ -124,8 +151,23 @@ export async function watchCrawl(
         savedHistoryIndex = history.index;
         publish({ checkpoint });
       }
+      publish({ saved, totalSaved: store.count() });
     } catch (error) {
+      if (signal.aborted && error instanceof IncompleteCaptureError)
+        store.savePartial(item, error.detail);
       if (!signal.aborted && !failure) {
+        if (error instanceof ListingUnavailableError) {
+          store.markUnavailable(item.key, error.message);
+          failedVersions.delete(item.key);
+          skipped++;
+          publish({
+            skipped,
+            current: item.name || item.eid,
+            detailProgress: error.message,
+            totalSaved: store.count(),
+          });
+          return;
+        }
         if (error instanceof IncompleteCaptureError) store.save(item, error.detail);
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
@@ -141,21 +183,11 @@ export async function watchCrawl(
     while (!failure && !signal.aborted && inFlight.size < concurrency) {
       const queues = queued();
       let lane: CrawlLane;
-      if (queues.new.length && queues.old.length) {
-        lane =
-          concurrency === 1
-            ? lastLane === "new"
-              ? "old"
-              : "new"
-            : running.new < limits.new
-              ? "new"
-              : "old";
-      } else if (queues.new.length) lane = "new";
+      if (queues.new.length) lane = "new";
       else if (queues.old.length) lane = "old";
       else break;
       const item = queues[lane][0]!;
       running[lane]++;
-      lastLane = lane;
       // 先登记在途，避免同步完成或下一次发现把同一条商品再次派发。
       const task = Promise.resolve()
         .then(() => capture(item, lane))
@@ -176,24 +208,60 @@ export async function watchCrawl(
   };
   const observe = async (listed: Listing, lane: CrawlLane) => {
     try {
-      check();
-      const item = await source.hover(listed);
-      check();
-      if (item.key !== listed.key || item.sellingTime !== listed.sellingTime)
-        throw new ListingChangedError();
-      const active = runningItems.get(item.key);
-      if (active && (active.sellingTime !== item.sellingTime || active.price !== item.price))
-        throw new ListingChangedError();
-      if (store.observe(item, lane)) skipped++;
-      // 真正重新上架后，不沿用本轮旧版本的失败排除。
-      if (failedVersions.get(item.key) !== item.sellingTime) failedVersions.delete(item.key);
-      return item;
+      while (true) {
+        check();
+        // 两侧分别有界，老号排队不能阻止刚发现的新号登记。
+        while (queued()[lane].length >= concurrency) {
+          pump();
+          if (queued()[lane].length < concurrency) break;
+          publish({ detailProgress: "详情待采队列已满，先处理已发现商品，再继续扫描…" });
+          await waitForWork(true);
+          check();
+        }
+        const item = await source.hover(listed);
+        check();
+        if (item.key !== listed.key || item.sellingTime !== listed.sellingTime)
+          throw new ListingChangedError();
+        const active = runningItems.get(item.key);
+        if (active && (active.sellingTime !== item.sellingTime || active.price !== item.price))
+          throw new ListingChangedError();
+        if (store.observe(item, lane)) {
+          skipped++;
+          const unavailable = store.unavailableReason(item.key);
+          if (unavailable)
+            publish({ skipped, current: item.name || item.eid, detailProgress: unavailable });
+        }
+        // 真正重新上架后，不沿用本轮旧版本的失败排除。
+        if (failedVersions.get(item.key) !== item.sellingTime) failedVersions.delete(item.key);
+        return item;
+      }
     } catch (error) {
-      failure ??= { error };
+      if (!(error instanceof ListingDisappearedError))
+        failure ??= {
+          error,
+          preserveCompleted: error instanceof Error && error.name === "TimeoutError",
+        };
       throw error;
     }
   };
+  const retryDiscovery = async <T>(discover: () => Promise<T>): Promise<T> => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await discover();
+      } catch (error) {
+        check();
+        if (!(error instanceof ListingDisappearedError) || attempt > 0) throw error;
+        publish({ detailProgress: "列表商品已消失，重新读取当前页核对一次…" });
+      }
+    }
+  };
   const discoverHead = async (first: ListingPage) => {
+    if (!ordered) {
+      publish({ headPage: 1 });
+      for (const listed of first.items) await observe(listed, "new");
+      publish({ headCheckedAt: new Date().toISOString() });
+      return;
+    }
     const previous = store.headCheckpoint();
     const top = first.items[0]?.sellingTime;
     const catchUp = !previous && store.backfillComplete();
@@ -211,7 +279,7 @@ export async function watchCrawl(
       previousLastTime: string | undefined;
     for (let number = 1; ; number++) {
       check();
-      checkPage(page, number);
+      checkPage(page, number, order);
       const firstTime = page.items[0]?.sellingTime;
       if (previousLastTime && firstTime && firstTime > previousLastTime)
         throw new Error("相邻列表页未保持上架时间倒序，已暂停以免漏采");
@@ -243,7 +311,7 @@ export async function watchCrawl(
       store.setHeadCheckpoint({ time: top, keys: [...keys] });
     publish({ headCheckedAt: new Date().toISOString() });
   };
-  const waitForWork = () =>
+  const waitForWork = (detailsOnly = false) =>
     new Promise<void>((resolve) => {
       const finish = () => {
         clearTimeout(timer);
@@ -251,22 +319,30 @@ export async function watchCrawl(
         wake = undefined;
         resolve();
       };
-      const timer = setTimeout(finish, Math.max(0, nextHeadCheck - Date.now()));
+      const timer = detailsOnly
+        ? undefined
+        : setTimeout(finish, Math.max(0, nextHeadCheck - Date.now()));
       wake = finish;
       signal.addEventListener("abort", finish, { once: true });
       if (signal.aborted || failure) finish();
     });
 
-  publish({ phase: "collecting", message: "持续检查新上架角色，并从原断点补齐历史角色…" });
+  publish({
+    phase: "collecting",
+    message: "优先采集新上架角色，空闲名额继续从原断点补齐历史角色…",
+  });
   try {
-    const first = await source.prepare(ORDER);
-    check();
-    checkPage(first, 1);
-    totalPages = first.totalPages;
+    const first = await retryDiscovery(async () => {
+      const first = await source.prepare(order);
+      check();
+      checkPage(first, 1, order);
+      totalPages = first.totalPages;
+      await discoverHead(first);
+      return first;
+    });
     nextHeadCheck = Date.now() + interval;
-    await discoverHead(first);
     const point = store.checkpoint();
-    if (!historyDone && point)
+    if (ordered && !historyDone && point)
       historyPage = (await locateCheckpoint(source, first, point, signal)) ?? 1;
     let previousSignature = "",
       previousHeadSignature = first.items.map((item) => item.key).join("|");
@@ -275,13 +351,16 @@ export async function watchCrawl(
       pump();
       publish({ nextHeadCheckAt: new Date(nextHeadCheck).toISOString() });
       if (Date.now() >= nextHeadCheck) {
-        nextHeadCheck = Date.now() + interval;
         const headPointBefore = JSON.stringify(store.headCheckpoint());
-        const refreshed = await source.prepare(ORDER);
-        check();
-        checkPage(refreshed, 1);
-        totalPages = refreshed.totalPages;
-        await discoverHead(refreshed);
+        const refreshed = await retryDiscovery(async () => {
+          const refreshed = await source.prepare(order);
+          check();
+          checkPage(refreshed, 1, order);
+          totalPages = refreshed.totalPages;
+          await discoverHead(refreshed);
+          return refreshed;
+        });
+        nextHeadCheck = Date.now() + interval;
         const headSignature = refreshed.items.map((item) => item.key).join("|");
         // 首页商品确有位移时，历史重叠页才需重建比较；相同首页不能掩盖重复页。
         if (
@@ -290,32 +369,47 @@ export async function watchCrawl(
         )
           previousSignature = "";
         previousHeadSignature = headSignature;
-      } else if (!historyDone && queued().old.length < Math.max(1, limits.old)) {
-        const page = await source.page(historyPage);
-        check();
-        checkPage(page, historyPage);
-        totalPages = page.totalPages;
-        const signature = page.items.map((item) => item.key).join("|");
-        if (signature && signature === previousSignature)
-          throw new Error("连续两页返回相同商品，已暂停，避免循环翻页");
-        previousSignature = signature;
-        publish({ historyPage, page: historyPage, totalPages });
-        for (const listed of page.items) {
-          const item = await observe(listed, "old");
-          if (store.captureLane(item.key) === "old")
-            historyPoints.set(item.key, {
-              index: historyIndex++,
-              point: {
-                key: item.key,
-                time: item.sellingTime,
-                order: ORDER,
-                page: historyPage,
-                savedAt: new Date().toISOString(),
-              },
-            });
+        if (!ordered && historyDone) {
+          historyDone = false;
+          historyPage = 1;
+          historyPass++;
+          previousSignature = "";
         }
-        historyDone = historyPage >= totalPages;
-        historyPage++;
+      } else if (!historyDone && !queued().new.length && queued().old.length < concurrency) {
+        const discovered = await retryDiscovery(async () => {
+          const page = await source.page(historyPage);
+          check();
+          checkPage(page, historyPage, order);
+          totalPages = page.totalPages;
+          const signature = page.items.map((item) => item.key).join("|");
+          if (signature && signature === previousSignature)
+            throw new Error("连续两页返回相同商品，已暂停，避免循环翻页");
+          publish({ historyPage, page: historyPage, totalPages });
+          for (const listed of page.items) {
+            const lane = !ordered && historyPass > 0 && !store.detail(listed.key) ? "new" : "old";
+            // 队列满时保留当前历史页，让出发现流程供到期头扫使用。
+            // 下次重读同页；只有全页登记后才推进页码和重复页签名。
+            if (queued()[lane].length >= concurrency) return { signature, complete: false };
+            const item = await observe(listed, lane);
+            if (store.captureLane(item.key) === "old")
+              historyPoints.set(item.key, {
+                index: historyIndex++,
+                point: {
+                  key: item.key,
+                  time: ordered ? item.sellingTime : item.orderTime,
+                  order,
+                  page: historyPage,
+                  savedAt: new Date().toISOString(),
+                },
+              });
+          }
+          return { signature, complete: true };
+        });
+        if (discovered.complete) {
+          previousSignature = discovered.signature;
+          historyDone = historyPage >= totalPages;
+          historyPage++;
+        }
         pump();
       } else await waitForWork();
     }
@@ -323,6 +417,11 @@ export async function watchCrawl(
     if (error instanceof ListingChangedError)
       error.message = "列表在采集中发生变化，已暂停以免漏采或保存旧资料";
     failure ??= { error };
+    if (!signal.aborted && !(error instanceof SellingOrderUnavailableError))
+      publish({
+        message: "采集遇到错误，已停止派发；正在结束在途任务并保存仍有效的完整详情…",
+        lastItemError: error instanceof Error ? error.message : String(error),
+      });
   } finally {
     // 暂停、列表失败、安全验证和租约中止都必须等在途页面操作结束。
     await Promise.all(inFlight.values());

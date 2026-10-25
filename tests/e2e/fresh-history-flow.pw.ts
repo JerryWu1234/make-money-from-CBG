@@ -18,7 +18,7 @@ import { valuationRecord } from "../fixtures/analysis";
 import { browserStatus } from "../fixtures/saved-role";
 
 const failureModes = [
-  "新号、老号共享一个详情队列，慢老号挡住首页检查或新号抓取",
+  "新号排队时仍派发老号、没有新号待派时空着名额，或新号出现后打断老号在途任务",
   "只查看首页或遇到一个旧商品就停止，漏掉跨页、同秒新增商品",
   "跨页重复商品重复入库，详情或报价串到另一个商品",
   "暂停后仍然落库，重启后首页检查进度覆盖历史回补进度",
@@ -113,7 +113,8 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
   let listKeys = [
     ["n1", "n2"],
     ["o1", "o2", "o3"],
-    ["o3", "o4", "o5", "o6"],
+    // 先保留一个重复的历史待采项；其余历史商品在下一次列表更新中出现。
+    ["o3"],
   ];
   const listPage = await context.newPage();
   const analysisPage = await context.newPage();
@@ -134,6 +135,7 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
   const allowedCapture = new Set<string>();
   const captureConfigurations: number[] = [];
   const captureStates: Array<{ new: number; old: number }> = [];
+  const captureQueuedStates: Array<{ new: number; old: number }> = [];
   const analysisGates = new Map<string, () => void>();
   const analysisCalls: string[] = [];
   const allowedAnalysis = new Set<string>();
@@ -226,6 +228,10 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
         contentType: "text/html",
         body: "<meta charset=utf-8><h1>本地受控列表（模拟数据）</h1><main style='white-space:pre-wrap'></main>",
       });
+    if (url.pathname === "/api/runtime/settings")
+      return route.fulfill({ json: { saveScreenshots: false } });
+    if (url.pathname === "/api/browser/settings")
+      return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
     if (url.pathname.startsWith("/api/")) {
       const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
       let body: unknown;
@@ -267,6 +273,8 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
             signal,
             (update) => {
               status = { ...status, ...update };
+              if (update.newQueued !== undefined && update.oldQueued !== undefined)
+                captureQueuedStates.push({ new: update.newQueued, old: update.oldQueued });
               analysisRunner?.appendCaptured();
             },
             { concurrency: input.concurrency, watch: true, headIntervalMs: 100 },
@@ -350,14 +358,16 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
     await page.goto("http://cbg-flow.test/");
     const crawlCount = page.getByRole("spinbutton", { name: "并发抓取数" });
     const startCapture = page.getByRole("button", { name: /开始采集详情|继续采集 \/ 检查新增/ });
-    await expect(crawlCount).toHaveValue("4");
+    await expect(crawlCount).toHaveValue("10");
+    await crawlCount.fill("4");
     await startCapture.click();
     await expect.poll(() => countLanes(activeCapture)).toEqual({ new: 2, old: 2 });
     await expect(crawlCount).toBeDisabled();
-    await expect(page.getByLabel("采集双队列状态")).toContainText("新号在途 2/2 · 老号在途 2/2");
+    await expect(page.getByLabel("采集双队列状态")).toContainText("新号在途 2 · 老号在途 2");
+    expect(status.captureStrategy).toBe("new-first");
     await expect(page.getByText(/首页下次检查：/)).toBeVisible();
     await page.screenshot({
-      path: testInfo.outputPath("capture-two-plus-two.png"),
+      path: testInfo.outputPath("capture-new-priority-old-fill.png"),
       fullPage: true,
     });
     listKeys = [
@@ -367,13 +377,30 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
       ["o3", "o4", "o5", "o6"],
     ];
     await renderList();
+    const discoveredNew = () =>
+      store.db.prepare("SELECT count(*) n FROM listings WHERE capture_lane='new'").get()!.n;
+    await expect.poll(discoveredNew).toBe(6);
     await expect
-      .poll(
-        () => store.db.prepare("SELECT count(*) n FROM listings WHERE capture_lane='new'").get()!.n,
-      )
-      .toBe(8);
+      .poll(() => ({ new: status.newQueued, old: status.oldQueued }))
+      .toEqual({
+        new: 4,
+        old: 1,
+      });
     expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
-    await expect(page.getByLabel("采集双队列状态")).toContainText("新号排队 6");
+    await expect(page.getByLabel("采集双队列状态")).toContainText("新号排队 4");
+    // 已在途老号继续；有新号排队时，空出的名额优先给新号。
+    release("n1", captureGates, allowedCapture);
+    await expect.poll(() => activeCapture.has("n3")).toBe(true);
+    await expect.poll(discoveredNew).toBe(7);
+    expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
+    release("n2", captureGates, allowedCapture);
+    await expect.poll(() => activeCapture.has("n4")).toBe(true);
+    await expect.poll(discoveredNew).toBe(8);
+    expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
+    release("n3", captureGates, allowedCapture);
+    await expect.poll(() => activeCapture.has("n5")).toBe(true);
+    expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
+    expect(capturedCalls).not.toContain("o3");
     for (let number = 1; number <= 8; number++) release(`n${number}`, captureGates, allowedCapture);
     await expect.poll(() => store.count()).toBe(8);
     release("o1", captureGates, allowedCapture);
@@ -401,6 +428,8 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
     for (let number = 1; number <= 6; number++) release(`o${number}`, captureGates, allowedCapture);
     release("n9", captureGates, allowedCapture);
     await page.reload();
+    await expect(crawlCount).toHaveValue("10");
+    await crawlCount.fill("4");
     await startCapture.click();
     await expect.poll(() => store.count()).toBe(15);
     await expect.poll(() => store.backfillComplete()).toBe(true);
@@ -504,7 +533,13 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
     expect(results).toHaveLength(15);
     expect(results).toEqual(expect.arrayContaining(preservedQuotes));
     expect(analysisCalls.filter((key) => key.startsWith("n"))).toHaveLength(9);
+    expect(captureConfigurations).toEqual([4, 4]);
     expect(Math.max(...captureStates.map((state) => state.new + state.old))).toBe(4);
+    expect(Math.max(...captureQueuedStates.map((state) => state.new))).toBe(4);
+    expect(Math.max(...captureQueuedStates.map((state) => state.old))).toBeLessThanOrEqual(4);
+    expect(
+      Math.max(...captureQueuedStates.map((state) => state.new + state.old)),
+    ).toBeLessThanOrEqual(8);
     expect(Math.max(...analysisStates.map((state) => state.new + state.old))).toBe(10);
     await analysisPage.screenshot({
       path: testInfo.outputPath("fifteen-final-quotes.png"),
@@ -523,6 +558,7 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
           captureConfigurations,
           analysisConfigurations,
           captureStates,
+          captureQueuedStates,
           analysisStates,
           capturedCalls,
           analysisCalls,

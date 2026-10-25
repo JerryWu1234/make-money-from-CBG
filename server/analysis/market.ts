@@ -1,8 +1,21 @@
 import type { DatabaseSync } from "node:sqlite";
-import type { ValuationSettings } from "./valuation-types";
+import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
+import { parseTravelHeatRanks } from "./market-travel";
+
+export const EXPIRED_MARKET_NOTICE =
+  "本批次区服行情已过期，请刷新行情并按当前设置重新分析；旧结果保留";
+export function automaticMarketExpired(profile: AnalysisProfile, now = Date.now()) {
+  return !!profile.marketSources?.some((source) => {
+    const configured = profile.settings.servers.find((row) => row.serverId === source.serverId);
+    if (configured && configured.source !== "auto") return false;
+    const fetchedAt = Date.parse(source.fetchedAt);
+    return !Number.isFinite(fetchedAt) || now - fetchedAt >= 24 * 60 * 60 * 1000;
+  });
+}
 
 export const MARKET_URL = "https://www.aimhxy.com";
 export const SERVER_DIRECTORY_URL = "https://cbg-xyq.res.netease.com/js/server_list_data.js";
+export const TRAVEL_HEAT_URL = MARKET_URL + "/travel?status=2";
 export type MarketServer = ValuationSettings["servers"][number] & {
   serverName: string;
   fetchedAt: string;
@@ -28,6 +41,7 @@ export function parseMarketPages(
   age: MarketServer["age"],
   suffix: string,
   fetchedAt: string,
+  travel?: string,
 ): MarketServer[] {
   const match = directory.match(/var\s+server_data\s*=\s*(\{[^\n]+\});/);
   if (!match) throw new Error("官方区服目录结构发生变化");
@@ -50,11 +64,12 @@ export function parseMarketPages(
     ranks.set(row.cells[1], Number(row.cells[0].slice(1)));
   }
   const result: MarketServer[] = [];
+  const fallback = age === "older" && travel ? parseTravelHeatRanks(travel, fetchedAt) : null;
   for (const row of rows(gold)) {
     const id = row.html.match(/\/mhb\/info\/(\d+)/)?.[1];
     const price = Number(row.cells[3]?.replace(/[¥￥,\s]/g, ""));
     const name = row.cells[1];
-    const rank = ranks.get(name);
+    const rank = ranks.get(name) ?? fallback?.ranks.get(name);
     if (
       !id ||
       !names.get(id)?.has(name) ||
@@ -79,6 +94,12 @@ export function parseMarketPages(
         MARKET_URL + "/mhb" + suffix,
         MARKET_URL + "/mhb/info/" + id,
         SERVER_DIRECTORY_URL,
+        ...(!ranks.has(name) && fallback?.ranks.has(name)
+          ? [
+              TRAVEL_HEAT_URL,
+              MARKET_URL + "/travel?dt=" + fallback.date.replace(/-/g, "") + "&status=2",
+            ]
+          : []),
       ],
     });
   }
@@ -125,7 +146,23 @@ export async function refreshMarket(
     if (!/每3000万两|\\u6bcf3000\\u4e07\\u4e24/.test(pages[1]))
       throw new Error("金价报价单位未能确认，保留原有参数");
     const fetchedAt = new Date().toISOString();
-    const servers = parseMarketPages(pages[0], pages[2], pages[3], "older", "", fetchedAt);
+    const hotNames = new Set(
+      rows(pages[2])
+        .filter((row) => /^#\d+$/.test(row.cells[0] || ""))
+        .map((row) => row.cells[1]),
+    );
+    const missingHeat = rows(pages[3]).some(
+      (row) => /\/mhb\/info\/\d+/.test(row.html) && !hotNames.has(row.cells[1]),
+    );
+    let travel: string | undefined;
+    if (missingHeat) {
+      try {
+        travel = await request(TRAVEL_HEAT_URL);
+      } catch {
+        // An optional weekly supplement must not discard reliable primary heat/gold rows.
+      }
+    }
+    const servers = parseMarketPages(pages[0], pages[2], pages[3], "older", "", fetchedAt, travel);
     if (new Set(servers.map((server) => server.serverId)).size !== servers.length)
       throw new Error("行情区服年代存在冲突");
     db.exec(

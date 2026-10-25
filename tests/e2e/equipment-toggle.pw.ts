@@ -10,6 +10,10 @@ test("首页装备总开关默认关闭、持久保存，保存失败不伪装�
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
     if (url.origin !== "http://cbg-ui.test") return route.abort();
+    if (url.pathname === "/api/runtime/settings")
+      return route.fulfill({ json: { saveScreenshots: false } });
+    if (url.pathname === "/api/browser/settings")
+      return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
     if (url.pathname.startsWith("/api/")) {
       let body: unknown;
       switch (url.pathname) {

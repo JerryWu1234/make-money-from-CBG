@@ -1,5 +1,6 @@
 import type { Page } from "playwright-core";
 import type { ValuationCapture } from "./types";
+import { roleIdentityIssues } from "./role-identity";
 
 const object = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value)
@@ -166,6 +167,7 @@ export function normalizeValuationSource(source: Record<string, unknown>): Valua
         );
         const attrs = set?.attributes;
         let score = 0,
+          scoreDecimals = 0,
           complete = Array.isArray(attrs) && attrs.length > 0;
         if (Array.isArray(attrs))
           for (const item of attrs) {
@@ -178,16 +180,24 @@ export function normalizeValuationSource(source: Record<string, unknown>): Valua
             const match = attr.attr
               .trim()
               .match(
-                /^(伤害|法术伤害|物理暴击|法术暴击|封印命中|防御|抵抗封印|速度|治疗能力|气血)\s*[+＋:]?\s*(\d+(?:\.\d+)?)$/,
+                /^(伤害|法术伤害|物理暴击|法术暴击|封印命中|防御|法术防御|固定伤害|抵抗封印|速度|治疗能力|气血)\s*[+＋:]?\s*(\d+(?:\.\d+)?)$/,
               );
             if (!match) {
               complete = false;
               issue(prefix + "属性未识别：" + attr.attr);
               continue;
             }
+            // 用户确认这两项不计分；保留原值，避免把已采到的属性误报为缺资料。
+            if (["法术防御", "固定伤害"].includes(match[1])) {
+              add(prefix + "未计分属性", attr.attr, "道具/法宝");
+              continue;
+            }
+            // 当前权重最多一位小数，保留原始属性精度并清除求和的二进制尾差。
+            scoreDecimals = Math.max(scoreDecimals, (match[2].split(".")[1]?.length || 0) + 1);
             score += Number(match[2]) * ATTRIBUTES[match[1]];
           }
-        if (complete) add(prefix + "总分", score, "道具/法宝");
+        if (complete)
+          add(prefix + "总分", Number(score.toFixed(Math.min(scoreDecimals, 100))), "道具/法宝");
         else issue(prefix + "属性分值未完整读取");
       }
     }
@@ -261,5 +271,9 @@ export async function captureValuation(page: Page): Promise<ValuationCapture> {
       source: {},
       issues: ["网页没有可读取的角色解析数据，需补采坐骑和神器"],
     };
-  return normalizeValuationSource({ ...source, collectedAt: new Date().toISOString() });
+  const capture = normalizeValuationSource({ ...source, collectedAt: new Date().toISOString() });
+  return {
+    ...capture,
+    issues: [...new Set([...capture.issues, ...roleIdentityIssues(capture.source)])],
+  };
 }

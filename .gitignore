@@ -15,6 +15,10 @@ dist-ssr
 test-results/
 playwright-report/
 
+# Local diagnostic screenshots, run receipts and exported logs
+/artifacts/
+/cbg-run-log*.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

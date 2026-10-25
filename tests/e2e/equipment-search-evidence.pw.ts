@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
-import { equipmentSearchEvidence } from "../../server/analysis/equipment-search-evidence";
 import type { EquipmentEvidenceCapture } from "../../server/analysis/browser-equipment-source";
 
 // Local fixture only: hold a font request so the first short screenshot really times out.
@@ -9,6 +8,18 @@ import type { EquipmentEvidenceCapture } from "../../server/analysis/browser-equ
 test("截图超时后实际Chrome重新截图，保留全页、账号遮盖和可核验文件", async ({
   browser,
 }, testInfo) => {
+  // The helper resolves runtime settings and evidence paths on import. Keep both
+  // isolated from the operator's saved screenshot preference and production logs.
+  const fixtureDirectory = testInfo.outputPath("runtime");
+  await mkdir(fixtureDirectory, { recursive: true });
+  const previousDirectory = process.cwd();
+  let equipmentSearchEvidence: typeof import("../../server/analysis/equipment-search-evidence").equipmentSearchEvidence;
+  try {
+    process.chdir(fixtureDirectory);
+    ({ equipmentSearchEvidence } = await import("../../server/analysis/equipment-search-evidence"));
+  } finally {
+    process.chdir(previousDirectory);
+  }
   const context = await browser.newContext({
     viewport: { width: 800, height: 600 },
     deviceScaleFactor: 2,
@@ -73,6 +84,7 @@ test("截图超时后实际Chrome重新截图，保留全页、账号遮盖和�
       },
     );
     expect(calls).toBe(2);
+    if (result.screenshotDisabled) throw new Error("隔离截图回归必须开启截图");
     const png = await readFile(result.screenshot);
     expect(png.readUInt32BE(16)).toBe(800);
     expect(png.readUInt32BE(20)).toBeGreaterThan(600);

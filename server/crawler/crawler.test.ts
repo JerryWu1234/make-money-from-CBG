@@ -5,11 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import { parseListing, timestamp } from "./listing";
 import { CrawlStore } from "./store";
-import { crawl } from "./runner";
-import { locateCheckpoint } from "./resume";
+import { crawl, validateCrawlOptions } from "./runner";
+import { locateCheckpoint, prepareCrawlPages } from "./resume";
 import type { CrawlSource, SavedRoleRecord } from "./types";
 import {
+  DEFAULT_CRAWL_CONCURRENCY,
   ListingChangedError,
+  ListingUnavailableError,
   type Checkpoint,
   type Listing,
   type ListingPage,
@@ -122,9 +124,83 @@ const readSaved = (db: CrawlStore, key: string) => db.detail(key) as SavedRoleRe
 
 // 失败方式：超出并发上限、乱序完成使断点倒退、失败后继续派发、暂停后落库、续采漏掉未完成项。
 describe("并发采集", () => {
-  it.each([undefined, 1, 2, 4])("并发配置 %s 限制在途数量且不重复采集", async (concurrency) => {
+  it.each([false, true])(
+    "确证不存在跳过且不增加待重试，重启补采不重复请求；优先补采：%s",
+    async (backfillOnly) => {
+      const db = memory(),
+        gone = item(1),
+        good = item(2),
+        src = source([[gone, good]]),
+        publish = vi.fn();
+      if (backfillOnly) {
+        db.observe(gone);
+        db.observe(good);
+      }
+      src.detail = vi.fn(async (row) => {
+        if (row.key === gone.key) throw new ListingUnavailableError("目标详情返回 HTTP 404");
+        return detail(row);
+      });
+      await crawl(src, db, signal(), publish, { backfillOnly });
+      expect(readSaved(db, gone.key)).toMatchObject({
+        status: "unavailable",
+        error: expect.stringContaining("不再重试"),
+      });
+      expect(readSaved(db, good.key)).toMatchObject({ status: "complete" });
+      expect(db.retryItems()).toEqual([]);
+      expect(db.checkpoint()?.key).not.toBe(gone.key);
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          skipped: 1,
+          detailProgress: expect.stringContaining("无法补齐"),
+        }),
+      );
+      expect(publish).toHaveBeenLastCalledWith(
+        expect.objectContaining({ saved: 1, skipped: 1, failed: 0 }),
+      );
+      await crawl(src, db, signal(), vi.fn(), { backfillOnly: true });
+      expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === gone.key)).toHaveLength(
+        1,
+      );
+    },
+  );
+  it("刷新前官网确证不存在保留旧详情并跳过，不再请求详情", async () => {
+    const db = memory(),
+      gone = item(1),
+      src = source([]),
+      publish = vi.fn();
+    db.observe(gone);
+    db.save(gone, refreshDetail(gone));
+    const before = readSaved(db, gone.key)?.detail;
+    src.onShelf = vi.fn(async () => {
+      throw new ListingUnavailableError("目标详情返回 HTTP 410");
+    });
+    await crawl(src, db, signal(), publish, {
+      backfillOnly: true,
+      refresh: true,
+      keys: [gone.key],
+    });
+    expect(src.detail).not.toHaveBeenCalled();
+    expect(readSaved(db, gone.key)).toMatchObject({ status: "unavailable", detail: before });
+    expect(publish).toHaveBeenLastCalledWith(
+      expect.objectContaining({ skipped: 1, failed: 0, saved: 0 }),
+    );
+  });
+  it.each([1, 3, 5, 0, -2, 2.5, Number.MAX_SAFE_INTEGER + 1])(
+    "并发配置 %s 在读取列表前拒绝，不能绕过页面限制",
+    async (concurrency) => {
+      const db = memory(),
+        src = source([[item(1)]]);
+      src.prepare = vi.fn(src.prepare);
+      src.detail = vi.fn(src.detail);
+      expect(() => validateCrawlOptions({ concurrency })).toThrow("正偶数");
+      await expect(crawl(src, db, signal(), vi.fn(), { concurrency })).rejects.toThrow("正偶数");
+      expect(src.prepare).not.toHaveBeenCalled();
+      expect(src.detail).not.toHaveBeenCalled();
+    },
+  );
+  it.each([undefined, 2, 4, 6])("并发配置 %s 限制在途数量且不重复采集", async (concurrency) => {
     const db = memory();
-    const rows = Array.from({ length: 7 }, (_, index) => item(index + 1));
+    const rows = Array.from({ length: 11 }, (_, index) => item(index + 1));
     const src = source([rows]);
     const releases: Array<() => void> = [];
     let active = 0,
@@ -137,7 +213,7 @@ describe("并发采集", () => {
       return detail(row);
     });
     const task = crawl(src, db, signal(), vi.fn(), { concurrency });
-    const limit = concurrency ?? 4;
+    const limit = concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
     await vi.waitFor(() => expect(releases).toHaveLength(limit));
     expect(db.retryItems()).toHaveLength(rows.length);
     while (db.count() < rows.length) {
@@ -226,7 +302,7 @@ describe("并发采集", () => {
     expect(db.retryItems()).toHaveLength(4);
     expect(db.checkpoint()).toBeUndefined();
     const resumed = source([[]]);
-    await crawl(resumed, db, signal(), vi.fn(), { backfillOnly: true, concurrency: 1 });
+    await crawl(resumed, db, signal(), vi.fn(), { backfillOnly: true, concurrency: 2 });
     expect(db.count()).toBe(4);
     expect(db.checkpoint()).toBeUndefined();
   });
@@ -978,6 +1054,20 @@ describe("SQLite 去重与断点", () => {
   });
 });
 describe("二分定位与动态翻页", () => {
+  it("旧锚点时间早于整份当前列表时放弃二分并核对全部页面", async () => {
+    const db = memory(),
+      old = item(1000),
+      src = source(Array.from({ length: 8 }, (_, index) => [item(index)]));
+    db.observe(old);
+    db.save(old, detail(old), checkpoint(old, 4));
+    const point = db.checkpoint()!;
+    expect(await locateCheckpoint(src, await src.prepare(), point, signal())).toBeNull();
+    const plan = await prepareCrawlPages(src, db, signal(), vi.fn());
+    expect(plan.fullScan).toBe(true);
+    expect(plan.numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(db.checkpoint()).toEqual(point);
+  });
+
   it("千页列表对数次定位，重叠一页而非按时间丢弃相等商品", async () => {
     const pages = Array.from({ length: 1024 }, (_, i) => [item(i * 2), item(i * 2 + 1)]);
     const src = source(pages);
