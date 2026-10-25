@@ -586,10 +586,12 @@ export function AnalysisPreview() {
                 </label>
                 <div className="analysis-list-intro">
                   <span>
-                    按金额阶梯和配置条件筛选，不限制差额百分比；裸号估值高于挂牌价不限，最多展示10个
+                    挂牌价低于裸号预估价直接入榜，无需装备或宝宝配置门槛；其他商品沿用金额阶梯和配置条件，不限制差额百分比，最多展示10个
                   </span>
                   <span>差额 = 挂牌价 − 裸号估值</span>
-                  <span>有等级相差不超过 10 级的非野生宝宝，或至少 3 件带宝石装备（含灵饰）</span>
+                  <span>
+                    原配置规则：有等级相差不超过 10 级的非野生宝宝，或至少 3 件带宝石装备（含灵饰）
+                  </span>
                   <span>
                     ≤100元：基础条件；100～200元：1类配置；200～300元：2类；300～500元：3类
                   </span>
@@ -656,6 +658,9 @@ export function AnalysisPreview() {
                           {item.recommendation.strongerFactors.length} 类较强
                         </p>
                       )}
+                      {item.recommendation?.basis === "bare-role-discount" && (
+                        <p>入榜依据：挂牌低于裸号预估价</p>
+                      )}
                       <div className="analysis-rank-assets" aria-label="装备和宝宝简要信息">
                         {item.assetSummary ? (
                           <>
@@ -676,6 +681,9 @@ export function AnalysisPreview() {
                     <div className="analysis-rank-side">
                       <small>挂牌价格</small>
                       <strong>{price(item.price)}</strong>
+                      {item.valuation && (
+                        <span>裸号预估价 {valuationMoney(item.valuation.bare_role_value)}</span>
+                      )}
                       <span>
                         {item.valuation
                           ? item.valuation.comparison_mode === "listing-only"

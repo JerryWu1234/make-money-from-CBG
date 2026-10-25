@@ -8,6 +8,7 @@ import { slotFromCategory } from "./equipment-baseline";
 
 export type Recommendation = {
   status: "recommended" | "manual" | "excluded";
+  basis?: "bare-role-discount";
   gap: number | null;
   factors: string[];
   strongerFactors: string[];
@@ -75,7 +76,8 @@ export function recommendationFor(
             ),
         )
       : [];
-  if (!qualifiedPets.length && gemmed.length < 3) return result;
+  const bareRoleDiscount = cents < 0 && inventory.captureComplete && pets.captureComplete;
+  if (!bareRoleDiscount && !qualifiedPets.length && gemmed.length < 3) return result;
   const refined = gear.filter(
     ({ attributes: a }) => !a.jewelrySections && grade(a.fields.锻炼等级) >= 4,
   ).length;
@@ -139,7 +141,12 @@ export function recommendationFor(
   }
   const required = cents <= 10000 ? 0 : cents <= 20000 ? 1 : cents <= 30000 ? 2 : 3;
   const strongRequired = cents <= 50000 ? 0 : cents <= 80000 ? 1 : 2;
-  if (result.factors.length >= required && result.strongerFactors.length >= strongRequired)
+  if (
+    bareRoleDiscount ||
+    (result.factors.length >= required && result.strongerFactors.length >= strongRequired)
+  ) {
     result.status = "recommended";
+    if (bareRoleDiscount) result.basis = "bare-role-discount";
+  }
   return result;
 }
