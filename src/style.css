@@ -1827,3 +1827,44 @@ body {
   width: auto;
   margin: 0;
 }
+.browser-mode-settings {
+  margin: 1.25rem 0;
+}
+.browser-mode-settings fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.browser-mode-settings legend {
+  margin-bottom: 0.65rem;
+  font-weight: 600;
+}
+.browser-mode-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 0.75rem;
+}
+.browser-mode-options label {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.85rem;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+}
+.browser-mode-options input {
+  margin: 0.2rem 0 0;
+  accent-color: #62dccb;
+}
+.browser-mode-options strong,
+.browser-mode-options small {
+  display: block;
+}
+.browser-mode-options small {
+  margin-top: 0.3rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.browser-mode-settings fieldset:disabled label {
+  opacity: 0.65;
+}

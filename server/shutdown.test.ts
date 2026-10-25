@@ -6,6 +6,8 @@ const mocks = vi.hoisted(() => ({
   stopSchedule: vi.fn(),
   stopAnalysis: vi.fn(),
   closeAi: vi.fn(),
+  closeBrowser: vi.fn(),
+  finishWorkflow: vi.fn(),
 }));
 vi.mock("./crawler/controller", () => ({
   crawlActivity: mocks.activity,
@@ -14,6 +16,8 @@ vi.mock("./crawler/controller", () => ({
 vi.mock("./crawler/schedule", () => ({ shutdownScanSchedule: mocks.stopSchedule }));
 vi.mock("./analysis/controller", () => ({ shutdownAnalysis: mocks.stopAnalysis }));
 vi.mock("./ai-connection", () => ({ shutdownAiConnections: mocks.closeAi }));
+vi.mock("./session", () => ({ shutdownBrowserSession: mocks.closeBrowser }));
+vi.mock("./cbg", () => ({ finishBrowserWorkflow: mocks.finishWorkflow }));
 
 import { createLocalServiceShutdown, shutdownLocalService } from "./shutdown";
 import { assertServiceOpen, resetServiceLifecycle } from "./service-lifecycle";
@@ -29,6 +33,8 @@ beforeEach(() => {
   mocks.stopSchedule.mockResolvedValue(undefined);
   mocks.stopAnalysis.mockResolvedValue(undefined);
   mocks.closeAi.mockResolvedValue(undefined);
+  mocks.closeBrowser.mockResolvedValue(undefined);
+  mocks.finishWorkflow.mockResolvedValue(undefined);
 });
 
 it("禁止新定时任务后暂停采集，等采集和分析退出才关闭 AI 连接", async () => {
@@ -95,6 +101,11 @@ it("先阻止新请求，等待已接收请求退出后排空其晚启动的采�
   lateCapture.resolve();
   await closing;
   expect(mocks.closeAi).toHaveBeenCalledTimes(2);
+  expect(mocks.closeBrowser).toHaveBeenCalledOnce();
+  expect(mocks.finishWorkflow).toHaveBeenCalledOnce();
+  expect(mocks.closeBrowser.mock.invocationCallOrder[0]).toBeGreaterThan(
+    mocks.closeAi.mock.invocationCallOrder[1],
+  );
 });
 
 it("第一轮清理失败仍排空 HTTP 和晚启动任务，并向稳定入口保留失败", async () => {

@@ -133,6 +133,52 @@ const finishWorkflow = async () => {
 };
 
 describe("开发服务重载后的流程复用", () => {
+  it("切换后晚到的旧状态不能回填旧账号或角色列表", async () => {
+    const workflow = await finishWorkflow();
+    let finish!: (value: PageSnapshot) => void;
+    mocks.readStableSnapshot.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const reading = workflow.checkCbgStatus();
+    workflow.resetBrowserWorkflow();
+    finish(snapshot);
+    expect(await reading).toMatchObject({ workflowStep: "idle", isLoggedIn: false });
+    expect((await workflow.checkCbgStatus()).roleList).toBeUndefined();
+  });
+
+  it("旧状态读取失败不能覆盖切换后新开始的查询", async () => {
+    const workflow = await finishWorkflow();
+    let reject!: (error: Error) => void;
+    mocks.readStableSnapshot.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, fail) => {
+          reject = fail;
+        }),
+    );
+    const reading = workflow.checkCbgStatus();
+    workflow.resetBrowserWorkflow();
+    let finish!: (value: ReturnType<typeof completed>) => void;
+    mocks.runFixedWorkflow.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    workflow.openCbg();
+    reject(new Error("旧工作页已关闭"));
+    expect(await reading).toMatchObject({ workflowStep: "connecting", running: true });
+    await vi.waitFor(() => expect(mocks.runFixedWorkflow).toHaveBeenCalledTimes(2));
+    finish(completed());
+    await workflow.finishBrowserWorkflow();
+    expect(await workflow.checkCbgStatus()).toMatchObject({
+      workflowStep: "completed",
+      isLoggedIn: true,
+    });
+  });
+
   it("已登录的角色列表保留状态，轮询不重新执行登录流程", async () => {
     await finishWorkflow();
     vi.resetModules();

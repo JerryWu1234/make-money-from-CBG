@@ -82,6 +82,8 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
     if (url.origin !== "http://cbg-ui.test") return route.abort();
     if (url.pathname === "/api/runtime/settings")
       return route.fulfill({ json: { saveScreenshots: false } });
+    if (url.pathname === "/api/browser/settings")
+      return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
     if (url.pathname.startsWith("/api/")) {
       let body: unknown;
       switch (url.pathname) {

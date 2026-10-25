@@ -230,6 +230,8 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
       });
     if (url.pathname === "/api/runtime/settings")
       return route.fulfill({ json: { saveScreenshots: false } });
+    if (url.pathname === "/api/browser/settings")
+      return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
     if (url.pathname.startsWith("/api/")) {
       const input = route.request().method() === "POST" ? route.request().postDataJSON() : {};
       let body: unknown;

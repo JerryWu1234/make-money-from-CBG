@@ -1,6 +1,6 @@
 # 藏宝阁角色查询
 
-本地 React + TypeScript 助手。连接日常 Chrome，复用已有登录状态，并在隐藏工作页中执行固定流程：
+本地 React + TypeScript 助手。默认使用项目专用 Chrome 保存登录状态，也可连接日常 Chrome，并在后台工作页中执行固定流程：
 
 **扫码登录 → 跨服购买 → 开服时间「3年以上服」→ 角色列表**
 
@@ -13,18 +13,24 @@ vp install
 vp dev
 ```
 
-1. 在日常 Chrome 打开 `chrome://inspect/#remote-debugging`，启用远程调试（需要支持此功能的新版 Chrome）。
-2. 访问 `http://127.0.0.1:5173`，点击 **开始查询角色**。首次连接如有 Chrome 授权提示，选择允许。
+1. 访问 `http://127.0.0.1:5173`，首页 **浏览器运行方式** 默认选择 **项目专用浏览器（保存登录）**。本机需安装 Google Chrome。
+2. 点击 **开始查询角色**。程序直接启动专用 Chrome，不请求接管日常 Chrome 的调试授权。
 3. 已登录时直接继续查询；未登录时在助手页面扫描二维码，并在手机确认。程序处理网站的跨服提示、选择首个可用登录角色并等待网站确认。
 4. 自动进入跨服购买，选择「3年以上服」，进入角色搜索后再次确认同一条件，再加载当前页角色表格。最终响应的 `QueryArgs.server_type` 必须为 `3` 才展示结果。
 
-当前自动连接支持 macOS 上的日常 Chrome。默认读取 `~/Library/Application Support/Google/Chrome/DevToolsActivePort`；自定义用户数据目录可设置 `CBG_CHROME_USER_DATA_DIR`。这里只读取调试地址，不复制浏览器配置。旧 `.chrome-cbg-profile` 不再使用。
+专用模式使用 [Playwright 持久上下文](https://playwright.dev/docs/api/class-browsertype#browser-type-launch-persistent-context)，固定配置目录为 `data/browser-profile/`，默认无前台窗口；在主页扫码后，后续角色查询、采集和资产分析共享同一个浏览器连接。暂停任务保留连接，服务正常关闭会保存配置，下次启动复用持久 Cookie 和 localStorage。网站登录过期或要求额外确认时仍需重新扫码；保存配置不代表永久登录。不要让多个服务同时占用这个目录，也不要将其提交或清理为运行日志。
+
+浏览器方式保存在独立的 `data/browser-settings.json`，不影响截图设置或估价规则。查询、扫码、采集、分析或连接请求仍在执行时禁止切换；切换后旧角色列表就绪状态清空，需重新开始查询。保存配置失败保留原模式；关闭旧连接失败会报告错误，不继续使用已失效的旧工作页。
+
+选择 **连接日常 Chrome** 时，先在日常 Chrome 的 `chrome://inspect/#remote-debugging` 启用远程调试。这个模式支持 macOS，默认读取 `~/Library/Application Support/Google/Chrome/DevToolsActivePort`；自定义用户数据目录可设置 `CBG_CHROME_USER_DATA_DIR`。这里只读取调试地址，不复制日常浏览器配置；新调试会话仍可能弹出允许提示。旧 `.chrome-cbg-profile` 不再使用。
 
 排查原始网页时，可设置 `CBG_SHOW_WORK_PAGES=1` 后启动服务，例如 `CBG_SHOW_WORK_PAGES=1 pnpm dev:stable`。程序会在 Chrome 的独立窗口显示列表，详情进入该窗口的标签栏；停止采集后保留这些页面，便于人工查看错误。运行中请避免手动修改工作页筛选条件；检查结束后可手动关闭标签。取消该环境变量或设为 `0` 后重新启动服务，即恢复默认隐藏模式。
 
 日常 Chrome 请正常启动，不要添加 `--remote-debugging-port` 或 `--remote-debugging-pipe`。新版 Chrome 使用默认用户目录时，这些旧参数会阻止调试服务及界面开关生效；需要完全退出后去掉参数重新打开。程序会检查调试地址对应的端口，区分旧地址失效、连接权限错误和授权握手失败；修复后再次点击开始会重新读取地址。
 
-连接采用 [Playwright connectOverCDP](https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp)。使用 Chrome 默认用户上下文创建隐藏工作页，并在 [Target.createTarget](https://chromedevtools.github.io/devtools-protocol/tot/Target/#method-createTarget) 时设置 `hidden: true`、`background: true` 和 `forTab: false`，保留创建会话以维持工作页生命周期。隐藏工作页不出现在标签栏，也没有可见浏览器窗口。Chrome 授权提示本身仍需要用户允许，说明见 [Chrome 官方文档](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session)。
+日常模式采用 [Playwright connectOverCDP](https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp)。使用 Chrome 默认用户上下文创建隐藏工作页，并在 [Target.createTarget](https://chromedevtools.github.io/devtools-protocol/tot/Target/#method-createTarget) 时设置 `hidden: true`、`background: true` 和 `forTab: false`，保留创建会话以维持工作页生命周期。隐藏工作页不出现在标签栏，也没有可见浏览器窗口。Chrome 授权提示本身仍需要用户允许，说明见 [Chrome 官方文档](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session)。
+
+`GET /api/browser/settings` 只读取当前方式、连接和忙状态，不启动或重连浏览器。`POST /api/browser/settings/save` 接受 `{ "mode": "dedicated" }` 或 `{ "mode": "daily" }`。日志新增 `browser.disconnected`、`browser.transport_closed`（关闭码与原因）和 `browser.launch_error`，用于区分连接中断、专用浏览器启动失败和网站读取超时。
 
 ## 状态与错误
 

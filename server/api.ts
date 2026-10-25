@@ -6,9 +6,11 @@ import { ScheduleConfigError } from "./crawler/schedule-time";
 import { validateSampleSelection } from "./analysis/sample-selection";
 import { analysisConcurrency } from "./analysis/types";
 import type { SavedListingScope } from "./crawler/types";
+import { browserControl, browserBusyError, isBrowserMode } from "./browser-settings";
 
 const getRoutes = new Set([
   "/api/browser/status",
+  "/api/browser/settings",
   "/api/crawl/status",
   "/api/crawl/settings",
   "/api/crawl/detail",
@@ -27,6 +29,7 @@ const getRoutes = new Set([
 ]);
 const postRoutes = new Set([
   "/api/browser/open",
+  "/api/browser/settings/save",
   "/api/crawl/start",
   "/api/crawl/settings/save",
   "/api/crawl/backfill",
@@ -60,6 +63,12 @@ const controlRoutes = new Set([
   "/api/analysis/resume",
   "/api/analysis/retry",
 ]);
+const browserUseRoutes = new Set([
+  ...controlRoutes,
+  "/api/analysis/equipment/check",
+  "/api/analysis/pet/check",
+  "/api/analysis/pet-gear/check",
+]);
 
 async function verifyRequestBody(request: IncomingMessage, limit = 4096) {
   const chunks: Buffer[] = [];
@@ -83,6 +92,16 @@ async function verifyRequestBody(request: IncomingMessage, limit = 4096) {
 }
 
 export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, next: () => void) {
+  const control = browserUseRoutes.has(req.url?.split("?")[0] || "");
+  if (control) browserControl.pending++;
+  try {
+    await handleApi(req, res, next);
+  } finally {
+    if (control) browserControl.pending--;
+  }
+}
+
+async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => void) {
   const pathname = req.url?.split("?")[0];
   if (!pathname || (!getRoutes.has(pathname) && !postRoutes.has(pathname))) return next();
   if (controlRoutes.has(pathname)) {
@@ -144,6 +163,39 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
             pathname === "/api/analysis/settings/save" ? 128 * 1024 : 4096,
           )
         : {};
+    if (browserUseRoutes.has(pathname) && browserControl.changing) throw browserBusyError();
+    if (pathname === "/api/browser/settings" || pathname === "/api/browser/settings/save") {
+      const mode = (body as Record<string, unknown>).mode;
+      if (pathname.endsWith("/save") && !isBrowserMode(mode)) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: "浏览器运行方式无效" }));
+        return;
+      }
+      const [session, workflow, capture, analysis] = await Promise.all([
+        import("./session"),
+        import("./cbg"),
+        import("./crawler/controller"),
+        import("./analysis/controller"),
+      ]);
+      const busy = () =>
+        browserControl.pending > 0 ||
+        workflow.isBrowserWorkflowRunning() ||
+        capture.isCrawling() ||
+        analysis.isAnalyzing();
+      if (pathname.endsWith("/save"))
+        await session.changeBrowserMode(
+          mode as "daily" | "dedicated",
+          busy,
+          workflow.resetBrowserWorkflow,
+        );
+      res.end(
+        JSON.stringify({
+          ...session.browserSessionSettings(),
+          busy: busy() || session.browserSessionSettings().busy,
+        }),
+      );
+      return;
+    }
     if (pathname === "/api/runtime/settings" || pathname === "/api/runtime/settings/save") {
       const input = body as Record<string, unknown>;
       if (pathname === "/api/runtime/settings/save" && typeof input.saveScreenshots !== "boolean") {
@@ -472,7 +524,11 @@ export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, n
         : error instanceof Error && error.name === "SchoolFormulaConfirmationError"
           ? 400
           : error instanceof Error &&
-              ["CapturePreparationError", "LogStorageTokenError"].includes(error.name)
+              [
+                "CapturePreparationError",
+                "LogStorageTokenError",
+                "BrowserSessionBusyError",
+              ].includes(error.name)
             ? 409
             : 500;
     res.end(JSON.stringify({ error: error instanceof Error ? error.message : "请求失败" }));

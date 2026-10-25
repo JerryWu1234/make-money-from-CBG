@@ -1,16 +1,30 @@
-import { chromium, type Browser, type Page } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { CONNECTION_HELP, resolveCdpEndpoint, verifyCdpEndpoint } from "./chrome";
 import { CBG_HOME_URL, showBrowserWorkPages } from "./config";
 import { ensureWorkViewport } from "./viewport";
 import { openWorkTransport, type WorkTransport } from "./work-transport";
 import { diagnostics } from "./diagnostics";
 import { captureBrowserStep, registerBrowserEvidence } from "./browser-evidence";
+import { openDedicatedBrowser } from "./dedicated-browser";
+import {
+  browserControl,
+  browserSettings,
+  saveBrowserSettings,
+  browserBusyError,
+  type BrowserMode,
+} from "./browser-settings";
 
 type BrowserSession = {
   cachedBrowser: Browser | null;
   connectionPromise: Promise<Browser> | null;
   selectedPage: Page | null;
   hiddenPageCreation: Promise<void>;
+  mode?: BrowserMode;
+  context?: BrowserContext | null;
+  transport?: WorkTransport;
+  closing?: boolean;
+  closePromise?: Promise<void>;
+  cleanup?: { browser: Browser | null; context?: BrowserContext | null; transport?: WorkTransport };
 };
 // Vite reloads the API modules in the same process; keep only our own work session.
 const sessionKey = Symbol.for("cbg.browser-session.v1");
@@ -31,10 +45,34 @@ export function isCbgUrl(value: string): boolean {
 }
 
 export async function getBrowser(allowConnect = false): Promise<Browser> {
+  if (cache.closing) throw browserBusyError("本地服务正在关闭，请稍后重试");
+  if (browserControl.changing) throw browserBusyError();
+  if (cache.cleanup) {
+    if (!allowConnect) throw new Error("浏览器未连接；旧会话尚未关闭，请重新开始以重试清理");
+    await closeBrowserSession();
+    if (cache.closing || browserControl.changing) throw browserBusyError();
+  }
   if (cache.cachedBrowser?.isConnected()) return cache.cachedBrowser;
   if (!allowConnect) throw new Error(`浏览器未连接。${CONNECTION_HELP}`);
   if (cache.connectionPromise) return cache.connectionPromise;
   cache.connectionPromise = (async () => {
+    const mode = browserSettings().mode;
+    if (mode === "dedicated") {
+      diagnostics.record("browser.launch_start", { mode });
+      const context = await openDedicatedBrowser();
+      const browser = context.browser();
+      if (!browser || cache.closing) {
+        cache.cleanup = { browser, context };
+        await closeBrowserSession();
+        throw new Error(cache.closing ? "本地服务正在关闭" : "项目专用浏览器连接未建立");
+      }
+      cache.context = context;
+      cache.mode = mode;
+      cache.cachedBrowser = browser;
+      watchBrowserDisconnect(browser, mode);
+      diagnostics.record("browser.launched", { mode });
+      return browser;
+    }
     const endpoint = await resolveCdpEndpoint();
     let transport: WorkTransport | undefined;
     let stage = "checking_port";
@@ -49,13 +87,14 @@ export async function getBrowser(allowConnect = false): Promise<Browser> {
         timeout: 15000,
         noDefaults: true,
       });
+      if (cache.closing) {
+        await browser.close();
+        throw new Error("本地服务正在关闭");
+      }
       cache.cachedBrowser = browser;
-      browser.on("disconnected", () => {
-        if (cache.cachedBrowser === browser) {
-          cache.cachedBrowser = null;
-          cache.selectedPage = null;
-        }
-      });
+      cache.mode = mode;
+      cache.transport = transport;
+      watchBrowserDisconnect(browser, mode);
       return browser;
     } catch (error) {
       transport?.close();
@@ -74,6 +113,117 @@ export async function getBrowser(allowConnect = false): Promise<Browser> {
   } finally {
     cache.connectionPromise = null;
   }
+}
+
+function watchBrowserDisconnect(browser: Browser, mode: BrowserMode) {
+  browser.on("disconnected", () => {
+    diagnostics.record("browser.disconnected", { mode });
+    if (cache.cachedBrowser === browser) {
+      cache.cachedBrowser = null;
+      cache.selectedPage = null;
+      cache.context = null;
+      cache.transport = undefined;
+    }
+  });
+}
+
+export function browserSessionSettings() {
+  return {
+    mode: cache.cachedBrowser?.isConnected() ? cache.mode || "daily" : browserSettings().mode,
+    connected: cache.cachedBrowser?.isConnected() === true,
+    busy: !!cache.connectionPromise || !!cache.closePromise || browserControl.changing,
+  };
+}
+
+async function closeBrowserSession() {
+  if (cache.closePromise) return cache.closePromise;
+  const pending = cache.cleanup || {
+    browser: cache.cachedBrowser,
+    context: cache.context,
+    transport: cache.transport,
+  };
+  const { browser, context, transport } = pending;
+  if (browser || context || transport) cache.cleanup = pending;
+  cache.cachedBrowser = null;
+  cache.selectedPage = null;
+  cache.context = null;
+  cache.transport = undefined;
+  cache.closePromise = (async () => {
+    await cache.hiddenPageCreation;
+    if (context) {
+      try {
+        await context.close();
+      } catch (error) {
+        diagnostics.record("browser.context_close_error", { error });
+        if (browser?.isConnected()) {
+          try {
+            await browser.close();
+          } catch (fallbackError) {
+            diagnostics.record("browser.close_error", { error: fallbackError });
+            throw error;
+          }
+        }
+        if (browser && !browser.isConnected() && cache.cleanup === pending)
+          cache.cleanup = undefined;
+        throw error;
+      }
+      // Playwright may return immediately after an earlier context.close() failed.
+      if (browser?.isConnected()) await browser.close();
+      if (browser?.isConnected()) throw new Error("项目专用浏览器尚未退出，请重新开始以重试清理");
+    }
+    // CDP Browser.close disconnects this client; it does not close the user's Chrome.
+    else if (browser) await browser.close();
+    else transport?.close();
+    if (cache.cleanup === pending) cache.cleanup = undefined;
+  })();
+  try {
+    await cache.closePromise;
+  } finally {
+    cache.closePromise = undefined;
+  }
+}
+
+export async function changeBrowserMode(
+  mode: BrowserMode,
+  busy: () => boolean,
+  resetWorkflow: () => void,
+) {
+  if (
+    browserControl.changing ||
+    cache.closing ||
+    cache.closePromise ||
+    cache.connectionPromise ||
+    busy()
+  )
+    throw browserBusyError("查询、采集或分析正在运行，请先暂停并等待任务结束后切换浏览器");
+  if (!cache.cleanup && mode === browserSessionSettings().mode && mode === browserSettings().mode)
+    return;
+  browserControl.changing = true;
+  try {
+    saveBrowserSettings(mode);
+    resetWorkflow();
+    await closeBrowserSession();
+    diagnostics.record("browser.mode_changed", { mode });
+  } finally {
+    browserControl.changing = false;
+  }
+}
+
+export async function shutdownBrowserSession() {
+  cache.closing = true;
+  await cache.connectionPromise?.catch(() => {});
+  await closeBrowserSession();
+}
+
+export function resetBrowserSessionLifecycle() {
+  if (
+    cache.closePromise ||
+    cache.connectionPromise ||
+    cache.cleanup ||
+    cache.cachedBrowser?.isConnected()
+  )
+    throw new Error("旧浏览器会话尚未关闭，不能重新启动本地服务");
+  cache.closing = false;
 }
 
 export function getCbgPage(): Page | null {
@@ -102,6 +252,19 @@ export function createHiddenPage(browser: Browser): Promise<Page> {
 }
 
 async function openHiddenPage(browser: Browser): Promise<Page> {
+  if (cache.closing || browserControl.changing) throw browserBusyError();
+  if (cache.context && cache.cachedBrowser === browser) {
+    const page = await cache.context.newPage();
+    try {
+      await ensureWorkViewport(page);
+      registerBrowserEvidence(page);
+      await captureBrowserStep(page, { flow: "browser", stage: "page.created" });
+      return page;
+    } catch (error) {
+      await page.close();
+      throw error;
+    }
+  }
   const before = new Set(browser.contexts().flatMap((context) => context.pages()));
   const session = await browser.newBrowserCDPSession();
   let retained = false;

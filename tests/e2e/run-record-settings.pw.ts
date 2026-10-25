@@ -25,6 +25,8 @@ async function mount(page: Page, runtime: (route: Route, pathname: string) => Pr
     if (url.origin !== "http://cbg-run-records.test") return route.abort();
     if (url.pathname.startsWith("/api/runtime/") || url.pathname.startsWith("/api/logs/"))
       return runtime(route, url.pathname);
+    if (url.pathname === "/api/browser/settings")
+      return route.fulfill({ json: { mode: "daily", connected: true, busy: false } });
     if (url.pathname.startsWith("/api/")) {
       const responses: Record<string, unknown> = {
         "/api/browser/status": browserStatus,

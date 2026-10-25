@@ -4,6 +4,7 @@ import { apiMiddleware } from "./server/api";
 import { initializeScanSchedule } from "./server/crawler/schedule";
 import { createLocalServiceShutdown } from "./server/shutdown";
 import { resetServiceLifecycle } from "./server/service-lifecycle";
+import { resetBrowserSessionLifecycle } from "./server/session";
 
 let closeService: (() => Promise<void>) | undefined;
 
@@ -13,11 +14,18 @@ export default defineConfig({
     {
       name: "cbg-browser-middleware",
       configureServer(server) {
-        resetServiceLifecycle();
         if (server.httpServer) {
-          initializeScanSchedule();
           let listened = server.httpServer.listening;
-          server.httpServer.once("listening", () => (listened = true));
+          const ready = () => {
+            // Vite creates the replacement server before closing the old server.
+            // Reset global lifecycle flags only after that close has finished.
+            resetServiceLifecycle();
+            resetBrowserSessionLifecycle();
+            initializeScanSchedule();
+            listened = true;
+          };
+          if (listened) ready();
+          else server.httpServer.once("listening", ready);
           const requestsClosed = new Promise<void>((resolve) =>
             server.httpServer!.once("close", resolve),
           );
@@ -45,6 +53,7 @@ export default defineConfig({
             res.end(JSON.stringify({ error: "本地服务正在关闭，请稍后重试" }));
           });
         } else {
+          resetServiceLifecycle();
           server.middlewares.use(apiMiddleware);
         }
       },

@@ -3,6 +3,8 @@ import { shutdownScanSchedule } from "./crawler/schedule";
 import { shutdownAnalysis } from "./analysis/controller";
 import { shutdownAiConnections } from "./ai-connection";
 import { beginServiceShutdown } from "./service-lifecycle";
+import { shutdownBrowserSession } from "./session";
+import { finishBrowserWorkflow } from "./cbg";
 
 export async function shutdownLocalService() {
   beginServiceShutdown();
@@ -33,6 +35,9 @@ export function createLocalServiceShutdown(requestsClosed: () => Promise<void>) 
         results.push(...(await Promise.allSettled([requestsClosed()])));
         // 已进入浏览器检查的启动请求可能晚于第一轮暂停创建任务；HTTP 排空后再收尾。
         results.push(...(await Promise.allSettled([shutdownLocalService()])));
+        // Closing the owned work session also releases any background QR/login wait.
+        results.push(...(await Promise.allSettled([shutdownBrowserSession()])));
+        results.push(...(await Promise.allSettled([finishBrowserWorkflow()])));
         const failures = results.filter((result) => result.status === "rejected");
         if (failures.length)
           throw new AggregateError(

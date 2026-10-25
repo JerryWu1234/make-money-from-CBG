@@ -3,6 +3,7 @@ import type { OpenCbgResult, WorkflowStep } from "../server/types";
 import { normalizeBrowserState } from "./browser-state";
 import "./style.css";
 import { CrawlPanel } from "./CrawlPanel";
+import { BrowserSettings, type BrowserMode } from "./BrowserSettings";
 
 const FLOW: [WorkflowStep, string][] = [
   ["logging_in", "扫码登录"],
@@ -26,11 +27,19 @@ export function App() {
   const [transportError, setTransportError] = useState<string | null>(null);
   const [crawling, setCrawling] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [browserMode, setBrowserMode] = useState<BrowserMode>("dedicated");
+  const [browserSettingsBusy, setBrowserSettingsBusy] = useState(true);
+  const browserSettingsBusyRef = useRef(true);
   const active = useRef<AbortController | null>(null);
   const sequence = useRef(0);
   const startingRef = useRef(false);
+  const setSettingsBusy = useCallback((busy: boolean) => {
+    browserSettingsBusyRef.current = busy;
+    setBrowserSettingsBusy(busy);
+  }, []);
 
   const request = useCallback(async (start = false) => {
+    if (start && browserSettingsBusyRef.current) return;
     if (startingRef.current || (!start && active.current)) return;
     const id = ++sequence.current;
     active.current?.abort();
@@ -83,6 +92,22 @@ export function App() {
     }
   }, []);
 
+  const browserModeSaved = useCallback(
+    async (mode: BrowserMode) => {
+      setBrowserMode(mode);
+      // A response from the previous browser must never restore its ready state.
+      ++sequence.current;
+      active.current?.abort();
+      active.current = null;
+      startingRef.current = false;
+      setStarting(false);
+      setResult(null);
+      setTransportError(null);
+      await request();
+    },
+    [request],
+  );
+
   useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -110,13 +135,23 @@ export function App() {
     <main className="container container-results">
       <div className="card">
         <header className="card-header">
-          <div className="badge">在本页完成 · 复用日常浏览器登录状态</div>
+          <div className="badge">
+            {browserMode === "dedicated"
+              ? "项目专用浏览器 · 保存登录状态"
+              : "在本页完成 · 复用日常浏览器登录状态"}
+          </div>
           <h1 className="title">藏宝阁角色查询</h1>
           <p className="subtitle">扫码登录后，自动进入跨服购买，选择3年以上服并加载角色列表。</p>
           <a className="analysis-preview-entry" href="/analysis-preview">
             进入商品分析 <span aria-hidden="true">↗</span>
           </a>
         </header>
+        <BrowserSettings
+          active={starting || running || crawling}
+          onBusy={setSettingsBusy}
+          onMode={setBrowserMode}
+          onSaved={browserModeSaved}
+        />
         <section className="workflow-stepper" aria-label="角色查询流程">
           {FLOW.map(([key, label]) => {
             const done = completed || stepIndex > ORDER.indexOf(key);
@@ -145,7 +180,7 @@ export function App() {
         <button
           id="open-cbg-btn"
           className="btn-primary"
-          disabled={starting || running || crawling}
+          disabled={browserSettingsBusy || starting || running || crawling}
           onClick={() => void request(true)}
         >
           {starting
@@ -159,10 +194,14 @@ export function App() {
                   : "开始查询角色"}
         </button>
         <p className="status-note">
-          {result?.workPagesVisible
-            ? "已开启原始工作页显示，可在 Chrome 窗口查看列表和详情；停止后保留页面供检查。"
-            : "藏宝阁在隐藏工作页中运行，本页显示二维码、进度与查询结果。"}
-          首次连接可能需要允许 Chrome 的连接提示。{" "}
+          {browserMode === "dedicated"
+            ? "查询在项目专用浏览器中运行，本页显示二维码、进度与查询结果。"
+            : result?.workPagesVisible
+              ? "已开启原始工作页显示，可在 Chrome 窗口查看列表和详情；停止后保留页面供检查。"
+              : "藏宝阁在隐藏工作页中运行，本页显示二维码、进度与查询结果。"}
+          {browserMode === "dedicated"
+            ? "使用项目专用浏览器保存登录；首次使用或登录过期时仍需扫码。"
+            : "连接日常 Chrome 时，如有调试授权提示请允许；连接断开后重新连接可能再次提示。"}{" "}
           <a href="/api/logs/export" download="cbg-run-log.json">
             下载运行日志
           </a>
@@ -192,7 +231,13 @@ export function App() {
                 <span className="login-pill pill-logged">已登录</span>
               )}
             </div>
-            <p>{result.message}</p>
+            <p>
+              {step === "connecting"
+                ? browserMode === "dedicated"
+                  ? "正在启动或连接项目专用浏览器…"
+                  : "正在连接日常 Chrome，请留意浏览器的调试授权提示…"
+                : result.message}
+            </p>
             {result.error && <p className="error-message">错误编号：{result.error.code}</p>}
             {result.qrCodeUrl && !transportError && (
               <div className="qr-hero-section">
@@ -213,9 +258,9 @@ export function App() {
         )}
 
         <CrawlPanel
-          ready={completed && result?.isLoggedIn === true && !running}
+          ready={!browserSettingsBusy && completed && result?.isLoggedIn === true && !running}
           onRunning={setCrawling}
-          onPrepare={() => request(true)}
+          onPrepare={browserSettingsBusy ? undefined : () => request(true)}
           preparationError={starting || running ? null : transportError || result?.error?.message}
         />
       </div>
