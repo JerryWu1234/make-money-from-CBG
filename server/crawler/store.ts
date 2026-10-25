@@ -39,6 +39,8 @@ export class CrawlStore {
       CREATE INDEX IF NOT EXISTS listings_status_collected ON listings(status,collected_at DESC,key DESC);
       CREATE INDEX IF NOT EXISTS listings_recent ON listings(last_seen_at DESC);
       CREATE INDEX IF NOT EXISTS listings_first_seen ON listings(first_seen_at DESC,key ASC);
+      CREATE INDEX IF NOT EXISTS listings_capture_queue ON listings(status,first_seen_at,key)
+        WHERE status IN ('pending','failed');
       CREATE TABLE IF NOT EXISTS role_tabs (listing_key TEXT NOT NULL, tab_index INTEGER NOT NULL, name TEXT NOT NULL, snapshot_json TEXT NOT NULL, PRIMARY KEY(listing_key,tab_index));
       CREATE TABLE IF NOT EXISTS role_parameters (listing_key TEXT NOT NULL, section TEXT NOT NULL, path TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(listing_key,section,path));
       CREATE TABLE IF NOT EXISTS crawl_state (id INTEGER PRIMARY KEY CHECK(id=1), checkpoint_json TEXT, backfill_complete INTEGER NOT NULL DEFAULT 0);
@@ -174,6 +176,14 @@ export class CrawlStore {
     )
       this.db.prepare("UPDATE listings SET status='pending',error=NULL WHERE key=?").run(item.key);
     return complete || old?.status === "unavailable";
+  }
+  /** Steady-state dispatch reads only queued metadata; legacy validation stays in retryItems. */
+  pendingItems(): Listing[] {
+    return this.db
+      .prepare(`SELECT listing_json FROM listings WHERE status IN ('pending','failed')
+      ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END,first_seen_at ASC,key ASC`)
+      .all()
+      .map((row) => JSON.parse(String(row.listing_json)) as Listing);
   }
   retryItems(keys?: string[], refresh = false): Listing[] {
     if (refresh) {

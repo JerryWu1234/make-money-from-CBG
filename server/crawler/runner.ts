@@ -1,5 +1,6 @@
 import {
   DEFAULT_CRAWL_CONCURRENCY,
+  crawlAccessFailure,
   ListingChangedError,
   ListingUnavailableError,
   SellingOrderUnavailableError,
@@ -186,8 +187,10 @@ export async function crawl(
           });
           return;
         }
-        if (error instanceof IncompleteCaptureError && !options.refresh)
-          store.save(item, error.detail);
+        if (error instanceof IncompleteCaptureError && !options.refresh) {
+          if (crawlAccessFailure(error)) store.savePartial(item, error.detail);
+          else store.save(item, error.detail);
+        }
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
         settled = true;
@@ -200,7 +203,11 @@ export async function crawl(
           current: item.name || item.eid,
           detailProgress: `商品 ${item.name || item.eid} 详情未完整，已保留待重试：${message}`,
         });
-        if (!(error instanceof Error && error.name === "IncompleteDetailError")) throw error;
+        if (
+          crawlAccessFailure(error) ||
+          !(error instanceof Error && error.name === "IncompleteDetailError")
+        )
+          throw error;
       } finally {
         retryRunning[lane]--;
         if (signal.aborted && !settled) retryQueued[lane]++;
@@ -368,9 +375,16 @@ export async function crawl(
           });
           return;
         }
-        if (error instanceof IncompleteCaptureError) store.save(item, error.detail);
+        if (error instanceof IncompleteCaptureError) {
+          if (crawlAccessFailure(error)) store.savePartial(item, error.detail);
+          else store.save(item, error.detail);
+        }
         store.fail(item.key, error instanceof Error ? error.message : String(error));
-        if (error instanceof Error && error.name === "IncompleteDetailError") {
+        if (
+          !crawlAccessFailure(error) &&
+          error instanceof Error &&
+          error.name === "IncompleteDetailError"
+        ) {
           failed++;
           publish({
             failed,

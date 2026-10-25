@@ -33,6 +33,7 @@ it.each(["selling_time DESC", "expire_time DESC"])(
     });
     const page = {
       isClosed: () => false,
+      url: () => "https://xyq.cbg.163.com/cgi-bin/role_search.py",
       viewportSize: () => ({ width: 1440, height: 1080 }),
       evaluate: async (fn: (arg: unknown) => unknown, arg?: unknown) => fn(arg),
       waitForFunction: async (fn: (arg: unknown) => unknown, arg: unknown) => {

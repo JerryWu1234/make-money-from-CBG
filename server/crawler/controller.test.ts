@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { beginServiceShutdown, resetServiceLifecycle } from "../service-lifecycle";
+import { CrawlAccessError } from "./types";
 
 const mocks = vi.hoisted(() => ({
   createStore: vi.fn(),
@@ -57,6 +58,29 @@ it("浏览器检查期间开始关停，不会在检查返回后启动采集", a
   expect(mocks.crawl).not.toHaveBeenCalled();
   expect(mocks.acquire).not.toHaveBeenCalled();
 });
+
+it.each(["login", "verification", "busy"] as const)(
+  "访问状态 %s 明确暂停而非执行异常，保留进度",
+  async (kind) => {
+    mocks.crawl.mockImplementation(async (_source, _store, _signal, publish) => {
+      publish({ page: 3, saved: 5 });
+      throw new CrawlAccessError(kind);
+    });
+    const controller = await import("./controller");
+    initial = controller;
+    const started = await controller.startCrawl();
+    await expect(started.activity!.completion).resolves.toMatchObject({
+      phase: "paused",
+      running: false,
+      page: 3,
+      saved: 5,
+      accessIssue: kind,
+      error: undefined,
+    });
+    expect(controller.crawlStatus().message).toContain("暂停");
+    expect(mocks.release).toHaveBeenCalledOnce();
+  },
+);
 
 afterEach(async () => {
   const controller = initial ?? (await import("./controller"));

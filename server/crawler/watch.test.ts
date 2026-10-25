@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { CrawlStore } from "./store";
 import { crawl } from "./runner";
 import { CAPTURE_VERSION } from "./compact";
-import { collectCompleteCapture } from "./capture-readiness";
+import { collectCompleteCapture, IncompleteCaptureError } from "./capture-readiness";
 import {
+  CrawlAccessError,
   ListingChangedError,
   ListingDisappearedError,
   ListingUnavailableError,
@@ -95,6 +96,124 @@ afterEach(() => {
 });
 
 describe("持续发现新号和历史详情共享采集池", () => {
+  it.each([false, true])("登录暂停时保留其它有效在途资料，版本变更=%s", async (changed) => {
+    const db = memory(),
+      bad = item(1),
+      good = item(2),
+      anchor = item(20);
+    db.observe(anchor);
+    const point = {
+      key: anchor.key,
+      time: anchor.orderTime,
+      order: "selling_time DESC",
+      page: 2,
+      savedAt: "before",
+    };
+    db.save(anchor, detail(anchor), point);
+    const src = source([[bad, good]]);
+    let rejectBad!: (error: Error) => void;
+    let finishGood!: () => void;
+    src.detail = vi.fn(async (row) => {
+      if (row.key === bad.key)
+        await new Promise<void>((_resolve, reject) => {
+          rejectBad = reject;
+        });
+      else
+        await new Promise<void>((resolve) => {
+          finishGood = resolve;
+        });
+      return detail(row);
+    });
+    const control = new AbortController();
+    const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true, concurrency: 4 }).catch(
+      (error: unknown) => error,
+    );
+    await flush();
+    expect(src.detail).toHaveBeenCalledTimes(2);
+    rejectBad(new CrawlAccessError("login"));
+    await flush();
+    if (changed) db.observe({ ...good, price: "200" });
+    finishGood();
+    const error = await outcome;
+    expect(error).toMatchObject({ name: "CrawlAccessError", kind: "login" });
+    expect(readSaved(db, bad.key)?.status).toBe("failed");
+    expect(readSaved(db, good.key)?.status).toBe(changed ? "pending" : "complete");
+    expect(db.checkpoint()).toEqual(point);
+    expect(src.detail).toHaveBeenCalledTimes(2);
+  });
+
+  it("登录中断时已读部分资料留为待补齐，不成为完整商品，也不再派发", async () => {
+    const db = memory(),
+      bad = item(1),
+      src = source([[bad]]);
+    const partial = { ...detail(bad), tabs: [], petCapture: undefined };
+    src.detail = vi
+      .fn()
+      .mockRejectedValue(
+        new IncompleteCaptureError("读取中断：登录", partial, new CrawlAccessError("login")),
+      );
+    const error = await crawl(src, db, new AbortController().signal, vi.fn(), {
+      watch: true,
+      concurrency: 4,
+    }).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(IncompleteCaptureError);
+    expect(readSaved(db, bad.key)?.status).toBe("failed");
+    expect(readSaved(db, bad.key)?.detail?.petCapture).toBeUndefined();
+    expect(db.count()).toBe(0);
+    expect(src.detail).toHaveBeenCalledOnce();
+  });
+
+  it("持续扫描期间只在启动时核对旧完整资料，后续派发不再全库检查", async () => {
+    const db = memory(),
+      src = source([[item(1), item(2), item(3)]]),
+      control = new AbortController();
+    const legacy = vi.spyOn(db, "retryItems"),
+      pending = vi.spyOn(db, "pendingItems");
+    const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true, concurrency: 4 }).catch(
+      (error: unknown) => error,
+    );
+    await flush();
+    expect(db.count()).toBe(3);
+    // beginRetry validates one dispatched key; unscoped full validation runs once.
+    expect(legacy.mock.calls.filter(([keys]) => keys === undefined)).toHaveLength(1);
+    expect(pending).toHaveBeenCalled();
+    control.abort(new Error("暂停"));
+    await outcome;
+  });
+
+  it("首个登录异常之后，另一在途任务的部分资料仍按当前版本保留", async () => {
+    const db = memory(),
+      first = item(1),
+      second = item(2),
+      src = source([[first, second]]);
+    let finishSecond!: () => void;
+    const partial = { ...detail(second), petCapture: undefined };
+    src.detail = vi.fn(async (row) => {
+      if (row.key === first.key) throw new CrawlAccessError("login");
+      await new Promise<void>((resolve) => {
+        finishSecond = resolve;
+      });
+      throw new IncompleteCaptureError(
+        "部分资料：登录中断",
+        partial,
+        new CrawlAccessError("login"),
+      );
+    });
+    const outcome = crawl(src, db, new AbortController().signal, vi.fn(), {
+      watch: true,
+      concurrency: 4,
+    }).catch((error: unknown) => error);
+    await flush();
+    finishSecond();
+    await outcome;
+    expect(readSaved(db, second.key)).toMatchObject({
+      status: "pending",
+      detail: { url: second.url },
+    });
+    expect(db.count()).toBe(0);
+    expect(src.detail).toHaveBeenCalledTimes(2);
+  });
+
   it("历史待采池满时让出头扫，旧在途逐个释放的空位优先派新且两侧队列有界", async () => {
     vi.useFakeTimers();
     const db = memory(),

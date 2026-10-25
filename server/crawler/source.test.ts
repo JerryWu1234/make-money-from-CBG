@@ -25,7 +25,11 @@ vi.mock("../browser-evidence", () => ({
   captureBrowserStep: vi.fn().mockResolvedValue(undefined),
 }));
 beforeEach(() => vi.clearAllMocks());
-const page = {} as Page;
+const page = {
+  isClosed: () => false,
+  url: () => "https://xyq.cbg.163.com/equip?s=367&eid=abc",
+  waitForURL: vi.fn().mockResolvedValue(undefined),
+} as unknown as Page;
 const item = { key: "367:abc", serverId: "367", eid: "abc", name: "角色" } as Listing;
 const options = () => ({
   signal: new AbortController().signal,
@@ -78,6 +82,21 @@ it("不可重试错误保留原对象和现场，诊断不改变采集策略", a
   await expect(collectRole(page, item, options())).rejects.toBe(original);
   expect(saveCaptureFailure).toHaveBeenCalledOnce();
   expect(collectDetail).toHaveBeenCalledOnce();
+});
+
+it("统一读取入口将导航中的登录地址分类为访问暂停，不增加整件重读", async () => {
+  const redirected = { ...page, url: () => "https://xyq.cbg.163.com/cgi-bin/login.py" } as Page;
+  vi.mocked(collectDetail).mockRejectedValue(
+    new Error(
+      "page.evaluate: Execution context was destroyed, most likely because of a navigation",
+    ),
+  );
+  await expect(collectRole(redirected, item, options())).rejects.toMatchObject({
+    name: "CrawlAccessError",
+    kind: "login",
+  });
+  expect(collectDetail).toHaveBeenCalledOnce();
+  expect(saveCaptureFailure).toHaveBeenCalledOnce();
 });
 
 it("完整详情通过校验后才记录读取完成", async () => {

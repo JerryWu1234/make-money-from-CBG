@@ -41,6 +41,34 @@ export class ListingUnavailableError extends Error {
     this.name = "ListingUnavailableError";
   }
 }
+export type CrawlAccessKind = "login" | "verification" | "busy";
+export class CrawlAccessError extends Error {
+  constructor(
+    readonly kind: CrawlAccessKind,
+    cause?: unknown,
+  ) {
+    super(
+      {
+        login: "网站详情要求重新登录，采集已暂停；请重新查询角色列表并完成登录后继续。",
+        verification: "网站要求安全验证，采集已暂停；请完成验证后继续。",
+        busy: "网站繁忙或要求降低频率，采集已暂停。",
+      }[kind],
+      { cause },
+    );
+    this.name = "CrawlAccessError";
+  }
+}
+export function crawlAccessFailure(error: unknown): CrawlAccessError | undefined {
+  for (let depth = 0; depth < 4 && error instanceof Error; depth++, error = error.cause) {
+    if (
+      error.name === "CrawlAccessError" &&
+      "kind" in error &&
+      ["login", "verification", "busy"].includes(String(error.kind))
+    )
+      return error as CrawlAccessError;
+  }
+  return undefined;
+}
 export class SellingOrderUnavailableError extends Error {
   constructor() {
     super("网站未提供上架时间倒序，无法持续检查新上架角色");
@@ -203,6 +231,7 @@ export interface CrawlStatus {
   latestComplete?: { key: string; collectedAt: string };
   strategy?: string;
   error?: string;
+  accessIssue?: CrawlAccessKind;
   database: string;
 }
 

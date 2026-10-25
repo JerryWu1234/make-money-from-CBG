@@ -262,7 +262,7 @@ export function CrawlPanel({
               {` · 新号排队 ${status.newQueued ?? 0} · 老号排队 ${status.oldQueued ?? 0}`}
             </p>
           )}
-          {status.phase !== "retrying" && status.nextHeadCheckAt && (
+          {status.running && status.phase !== "retrying" && status.nextHeadCheckAt && (
             <p className="status-note">
               首页下次检查：{displayTime(status.nextHeadCheckAt)}
               {status.headCheckedAt ? ` · 上次检查：${displayTime(status.headCheckedAt)}` : ""}

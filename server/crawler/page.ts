@@ -3,11 +3,13 @@ import { ensureWorkViewport, hoverForInspection } from "../viewport";
 import { parseListing } from "./listing";
 import {
   ListingChangedError,
+  CrawlAccessError,
   ListingDisappearedError,
   SellingOrderUnavailableError,
   type Listing,
   type ListingPage,
 } from "./types";
+import { accessNavigationFailure } from "./access-navigation";
 
 export interface ListingHoverDiagnostic {
   event: "timeout" | "retry_recovered";
@@ -76,30 +78,40 @@ export async function pace(signal: AbortSignal, minimum = 1200, spread = 900) {
 }
 export async function assertAvailable(page: Page) {
   if (page.isClosed()) throw new Error("工作页已关闭，请重新连接后续采");
-  const error = await page.evaluate(() => {
-    const globals = window as Window & {
-      CaptchaCheck?: { need_captcha?: boolean };
-      IsLogin?: number;
-      LoginInfo?: { login?: number };
-    };
-    const visible = (selector: string) =>
-      Array.from(document.querySelectorAll(selector)).some((el) => el.checkVisibility());
-    if (
-      globals.CaptchaCheck?.need_captcha ||
-      visible(".yidun_popup, .geetest_panel, #captcha_container")
-    )
-      return "网站要求安全验证，已暂停采集";
-    if (
-      globals.IsLogin === 0 ||
-      globals.LoginInfo?.login === 0 ||
-      /show_login\.py/.test(location.pathname)
-    )
-      return "网站登录已失效，已暂停采集";
-    if (/系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText))
-      return "网站繁忙或要求降低频率，已暂停采集";
-    return "";
-  });
-  if (error) throw new Error(error);
+  const navigation = await accessNavigationFailure(page, undefined);
+  if (navigation) throw navigation;
+  let issue: "login" | "verification" | "busy" | "";
+  try {
+    issue = await page.evaluate(() => {
+      const globals = window as Window & {
+        CaptchaCheck?: { need_captcha?: boolean };
+        IsLogin?: number | boolean;
+        LoginInfo?: { login?: number | boolean };
+      };
+      const visible = (selector: string) =>
+        Array.from(document.querySelectorAll(selector)).some((el) => el.checkVisibility());
+      if (
+        globals.CaptchaCheck?.need_captcha ||
+        visible(".yidun_popup, .geetest_panel, #captcha_container")
+      )
+        return "verification" as const;
+      if (
+        globals.IsLogin === 0 ||
+        globals.IsLogin === false ||
+        globals.LoginInfo?.login === 0 ||
+        globals.LoginInfo?.login === false ||
+        visible("#loginContainer,#qrcode,input[type=password]") ||
+        /show_login\.py/.test(location.pathname)
+      )
+        return "login" as const;
+      if (/系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText))
+        return "busy" as const;
+      return "" as const;
+    });
+  } catch (error) {
+    throw (await accessNavigationFailure(page, error)) || error;
+  }
+  if (issue) throw new CrawlAccessError(issue);
 }
 export async function readListings(page: Page): Promise<ListingPage> {
   await assertAvailable(page);

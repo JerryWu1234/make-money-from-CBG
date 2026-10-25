@@ -20,6 +20,7 @@ import { roleIdentityIssues } from "./role-identity";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { readDetailIdentity } from "./detail-identity";
 import { captureBrowserStep } from "../browser-evidence";
+import { accessNavigationFailure } from "./access-navigation";
 
 export const MAIN_TABS = [
   "人物/修炼",
@@ -621,12 +622,13 @@ async function openDetail(
       root.setAttribute("data-cbg-detail-root", "true");
     });
   } catch (error) {
+    const failure = (await accessNavigationFailure(page, error, signal)) || error;
     await captureBrowserStep(
       page,
-      { flow: "collection", stage: "角色详情打开失败", key: item.key, error },
+      { flow: "collection", stage: "角色详情打开失败", key: item.key, error: failure },
       signal,
     );
-    throw error;
+    throw failure;
   }
 }
 
@@ -1005,23 +1007,25 @@ export async function collectDetail(
       raw,
     };
   } catch (error) {
+    const access = await accessNavigationFailure(page, error, signal);
     await captureBrowserStep(
       page,
-      { flow: "collection", stage: `详情读取失败-${step}`, key: item.key, error },
+      { flow: "collection", stage: `详情读取失败-${step}`, key: item.key, error: access || error },
       signal,
     );
     signal.throwIfAborted();
-    // 仅把本轮已读内容随超时带出；登录、访问限制及未知异常继续按原错误处理。
+    // 超时或已确认访问暂停带出部分资料；未知异常保留原错误。
     if (
-      !(error instanceof Error) ||
-      error.name !== "TimeoutError" ||
       !tabs.length ||
-      /登录|验证码|安全验证|频繁|繁忙|权限|禁止/i.test(error.message)
+      (!access &&
+        (!(error instanceof Error) ||
+          error.name !== "TimeoutError" ||
+          /登录|验证码|安全验证|频繁|繁忙|权限|禁止/i.test(error.message)))
     )
-      throw error;
+      throw access || error;
     const now = new Date().toISOString();
     throw new IncompleteCaptureError(
-      `详情读取中断（${step}）：${error.message}`,
+      `详情读取中断（${step}）：${access?.message || (error as Error).message}`,
       {
         captureMode: "all",
         captureVersion: CAPTURE_VERSION,
@@ -1033,7 +1037,7 @@ export async function collectDetail(
         petCapture,
         // 未执行完本轮读取，不能附上完整本体核验凭据或借用上一轮资料。
       },
-      error,
+      access || error,
     );
   }
 }

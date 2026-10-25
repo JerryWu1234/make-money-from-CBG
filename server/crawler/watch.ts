@@ -6,6 +6,7 @@ import { IncompleteCaptureError } from "./capture-readiness";
 import { locateCheckpoint } from "./resume";
 import {
   DEFAULT_CRAWL_CONCURRENCY,
+  crawlAccessFailure,
   ListingChangedError,
   ListingDisappearedError,
   ListingUnavailableError,
@@ -81,7 +82,7 @@ export async function watchCrawl(
   };
   const queued = () => {
     const queues: Record<CrawlLane, Listing[]> = { new: [], old: [] };
-    for (const item of store.retryItems())
+    for (const item of store.pendingItems())
       if (
         !inFlight.has(item.key) &&
         (!failedVersions.has(item.key) || failedVersions.get(item.key) !== item.sellingTime)
@@ -114,6 +115,13 @@ export async function watchCrawl(
     )
       store.markBackfillComplete();
   };
+  const samePendingVersion = (item: Listing) => {
+    const current = store.detail(item.key) as SavedRoleRecord | null;
+    return (
+      current?.status === "pending" &&
+      isDeepStrictEqual(current.listing, JSON.parse(JSON.stringify(compactListing(item))))
+    );
+  };
   const capture = async (item: Listing, lane: CrawlLane) => {
     try {
       check();
@@ -123,12 +131,7 @@ export async function watchCrawl(
       signal.throwIfAborted();
       if (failure) {
         if (!failure.preserveCompleted) throw failure.error;
-        const current = store.detail(item.key) as SavedRoleRecord | null;
-        if (
-          current?.status !== "pending" ||
-          !isDeepStrictEqual(current.listing, JSON.parse(JSON.stringify(compactListing(item))))
-        )
-          throw new ListingChangedError();
+        if (!samePendingVersion(item)) throw new ListingChangedError();
       }
       const history =
         lane === "old" && store.captureLane(item.key) === "old"
@@ -155,6 +158,12 @@ export async function watchCrawl(
     } catch (error) {
       if (signal.aborted && error instanceof IncompleteCaptureError)
         store.savePartial(item, error.detail);
+      else if (
+        crawlAccessFailure(failure?.error) &&
+        error instanceof IncompleteCaptureError &&
+        samePendingVersion(item)
+      )
+        store.savePartial(item, error.detail);
       if (!signal.aborted && !failure) {
         if (error instanceof ListingUnavailableError) {
           store.markUnavailable(item.key, error.message);
@@ -168,14 +177,18 @@ export async function watchCrawl(
           });
           return;
         }
-        if (error instanceof IncompleteCaptureError) store.save(item, error.detail);
+        const access = crawlAccessFailure(error);
+        if (error instanceof IncompleteCaptureError) {
+          if (access) store.savePartial(item, error.detail);
+          else store.save(item, error.detail);
+        }
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
         failedVersions.set(item.key, item.sellingTime);
         failed++;
         publish({ failed, lastItemError: `商品 ${item.key}：${message}` });
-        if (!(error instanceof Error && error.name === "IncompleteDetailError"))
-          failure ??= { error };
+        if (access || !(error instanceof Error && error.name === "IncompleteDetailError"))
+          failure ??= { error, preserveCompleted: !!access };
       }
     }
   };
@@ -238,7 +251,7 @@ export async function watchCrawl(
     } catch (error) {
       if (!(error instanceof ListingDisappearedError)) {
         const timeout = error instanceof Error && error.name === "TimeoutError";
-        failure ??= { error, preserveCompleted: timeout };
+        failure ??= { error, preserveCompleted: timeout || !!crawlAccessFailure(error) };
         // 发现阶段失败也必须登记为任务；不能把未核验的列表资料发布为完整商品。
         // 已在途或完整的同版本商品由原任务负责，避免覆盖其有效资料。
         if (timeout && !inFlight.has(listed.key) && !store.observe(listed, lane)) {
@@ -425,7 +438,7 @@ export async function watchCrawl(
   } catch (error) {
     if (error instanceof ListingChangedError)
       error.message = "列表在采集中发生变化，已暂停以免漏采或保存旧资料";
-    failure ??= { error };
+    failure ??= { error, preserveCompleted: !!crawlAccessFailure(error) };
     if (!signal.aborted && !(error instanceof SellingOrderUnavailableError))
       publish({
         message: "采集遇到错误，已停止派发；正在结束在途任务并保存仍有效的完整详情…",

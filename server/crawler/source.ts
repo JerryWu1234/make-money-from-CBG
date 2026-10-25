@@ -7,7 +7,9 @@ import {
   type Listing,
   type SavedRoleRecord,
 } from "./types";
-import { collectCompleteCapture, captureIssues } from "./capture-readiness";
+import { collectCompleteCapture, captureIssues, IncompleteCaptureError } from "./capture-readiness";
+import { accessNavigationFailure } from "./access-navigation";
+import { crawlAccessFailure } from "./types";
 import { saveCaptureFailure } from "./capture-failure";
 import { captureBrowserStep } from "../browser-evidence";
 
@@ -72,8 +74,22 @@ export async function collectRole(
           );
         return detail;
       } catch (error) {
-        await saveCaptureFailure(detailPage, signal, { key: item.key, attempt, stage, error }, log);
-        throw error;
+        const access = signal.aborted
+          ? undefined
+          : await accessNavigationFailure(detailPage, error, signal);
+        const failure =
+          access && !crawlAccessFailure(error)
+            ? error instanceof IncompleteCaptureError
+              ? new IncompleteCaptureError(access.message, error.detail, access)
+              : access
+            : error;
+        await saveCaptureFailure(
+          detailPage,
+          signal,
+          { key: item.key, attempt, stage, error: failure },
+          log,
+        );
+        throw failure;
       }
     },
     signal,

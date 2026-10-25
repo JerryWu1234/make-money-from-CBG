@@ -5,7 +5,12 @@ import { checkCbgStatus } from "../cbg";
 import { crawl, validateCrawlOptions, type CrawlOptions } from "./runner";
 import { createCrawlSource } from "./source";
 import { CrawlStore } from "./store";
-import { DEFAULT_CRAWL_CONCURRENCY, type CrawlStatus, type SavedRoleRecord } from "./types";
+import {
+  DEFAULT_CRAWL_CONCURRENCY,
+  crawlAccessFailure,
+  type CrawlStatus,
+  type SavedRoleRecord,
+} from "./types";
 import { diagnostics, watchWorkPage } from "../diagnostics";
 import { loadProfile, saveProfile } from "../analysis/profile";
 import { assertServiceOpen } from "../service-lifecycle";
@@ -159,6 +164,7 @@ export async function startCrawl(
     skipped: 0,
     error: undefined,
     failed: 0,
+    accessIssue: undefined,
     retryTotal: undefined,
     retryCompleted: undefined,
     lastItemError: undefined,
@@ -225,8 +231,10 @@ export async function startCrawl(
   })()
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      log(control.signal.aborted ? "crawl.paused" : "crawl.error", {
+      const access = crawlAccessFailure(error);
+      log(control.signal.aborted || access ? "crawl.paused" : "crawl.error", {
         error,
+        accessIssue: access?.kind,
         page: cache.status.page,
         itemIndex: cache.status.itemIndex,
         detailProgress: cache.status.detailProgress,
@@ -234,12 +242,13 @@ export async function startCrawl(
       cache.status = {
         ...cache.status,
         running: false,
-        phase: control.signal.aborted ? "paused" : "error",
-        message: control.signal.aborted ? "采集已暂停，断点已保留。" : message,
-        error: control.signal.aborted ? undefined : message,
+        phase: control.signal.aborted || access ? "paused" : "error",
+        message: control.signal.aborted ? "采集已暂停，断点已保留。" : access?.message || message,
+        error: control.signal.aborted || access ? undefined : message,
+        accessIssue: access?.kind,
         detailProgress: undefined,
       };
-      if (!control.signal.aborted) console.error("[CBG_CRAWL]", message);
+      if (!control.signal.aborted && !access) console.error("[CBG_CRAWL]", message);
     })
     .finally(() => {
       clearInterval(lease);
