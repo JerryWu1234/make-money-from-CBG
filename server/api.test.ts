@@ -99,6 +99,7 @@ it("正式商品分析接口转交完整范围，拒绝无效范围", async () =
   await (await import("./api")).apiMiddleware(req, response(), vi.fn());
   expect(mocks.analysisOverview).toHaveBeenCalledWith(
     expect.objectContaining({ scope: "complete" }),
+    expect.any(AbortSignal),
   );
   for (const path of ["/api/analysis/status", "/api/crawl/records"]) {
     const invalid = request(`${path}?scope=unknown`);
@@ -664,6 +665,7 @@ it("推荐查看接口仅保存标记，读取默认隐藏且支持显示已查�
     await apiMiddleware(read, response(), vi.fn());
     expect(mocks.analysisOverview).toHaveBeenLastCalledWith(
       expect.objectContaining({ showViewed: show }),
+      expect.any(AbortSignal),
     );
   }
   expect(mocks.startAnalysis).not.toHaveBeenCalled();

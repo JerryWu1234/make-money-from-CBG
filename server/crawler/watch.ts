@@ -156,6 +156,19 @@ export async function watchCrawl(
       }
       publish({ saved, totalSaved: store.count() });
     } catch (error) {
+      if (
+        !signal.aborted &&
+        failure &&
+        !crawlAccessFailure(failure.error) &&
+        !(failure.error instanceof ListingChangedError) &&
+        samePendingVersion(item)
+      ) {
+        if (error instanceof IncompleteCaptureError) store.savePartial(item, error.detail);
+        const message = error instanceof Error ? error.message : String(error);
+        store.fail(item.key, message);
+        failedVersions.set(item.key, item.sellingTime);
+        failed++;
+      }
       if (signal.aborted && error instanceof IncompleteCaptureError)
         store.savePartial(item, error.detail);
       else if (
@@ -178,10 +191,7 @@ export async function watchCrawl(
           return;
         }
         const access = crawlAccessFailure(error);
-        if (error instanceof IncompleteCaptureError) {
-          if (access) store.savePartial(item, error.detail);
-          else store.save(item, error.detail);
-        }
+        if (error instanceof IncompleteCaptureError) store.savePartial(item, error.detail);
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
         failedVersions.set(item.key, item.sellingTime);
@@ -438,15 +448,35 @@ export async function watchCrawl(
   } catch (error) {
     if (error instanceof ListingChangedError)
       error.message = "列表在采集中发生变化，已暂停以免漏采或保存旧资料";
-    failure ??= { error, preserveCompleted: !!crawlAccessFailure(error) };
+    failure ??= {
+      error,
+      preserveCompleted:
+        !!crawlAccessFailure(error) || (error instanceof Error && error.name === "TimeoutError"),
+    };
     if (!signal.aborted && !(error instanceof SellingOrderUnavailableError))
       publish({
         message: "采集遇到错误，已停止派发；正在结束在途任务并保存仍有效的完整详情…",
         lastItemError: error instanceof Error ? error.message : String(error),
       });
   } finally {
-    // 暂停、列表失败、安全验证和租约中止都必须等在途页面操作结束。
-    await Promise.all(inFlight.values());
+    // Give valid in-flight captures a short grace period, then cancel their owned pages.
+    // Still await their actual cleanup; never release the lease while old work can save.
+    let cleanup: Promise<void> | undefined;
+    const timer =
+      source.cancelDetails && inFlight.size
+        ? setTimeout(() => {
+            cleanup = source.cancelDetails!(
+              new Error("采集已停止，详情超过15秒收尾时限，已保留资料待补采"),
+            );
+            void cleanup.catch(() => {});
+          }, 15_000)
+        : undefined;
+    try {
+      await Promise.all(inFlight.values());
+    } finally {
+      clearTimeout(timer);
+      await cleanup;
+    }
   }
   signal.throwIfAborted();
   if (failure) throw failure.error;

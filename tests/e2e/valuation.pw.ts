@@ -171,6 +171,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
             profile = createProfile(input.template, input.settings, false);
             body = { profile };
             break;
+          case "/api/analysis/progress":
           case "/api/analysis/status": {
             const overview = store.overview({
               provider: "codex",

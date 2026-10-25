@@ -50,7 +50,7 @@ test("采集准备前置：无完整记录也能自动采集，显示进度且�
           return route.fulfill({ contentType: "application/json", body: "null" });
         }
         const body =
-          url.pathname === "/api/analysis/status"
+          url.pathname === "/api/analysis/status" || url.pathname === "/api/analysis/progress"
             ? { ...store.overview({}), ...(preparation ? { capturePreparation: preparation } : {}) }
             : url.pathname === "/api/ai/status"
               ? {

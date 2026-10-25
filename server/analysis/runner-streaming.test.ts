@@ -123,6 +123,33 @@ describe("分析队列持续处理并等待新角色", () => {
     await vi.waitFor(() => expect(x.store.run(id)?.completed).toBe(2), { timeout: 2500 });
     expect(x.analyzed).toEqual(["a", "b", "a"]);
   });
+  it("分析写入及锁续期不重放历史资料，新增角色只读取新增输入", async () => {
+    const x = setup();
+    const profile = createProfile("冻结裸号设置", undefined, false);
+    x.add("historical", 1);
+    x.release();
+    await x.runner.start("codex", false, profile, true);
+    await x.runner.settled();
+    const id = await x.runner.start("codex", false, profile);
+    const prepare = vi.spyOn(x.crawl.db, "prepare");
+    try {
+      x.crawl.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run("updated", id);
+      x.crawl.db.prepare("UPDATE analysis_lock SET expires_at=expires_at+1").run();
+      expect(x.runner.appendCaptured()).toBe(0);
+      expect(prepare.mock.calls.filter(([sql]) => sql.includes("AND t.input_hash=?"))).toHaveLength(
+        0,
+      );
+      x.add("new-input", 2);
+      prepare.mockClear();
+      expect(x.runner.appendCaptured()).toBe(1);
+      // Only the new role may need a reusable-result lookup. History stays checked.
+      expect(prepare.mock.calls.filter(([sql]) => sql.includes("AND t.input_hash=?"))).toHaveLength(
+        1,
+      );
+    } finally {
+      prepare.mockRestore();
+    }
+  });
   it("另一个数据库连接写入采集结果也会打破待命快照，不漏掉新角色", async () => {
     const directory = await mkdtemp(join(tmpdir(), "cbg-idle-append-"));
     const filename = join(directory, "fixture.sqlite");
@@ -146,6 +173,90 @@ describe("分析队列持续处理并等待新角色", () => {
       await vi.waitFor(() => expect(x.store.run(id)?.completed).toBe(1), { timeout: 2500 });
       expect(x.analyzed).toEqual(["a", "external"]);
     } finally {
+      other.close();
+    }
+  });
+  it("来源证明被删除后重新分析，不能永久缓存历史复用资格", async () => {
+    const x = setup();
+    const profile = createProfile("冻结裸号设置", undefined, false);
+    x.add("proof", 1);
+    x.release();
+    await x.runner.start("codex", false, profile, true);
+    await x.runner.settled();
+    const id = await x.runner.start("codex", false, profile);
+    expect(x.store.run(id)?.total).toBe(0);
+    expect(x.runner.appendCaptured()).toBe(0);
+    x.crawl.db.prepare("DELETE FROM analysis_attempts").run();
+    expect(x.runner.appendCaptured()).toBe(1);
+    expect(x.store.run(id)?.total).toBe(1);
+  });
+  it("原文版本跨连接更新会单独重查该角色，重建Store也保留已检查状态", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-version-intake-"));
+    const filename = join(directory, "fixture.sqlite"),
+      x = setup(filename);
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const profile = createProfile("冻结裸号设置", undefined, false);
+    x.add("external-change", 1);
+    x.release();
+    await x.runner.start("codex", false, profile, true);
+    await x.runner.settled();
+    const id = await x.runner.start("codex", false, profile);
+    const reopened = new AnalysisStore(x.crawl.db);
+    const owner = String(x.crawl.db.prepare("SELECT owner FROM analysis_lock").get()!.owner);
+    const prepare = vi.spyOn(x.crawl.db, "prepare");
+    try {
+      expect(reopened.appendCaptured(id, owner)).toBe(0);
+      expect(prepare.mock.calls.filter(([sql]) => sql.includes("AND t.input_hash=?"))).toHaveLength(
+        0,
+      );
+      const other = new CrawlStore(filename);
+      try {
+        other.db
+          .prepare(
+            "UPDATE listings SET listing_json=json_set(listing_json,'$.price','1234'),price='1234' WHERE key='external-change'",
+          )
+          .run();
+      } finally {
+        other.close();
+      }
+      expect(reopened.appendCaptured(id, owner)).toBe(1);
+    } finally {
+      prepare.mockRestore();
+    }
+  });
+  it("发现输入后外部连接立即改价，不能登记或入队旧版本", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-intake-race-"));
+    const filename = join(directory, "fixture.sqlite"),
+      x = setup(filename);
+    cleanups.push(() => rm(directory, { recursive: true, force: true }));
+    const profile = createProfile("冻结裸号设置", undefined, false);
+    x.release();
+    const id = await x.runner.start("codex", false, profile);
+    x.add("racing", 1);
+    const other = new CrawlStore(filename),
+      exec = x.crawl.db.exec.bind(x.crawl.db);
+    let changed = false;
+    const spy = vi.spyOn(x.crawl.db, "exec").mockImplementation((sql) => {
+      if (!changed && sql === "BEGIN IMMEDIATE") {
+        changed = true;
+        other.db
+          .prepare(
+            "UPDATE listings SET listing_json=json_set(listing_json,'$.price','4321'),price='4321' WHERE key='racing'",
+          )
+          .run();
+      }
+      return exec(sql);
+    });
+    try {
+      expect(x.runner.appendCaptured()).toBe(0);
+      expect(x.store.run(id)?.total).toBe(0);
+      expect(x.runner.appendCaptured()).toBe(1);
+      const queued = x.crawl.db
+        .prepare("SELECT source_listing_json FROM analysis_tasks WHERE run_id=?")
+        .get(id)!;
+      expect(JSON.parse(String(queued.source_listing_json)).price).toBe("4321");
+    } finally {
+      spy.mockRestore();
       other.close();
     }
   });

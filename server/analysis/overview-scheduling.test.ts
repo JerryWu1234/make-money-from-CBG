@@ -84,6 +84,39 @@ it("冷汇总分批让出主线程，相同并发请求合并；处理中商品�
   }
 });
 
+it("暖轮询不再从SQLite传回未变化候选的完整详情", () => {
+  const { crawl, store, runId } = fixture();
+  try {
+    store.overview({ runId, summary: true });
+    const original = crawl.db.prepare.bind(crawl.db);
+    let detailReads = 0;
+    const spy = vi.spyOn(crawl.db, "prepare").mockImplementation((sql) => {
+      const statement = original(sql);
+      const get = statement.get.bind(statement);
+      const all = statement.all.bind(statement);
+      statement.get = (...args) => {
+        const row = Reflect.apply(get, undefined, args) as ReturnType<typeof get>;
+        if (row?.detail_json != null) detailReads++;
+        return row;
+      };
+      statement.all = (...args) => {
+        const rows = Reflect.apply(all, undefined, args) as ReturnType<typeof all>;
+        detailReads += rows.filter((row) => row.detail_json != null).length;
+        return rows;
+      };
+      return statement;
+    });
+    try {
+      expect(store.overview({ runId, summary: true }).ranking).toHaveLength(0);
+      expect(detailReads).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+  } finally {
+    crawl.close();
+  }
+});
+
 it("让出线程期间出现更新的完整分析结果，不能再发布旧任务的推荐", async () => {
   const { crawl, store } = fixture();
   try {
@@ -107,6 +140,111 @@ it("让出线程期间出现更新的完整分析结果，不能再发布旧任�
       )
       .run(JSON.stringify({ valuation: { bare_role_value: 100, decision: "NEED_INFO" } }), next);
     expect((await pending).ranking.map((item) => item.key)).not.toContain("poll-000");
+  } finally {
+    crawl.close();
+  }
+});
+
+it("轻量进度不传回角色原文或计算推荐，后续完成数立即可见", () => {
+  const { crawl, store, runId } = fixture();
+  const compute = vi.spyOn(recommendations, "recommendationFor");
+  const original = crawl.db.prepare.bind(crawl.db);
+  let sourceReads = 0;
+  const spy = vi.spyOn(crawl.db, "prepare").mockImplementation((sql) => {
+    const statement = original(sql),
+      get = statement.get.bind(statement),
+      all = statement.all.bind(statement);
+    const inspect = (row: Record<string, unknown> | undefined) => {
+      sourceReads += Object.entries(row || {}).filter(
+        ([key, value]) => /(?:^|_)detail_json$/.test(key) && value != null,
+      ).length;
+    };
+    statement.get = (...args) => {
+      const row = Reflect.apply(get, undefined, args) as ReturnType<typeof get>;
+      inspect(row);
+      return row;
+    };
+    statement.all = (...args) => {
+      const rows = Reflect.apply(all, undefined, args) as ReturnType<typeof all>;
+      rows.forEach(inspect);
+      return rows;
+    };
+    return statement;
+  });
+  try {
+    crawl.db
+      .prepare("UPDATE analysis_tasks SET status='running' WHERE listing_key='poll-000'")
+      .run();
+    expect(store.progress({ runId, scope: "complete" }).run).toMatchObject({
+      completed: 47,
+      runningCount: 1,
+    });
+    crawl.db
+      .prepare("UPDATE analysis_tasks SET status='completed' WHERE listing_key='poll-000'")
+      .run();
+    const next = store.progress({ runId, scope: "complete" });
+    expect(next.run).toMatchObject({ completed: 48, runningCount: 0 });
+    expect(next).not.toHaveProperty("ranking");
+    expect(next).not.toHaveProperty("records");
+    expect(compute).not.toHaveBeenCalled();
+    expect(sourceReads).toBe(0);
+  } finally {
+    spy.mockRestore();
+    crawl.close();
+  }
+});
+
+it("记录请求全部取消后停止后台计算，不再为已断开的页面扫描原文", async () => {
+  const { crawl, store, runId } = fixture();
+  const original = recommendations.recommendationFor;
+  const compute = vi.spyOn(recommendations, "recommendationFor").mockImplementation((...args) => {
+    const until = performance.now() + 2;
+    while (performance.now() < until) {
+      /* CPU fixture */
+    }
+    return original(...args);
+  });
+  const control = new AbortController();
+  const error = new Error("client disconnected");
+  const pending = store
+    .overviewAsync({ runId, summary: true }, control.signal)
+    .catch((e: unknown) => e);
+  try {
+    while (!compute.mock.calls.length) await yieldThread();
+    control.abort(error);
+    expect(await pending).toBe(error);
+    const count = compute.mock.calls.length;
+    for (let n = 0; n < 3; n++) await yieldThread();
+    expect(compute).toHaveBeenCalledTimes(count);
+    expect(count).toBeLessThan(48);
+  } finally {
+    crawl.close();
+  }
+});
+
+it("一个读者取消不影响另一个共享请求，返回时重新读取最新批次进度", async () => {
+  const { crawl, store, runId } = fixture();
+  const original = recommendations.recommendationFor;
+  const compute = vi.spyOn(recommendations, "recommendationFor").mockImplementation((...args) => {
+    const until = performance.now() + 2;
+    while (performance.now() < until) {
+      /* CPU fixture */
+    }
+    return original(...args);
+  });
+  const control = new AbortController();
+  const cancelled = store
+    .overviewAsync({ runId, summary: true }, control.signal)
+    .catch((e: unknown) => e);
+  const shared = store.overviewAsync({ runId, summary: true });
+  try {
+    while (!compute.mock.calls.length) await yieldThread();
+    control.abort(new Error("first reader left"));
+    crawl.db
+      .prepare("UPDATE analysis_tasks SET status='failed' WHERE listing_key='poll-047'")
+      .run();
+    expect(await cancelled).toBeInstanceOf(Error);
+    expect((await shared).run).toMatchObject({ completed: 47, failed: 1 });
   } finally {
     crawl.close();
   }

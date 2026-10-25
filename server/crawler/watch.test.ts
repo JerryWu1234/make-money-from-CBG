@@ -96,6 +96,67 @@ afterEach(() => {
 });
 
 describe("持续发现新号和历史详情共享采集池", () => {
+  it("列表失败后收尾最多15秒，取消慢详情并保留部分资料及每件失败原因", async () => {
+    vi.useFakeTimers();
+    const db = memory(),
+      fresh = [item(1), item(2), item(3), item(4), item(5)];
+    const src = source([fresh]);
+    const blocked = new Map<string, (reason: Error) => void>();
+    const error = Object.assign(new Error("page.waitForFunction: Timeout 45000ms exceeded."), {
+      name: "TimeoutError",
+    });
+    src.hover = vi.fn(async (row) => {
+      if (row.key === fresh[4].key) throw error;
+      return row;
+    });
+    src.detail = vi.fn(
+      async (row) =>
+        new Promise<RoleDetail>((_resolve, reject) => {
+          blocked.set(row.key, (reason) =>
+            reject(
+              new IncompleteCaptureError(
+                "详情收尾中断",
+                { ...detail(row), petCapture: undefined },
+                reason,
+              ),
+            ),
+          );
+        }),
+    );
+    const cancel = vi.fn(async (reason: Error) => {
+      blocked.forEach((reject) => reject(reason));
+    });
+    Object.assign(src, { cancelDetails: cancel });
+    const control = new AbortController();
+    const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true, concurrency: 4 }).catch(
+      (e: unknown) => e,
+    );
+    try {
+      await flush();
+      expect(blocked.size).toBe(4);
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(cancel).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(await outcome).toBe(error);
+      expect(db.count()).toBe(0);
+      for (const row of fresh.slice(0, 4)) {
+        expect(readSaved(db, row.key)).toMatchObject({
+          status: "failed",
+          error: expect.stringContaining("收尾"),
+        });
+        expect(readSaved(db, row.key)?.detail).not.toBeNull();
+      }
+      expect(db.checkpoint()).toBeUndefined();
+      const before = db.db.prepare("SELECT total_changes() n").get()!.n;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(db.db.prepare("SELECT total_changes() n").get()!.n).toBe(before);
+    } finally {
+      control.abort(new Error("cleanup"));
+      blocked.forEach((reject) => reject(new Error("cleanup")));
+      await outcome;
+    }
+  });
   it.each([false, true])("登录暂停时保留其它有效在途资料，版本变更=%s", async (changed) => {
     const db = memory(),
       bad = item(1),

@@ -112,6 +112,7 @@ test("并发1时查价失败立即停队，刷新后显式重试，按顺序完�
             case "/api/analysis/settings":
               body = { profile, promptFile: PROMPT_FILE, servers: [], market: [] };
               break;
+            case "/api/analysis/progress":
             case "/api/analysis/status":
               body = { ...store.overview({ provider: "codex", currentProfile: profile }), profile };
               break;

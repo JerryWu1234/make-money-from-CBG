@@ -187,10 +187,8 @@ export async function crawl(
           });
           return;
         }
-        if (error instanceof IncompleteCaptureError && !options.refresh) {
-          if (crawlAccessFailure(error)) store.savePartial(item, error.detail);
-          else store.save(item, error.detail);
-        }
+        if (error instanceof IncompleteCaptureError && !options.refresh)
+          store.savePartial(item, error.detail);
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
         settled = true;
@@ -375,10 +373,7 @@ export async function crawl(
           });
           return;
         }
-        if (error instanceof IncompleteCaptureError) {
-          if (crawlAccessFailure(error)) store.savePartial(item, error.detail);
-          else store.save(item, error.detail);
-        }
+        if (error instanceof IncompleteCaptureError) store.savePartial(item, error.detail);
         store.fail(item.key, error instanceof Error ? error.message : String(error));
         if (
           !crawlAccessFailure(error) &&

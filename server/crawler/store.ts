@@ -20,6 +20,7 @@ import type {
 } from "./types";
 import { captureIssues } from "./capture-readiness";
 import { diagnostics } from "../diagnostics";
+import { trackRecordVersions } from "../record-versions";
 
 export class CrawlStore {
   readonly db: DatabaseSync;
@@ -52,6 +53,7 @@ export class CrawlStore {
     this.ensureListingColumn("capture_lane", "TEXT NOT NULL DEFAULT 'old'");
     this.ensureCrawlStateColumn("backfill_complete", "INTEGER NOT NULL DEFAULT 0");
     this.ensureCrawlStateColumn("head_checkpoint_json", "TEXT");
+    trackRecordVersions(this.db, "listings");
     this.compactExisting();
     for (const row of this.db
       .prepare(

@@ -18,6 +18,7 @@ import { reconcileCapturedEquipmentCategories } from "./equipment-category-evide
 import { analysisConcurrency, DEFAULT_ANALYSIS_CONCURRENCY } from "./types";
 import { assertServiceOpen } from "../service-lifecycle";
 import { confirmAscendedSchoolFormula } from "./school-confirmation";
+import { overviewOffThread, shutdownOverviewWorkers } from "./overview-worker";
 
 type CapturePreparation = {
   controller: AbortController;
@@ -99,11 +100,24 @@ export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[
     ...overviewStatus(profile),
   };
 }
-export async function analysisOverviewAsync(options: Parameters<AnalysisStore["overview"]>[0]) {
+export async function analysisOverviewAsync(
+  options: Parameters<AnalysisStore["overview"]>[0],
+  signal?: AbortSignal,
+) {
   service().store.recover();
   const profile = loadProfile(service().store.db);
-  const overview = await service().store.overviewAsync({ ...options, currentProfile: profile });
-  return { ...overview, ...overviewStatus(profile) };
+  const store = service().store;
+  const file = String(store.db.prepare("PRAGMA database_list").get()?.file || "");
+  const overview = file
+    ? await overviewOffThread(file, { ...options, currentProfile: profile }, signal)
+    : await store.overviewAsync({ ...options, currentProfile: profile }, signal);
+  return { ...overview, ...store.progress(options), ...overviewStatus(profile) };
+}
+export function analysisProgress(options: Parameters<AnalysisStore["progress"]>[0]) {
+  const current = service();
+  current.store.recover();
+  const profile = loadProfile(current.store.db);
+  return { ...current.store.progress(options), ...overviewStatus(profile) };
 }
 
 async function prepareCaptures(keys?: string[]) {
@@ -320,4 +334,5 @@ export function isAnalyzing() {
 export async function shutdownAnalysis() {
   if (runtime[serviceKey]?.preparing) await pauseAnalysis();
   if (runtime[serviceKey]) await runtime[serviceKey].runner.shutdown();
+  await shutdownOverviewWorkers();
 }

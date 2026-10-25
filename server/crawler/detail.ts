@@ -1,5 +1,5 @@
 import type { Page, Response } from "playwright-core";
-import { hoverForInspection } from "../viewport";
+import { clickForInspection, hoverForInspection } from "../viewport";
 import { ListingUnavailableError, type Listing, type RoleDetail, type TabSnapshot } from "./types";
 import { assertAvailable, checkAborted, pace } from "./page";
 import {
@@ -177,56 +177,63 @@ async function inspectItems(
   for (let index = 0; index < count; index++) {
     checkAborted(signal);
     const icon = page.locator(`[data-cbg-inspect-index="${index}"]`);
-    let attrs = await icon.evaluate((el) => {
-      if (el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]')) return null;
-      const attrs: Record<string, string> = {};
-      // 装备数据和提示框标识可能在图片的 a/td 父元素上。
-      const ancestors: Element[] = [el];
-      let parent = el.parentElement;
-      for (
-        let depth = 0;
-        depth < 2 && parent && !parent.hasAttribute("data-cbg-detail-root");
-        depth++, parent = parent.parentElement
-      )
-        ancestors.unshift(parent);
-      for (const node of ancestors)
-        for (const a of node.attributes) {
-          if (node !== el && /^(?:data_kindid|data-kindid)$/.test(a.name)) continue;
-          if (/^(data[-_]|alt$|title$)/.test(a.name) && !a.name.startsWith("data-cbg-"))
-            attrs[a.name.replace(/^data-/, "data_")] = a.value;
-        }
-      // Exact model metadata from the official page is an observed name, not a guessed mapping.
-      const globals = window as unknown as {
-        CBG_GAME_CONFIG?: { equip_info?: Record<string, { name?: unknown }> };
-      };
-      const model = attrs.data_equip_type;
-      const modelName =
-        model && /^[1-9]\d*$/.test(model)
-          ? globals.CBG_GAME_CONFIG?.equip_info?.[model]?.name
-          : undefined;
-      if (typeof modelName === "string") attrs.data_official_model_name = modelName;
-      const container = el.closest("[data-equip-location], [data_equip_location], [id]");
-      if (
-        !attrs.data_equip_location &&
-        container &&
-        !container.hasAttribute("data-cbg-detail-root")
-      )
-        attrs.data_equip_location =
-          container.getAttribute("data-equip-location") ||
-          container.getAttribute("data_equip_location") ||
-          container.id;
-      if (attrs.data_skill_type && !attrs.data_equip_level) {
-        for (const node of [...ancestors].reverse()) {
-          const text = (node as HTMLElement).innerText || "";
-          const level = text.length < 120 && text.match(/(?:^|\n)\s*(\d{1,3})\s*(?:\n|$)/)?.[1];
-          if (level) {
-            attrs.data_visible_level = level;
-            break;
+    const observations = await icon.evaluateAll((elements) =>
+      elements.map((el) => {
+        if (el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]')) return null;
+        const attrs: Record<string, string> = {};
+        // 装备数据和提示框标识可能在图片的 a/td 父元素上。
+        const ancestors: Element[] = [el];
+        let parent = el.parentElement;
+        for (
+          let depth = 0;
+          depth < 2 && parent && !parent.hasAttribute("data-cbg-detail-root");
+          depth++, parent = parent.parentElement
+        )
+          ancestors.unshift(parent);
+        for (const node of ancestors)
+          for (const a of node.attributes) {
+            if (node !== el && /^(?:data_kindid|data-kindid)$/.test(a.name)) continue;
+            if (/^(data[-_]|alt$|title$)/.test(a.name) && !a.name.startsWith("data-cbg-"))
+              attrs[a.name.replace(/^data-/, "data_")] = a.value;
+          }
+        // Exact model metadata from the official page is an observed name, not a guessed mapping.
+        const globals = window as unknown as {
+          CBG_GAME_CONFIG?: { equip_info?: Record<string, { name?: unknown }> };
+        };
+        const model = attrs.data_equip_type;
+        const modelName =
+          model && /^[1-9]\d*$/.test(model)
+            ? globals.CBG_GAME_CONFIG?.equip_info?.[model]?.name
+            : undefined;
+        if (typeof modelName === "string") attrs.data_official_model_name = modelName;
+        const container = el.closest("[data-equip-location], [data_equip_location], [id]");
+        if (
+          !attrs.data_equip_location &&
+          container &&
+          !container.hasAttribute("data-cbg-detail-root")
+        )
+          attrs.data_equip_location =
+            container.getAttribute("data-equip-location") ||
+            container.getAttribute("data_equip_location") ||
+            container.id;
+        if (attrs.data_skill_type && !attrs.data_equip_level) {
+          for (const node of [...ancestors].reverse()) {
+            const text = (node as HTMLElement).innerText || "";
+            const level = text.length < 120 && text.match(/(?:^|\n)\s*(\d{1,3})\s*(?:\n|$)/)?.[1];
+            if (level) {
+              attrs.data_visible_level = level;
+              break;
+            }
           }
         }
-      }
-      return attrs;
-    });
+        return attrs;
+      }),
+    );
+    if (observations.length !== 1)
+      throw Object.assign(new Error(`详情图标 ${index + 1}/${count} 已变化，未完整读取`), {
+        name: "IncompleteDetailError",
+      });
+    let attrs = observations[0];
     if (!attrs) continue;
     let rawLevel: string | undefined;
     if (worn) {
@@ -615,12 +622,19 @@ async function openDetail(
       if (!(await page.getByText(name, { exact: true }).filter({ visible: true }).count()))
         throw new Error(`详情缺少「${name}」标签，未标记完整采集`);
     }
-    await first.evaluate((el) => {
+    const rooted = await first.evaluateAll((elements) => {
+      if (elements.length !== 1) return false;
+      const el = elements[0];
       let root = el.parentElement!;
       // 包含标签栏和实际属性面板的最小祖先；不采集顶部登录账号或整个 window。
       while (root.parentElement && root.innerText.trim().length < 160) root = root.parentElement;
       root.setAttribute("data-cbg-detail-root", "true");
+      return true;
     });
+    if (!rooted)
+      throw Object.assign(new Error("详情标签已变化，无法确认读取范围"), {
+        name: "IncompleteDetailError",
+      });
   } catch (error) {
     const failure = (await accessNavigationFailure(page, error, signal)) || error;
     await captureBrowserStep(
@@ -642,7 +656,7 @@ async function captureMountEntries(
   for (let index = 0; index < (await entries.count()); index++) {
     checkAborted(signal);
     report(`正在读取第 ${index + 1} 只坐骑…`);
-    await entries.nth(index).evaluate((el) => (el as HTMLElement).click());
+    await clickForInspection(entries.nth(index));
     await pace(signal, 250, 150);
     tabs.push(await capture(page, `坐骑 / 第${index + 1}只`));
     await captureBrowserStep(
@@ -737,7 +751,7 @@ async function inspectEquipmentTabs(
     if (href && /^https?:|^\//.test(href)) continue;
     report(`正在读取道具/法宝 / ${name}`);
     await hoverForInspection(page, tab);
-    await tab.evaluate((element) => (element as HTMLElement).click());
+    await clickForInspection(tab);
     await settled(page, signal);
     const child = await capture(page, `道具/法宝 / ${name}`);
     await inspectItems(page, child, signal, report, issues, worn);
@@ -780,11 +794,9 @@ export async function collectValuationDetail(
     for (const name of ["人物/修炼", "道具/法宝", "召唤兽/孩子", "坐骑"]) {
       checkAborted(signal);
       report("正在补采估值资料：" + name);
-      await page
-        .getByText(name, { exact: true })
-        .filter({ visible: true })
-        .first()
-        .evaluate((el) => (el as HTMLElement).click());
+      await clickForInspection(
+        page.getByText(name, { exact: true }).filter({ visible: true }).first(),
+      );
       await settled(page, signal);
       await captureBrowserStep(
         page,
@@ -871,7 +883,7 @@ export async function collectDetail(
       await pace(signal, 500, 600);
       await hoverForInspection(page, tab);
       // 仅操作已确认的详情标签，不点击购买、还价、收藏或站外链接。
-      await tab.evaluate((el) => (el as HTMLElement).click());
+      await clickForInspection(tab);
       await settled(page, signal);
       await captureBrowserStep(
         page,
@@ -921,7 +933,7 @@ export async function collectDetail(
         const href = await childTab.getAttribute("href");
         if (href && /^https?:|^\//.test(href)) continue;
         await hoverForInspection(page, childTab);
-        await childTab.evaluate((el) => (el as HTMLElement).click());
+        await clickForInspection(childTab);
         await settled(page, signal);
         const childSnapshot = await capture(page, `${name} / ${child}`);
         tabs.push(childSnapshot);
@@ -943,7 +955,7 @@ export async function collectDetail(
         const href = await entry.getAttribute("href");
         if (href && /^https?:|^\//.test(href)) continue;
         await hoverForInspection(page, entry);
-        await entry.evaluate((el) => (el as HTMLElement).click());
+        await clickForInspection(entry);
         await settled(page, signal);
         const entryName = (await entry.innerText()).trim() || `第 ${index + 1} 项`;
         const entrySnapshot = await capture(page, `${name} / ${entryName}`);
@@ -1007,25 +1019,26 @@ export async function collectDetail(
       raw,
     };
   } catch (error) {
-    const access = await accessNavigationFailure(page, error, signal);
+    const access = signal.aborted ? undefined : await accessNavigationFailure(page, error, signal);
     await captureBrowserStep(
       page,
       { flow: "collection", stage: `详情读取失败-${step}`, key: item.key, error: access || error },
       signal,
     );
-    signal.throwIfAborted();
+    const cause = signal.aborted ? signal.reason : access || error;
     // 超时或已确认访问暂停带出部分资料；未知异常保留原错误。
     if (
       !tabs.length ||
-      (!access &&
+      (!signal.aborted &&
+        !access &&
         (!(error instanceof Error) ||
-          error.name !== "TimeoutError" ||
+          !["TimeoutError", "IncompleteDetailError"].includes(error.name) ||
           /登录|验证码|安全验证|频繁|繁忙|权限|禁止/i.test(error.message)))
     )
-      throw access || error;
+      throw cause;
     const now = new Date().toISOString();
     throw new IncompleteCaptureError(
-      `详情读取中断（${step}）：${access?.message || (error as Error).message}`,
+      `详情读取中断（${step}）：${cause instanceof Error ? cause.message : String(cause)}`,
       {
         captureMode: "all",
         captureVersion: CAPTURE_VERSION,
@@ -1037,7 +1050,7 @@ export async function collectDetail(
         petCapture,
         // 未执行完本轮读取，不能附上完整本体核验凭据或借用上一轮资料。
       },
-      access || error,
+      cause,
     );
   }
 }

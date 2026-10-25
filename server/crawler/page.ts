@@ -1,5 +1,5 @@
 import type { Page } from "playwright-core";
-import { ensureWorkViewport, hoverForInspection } from "../viewport";
+import { clickForInspection, ensureWorkViewport, hoverForInspection } from "../viewport";
 import { parseListing } from "./listing";
 import {
   ListingChangedError,
@@ -207,7 +207,7 @@ export async function gotoPage(
   await pace(signal);
   // 优先点击网站现有分页链接；远距离定位使用网站自己的跳页函数。
   const link = page.locator(`#pager_bar a[href="javascript:goto(${wanted})"]`).first();
-  if (await link.count()) await link.evaluate((el) => (el as HTMLElement).click());
+  if (await link.count()) await clickForInspection(link);
   else
     await page.evaluate((number) => {
       const goto = (window as Window & { goto?: (page: number) => void }).goto;
@@ -248,9 +248,7 @@ export async function prepareList(
       const current = await readListings(page);
       if (current.order === `${field} DESC`) break;
       await pace(signal);
-      await page
-        .locator(`#order_menu a[data_attr_name="${field}"]`)
-        .evaluate((el) => (el as HTMLElement).click());
+      await clickForInspection(page.locator(`#order_menu a[data_attr_name="${field}"]`));
       await waitList(page, 1);
     }
   }

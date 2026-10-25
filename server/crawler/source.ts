@@ -22,6 +22,7 @@ interface SourceOptions {
   savedRecord?: (key: string) => SavedRoleRecord | null;
   onDetailProgress: (message: string) => void;
   log: (event: string, data?: Record<string, unknown>) => void;
+  detailTimeoutMs?: number;
 }
 
 /** 完整抓取一个角色，包括标签、装备、宝宝及采集完整性重读。 */
@@ -96,6 +97,8 @@ export async function collectRole(
     report,
     item,
   );
+  if (signal.aborted)
+    throw new IncompleteCaptureError("采集已中断，已保留读取资料", result, signal.reason);
   await captureBrowserStep(
     detailPage,
     { flow: "collection", stage: "角色详情读取完成", key: item.key },
@@ -127,8 +130,10 @@ export function createCrawlSource({
   savedRecord,
   onDetailProgress,
   log,
+  detailTimeoutMs = 180_000,
 }: SourceOptions): CrawlSource {
   const available = [detailPage];
+  const active = new Map<AbortController, () => Promise<void>>();
   const step = async <T>(page: Page, stage: string, read: () => Promise<T>, key?: string) => {
     try {
       const result = await read();
@@ -206,11 +211,53 @@ export function createCrawlSource({
       signal.throwIfAborted();
       const page = available.pop() || (await createDetailPage?.());
       if (!page) throw new Error("并发采集需要独立的角色详情页");
+      const control = new AbortController();
+      const local = AbortSignal.any([signal, control.signal]);
+      let closing: Promise<void> | undefined;
+      const close = () => (closing ||= page.close());
+      const cancel = () => {
+        void close().catch((error: unknown) =>
+          log("detail.close_failed", { key: item.key, error }),
+        );
+      };
+      local.addEventListener("abort", cancel, { once: true });
+      if (local.aborted) cancel();
+      active.set(control, close);
+      const timer = setTimeout(
+        () =>
+          control.abort(
+            Object.assign(
+              new Error(
+                `角色详情采集超过 ${detailTimeoutMs / 1000} 秒总时限，已停止本件读取并保留资料`,
+              ),
+              { name: "IncompleteDetailError" },
+            ),
+          ),
+        detailTimeoutMs,
+      );
       try {
-        return await collectRole(page, item, { signal, savedRecord, onDetailProgress, log });
+        local.throwIfAborted();
+        return await collectRole(page, item, {
+          signal: local,
+          savedRecord,
+          log,
+          onDetailProgress: (message) => {
+            local.throwIfAborted();
+            onDetailProgress(message);
+          },
+        });
       } finally {
-        available.push(page);
+        clearTimeout(timer);
+        local.removeEventListener("abort", cancel);
+        active.delete(control);
+        if (closing) await closing;
+        if (!local.aborted && !page.isClosed()) available.push(page);
       }
+    },
+    cancelDetails: async (reason) => {
+      const current = [...active];
+      for (const [control] of current) control.abort(reason);
+      await Promise.all(current.map(([, close]) => close()));
     },
   };
 }

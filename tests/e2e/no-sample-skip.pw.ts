@@ -316,6 +316,7 @@ for (const rule of [
             case "/api/analysis/settings":
               body = { profile, promptFile: PROMPT_FILE, servers: [], market: [] };
               break;
+            case "/api/analysis/progress":
             case "/api/analysis/status":
               body = store.overview({ provider: "codex", currentProfile: profile });
               break;

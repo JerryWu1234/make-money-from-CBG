@@ -87,6 +87,7 @@ export interface CrawlSource {
   onShelf: (item: Listing) => Promise<boolean>;
   hover: (item: Listing) => Promise<Listing>;
   detail: (item: Listing) => Promise<RoleDetail>;
+  cancelDetails?: (reason: Error) => Promise<void>;
 }
 export interface TabSnapshot {
   collectedAt?: string;

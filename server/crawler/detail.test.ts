@@ -111,6 +111,78 @@ describe("装备局部补采", () => {
   afterAll(async () => {
     await browser?.close();
   });
+  it("详情属性读取不依赖单元素句柄转换，句柄求值超时也不丢失技能及装备", async () => {
+    const page = await browser.newPage(),
+      locate = page.locator.bind(page);
+    const spy = vi.spyOn(page, "locator").mockImplementation((selector, options) => {
+      const target = locate(selector, options);
+      if (selector.includes("data-cbg-inspect-index"))
+        vi.spyOn(target, "evaluate").mockImplementation(async () => {
+          throw Object.assign(
+            new Error(
+              "locator.evaluate: Timeout 15000ms exceeded; locator resolved to visible element",
+            ),
+            { name: "TimeoutError" },
+          );
+        });
+      return target;
+    });
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ contentType: "text/html", body: fixture(false) }),
+      );
+      const result = await collectDetail(page, listing, new AbortController().signal);
+      expect(
+        result.tabs
+          .find((tab) => tab.name === "技能")!
+          .items!.filter((item) => item.kind === "skill"),
+      ).toHaveLength(7);
+      expect(
+        result.tabs.find((tab) => tab.name === "道具/法宝")!.items!.map((item) => item.name),
+      ).toContain("新武器");
+    } finally {
+      spy.mockRestore();
+      await page.close();
+    }
+  });
+  it("主上下文求值永不返回时，总预算关闭独占页并带出已读标签，列表页保持打开", async () => {
+    const page = await browser.newPage(),
+      listPage = await browser.newPage();
+    const evaluate = page.evaluate.bind(page),
+      navigation = vi.spyOn(page, "goto");
+    let blocked: { mockRestore: () => void } | undefined;
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ contentType: "text/html", body: fixture(false) }),
+      );
+      const source = createCrawlSource({
+        listPage,
+        detailPage: page,
+        signal: new AbortController().signal,
+        detailTimeoutMs: 5000,
+        log: vi.fn(),
+        onDetailProgress: (message) => {
+          if (!blocked && message.includes("正在读取标签 2/7"))
+            blocked = vi
+              .spyOn(page, "evaluate")
+              .mockImplementation(() => evaluate(() => new Promise<never>(() => {})));
+        },
+      });
+      const error = await source.detail(listing).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(IncompleteCaptureError);
+      expect((error as IncompleteCaptureError).detail.tabs.map((tab) => tab.name)).toEqual([
+        "人物/修炼",
+      ]);
+      expect(page.isClosed()).toBe(true);
+      expect(listPage.isClosed()).toBe(false);
+      expect(navigation).toHaveBeenCalledOnce();
+    } finally {
+      blocked?.mockRestore();
+      navigation.mockRestore();
+      await page.close();
+      await listPage.close();
+    }
+  }, 15_000);
   it("非人物装备的分类不跳过召唤兽自身装备的属性读取", async () => {
     const page = await browser.newPage();
     try {

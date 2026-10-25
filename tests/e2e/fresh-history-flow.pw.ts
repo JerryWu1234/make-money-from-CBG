@@ -308,6 +308,7 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
             models: [{ id: "test-model", name: "模拟模型" }],
           };
           break;
+        case "/api/analysis/progress":
         case "/api/analysis/status":
           body = { ...analysisStore!.overview({ runId: batch || undefined }), profile };
           break;

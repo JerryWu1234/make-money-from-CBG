@@ -140,6 +140,7 @@ export async function collectCompleteCapture(
         name: "IncompleteDetailError",
       });
     } catch (error) {
+      if (error instanceof IncompleteCaptureError) partial = error.detail;
       checkAborted();
       if (crawlAccessFailure(error)) throw error;
       const cause =
@@ -153,7 +154,6 @@ export async function collectCompleteCapture(
           !isSameDetailNavigationInterrupted(cause))
       )
         throw cause;
-      if (error instanceof IncompleteCaptureError) partial = error.detail;
       last = error instanceof Error ? error : cause;
       if (attempt < 3) report(`资料尚未核验完整，正在本轮内自动重读 ${attempt}/2：${last.message}`);
     }

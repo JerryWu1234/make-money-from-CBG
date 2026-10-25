@@ -28,6 +28,7 @@ const getRoutes = new Set([
   "/api/ai/models",
   "/api/ai/login/status",
   "/api/analysis/status",
+  "/api/analysis/progress",
   "/api/analysis/detail",
   "/api/analysis/input",
   "/api/analysis/settings",
@@ -140,7 +141,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
   try {
     const scope = new URL(req.url!, expectedOrigin).searchParams.get("scope") || "all";
     if (
-      (pathname === "/api/crawl/records" || pathname === "/api/analysis/status") &&
+      (pathname === "/api/crawl/records" ||
+        pathname === "/api/analysis/status" ||
+        pathname === "/api/analysis/progress") &&
       !["all", "complete", "tasks"].includes(scope)
     ) {
       res.statusCode = 400;
@@ -264,6 +267,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
       const runId = typeof input.runId === "string" ? input.runId : "";
       let result: unknown;
       switch (pathname) {
+        case "/api/analysis/progress": {
+          const provider = params.get("provider");
+          result = analysis.analysisProgress({
+            provider: provider ? (await import("./ai-connection")).aiProvider(provider) : undefined,
+            runId: params.get("runId") || undefined,
+            ...(scope === "all" ? {} : { scope: scope as SavedListingScope }),
+          });
+          break;
+        }
         case "/api/analysis/settings":
           result = await analysis.analysisSettings();
           break;
@@ -275,17 +287,34 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
           break;
         case "/api/analysis/status": {
           const provider = params.get("provider");
-          result = await analysis.analysisOverviewAsync({
-            provider: provider ? (await import("./ai-connection")).aiProvider(provider) : undefined,
-            runId: params.get("runId") || undefined,
-            page: Number(params.get("page") || 1),
-            resultsPage: Number(params.get("resultsPage") || 1),
-            summary: true,
-            search: params.get("search") || undefined,
-            filter: params.get("filter") || undefined,
-            showViewed: params.get("showViewed") === "true",
-            ...(scope === "all" ? {} : { scope: scope as SavedListingScope }),
-          });
+          const controller = new AbortController();
+          const cancel = () => controller.abort(new Error("商品记录请求已断开"));
+          const deadline = setTimeout(
+            () => controller.abort(new Error("读取商品记录超时")),
+            12_000,
+          );
+          res.once("close", cancel);
+          try {
+            result = await analysis.analysisOverviewAsync(
+              {
+                provider: provider
+                  ? (await import("./ai-connection")).aiProvider(provider)
+                  : undefined,
+                runId: params.get("runId") || undefined,
+                page: Number(params.get("page") || 1),
+                resultsPage: Number(params.get("resultsPage") || 1),
+                summary: true,
+                search: params.get("search") || undefined,
+                filter: params.get("filter") || undefined,
+                showViewed: params.get("showViewed") === "true",
+                ...(scope === "all" ? {} : { scope: scope as SavedListingScope }),
+              },
+              controller.signal,
+            );
+          } finally {
+            clearTimeout(deadline);
+            res.removeListener("close", cancel);
+          }
           break;
         }
         case "/api/analysis/recommendation/view":

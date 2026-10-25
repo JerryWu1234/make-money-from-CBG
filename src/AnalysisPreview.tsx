@@ -6,6 +6,7 @@ import {
   DEFAULT_ANALYSIS_CONCURRENCY,
   type AnalysisItem,
   type AnalysisOverview,
+  type AnalysisProgress,
   type AnalysisRun,
 } from "../server/analysis/types";
 import { AiConnectionControl } from "./AiConnectionControl";
@@ -74,7 +75,19 @@ export function AnalysisPreview() {
     setDefaultModels((previous) => ({ ...previous, [source]: model }));
   }, []);
   const [tab, setTab] = useState<"ranking" | "all" | "history">("history");
-  const [data, setData] = useState<AnalysisOverview | null>(null);
+  const [snapshot, setData] = useState<AnalysisOverview | null>(null);
+  const [progress, setProgress] = useState<AnalysisProgress | null>(null);
+  const data: AnalysisOverview | null = progress
+    ? {
+        runs: [],
+        ranking: [],
+        records: { page: 1, totalPages: 1, total: 0, items: [] },
+        results: { page: 1, totalPages: 1, total: 0, items: [] },
+        history: [],
+        ...snapshot,
+        ...progress,
+      }
+    : snapshot;
   const [page, setPage] = useState(1);
   const [resultsPage, setResultsPage] = useState(1);
   const [search, setSearch] = useState("");
@@ -85,6 +98,7 @@ export function AnalysisPreview() {
   const [concurrency, setConcurrency] = useState(String(DEFAULT_ANALYSIS_CONCURRENCY));
   const [error, setError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [progressError, setProgressError] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [roleKey, setRoleKey] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -141,6 +155,59 @@ export function AnalysisPreview() {
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
       try {
+        const params = new URLSearchParams({ provider, scope: "complete" });
+        const next = await request<AnalysisProgress>(
+          `/api/analysis/progress?${params}`,
+          undefined,
+          AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
+        );
+        if (controller.signal.aborted) return;
+        if (firstLoad.current) {
+          const saved = next.activeRun || next.run;
+          if (saved) {
+            setProvider(saved.provider);
+            if (saved.status !== "completed")
+              setSelectedModels((previous) => ({ ...previous, [saved.provider]: saved.model }));
+          }
+          firstLoad.current = false;
+        }
+        const {
+          run,
+          activeRun,
+          counts,
+          captureTasks,
+          captureActivity,
+          capturePreparation,
+          profile,
+        } = next;
+        setProgress({
+          run,
+          activeRun,
+          counts,
+          captureTasks,
+          captureActivity,
+          capturePreparation,
+          profile,
+        });
+        setProgressError(null);
+        timer = setTimeout(refresh, next.activeRun || next.capturePreparation ? 1500 : 5000);
+      } catch (failure) {
+        if (controller.signal.aborted) return;
+        setProgressError(pollingError(failure, "读取分析进度"));
+        timer = setTimeout(refresh, 5000);
+      }
+    }
+    void refresh();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [provider, revision]);
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    async function refresh() {
+      try {
         const params = new URLSearchParams({
           provider,
           page: String(page),
@@ -156,22 +223,14 @@ export function AnalysisPreview() {
           AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
         );
         if (controller.signal.aborted) return;
-        if (firstLoad.current) {
-          const saved = next.activeRun || next.run;
-          if (saved) setProvider(saved.provider);
-          if (saved && saved.status !== "completed") {
-            setSelectedModels((previous) => ({ ...previous, [saved.provider]: saved.model }));
-          }
-        }
-        firstLoad.current = false;
         setData(next);
         setLoadError(null);
         if (next.records.page !== page) setPage(next.records.page);
         if (next.results && next.results.page !== resultsPage) setResultsPage(next.results.page);
-        timer = setTimeout(refresh, next.activeRun || next.capturePreparation ? 1500 : 5000);
+        timer = setTimeout(refresh, 5000);
       } catch (failure) {
         if (controller.signal.aborted) return;
-        setLoadError(pollingError(failure, "读取分析进度"));
+        setLoadError(pollingError(failure, "读取商品记录"));
         timer = setTimeout(refresh, 5000);
       }
     }
@@ -243,6 +302,7 @@ export function AnalysisPreview() {
     setProvider(selected);
     setModelChanged(!!selectedModels[selected]);
     setData(null);
+    setProgress(null);
     setPage(1);
     setResultsPage(1);
     setError(null);
@@ -475,9 +535,9 @@ export function AnalysisPreview() {
               </p>
             )}
             {active?.assetCounts && <EquipmentSummary counts={active.assetCounts} />}
-            {(error || loadError || run?.error) && (
+            {(error || progressError || loadError || run?.error) && (
               <p className="analysis-auth-notice" role="alert">
-                {error || loadError || run?.error}
+                {error || progressError || loadError || run?.error}
               </p>
             )}
           </div>
@@ -540,7 +600,7 @@ export function AnalysisPreview() {
           <div>
             <span className="analysis-overview-icon">02</span>
             <small>已完成分析</small>
-            <strong>{data?.results?.total || 0} 件已有结果</strong>
+            <strong>{snapshot ? `${snapshot.results?.total || 0} 件已有结果` : "正在加载…"}</strong>
             <p>
               {run
                 ? `${waitingPricing} 件价格待补齐 · ${run.failed} 件失败 · ${run.queued} 件排队中`
@@ -556,6 +616,7 @@ export function AnalysisPreview() {
         </div>
         <div className="analysis-workspace">
           <section className="analysis-results" aria-label="商品分析结果">
+            {!snapshot && <p role="status">正在加载商品记录…</p>}
             <div className="analysis-tabbar" role="tablist" aria-label="分析结果视图">
               <button
                 role="tab"
@@ -611,7 +672,7 @@ export function AnalysisPreview() {
                     <p>这些是筛选条件，不代表装备或宝宝已估价，也不证明资产能够补足差额。</p>
                   </details>
                 </div>
-                {!data?.ranking.length && (
+                {!!snapshot && !data?.ranking.length && (
                   <div className="analysis-start-empty">
                     <strong>
                       {run?.completed
@@ -835,7 +896,7 @@ export function AnalysisPreview() {
                     </tbody>
                   </table>
                 </div>
-                {!data?.records.items.length && (
+                {!!snapshot && !data?.records.items.length && (
                   <p className="analysis-empty">没有符合条件的商品</p>
                 )}
                 <div className="analysis-pagination">
@@ -859,7 +920,7 @@ export function AnalysisPreview() {
                 <p className="analysis-list-intro">
                   每件商品一条记录，点击查看完整分析、原文与调用记录。
                 </p>
-                {!data?.results?.total && (
+                {!!snapshot && !data?.results?.total && (
                   <p className="analysis-empty">
                     暂无已完成结果。每完成一件，结果就会自动显示在这里。
                   </p>

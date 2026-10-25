@@ -13,6 +13,18 @@ export async function ensureWorkViewport(page: Page) {
     await page.setViewportSize(WORK_VIEWPORT);
   }
 }
+/** Use the verified locator directly in the main world, without adopting a node handle. */
+export async function clickForInspection(element: Locator) {
+  const clicked = await element.evaluateAll((elements) => {
+    if (elements.length !== 1) return false;
+    (elements[0] as HTMLElement).click();
+    return true;
+  });
+  if (!clicked)
+    throw Object.assign(new Error("待读取标签或分页目标已变化，未执行点击"), {
+      name: "IncompleteDetailError",
+    });
+}
 export async function hoverForInspection(
   page: Page,
   element: Locator,

@@ -108,18 +108,22 @@ it.each(["网站要求安全验证", "page.goto: net::ERR_CONNECTION_CLOSED"])(
     expect(read).toHaveBeenCalledOnce();
   },
 );
-it("中途携带快照时收到暂停立即退出，不保存为采集失败或继续重读", async () => {
+it("中途携带快照时收到暂停立即退出，保留快照及暂停原因而不继续重读", async () => {
   const control = new AbortController();
   const reason = new Error("用户暂停采集");
+  const partial = complete();
   const read = vi.fn(async () => {
     control.abort(reason);
     throw new IncompleteCaptureError(
       "部分资料",
-      complete(),
+      partial,
       Object.assign(new Error("超时"), { name: "TimeoutError" }),
     );
   });
-  await expect(collectCompleteCapture(read, control.signal, vi.fn())).rejects.toBe(reason);
+  await expect(collectCompleteCapture(read, control.signal, vi.fn())).rejects.toMatchObject({
+    detail: partial,
+    cause: reason,
+  });
   expect(read).toHaveBeenCalledOnce();
 });
 it.each(["读取返回时", "下一轮开始前", "第二轮等待时"])(

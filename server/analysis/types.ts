@@ -177,6 +177,16 @@ export type AnalysisOverview = {
     error: string | null;
   }[];
 };
+export type AnalysisProgress = Pick<
+  AnalysisOverview,
+  | "counts"
+  | "captureTasks"
+  | "run"
+  | "activeRun"
+  | "captureActivity"
+  | "capturePreparation"
+  | "profile"
+>;
 export type AnalysisDetail = {
   assetCounts?: CapturedAssetCounts | null;
   taskId: string;

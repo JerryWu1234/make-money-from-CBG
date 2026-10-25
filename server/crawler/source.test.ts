@@ -7,6 +7,7 @@ import { SellingOrderUnavailableError, type Listing, type RoleDetail } from "./t
 import { captureBrowserStep } from "../browser-evidence";
 import { prepareList, gotoPage, hoverListing } from "./page";
 import { CAPTURE_VERSION } from "./compact";
+import { IncompleteCaptureError } from "./capture-readiness";
 
 vi.mock("./detail", () => ({
   MAIN_TABS: [],
@@ -35,6 +36,48 @@ const options = () => ({
   signal: new AbortController().signal,
   log: vi.fn(),
   onDetailProgress: vi.fn(),
+});
+
+it("整件采集总预算到期会关闭独占详情页并保留部分资料，不在后台继续重读", async () => {
+  vi.useFakeTimers();
+  let rejectRead!: (error: Error) => void;
+  let closed = false;
+  const partial = { url: "fixture", collectedAt: "now", tabs: [], raw: {} } as RoleDetail;
+  const close = vi.fn(async () => {
+    closed = true;
+    rejectRead(new IncompleteCaptureError("读取被取消", partial, new Error("Target closed")));
+  });
+  const localPage = {
+    ...page,
+    isClosed: () => closed,
+    close,
+  } as unknown as Page;
+  vi.mocked(collectDetail).mockImplementation(
+    async () =>
+      new Promise((_resolve, reject) => {
+        rejectRead = reject;
+      }),
+  );
+  const control = new AbortController();
+  const src = createCrawlSource({
+    ...options(),
+    signal: control.signal,
+    listPage: page,
+    detailPage: localPage,
+  });
+  const outcome = src.detail(item).catch((error: unknown) => error);
+  try {
+    for (let n = 0; n < 20; n++) await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(close).toHaveBeenCalledOnce();
+    expect(await outcome).toMatchObject({ name: "IncompleteDetailError", detail: partial });
+    expect(collectDetail).toHaveBeenCalledOnce();
+  } finally {
+    control.abort(new Error("cleanup"));
+    rejectRead(new Error("cleanup"));
+    await outcome;
+    vi.useRealTimers();
+  }
 });
 
 it("每轮超时在重读导航之前记录对应阶段，最终保留原错误作为cause", async () => {
