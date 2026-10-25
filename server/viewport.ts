@@ -40,9 +40,14 @@ export async function hoverForInspection(
       document.head.appendChild(style);
     }
   });
-  await element.evaluate((el) =>
-    el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }),
-  );
+  // Locator.evaluate 会先把节点从隔离上下文转换到主上下文，额外等待
+  // DOM.resolveNode；受控复现中，节点已可见仍会卡在这一步。
+  // evaluateAll 在主上下文按当前定位器求值，不传回单个元素句柄。
+  // 节点已消失时交给下面的原生 hover 正常定位，不能把滚动成功当作悬停成功。
+  await element.evaluateAll((elements) => {
+    if (elements.length > 1) throw new Error("待悬停目标不唯一，已停止以免读取错误商品");
+    elements[0]?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+  });
   try {
     await element.hover({ timeout: 5000 });
   } catch (error) {
@@ -57,7 +62,9 @@ export async function hoverForInspection(
       // 隐藏工作页的帧等待或 CDP 滚动可能停滞。先核对当前 DOM 的可见性、
       // 稳定几何和鼠标命中，再发一次原生鼠标动作；真实遮挡或不可见仍然失败。
       const point = () =>
-        element.evaluate((el) => {
+        element.evaluateAll((elements) => {
+          if (elements.length !== 1) return null;
+          const el = elements[0];
           if (
             !el.isConnected ||
             !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
@@ -80,8 +87,11 @@ export async function hoverForInspection(
       if (!before || !after || JSON.stringify(before) !== JSON.stringify(after)) throw error;
       await page.mouse.move(after.x, after.y);
       if (
-        !(await element.evaluate(
-          (el, { x, y }) => el.isConnected && el.contains(document.elementFromPoint(x, y)),
+        !(await element.evaluateAll(
+          (elements, { x, y }) =>
+            elements.length === 1 &&
+            elements[0].isConnected &&
+            elements[0].contains(document.elementFromPoint(x, y)),
           after,
         ))
       )
@@ -106,9 +116,10 @@ export async function hoverForInspection(
       );
       await page.setViewportSize({ width, height: 1080 });
     }
-    await element.evaluate((el) =>
-      el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }),
-    );
+    await element.evaluateAll((elements) => {
+      if (elements.length > 1) throw new Error("待悬停目标不唯一，已停止以免读取错误商品");
+      elements[0]?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+    });
     await element.hover({ timeout: 5000 });
   }
 }

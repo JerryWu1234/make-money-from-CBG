@@ -269,6 +269,18 @@ describe("装备局部补采", () => {
       await page.close();
     }
   });
+  it("悬停准备遇到多个匹配节点时停止，不能选择第一件商品继续读取", async () => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        '<button onmouseover="window.inspected=true">角色甲</button><button onmouseover="window.inspected=true">角色乙</button>',
+      );
+      await expect(hoverForInspection(page, page.locator("button"))).rejects.toThrow("目标不唯一");
+      expect(await page.evaluate(() => Reflect.get(window, "inspected"))).not.toBe(true);
+    } finally {
+      await page.close();
+    }
+  });
   it.each([
     ["scroll", false],
     ["scroll", true],

@@ -16,7 +16,7 @@ function setup() {
     mouse: { move: vi.fn() },
     evaluate: vi.fn().mockResolvedValue(1440),
   };
-  const element = { evaluate: vi.fn(), hover: vi.fn().mockResolvedValue(undefined) };
+  const element = { evaluateAll: vi.fn(), hover: vi.fn().mockResolvedValue(undefined) };
   return {
     page,
     element,
@@ -68,7 +68,7 @@ it("可见性等待超时后几何仍变化，不能把悬停当作成功", asyn
       { name: "TimeoutError" },
     ),
   );
-  x.element.evaluate
+  x.element.evaluateAll
     .mockResolvedValueOnce(undefined)
     .mockResolvedValueOnce({ x: 10, y: 10, width: 20, height: 20 })
     .mockResolvedValueOnce({ x: 11, y: 10, width: 20, height: 20 });
