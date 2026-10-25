@@ -16,6 +16,7 @@ async function mount(
   page: Page,
   options: {
     mode?: BrowserMode;
+    modes?: BrowserMode[];
     ready?: boolean;
     busy?: boolean;
     queryRunning?: boolean;
@@ -25,17 +26,20 @@ async function mount(
 ) {
   const state = {
     mode: options.mode ?? ("dedicated" as BrowserMode),
+    modes:
+      options.modes ?? (options.mode ? [options.mode] : (["dedicated", "daily"] as BrowserMode[])),
     ready: options.ready ?? false,
     busy: options.busy ?? false,
     queryRunning: options.queryRunning ?? false,
     crawlRunning: options.crawlRunning ?? false,
     readFailures: options.readFailures ?? 0,
+    browserStates: undefined as unknown[] | undefined,
     saveError: "",
     settingsReads: 0,
     statusReads: 0,
     opens: 0,
     captureStarts: 0,
-    saves: [] as BrowserMode[],
+    saves: [] as BrowserMode[][],
     saveGate: undefined as Promise<void> | undefined,
     staleStatusGate: undefined as Promise<void> | undefined,
     staleStatusPending: false,
@@ -51,6 +55,7 @@ async function mount(
   };
   const settings = () => ({
     mode: state.mode,
+    modes: state.modes,
     connected: state.ready,
     busy: state.busy || state.queryRunning || state.crawlRunning,
   });
@@ -70,12 +75,13 @@ async function mount(
           body = settings();
           break;
         case "/api/browser/settings/save": {
-          const mode = route.request().postDataJSON().mode as BrowserMode;
-          state.saves.push(mode);
+          const modes = route.request().postDataJSON().modes as BrowserMode[];
+          state.saves.push(modes);
           if (state.saveGate) await state.saveGate;
           if (state.saveError)
             return route.fulfill({ status: 409, json: { error: state.saveError } });
-          state.mode = mode;
+          state.modes = modes;
+          state.mode = modes[0];
           state.ready = false;
           body = settings();
           break;
@@ -96,6 +102,7 @@ async function mount(
             : state.ready
               ? browserStatus
               : idle;
+          if (state.browserStates) body = { ...(body as object), browsers: state.browserStates };
           break;
         }
         case "/api/browser/open":
@@ -162,28 +169,29 @@ async function mount(
   return state;
 }
 
-test("默认使用专用浏览器，切换日常方式后刷新仍读取已保存选择", async ({ page }, testInfo) => {
+test("默认两种方式均勾选，取消其中一种后刷新保留多选配置", async ({ page }, testInfo) => {
   const state = await mount(page);
-  const dedicated = page.getByRole("radio", { name: /^项目专用浏览器/ });
-  const daily = page.getByRole("radio", { name: /^连接日常 Chrome/ });
+  const dedicated = page.getByRole("checkbox", { name: /^项目专用浏览器/ });
+  const daily = page.getByRole("checkbox", { name: /^连接日常 Chrome/ });
   await expect(dedicated).toBeChecked();
-  await expect(daily).not.toBeChecked();
-  await expect(page.locator(".badge")).toHaveText("项目专用浏览器 · 保存登录状态");
+  await expect(daily).toBeChecked();
+  await expect(page.locator(".badge")).toHaveText("专用浏览器 + 日常 Chrome · 同时启动");
   await expect(page.getByRole("region", { name: "浏览器运行方式" })).toContainText(
     "登录过期仍需扫码",
   );
   expect(state.saves).toEqual([]);
   await page.reload();
   await expect(dedicated).toBeChecked();
-  await daily.click();
+  await dedicated.click();
   await expect(daily).toBeChecked();
+  await expect(dedicated).not.toBeChecked();
   await expect(page.locator(".badge")).toContainText("复用日常浏览器登录状态");
   await page.reload();
   await expect(daily).toBeChecked();
   await expect(page.getByRole("region", { name: "浏览器运行方式" })).toContainText(
     "Chrome 可能再次要求允许",
   );
-  expect(state.saves).toEqual(["daily"]);
+  expect(state.saves).toEqual([["daily"]]);
   await page
     .getByRole("region", { name: "浏览器运行方式" })
     .screenshot({ path: testInfo.outputPath("browser-options.png") });
@@ -193,8 +201,8 @@ test("保存期间禁用查询及采集准备，切换后清空旧ready并忽略
   const state = await mount(page, { mode: "daily", ready: true });
   const old = deferred();
   const save = deferred();
-  const dedicated = page.getByRole("radio", { name: /^项目专用浏览器/ });
-  const daily = page.getByRole("radio", { name: /^连接日常 Chrome/ });
+  const dedicated = page.getByRole("checkbox", { name: /^项目专用浏览器/ });
+  const daily = page.getByRole("checkbox", { name: /^连接日常 Chrome/ });
   const query = page.locator("#open-cbg-btn");
   const resume = page.getByRole("button", { name: "继续采集 / 检查新增", exact: true });
   const header = page.locator(".status-header-row strong");
@@ -209,7 +217,7 @@ test("保存期间禁用查询及采集准备，切换后清空旧ready并忽略
   await expect(daily).toBeChecked();
   await expect(query).toBeDisabled();
   await expect(resume).toBeDisabled();
-  expect(state.saves).toEqual(["dedicated"]);
+  expect(state.saves).toEqual([["dedicated", "daily"]]);
   expect(state.opens).toBe(0);
   expect(state.captureStarts).toBe(0);
   save.release();
@@ -232,8 +240,8 @@ test("保存期间禁用查询及采集准备，切换后清空旧ready并忽略
 
 test("切换失败保持原方式与原ready，显示服务原因后可重试", async ({ page }) => {
   const state = await mount(page, { mode: "daily", ready: true });
-  const dedicated = page.getByRole("radio", { name: /^项目专用浏览器/ });
-  const daily = page.getByRole("radio", { name: /^连接日常 Chrome/ });
+  const dedicated = page.getByRole("checkbox", { name: /^项目专用浏览器/ });
+  const daily = page.getByRole("checkbox", { name: /^连接日常 Chrome/ });
   await expect(daily).toBeChecked();
   state.saveError = "模拟分析任务正在运行，暂不能切换";
   await dedicated.click();
@@ -246,13 +254,16 @@ test("切换失败保持原方式与原ready，显示服务原因后可重试", 
   await dedicated.click();
   await expect(dedicated).toBeChecked();
   await expect(page.getByRole("alert")).toHaveCount(0);
-  expect(state.saves).toEqual(["dedicated", "dedicated"]);
+  expect(state.saves).toEqual([
+    ["dedicated", "daily"],
+    ["dedicated", "daily"],
+  ]);
 });
 
 test("服务busy时禁用选择，分析结束后自动重新读取并恢复", async ({ page }) => {
   const state = await mount(page, { busy: true });
-  const daily = page.getByRole("radio", { name: /^连接日常 Chrome/ });
-  await expect(page.getByRole("radio", { name: /^项目专用浏览器/ })).toBeChecked();
+  const daily = page.getByRole("checkbox", { name: /^连接日常 Chrome/ });
+  await expect(page.getByRole("checkbox", { name: /^项目专用浏览器/ })).toBeChecked();
   await expect(daily).toBeDisabled();
   await expect(page.getByRole("region", { name: "浏览器运行方式" })).toContainText("请先暂停任务");
   state.busy = false;
@@ -266,8 +277,8 @@ for (const activity of ["queryRunning", "crawlRunning"] as const) {
     page,
   }) => {
     const state = await mount(page, { [activity]: true });
-    const daily = page.getByRole("radio", { name: /^连接日常 Chrome/ });
-    await expect(page.getByRole("radio", { name: /^项目专用浏览器/ })).toBeChecked();
+    const daily = page.getByRole("checkbox", { name: /^连接日常 Chrome/ });
+    await expect(page.getByRole("checkbox", { name: /^项目专用浏览器/ })).toBeChecked();
     await expect(daily).toBeDisabled();
     state[activity] = false;
     await expect(daily).toBeEnabled();
@@ -277,7 +288,7 @@ for (const activity of ["queryRunning", "crawlRunning"] as const) {
 
 test("设置加载失败阻止查询，重新读取成功后恢复默认方式", async ({ page }) => {
   const state = await mount(page, { readFailures: 1 });
-  const dedicated = page.getByRole("radio", { name: /^项目专用浏览器/ });
+  const dedicated = page.getByRole("checkbox", { name: /^项目专用浏览器/ });
   await expect(page.getByRole("alert")).toContainText("模拟浏览器设置读取失败");
   await expect(dedicated).toBeDisabled();
   await expect(page.locator("#open-cbg-btn")).toBeDisabled();
@@ -288,4 +299,50 @@ test("设置加载失败阻止查询，重新读取成功后恢复默认方式",
   expect(state.settingsReads).toBe(2);
   expect(state.saves).toEqual([]);
   expect(state.opens).toBe(0);
+});
+
+test("两种可同时勾选并开始，至少保留一种方式", async ({ page }) => {
+  const state = await mount(page);
+  const dedicated = page.getByRole("checkbox", { name: /^项目专用浏览器/ });
+  const daily = page.getByRole("checkbox", { name: /^连接日常 Chrome/ });
+  await expect(dedicated).toBeEnabled();
+  await dedicated.click();
+  await expect(dedicated).not.toBeChecked();
+  await expect(daily).toBeEnabled();
+  await daily.click();
+  await expect(page.getByRole("alert")).toContainText("请至少保留一种浏览器方式");
+  await expect(daily).toBeChecked();
+  await dedicated.click();
+  await expect(dedicated).toBeChecked();
+  await expect(daily).toBeChecked();
+  await expect(dedicated).toBeEnabled();
+  await page.locator("#open-cbg-btn").click();
+  await expect.poll(() => state.opens).toBe(1);
+  expect(state.modes).toEqual(["dedicated", "daily"]);
+});
+
+test("两路状态独立显示，专用浏览器扫码不遮住已就绪日常浏览器", async ({ page }) => {
+  const state = await mount(page, { ready: true });
+  state.browserStates = [
+    {
+      ...browserStatus,
+      mode: "dedicated",
+      running: true,
+      isLoggedIn: false,
+      workflowStep: "logging_in",
+      message: "专用浏览器请扫码",
+      qrCodeUrl:
+        "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'/%3E",
+    },
+    { ...browserStatus, mode: "daily", running: false, message: "日常角色列表就绪" },
+  ];
+  const dedicated = page.getByRole("region", { name: "专用浏览器状态", exact: true });
+  const daily = page.getByRole("region", { name: "日常 Chrome 状态", exact: true });
+  await expect(dedicated).toContainText("专用浏览器请扫码");
+  await expect(dedicated.getByRole("img")).toBeVisible();
+  await expect(daily).toContainText("角色列表已就绪");
+  await expect(
+    page.getByRole("button", { name: "继续采集 / 检查新增", exact: true }),
+  ).toBeEnabled();
+  await expect(page.locator("#open-cbg-btn")).toBeDisabled();
 });

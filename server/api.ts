@@ -6,7 +6,12 @@ import { ScheduleConfigError } from "./crawler/schedule-time";
 import { validateSampleSelection } from "./analysis/sample-selection";
 import { analysisConcurrency } from "./analysis/types";
 import type { SavedListingScope } from "./crawler/types";
-import { browserControl, browserBusyError, isBrowserMode } from "./browser-settings";
+import {
+  browserControl,
+  browserBusyError,
+  isBrowserMode,
+  isBrowserModes,
+} from "./browser-settings";
 
 const getRoutes = new Set([
   "/api/browser/status",
@@ -165,8 +170,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
         : {};
     if (browserUseRoutes.has(pathname) && browserControl.changing) throw browserBusyError();
     if (pathname === "/api/browser/settings" || pathname === "/api/browser/settings/save") {
-      const mode = (body as Record<string, unknown>).mode;
-      if (pathname.endsWith("/save") && !isBrowserMode(mode)) {
+      const { mode, modes } = body as Record<string, unknown>;
+      if (
+        pathname.endsWith("/save") &&
+        !(modes === undefined ? isBrowserMode(mode) : isBrowserModes(modes))
+      ) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: "浏览器运行方式无效" }));
         return;
@@ -182,7 +190,13 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
         workflow.isBrowserWorkflowRunning() ||
         capture.isCrawling() ||
         analysis.isAnalyzing();
-      if (pathname.endsWith("/save"))
+      if (pathname.endsWith("/save") && modes !== undefined)
+        await session.changeBrowserModes(
+          modes as ("daily" | "dedicated")[],
+          busy,
+          workflow.resetBrowserWorkflow,
+        );
+      else if (pathname.endsWith("/save"))
         await session.changeBrowserMode(
           mode as "daily" | "dedicated",
           busy,

@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 const mocks = vi.hoisted(() => ({
   browserSessionSettings: vi.fn(),
   changeBrowserMode: vi.fn(),
+  changeBrowserModes: vi.fn(),
   getBrowser: vi.fn(),
   isBrowserWorkflowRunning: vi.fn(),
   resetBrowserWorkflow: vi.fn(),
@@ -261,4 +262,30 @@ it("控制请求尚未完成或 HTTP 已断开时保留 pending，业务结束�
     await running;
   }
   expect(browserControl.pending).toBe(0);
+});
+
+it("多选保存完整传递两种方式，拒绝空选择和重复值", async () => {
+  mocks.changeBrowserModes.mockImplementation(async (modes) => {
+    mocks.browserSessionSettings.mockReturnValue({
+      mode: modes[0],
+      modes,
+      connected: false,
+      busy: false,
+    });
+  });
+  const res = await invoke(
+    request("/api/browser/settings/save", "POST", { modes: ["dedicated", "daily"] }),
+  );
+  expect(res.statusCode).toBe(200);
+  expect(mocks.changeBrowserModes).toHaveBeenCalledExactlyOnceWith(
+    ["dedicated", "daily"],
+    expect.any(Function),
+    mocks.resetBrowserWorkflow,
+  );
+  expect(JSON.parse(res.end.mock.calls[0][0]).modes).toEqual(["dedicated", "daily"]);
+  for (const modes of [[], ["daily", "daily"], ["chrome"], null, "daily"]) {
+    const invalid = await invoke(request("/api/browser/settings/save", "POST", { modes }));
+    expect(invalid.statusCode).toBe(400);
+  }
+  expect(mocks.changeBrowserModes).toHaveBeenCalledOnce();
 });

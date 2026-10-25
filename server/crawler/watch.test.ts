@@ -1219,6 +1219,11 @@ describe("持续发现新号和历史详情共享采集池", () => {
         expect(await outcome).toBe(error);
         expect(db.count()).toBe(changed ? 3 : 4);
         expect(src.detail).toHaveBeenCalledTimes(4);
+        expect(readSaved(db, fresh[4].key)).toMatchObject({
+          status: "failed",
+          error: error.message,
+        });
+        expect(db.retryItems().some((row) => row.key === fresh[4].key)).toBe(true);
         expect(readSaved(db, fresh[0].key)?.status).toBe(changed ? "pending" : "complete");
         expect(db.checkpoint()).toBeUndefined();
         expect(db.backfillComplete()).toBe(false);

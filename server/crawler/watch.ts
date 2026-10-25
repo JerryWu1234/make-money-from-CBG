@@ -236,11 +236,18 @@ export async function watchCrawl(
         return item;
       }
     } catch (error) {
-      if (!(error instanceof ListingDisappearedError))
-        failure ??= {
-          error,
-          preserveCompleted: error instanceof Error && error.name === "TimeoutError",
-        };
+      if (!(error instanceof ListingDisappearedError)) {
+        const timeout = error instanceof Error && error.name === "TimeoutError";
+        failure ??= { error, preserveCompleted: timeout };
+        // 发现阶段失败也必须登记为任务；不能把未核验的列表资料发布为完整商品。
+        // 已在途或完整的同版本商品由原任务负责，避免覆盖其有效资料。
+        if (timeout && !inFlight.has(listed.key) && !store.observe(listed, lane)) {
+          store.fail(listed.key, error.message);
+          failedVersions.set(listed.key, listed.sellingTime);
+          failed++;
+          report();
+        }
+      }
       throw error;
     }
   };

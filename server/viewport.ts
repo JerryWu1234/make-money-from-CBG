@@ -16,7 +16,7 @@ export async function ensureWorkViewport(page: Page) {
 export async function hoverForInspection(
   page: Page,
   element: Locator,
-  recoveredActionability?: (stage: "scroll" | "visibility") => void,
+  recoveredActionability?: (stage: "scroll" | "visibility" | "handle") => void,
 ) {
   await ensureWorkViewport(page);
   // 移出上一个图标，触发网站自己的 mouseout；仅让提示框不拦截后续鼠标。
@@ -58,8 +58,16 @@ export async function hoverForInspection(
         (error.message.includes("element is visible and stable") &&
           error.message.includes("scrolling into view if needed"))) &&
       !error.message.includes("performing hover action");
-    if (actionabilityTimeout) {
-      // 隐藏工作页的帧等待或 CDP 滚动可能停滞。先核对当前 DOM 的可见性、
+    const handleTimeout =
+      error.name === "TimeoutError" &&
+      error.message.startsWith("locator.hover:") &&
+      error.message.includes("locator resolved to") &&
+      !/attempting hover action|waiting for element|visible and stable|not visible|not stable|intercepts pointer events|performing hover action|hover action done|scrolling into view if needed/.test(
+        error.message,
+      );
+    if (actionabilityTimeout || handleTimeout) {
+      // 原生 hover 还可能停在已解析节点后的句柄读取，尚未进入动作检查。
+      // 不重新请求句柄；先核对当前 DOM 的可见性、
       // 稳定几何和鼠标命中，再发一次原生鼠标动作；真实遮挡或不可见仍然失败。
       const point = () =>
         element.evaluateAll((elements) => {
@@ -97,7 +105,11 @@ export async function hoverForInspection(
       )
         throw error;
       recoveredActionability?.(
-        error.message.includes("scrolling into view if needed") ? "scroll" : "visibility",
+        handleTimeout
+          ? "handle"
+          : error.message.includes("scrolling into view if needed")
+            ? "scroll"
+            : "visibility",
       );
       return;
     }

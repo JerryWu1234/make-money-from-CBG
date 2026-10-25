@@ -19,6 +19,14 @@ test("新号优先状态显示实际在途，10并发上限不会显示成已满
     running: true,
     phase: "collecting",
     message: "本地模拟采集状态",
+    latestComplete: { key: "fixture:new", collectedAt: "2026-10-25T05:00:20.000Z" },
+    checkpoint: {
+      key: "fixture:history",
+      savedAt: "2026-10-25T04:21:14.000Z",
+      time: null,
+      order: "expire_time DESC",
+      page: 4,
+    },
     captureStrategy: "new-first",
     concurrency: 10,
     newRunning: 0,
@@ -94,6 +102,9 @@ test("新号优先状态显示实际在途，10并发上限不会显示成已满
   await expect(queues).toContainText("新号排队 0 · 老号排队 6");
   await expect(queues).not.toContainText("/5");
   await expect(panel).not.toContainText("借用");
+  await expect(panel.getByText(/最近完整采集：/)).toContainText("13:00:20");
+  await expect(panel.getByText(/历史扫描断点：/)).toContainText("12:21:14");
+  await expect(panel).not.toContainText("上次成功入库");
   await panel.screenshot({ path: testInfo.outputPath("old-four-of-ten.png") });
   status = {
     ...status,

@@ -18,6 +18,7 @@ vi.mock("./store", () => ({
     count = () => 42;
     checkpoint = () => undefined;
     recent = () => [];
+    latestComplete = () => ({ key: "1:latest", collectedAt: "2026-10-25T05:00:20.000Z" });
     acquire = mocks.acquire;
     release = mocks.release;
   },
@@ -130,4 +131,8 @@ it("完成后的状态不会因模块重载回到初始页", async () => {
   });
   expect(reloaded.crawlActivity()).toBeNull();
   expect(mocks.createStore).toHaveBeenCalledOnce();
+  expect(reloaded.crawlStatus().latestComplete).toEqual({
+    key: "1:latest",
+    collectedAt: "2026-10-25T05:00:20.000Z",
+  });
 });

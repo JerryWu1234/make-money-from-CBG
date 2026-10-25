@@ -136,15 +136,10 @@ it("句柄转换指令不可用时仍一次悬停成功，第2页商品完成入
   const locatorSpy = vi.spyOn(page, "locator").mockImplementation((selector, options) => {
     const matches = locate(selector, options);
     if (selector.includes("eid=202610231500113-133-OSUWYRGDRWSS")) {
-      const first = matches.first.bind(matches);
-      vi.spyOn(matches, "first").mockImplementation(() => {
-        const target = first();
-        const hover = target.hover.bind(target);
-        vi.spyOn(target, "hover").mockImplementation((options) => {
-          targetNativeHoverCalls++;
-          return hover(options);
-        });
-        return target;
+      const hover = matches.hover.bind(matches);
+      vi.spyOn(matches, "hover").mockImplementation((options) => {
+        targetNativeHoverCalls++;
+        return hover(options);
       });
     }
     return matches;

@@ -110,3 +110,38 @@ it("旧数据库升级为老号来源，保留商品、详情和历史断点", (
     rmSync(folder, { recursive: true, force: true });
   }
 });
+
+it("最近完整采集独立于历史断点，待采和失败快照不能冒充最新商品", () => {
+  const store = new CrawlStore(":memory:");
+  try {
+    expect(store.latestComplete()).toBeUndefined();
+    const old = analysisRecord("history"),
+      fresh = analysisRecord("new");
+    old.detail!.collectedAt = "2026-10-25T04:21:14.000Z";
+    fresh.detail!.collectedAt = "2026-10-25T05:00:20.000Z";
+    store.observe(old.listing);
+    const point = {
+      key: old.listing.key,
+      time: old.listing.sellingTime,
+      order: "expire_time DESC",
+      page: 4,
+      savedAt: old.detail!.collectedAt,
+    };
+    expect(store.save(old.listing, old.detail!, point)).toBe(true);
+    store.observe(fresh.listing, "new");
+    expect(store.save(fresh.listing, fresh.detail!)).toBe(true);
+    expect(store.latestComplete()).toEqual({
+      key: fresh.listing.key,
+      collectedAt: fresh.detail!.collectedAt,
+    });
+    expect(store.checkpoint()).toEqual(point);
+    store.fail(fresh.listing.key, "资料已失效");
+    expect(store.latestComplete()).toEqual({
+      key: old.listing.key,
+      collectedAt: old.detail!.collectedAt,
+    });
+    expect(store.checkpoint()).toEqual(point);
+  } finally {
+    store.close();
+  }
+});

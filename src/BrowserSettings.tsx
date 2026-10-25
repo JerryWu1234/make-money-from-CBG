@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export type BrowserMode = "dedicated" | "daily";
-type Settings = { mode: BrowserMode; connected: boolean; busy: boolean };
+import type { OpenCbgResult } from "../server/types";
 
-async function request(body?: { mode: BrowserMode }, signal?: AbortSignal): Promise<Settings> {
+export type BrowserMode = "dedicated" | "daily";
+type Settings = { mode: BrowserMode; modes: BrowserMode[]; connected: boolean; busy: boolean };
+const sameModes = (left: BrowserMode[], right: BrowserMode[]) => left.join(",") === right.join(",");
+
+async function request(body?: { modes: BrowserMode[] }, signal?: AbortSignal): Promise<Settings> {
   const response = await fetch(body ? "/api/browser/settings/save" : "/api/browser/settings", {
     ...(body
       ? {
@@ -21,8 +24,13 @@ async function request(body?: { mode: BrowserMode }, signal?: AbortSignal): Prom
     throw new Error("浏览器设置服务响应无效，请重新读取设置");
   });
   if (!response.ok) throw new Error(data.error || "浏览器运行方式保存失败");
+  if (data.modes === undefined && ["dedicated", "daily"].includes(data.mode))
+    data.modes = [data.mode];
   if (
     !["dedicated", "daily"].includes(data.mode) ||
+    !Array.isArray(data.modes) ||
+    !data.modes.length ||
+    data.modes.some((mode: unknown) => mode !== "dedicated" && mode !== "daily") ||
     typeof data.connected !== "boolean" ||
     typeof data.busy !== "boolean"
   )
@@ -35,17 +43,21 @@ export function BrowserSettings({
   onBusy,
   onMode,
   onSaved,
+  onModes,
+  states,
 }: {
   active: boolean;
   onBusy: (busy: boolean) => void;
   onMode: (mode: BrowserMode) => void;
   onSaved: (mode: BrowserMode) => Promise<void>;
+  onModes: (modes: BrowserMode[]) => void;
+  states?: OpenCbgResult["browsers"];
 }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const mode = useRef<BrowserMode | null>(null);
+  const mode = useRef<BrowserMode[] | null>(null);
   const pending = useRef(false);
   const generation = useRef(0);
 
@@ -61,10 +73,11 @@ export function BrowserSettings({
       try {
         const data = await request(undefined, signal);
         if (id !== generation.current || signal?.aborted) return;
-        const changed = mode.current !== null && data.mode !== mode.current;
-        mode.current = data.mode;
+        const changed = mode.current !== null && !sameModes(data.modes, mode.current);
+        mode.current = data.modes;
         setSettings(data);
         onMode(data.mode);
+        onModes(data.modes);
         setError("");
         if (changed) await onSaved(data.mode);
       } catch (cause) {
@@ -77,7 +90,7 @@ export function BrowserSettings({
         }
       }
     },
-    [onBusy, onMode, onSaved],
+    [onBusy, onMode, onModes, onSaved],
   );
 
   useEffect(() => {
@@ -95,19 +108,25 @@ export function BrowserSettings({
     };
   }, [active, load, saving, settings]);
 
-  const save = async (next: BrowserMode) => {
-    if (pending.current || active || settings?.busy || next === mode.current) return;
+  const save = async (next: BrowserMode[]) => {
+    if (pending.current || active || settings?.busy) return;
+    if (!next.length) {
+      setError("请至少保留一种浏览器方式");
+      return;
+    }
+    if (mode.current && sameModes(next, mode.current)) return;
     ++generation.current;
     pending.current = true;
     setSaving(true);
     onBusy(true);
     setError("");
     try {
-      const data = await request({ mode: next });
-      if (data.mode !== next) throw new Error("浏览器运行方式未保存，请重试");
-      mode.current = data.mode;
+      const data = await request({ modes: next });
+      if (!sameModes(data.modes, next)) throw new Error("浏览器运行方式未保存，请重试");
+      mode.current = data.modes;
       setSettings(data);
       onMode(data.mode);
+      onModes(data.modes);
       await onSaved(data.mode);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "浏览器运行方式保存失败，请重试");
@@ -125,24 +144,34 @@ export function BrowserSettings({
         <div className="browser-mode-options">
           <label>
             <input
-              type="radio"
-              name="browser-mode"
+              type="checkbox"
               value="dedicated"
-              checked={settings?.mode === "dedicated"}
-              onChange={() => void save("dedicated")}
+              checked={settings ? settings.modes.includes("dedicated") : true}
+              onChange={(event) =>
+                void save(
+                  (["dedicated", "daily"] as BrowserMode[]).filter((value) =>
+                    value === "dedicated" ? event.target.checked : settings?.modes.includes(value),
+                  ),
+                )
+              }
             />
             <span>
               <strong>项目专用浏览器（保存登录）</strong>
-              <small>默认方式。首次需扫码，之后复用本机保存的登录；登录过期仍需扫码。</small>
+              <small>首次需扫码，之后复用本机保存的登录；登录过期仍需扫码。</small>
             </span>
           </label>
           <label>
             <input
-              type="radio"
-              name="browser-mode"
+              type="checkbox"
               value="daily"
-              checked={settings?.mode === "daily"}
-              onChange={() => void save("daily")}
+              checked={settings ? settings.modes.includes("daily") : true}
+              onChange={(event) =>
+                void save(
+                  (["dedicated", "daily"] as BrowserMode[]).filter((value) =>
+                    value === "daily" ? event.target.checked : settings?.modes.includes(value),
+                  ),
+                )
+              }
             />
             <span>
               <strong>连接日常 Chrome</strong>
@@ -151,14 +180,40 @@ export function BrowserSettings({
           </label>
         </div>
       </fieldset>
+      {states?.map((state) => (
+        <section
+          className="browser-connection-state"
+          key={state.mode}
+          aria-label={state.mode === "dedicated" ? "专用浏览器状态" : "日常 Chrome 状态"}
+        >
+          <strong>
+            {state.mode === "dedicated" ? "项目专用浏览器" : "日常 Chrome"}：
+            {state.workflowStep === "completed" && state.isLoggedIn
+              ? "角色列表已就绪"
+              : state.running
+                ? "正在启动 / 查询"
+                : state.error
+                  ? "连接或查询失败"
+                  : "等待启动"}
+          </strong>
+          <p className={state.error ? "error-message" : "status-note"}>{state.message}</p>
+          {state.qrCodeUrl && (
+            <img
+              className="browser-login-qr"
+              src={state.qrCodeUrl}
+              alt={`${state.mode === "dedicated" ? "专用浏览器" : "日常 Chrome"}登录二维码`}
+            />
+          )}
+        </section>
+      ))}
       <p className="status-note" role="status">
         {loading
           ? "正在读取浏览器运行方式…"
           : saving
             ? "正在保存并更新浏览器状态…"
             : active || settings?.busy
-              ? "查询、采集或分析正在运行，请先暂停任务再切换浏览器方式。"
-              : "切换后需重新开始查询，系统会重新核对登录和角色列表。"}
+              ? "查询、采集或分析正在运行，请先暂停任务再修改启用方式。"
+              : "默认同时启用两种方式；点击开始查询时同时启动并分别核对登录。已就绪的浏览器共用采集并发名额，修改勾选后需重新开始查询。"}
       </p>
       {error && (
         <p className="error-message" role="alert">

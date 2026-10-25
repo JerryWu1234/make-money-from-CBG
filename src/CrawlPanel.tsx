@@ -288,9 +288,15 @@ export function CrawlPanel({
             <p className="crawl-progress">{status.detailProgress}</p>
           )}
           {status.strategy && <p className="status-note">{status.strategy}</p>}
+          {status.latestComplete && (
+            <p className="status-note">
+              最近完整采集：{displayTime(status.latestComplete.collectedAt)} · 商品{" "}
+              {status.latestComplete.key}
+            </p>
+          )}
           {status.checkpoint && (
             <p className="status-note">
-              上次成功入库：{displayTime(status.checkpoint.savedAt)} · 商品 {status.checkpoint.key}{" "}
+              历史扫描断点：{displayTime(status.checkpoint.savedAt)} · 商品 {status.checkpoint.key}{" "}
               · 第 {status.checkpoint.page} 页
             </p>
           )}

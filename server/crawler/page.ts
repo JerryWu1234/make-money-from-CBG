@@ -251,7 +251,7 @@ export async function hoverListing(
   page: Page,
   item: Listing,
   signal: AbortSignal,
-  recoveredActionability?: (stage: "scroll" | "visibility") => void,
+  recoveredActionability?: (stage: "scroll" | "visibility" | "handle") => void,
   onDiagnostic?: (diagnostic: ListingHoverDiagnostic) => void,
 ): Promise<Listing> {
   checkAborted(signal);
@@ -271,13 +271,19 @@ export async function hoverListing(
   const sameVersion = (value: Listing) =>
     value.key === item.key && value.price === item.price && value.sellingTime === item.sellingTime;
   let diagnostic: ListingHoverDiagnostic | undefined;
+  let recovered = false;
   for (let attempt = 1; attempt <= 2; attempt++) {
     checkAborted(signal);
     const targets = page.locator(selector);
-    const target = targets.first();
-    if (!(await target.count())) throw new ListingDisappearedError();
+    const target = targets;
+    const count = await targets.count();
+    if (!count) throw new ListingDisappearedError();
+    if (count !== 1) throw new ListingChangedError();
     try {
-      await hoverForInspection(page, target, recoveredActionability);
+      await hoverForInspection(page, target, (stage) => {
+        recovered = true;
+        recoveredActionability?.(stage);
+      });
       break;
     } catch (error) {
       checkAborted(signal);
@@ -322,10 +328,12 @@ export async function hoverListing(
   const current = await readListings(page);
   const refreshed = current.items.find((value) => value.key === item.key);
   if (!refreshed) throw new ListingDisappearedError();
-  if (diagnostic) {
-    if (!sameVersion(refreshed) || current.page !== before.page || current.order !== before.order)
-      throw new ListingChangedError();
+  if (
+    (diagnostic || recovered) &&
+    (!sameVersion(refreshed) || current.page !== before.page || current.order !== before.order)
+  )
+    throw new ListingChangedError();
+  if (diagnostic)
     onDiagnostic?.({ ...diagnostic, event: "retry_recovered", attempt: 2, retrying: false });
-  }
   return refreshed;
 }

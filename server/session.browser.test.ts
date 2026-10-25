@@ -114,7 +114,10 @@ it("并发连接与建页共享专用会话，context 关闭失败后真实 Brow
     const closeError = new Error("模拟 context.close 首次失败");
     const contextClose = vi.spyOn(context, "close").mockRejectedValueOnce(closeError);
     const browserClose = vi.spyOn(browser, "close");
-    await expect(session.shutdownBrowserSession()).rejects.toBe(closeError);
+    await expect(session.shutdownBrowserSession()).rejects.toMatchObject({
+      name: "AggregateError",
+      errors: [closeError],
+    });
     expect(contextClose).toHaveBeenCalledOnce();
     expect(browserClose).toHaveBeenCalledOnce();
     expect(browser.isConnected()).toBe(false);

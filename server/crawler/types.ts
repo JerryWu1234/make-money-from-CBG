@@ -198,6 +198,7 @@ export interface CrawlStatus {
   itemsOnPage?: number;
   detailProgress?: string;
   checkpoint?: Checkpoint;
+  latestComplete?: { key: string; collectedAt: string };
   strategy?: string;
   error?: string;
   database: string;

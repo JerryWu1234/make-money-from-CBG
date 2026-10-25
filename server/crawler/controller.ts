@@ -52,6 +52,7 @@ export function crawlStatus() {
     ...cache.status,
     totalSaved: store().count(),
     checkpoint: store().checkpoint(),
+    latestComplete: store().latestComplete(),
     recent: store().recent(),
   };
 }
@@ -177,7 +178,7 @@ export async function startCrawl(
     const detailPages: Page[] = [];
     const createDetailPage = async () => {
       control.signal.throwIfAborted();
-      const detailPage = await createHiddenPage(await getBrowser(true));
+      const detailPage = await createHiddenPage(await getBrowser(true, undefined, "detail"));
       detailPages.push(detailPage);
       watchWorkPage(detailPage, "detail");
       log("page.ready", { kind: "detail" });

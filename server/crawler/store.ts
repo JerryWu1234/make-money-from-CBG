@@ -36,6 +36,9 @@ export class CrawlStore {
         attempt_count INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT
       );
       CREATE INDEX IF NOT EXISTS listings_selling_time ON listings(selling_time);
+      CREATE INDEX IF NOT EXISTS listings_status_collected ON listings(status,collected_at DESC,key DESC);
+      CREATE INDEX IF NOT EXISTS listings_recent ON listings(last_seen_at DESC);
+      CREATE INDEX IF NOT EXISTS listings_first_seen ON listings(first_seen_at DESC,key ASC);
       CREATE TABLE IF NOT EXISTS role_tabs (listing_key TEXT NOT NULL, tab_index INTEGER NOT NULL, name TEXT NOT NULL, snapshot_json TEXT NOT NULL, PRIMARY KEY(listing_key,tab_index));
       CREATE TABLE IF NOT EXISTS role_parameters (listing_key TEXT NOT NULL, section TEXT NOT NULL, path TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(listing_key,section,path));
       CREATE TABLE IF NOT EXISTS crawl_state (id INTEGER PRIMARY KEY CHECK(id=1), checkpoint_json TEXT, backfill_complete INTEGER NOT NULL DEFAULT 0);
@@ -357,6 +360,14 @@ export class CrawlStore {
     return Number(
       this.db.prepare("SELECT count(*) AS n FROM listings WHERE status='complete'").get()?.n || 0,
     );
+  }
+  latestComplete(): { key: string; collectedAt: string } | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT key,collected_at FROM listings WHERE status='complete' AND collected_at IS NOT NULL ORDER BY collected_at DESC,key DESC LIMIT 1",
+      )
+      .get();
+    return row ? { key: String(row.key), collectedAt: String(row.collected_at) } : undefined;
   }
   recent() {
     return this.db

@@ -8,7 +8,13 @@ import {
   MAIN_TABS,
 } from "./detail";
 import { CAPTURE_VERSION, itemFromAttributes } from "./compact";
-import { ListingUnavailableError, type Listing, type RoleDetail, type TabSnapshot } from "./types";
+import {
+  ListingChangedError,
+  ListingUnavailableError,
+  type Listing,
+  type RoleDetail,
+  type TabSnapshot,
+} from "./types";
 import { createCrawlSource } from "./source";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -286,6 +292,8 @@ describe("装备局部补采", () => {
     ["scroll", true],
     ["visibility", false],
     ["visibility", true],
+    ["handle", false],
+    ["handle", true],
   ] as const)("原生悬停卡在 %s 阶段时核对命中目标，遮罩存在：%s", async (stage, covered) => {
     const page = await browser.newPage();
     try {
@@ -299,7 +307,9 @@ describe("装备局部补采", () => {
           "locator.hover: Timeout 5000ms exceeded.\n" +
             (stage === "scroll"
               ? "  element is visible and stable\n  scrolling into view if needed"
-              : "  waiting for element to be visible and stable"),
+              : stage === "handle"
+                ? "  locator resolved to <button>测试物品</button>"
+                : "  waiting for element to be visible and stable"),
         ),
         { name: "TimeoutError" },
       );
@@ -327,6 +337,38 @@ describe("装备局部补采", () => {
           await page.evaluate(() => (window as Window & { inspected?: boolean }).inspected),
         ).toBe(true);
       }
+    } finally {
+      await page.close();
+    }
+  });
+  it.each(["price", "duplicate"] as const)("句柄恢复时%s改变仍拒绝读取商品", async (change) => {
+    const page = await browser.newPage();
+    try {
+      await page.setContent(
+        `<style>a{display:block;width:240px;height:40px}</style><div id="soldList"><a class="soldImg" href="https://xyq.cbg.163.com/equip?s=1&eid=handle-fixture" data_price="100">目标</a></div><div id="pager_bar">第 1 页 共 1 页</div><script>window.QueryArgs={server_type:'3',page:1,order_by:'expire_time DESC'};</script>`,
+      );
+      const item = (await readListings(page)).items[0];
+      const locate = page.locator.bind(page);
+      const timeout = Object.assign(
+        new Error("locator.hover: Timeout 5000ms exceeded.\n  locator resolved to <a>目标</a>"),
+        { name: "TimeoutError" },
+      );
+      vi.spyOn(page, "locator").mockImplementation((selector, options) => {
+        const target = locate(selector, options);
+        if (selector.startsWith("#soldList a.soldImg:is("))
+          vi.spyOn(target, "hover").mockImplementationOnce(async () => {
+            await page.evaluate((change) => {
+              const anchor = document.querySelector("#soldList a")!;
+              if (change === "price") anchor.setAttribute("data_price", "200");
+              else anchor.after(anchor.cloneNode(true));
+            }, change);
+            throw timeout;
+          });
+        return target;
+      });
+      const outcome = hoverListing(page, item, new AbortController().signal);
+      if (change === "price") await expect(outcome).rejects.toBeInstanceOf(ListingChangedError);
+      else await expect(outcome).rejects.toBe(timeout);
     } finally {
       await page.close();
     }
@@ -456,8 +498,7 @@ describe("装备局部补采", () => {
         vi.spyOn(page, "locator").mockImplementation((selector, options) => {
           const matches = locator(selector, options);
           if (!selector.startsWith("#soldList a.soldImg:is(")) return matches;
-          const selected = matches.first();
-          vi.spyOn(matches, "first").mockReturnValue(selected);
+          const selected = matches;
           const hover = selected.hover.bind(selected);
           vi.spyOn(selected, "hover").mockImplementation(async (options) => {
             hoverCalls++;

@@ -26,6 +26,10 @@ vi.mock("./browser-settings", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./browser-settings")>()),
   browserSettings: vi.fn(),
   saveBrowserSettings: vi.fn(),
+  enabledBrowserModes: () => {
+    const settings = vi.mocked(browserSettings)();
+    return settings.modes || [settings.mode];
+  },
 }));
 vi.mock("./chrome", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./chrome")>()),
@@ -74,7 +78,7 @@ describe("项目专用浏览器会话", () => {
   it("状态查询不启动浏览器，并发开始只启动一个持久上下文且模块重载后继续复用", async () => {
     const { browser } = dedicated();
     const first = await import("./session");
-    expect(first.browserSessionSettings()).toEqual({
+    expect(first.browserSessionSettings()).toMatchObject({
       mode: "dedicated",
       connected: false,
       busy: false,
@@ -530,4 +534,51 @@ describe("并发创建后台页", () => {
     expect(await next).toBe(workers[0]);
     expect(process.env.PW_CHROMIUM_ATTACH_TO_OTHER).toBeUndefined();
   });
+});
+
+it("两路连接互不替换，详情使用已就绪浏览器，关闭时两路都清理", async () => {
+  let dedicatedConnected = true;
+  const dedicatedBrowser = { on: vi.fn(), isConnected: () => dedicatedConnected, close: vi.fn() };
+  const context = {
+    browser: () => dedicatedBrowser,
+    close: vi.fn(async () => {
+      dedicatedConnected = false;
+    }),
+  };
+  let dailyConnected = true;
+  const daily = {
+    on: vi.fn(),
+    isConnected: () => dailyConnected,
+    close: vi.fn(async () => {
+      dailyConnected = false;
+    }),
+  };
+  vi.mocked(browserSettings).mockReturnValue({
+    mode: "dedicated",
+    modes: ["dedicated", "daily"],
+  } as never);
+  vi.mocked(openDedicatedBrowser).mockResolvedValue(context as never);
+  connectOverCDP.mockResolvedValue(daily);
+  const session = await import("./session");
+  const connected = await Promise.all([
+    session.getBrowser(true, "dedicated"),
+    session.getBrowser(true, "daily"),
+  ]);
+  expect(connected).toEqual([dedicatedBrowser, daily]);
+  expect(openDedicatedBrowser).toHaveBeenCalledOnce();
+  expect(connectOverCDP).toHaveBeenCalledOnce();
+  session.markBrowserReady("daily");
+  expect(await session.getBrowser(true, undefined, "detail")).toBe(daily);
+  session.markBrowserReady("dedicated");
+  expect(
+    new Set(
+      await Promise.all([
+        session.getBrowser(true, undefined, "detail"),
+        session.getBrowser(true, undefined, "detail"),
+      ]),
+    ),
+  ).toEqual(new Set([dedicatedBrowser, daily]));
+  await session.shutdownBrowserSession();
+  expect(context.close).toHaveBeenCalledOnce();
+  expect(daily.close).toHaveBeenCalledOnce();
 });
