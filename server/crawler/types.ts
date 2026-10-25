@@ -89,6 +89,8 @@ export interface PetSnapshot {
   innerSkills: DetailItem[];
 }
 export interface DetailItem {
+  nameSource?: "element" | "official-model" | "tooltip";
+  categorySource?: "element" | "official-model" | "official-slot" | "description";
   index: number;
   name: string;
   description?: string;

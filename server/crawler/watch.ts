@@ -336,6 +336,8 @@ export async function watchCrawl(
 
   publish({
     phase: "collecting",
+    current: undefined,
+    detailProgress: undefined,
     message: "优先采集新上架角色，空闲名额继续从原断点补齐历史角色…",
   });
   try {

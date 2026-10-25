@@ -87,6 +87,7 @@ export function observedEquipmentCategory(category = "", location = "", modelId 
   if (modelId === "4002") return "材料 · 太阳石";
   if (modelId === "612") return "材料 · 制造指南书";
   if (modelId === "4034") return "材料 · 点化石";
+  if (modelId === "17320") return "消耗品";
   if ([611, 18521, 56870].includes(Number(modelId))) return "道具 · 召唤兽技能书";
   if (modelId === "4103") return "道具 · 召唤兽内丹";
   if (category.trim() && !/^(?:\d+|人物装备|装备|武器|灵饰)$/.test(category.trim()))
@@ -110,6 +111,27 @@ export function observedEquipmentCategory(category = "", location = "", modelId 
       : category;
 }
 
+/** Shared by reading, equipment validation and inventory coverage. Unknown items remain blocking. */
+export function isNonRoleEquipment(item: DetailItem): boolean {
+  const category = observedEquipmentCategory(item.category, item.location, item.modelId) || "";
+  return (
+    /^(?:法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备)(?:$|\s*·)/.test(category) ||
+    item.attributes?.装备对象 === "召唤兽" ||
+    /装备对象[：:]?\s*召唤兽/.test(item.description || "")
+  );
+}
+
+function hasNonRoleInventoryEvidence(item: DetailItem) {
+  if (!isNonRoleEquipment(item)) return false;
+  return (
+    item.categorySource === "element" ||
+    item.categorySource === "official-slot" ||
+    !!observedEquipmentCategory("", "", item.modelId) ||
+    item.attributes?.装备对象 === "召唤兽" ||
+    /装备对象[：:]?\s*召唤兽/.test(item.description || "")
+  );
+}
+
 /** Cash and artifacts alone do not establish that the role equipment inventory is empty. */
 export function equipmentEmptyProof(tabs: TabSnapshot[]) {
   if (!tabs.length) return undefined;
@@ -126,29 +148,32 @@ export function equipmentEmptyProof(tabs: TabSnapshot[]) {
       )
     )
       return false;
+    const unread = [...(tab.items || [])];
     return containers
       .filter((container) => container.present)
       .every(
         (container) =>
           container.visible &&
-          container.icons.every(
-            (icon) =>
-              (icon.modelId === "17320" && icon.name === "三界密令") ||
-              (!!icon.name &&
-                !!icon.modelId &&
-                (tab.items || []).some(
-                  (item) =>
-                    item.name === icon.name &&
-                    item.modelId === icon.modelId &&
-                    (item.attributes?.装备对象 === "召唤兽" ||
-                      // Observed in RoleSplitEquips alongside pet gear. Its read material
-                      // description is evidence of a non-role item, never of an unread icon.
-                      (icon.modelId === "4034" &&
-                        icon.name === "点化石" &&
-                        item.category === "材料 · 点化石" &&
-                        !!item.description?.trim())),
-                )),
-          ),
+          container.icons.every((icon) => {
+            if (icon.modelId === "17320" && icon.name === "三界密令") return true;
+            if (!icon.modelId) return false;
+            const match = unread.findIndex(
+              (item) =>
+                item.kind === "equipment" &&
+                (equipmentNameUnresolved(icon.name) || item.name === icon.name) &&
+                item.modelId === icon.modelId &&
+                !equipmentNameUnresolved(item.name) &&
+                hasNonRoleInventoryEvidence(item) &&
+                // A model classification alone does not establish a fully read item.
+                (item.attributes?.装备对象 === "召唤兽" || !!item.description?.trim()) &&
+                (!item.category ||
+                  item.category ===
+                    observedEquipmentCategory(item.category, item.location, item.modelId)),
+            );
+            if (match < 0) return false;
+            unread.splice(match, 1);
+            return true;
+          }),
       );
   };
   if (
@@ -180,6 +205,7 @@ export function hasUnconfirmedEmptyEquipment(detail: RoleDetail | null) {
   const roleEquipment = tabs.some((tab) =>
     (tab.items || []).some((item) => {
       if (item.kind === "skill" || item.kind === "innerSkill") return false;
+      if (isNonRoleEquipment(item)) return false;
       const category = observedEquipmentCategory(item.category, item.location, item.modelId) || "";
       const description = [
         item.description,
@@ -193,11 +219,7 @@ export function hasUnconfirmedEmptyEquipment(detail: RoleDetail | null) {
         /人物装备|灵饰|武器|头盔|衣服|项链|腰带|鞋|戒指|耳饰|手镯|佩饰|上古玉魄/.test(category) ||
         (/等级\s*[：:]?\s*\d/.test(description) &&
           /伤害|防御|灵力|敏捷|速度|气血|封印|治疗/.test(description));
-      return (
-        observed &&
-        !/法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(category) &&
-        !/装备对象[：:]?\s*召唤兽|【?携带/.test(description)
-      );
+      return observed && !/【?携带/.test(description);
     }),
   );
   return !roleEquipment;
@@ -289,12 +311,16 @@ export function coreEquipmentDescription(value: string, knownJewelry = false) {
 export function itemFromAttributes(attrs: Record<string, string>, index: number): DetailItem {
   const skillType = attrs.data_skill_type || attrs["data-skill-type"] || "";
   const skill = !!skillType;
+  const elementName = [
+    attrs.data_equip_name,
+    attrs["data-equip-name"],
+    attrs.data_store_name,
+    attrs.alt,
+  ].find((value): value is string => typeof value === "string" && !equipmentNameUnresolved(value));
+  const modelName = attrs.data_official_model_name?.trim();
   const name =
-    attrs.data_equip_name ||
-    attrs["data-equip-name"] ||
-    attrs.data_store_name ||
-    attrs.alt ||
-    `图标 ${index + 1}`;
+    elementName ||
+    (modelName && !equipmentNameUnresolved(modelName) ? modelName : `图标 ${index + 1}`);
   const level = attrs.data_equip_level || attrs.data_visible_level;
   if (skill)
     return {
@@ -375,11 +401,24 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
       : /(?:^|\n)\s*(?:灵气|修炼境界)[：:\s]/.test(description) || /fabao|法宝/i.test(storage)
         ? "法宝"
         : observedCategory;
+  const categorySource =
+    category !== observedCategory
+      ? /lingbao|灵宝|shenqi|神器|fabao|法宝/i.test(storage)
+        ? ("official-slot" as const)
+        : ("description" as const)
+      : observedEquipmentCategory("", "", modelId)
+        ? ("official-model" as const)
+        : declaredCategory
+          ? ("element" as const)
+          : ("official-slot" as const);
   return {
     index,
     name,
     kind: "equipment",
-    ...(category ? { category } : {}),
+    ...(!equipmentNameUnresolved(name)
+      ? { nameSource: elementName ? ("element" as const) : ("official-model" as const) }
+      : {}),
+    ...(category ? { category, categorySource } : {}),
     ...(kindId ? { kindId } : {}),
     ...(modelId ? { modelId } : {}),
     ...(location ? { location } : {}),

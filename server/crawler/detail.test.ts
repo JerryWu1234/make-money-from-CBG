@@ -111,6 +111,94 @@ describe("装备局部补采", () => {
   afterAll(async () => {
     await browser?.close();
   });
+  it("非人物装备的分类不跳过召唤兽自身装备的属性读取", async () => {
+    const page = await browser.newPage();
+    try {
+      const pet =
+        completePet().replace(
+          'data_equip_name="宝宝项圈" data_equip_desc="等级 80#r速度 +20"',
+          'data_equip_name="宝宝项圈" data_equip_level="80" data_equip_type_desc="【装备对象】召唤兽" data_tip_box="PetItemTipsBox" onmouseover="document.getElementById(\'PetItemTipsBox\').style.display=\'block\'"',
+        ) +
+        '<div id="PetItemTipsBox" style="display:none;white-space:pre-line">宝宝项圈\n等级 80\n速度 +20</div>';
+      await page.route(url, (route) =>
+        route.fulfill({ contentType: "text/html", body: fixture(false, pet) }),
+      );
+      const detail = await collectDetail(page, listing, new AbortController().signal);
+      expect(detail.petCapture?.complete).toBe(true);
+      const pets = detail.tabs.find((tab) => tab.name === "召唤兽/孩子")!.pets!;
+      expect(pets[0].equipment.find((item) => item.name === "宝宝项圈")?.description).toContain(
+        "速度 +20",
+      );
+    } finally {
+      await page.close();
+    }
+  });
+  it.each(["official-model", "tooltip-heading", "unknown", "ambiguous-tooltip"])(
+    "所有角色共用名称补全且未知或串提示框不能通过：%s",
+    async (mode) => {
+      const page = await browser.newPage();
+      try {
+        const image =
+          '<img width="40" height="40" data_equip_type="31001" data_equip_location="role_using_equip_6" data_equip_desc="等级 30#r伤害 +100"';
+        const equipment = mode.includes("tooltip")
+          ? `${image} onmouseover="document.getElementById('RoleEquipTipsBox').style.display='block'" ${mode === "ambiguous-tooltip" ? "" : 'data_tip_box="RoleEquipTipsBox"'}>`
+          : `${image}>`;
+        const html =
+          fixture(false, "<p>召唤兽(0/10)</p>", undefined, "", "", equipment) +
+          (mode === "official-model"
+            ? '<script>window.CBG_GAME_CONFIG={equip_info:{31001:{name:"官网型号名称"}}}</script>'
+            : "");
+        await page.route(url, (route) => route.fulfill({ contentType: "text/html", body: html }));
+        // The heading is deliberately not the tooltip's first line.
+        await page.addInitScript(() => {
+          document.addEventListener("DOMContentLoaded", () => {
+            const box = document.getElementById("RoleEquipTipsBox")!;
+            box.innerHTML = "<p>等级 30</p><h3>实际武器名称</h3><p>伤害 +100</p>";
+          });
+        });
+        if (mode === "ambiguous-tooltip")
+          await page.addInitScript(() =>
+            document.addEventListener("DOMContentLoaded", () => {
+              const other = document.createElement("div");
+              other.setAttribute("role", "tooltip");
+              other.innerHTML = "<h3>其他物品</h3><p>等级 30</p><p>伤害 +999</p>";
+              document.body.append(other);
+            }),
+          );
+        const valid = ["official-model", "tooltip-heading"].includes(mode);
+        const signal = new AbortController().signal;
+        const detail = valid
+          ? await createCrawlSource({
+              listPage: page,
+              detailPage: page,
+              signal,
+              onDetailProgress: vi.fn(),
+              log: vi.fn(),
+            }).detail(listing)
+          : await collectDetail(page, listing, signal);
+        const item = detail.tabs.find((entry) => entry.name === "道具/法宝")!.items![0];
+        if (["unknown", "ambiguous-tooltip"].includes(mode)) {
+          expect(detail.equipmentCapture?.complete).toBe(false);
+          expect(item.name).toMatch(/^图标/);
+        } else {
+          expect(item.name).toBe(mode === "official-model" ? "官网型号名称" : "实际武器名称");
+          expect(item.nameSource).toBe(mode === "official-model" ? "official-model" : "tooltip");
+          expect(detail.equipmentCapture?.complete).toBe(true);
+          const store = new CrawlStore(":memory:");
+          try {
+            store.observe(listing);
+            expect(store.save(listing, detail)).toBe(true);
+            expect(store.count()).toBe(1);
+          } finally {
+            store.close();
+          }
+        }
+      } finally {
+        await page.close();
+      }
+    },
+    15000,
+  );
   it.each([404, 410, 200])(
     "官网确证不存在HTTP %s只请求一次，不做三轮资料重试",
     async (status) => {

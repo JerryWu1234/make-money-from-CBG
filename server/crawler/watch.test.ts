@@ -360,6 +360,12 @@ describe("持续发现新号和历史详情共享采集池", () => {
             ?.attempt_count,
         ).toBe(attemptsBeforeDiscovery);
         expect(publish).toHaveBeenCalledWith(expect.objectContaining({ saved: 2, failed: 1 }));
+        const patches = publish.mock.calls.map(([patch]) => patch as Partial<CrawlStatus>);
+        const failedAt = patches.findIndex((patch) => patch.lastItemError?.includes(bad.key));
+        expect(patches[failedAt]).toMatchObject({ current: bad.name });
+        const discovery = patches.slice(failedAt + 1).find((patch) => patch.phase === "collecting");
+        expect(discovery).toHaveProperty("detailProgress", undefined);
+        expect(discovery).toHaveProperty("current", undefined);
         expect(db.checkpoint()?.key).not.toBe(good.key);
       } finally {
         control.abort(new Error("暂停"));

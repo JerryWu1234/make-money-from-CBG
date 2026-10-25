@@ -197,7 +197,8 @@ export async function crawl(
           failed,
           retryCompleted: ++retryCompleted,
           lastItemError: `商品 ${item.key}：${message}`,
-          detailProgress: "该商品详情待重试，继续正常采集",
+          current: item.name || item.eid,
+          detailProgress: `商品 ${item.name || item.eid} 详情未完整，已保留待重试：${message}`,
         });
         if (!(error instanceof Error && error.name === "IncompleteDetailError")) throw error;
       } finally {
