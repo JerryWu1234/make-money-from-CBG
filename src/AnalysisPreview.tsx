@@ -215,6 +215,7 @@ export function AnalysisPreview() {
           search,
           filter,
           showViewed: String(showViewed),
+          includeRanking: String(tab === "ranking"),
           scope: "complete",
         });
         const next = await request<AnalysisOverview>(
@@ -239,7 +240,7 @@ export function AnalysisPreview() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [provider, page, resultsPage, search, filter, showViewed, revision]);
+  }, [provider, page, resultsPage, search, filter, showViewed, tab, revision]);
 
   const mutate = useCallback(
     async (path: string, body: Record<string, unknown>) => {
@@ -623,7 +624,8 @@ export function AnalysisPreview() {
                 aria-selected={tab === "ranking"}
                 onClick={() => setTab("ranking")}
               >
-                推荐榜 <span>{data?.ranking.length || 0}</span>
+                推荐榜{" "}
+                {snapshot && !snapshot.rankingDeferred && <span>{data?.ranking.length || 0}</span>}
               </button>
               <button role="tab" aria-selected={tab === "all"} onClick={() => setTab("all")}>
                 全部商品 <span>{data?.counts.total || 0}</span>
@@ -638,6 +640,7 @@ export function AnalysisPreview() {
             </div>
             {tab === "ranking" ? (
               <div className="analysis-rank-list" role="tabpanel" aria-label="推荐榜">
+                {snapshot?.rankingDeferred && <p role="status">正在加载推荐榜…</p>}
                 <label>
                   <input
                     type="checkbox"
@@ -672,7 +675,7 @@ export function AnalysisPreview() {
                     <p>这些是筛选条件，不代表装备或宝宝已估价，也不证明资产能够补足差额。</p>
                   </details>
                 </div>
-                {!!snapshot && !data?.ranking.length && (
+                {!!snapshot && !snapshot.rankingDeferred && !data?.ranking.length && (
                   <div className="analysis-start-empty">
                     <strong>
                       {run?.completed

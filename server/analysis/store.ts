@@ -21,6 +21,7 @@ import { recommendationFor } from "./recommendation";
 import { analysisConcurrency, analysisLaneLimits, DEFAULT_ANALYSIS_CONCURRENCY } from "./types";
 import { automaticMarketExpired } from "./market";
 import { trackRecordVersions } from "../record-versions";
+import { installSourceMatches } from "./source-matches";
 import type {
   AnalysisLane,
   AnalysisDetail,
@@ -58,9 +59,11 @@ const expiredPricingSql = ["equipment_pricing", "pet_pricing", "pet_pricing.gear
     return `(json_type(t.result_json,'$.valuation.${key}')='object' AND ${expiredPricingTimeSql("t.result_json", "$.valuation." + key)})`;
   })
   .join(" OR ");
+const matchingSourceSql =
+  "coalesce((SELECT m.matches FROM analysis_source_matches m WHERE m.task_id=t.id AND m.listing_key=l.key),0)=1";
 const stateSql = `CASE WHEN l.status!='complete' OR l.detail_json IS NULL THEN 'waiting_detail'
   WHEN t.id IS NULL THEN 'ready'
-  WHEN t.source_listing_json!=l.listing_json OR t.source_detail_json!=l.detail_json THEN 'stale'
+  WHEN NOT (${matchingSourceSql}) THEN 'stale'
   WHEN t.status='completed' AND (${expiredPricingSql}) THEN 'stale'
   ELSE t.status END`;
 
@@ -164,6 +167,8 @@ export class AnalysisStore {
     CREATE INDEX IF NOT EXISTS analysis_tasks_run ON analysis_tasks(run_id,ordinal);
     CREATE INDEX IF NOT EXISTS analysis_tasks_input ON analysis_tasks(input_hash,status);
     CREATE INDEX IF NOT EXISTS analysis_tasks_listing ON analysis_tasks(listing_key,status,completed_at DESC);
+    CREATE INDEX IF NOT EXISTS analysis_completed_listings ON analysis_tasks(listing_key,completed_at DESC,id DESC,run_id)
+      WHERE status='completed' AND result_json IS NOT NULL;
     CREATE TABLE IF NOT EXISTS recommendation_views (listing_key TEXT PRIMARY KEY, viewed_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS analysis_attempts (
       id TEXT PRIMARY KEY, task_id TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL,
@@ -209,6 +214,7 @@ export class AnalysisStore {
     );
     trackRecordVersions(db, "analysis_tasks");
     trackRecordVersions(db, "analysis_attempts");
+    installSourceMatches(db);
     db.exec(`CREATE TABLE IF NOT EXISTS analysis_capture_checks (
       run_id TEXT NOT NULL, listing_key TEXT NOT NULL, listing_revision INTEGER NOT NULL,
       result_task_id TEXT, result_revision INTEGER, proof_id TEXT, proof_revision INTEGER,
@@ -273,7 +279,10 @@ export class AnalysisStore {
   counts() {
     const row = this.db
       .prepare(
-        "SELECT count(*) total,sum(CASE WHEN status='complete' AND detail_json IS NOT NULL THEN 1 ELSE 0 END) complete,sum(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed,sum(CASE WHEN status='unavailable' THEN 1 ELSE 0 END) unavailable FROM listings",
+        `SELECT (SELECT count(*) FROM listings) total,
+        (SELECT count(*) FROM listings WHERE status='complete' AND detail_json IS NOT NULL) complete,
+        (SELECT count(*) FROM listings WHERE status='failed') failed,
+        (SELECT count(*) FROM listings WHERE status='unavailable') unavailable`,
       )
       .get()!;
     const total = Number(row.total),
@@ -1386,6 +1395,7 @@ export class AnalysisStore {
       filter?: string;
       summary?: boolean;
       showViewed?: boolean;
+      includeRanking?: boolean;
       scope?: import("../crawler/types").SavedListingScope;
     } = {},
   ): Generator<void, AnalysisOverview, void> {
@@ -1405,8 +1415,7 @@ export class AnalysisStore {
       : `t.id=(
       SELECT candidate.id FROM analysis_tasks candidate JOIN analysis_runs r ON r.id=candidate.run_id
       WHERE candidate.listing_key=l.key ORDER BY
-        CASE WHEN candidate.status='completed' AND candidate.source_listing_json=l.listing_json
-          AND candidate.source_detail_json=l.detail_json
+        CASE WHEN candidate.status='completed' AND (${matchingSourceSql.replaceAll("t.", "candidate.")})
           AND coalesce((${expiredPricingSql.replaceAll("t.", "candidate.")}),0)=0 THEN 0 ELSE 1 END,
         r.created_at DESC,candidate.ordinal DESC,candidate.id DESC LIMIT 1)`;
     // Omit evidence before transferring/parsing a summary; detail reads retain the full result.
@@ -1425,7 +1434,7 @@ export class AnalysisStore {
       options.scope === "complete"
         ? " WHERE l.status='complete' AND l.detail_json IS NOT NULL"
         : options.scope === "tasks"
-          ? " WHERE l.status!='complete' OR l.detail_json IS NULL"
+          ? " WHERE (l.status!='complete' OR l.detail_json IS NULL)"
           : "";
     const source = `SELECT ${productColumns} FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN analysis_runs selected_run ON selected_run.id=t.run_id${scopeCondition}`;
     const conditions: string[] = [],
@@ -1439,124 +1448,186 @@ export class AnalysisStore {
       values.push(options.filter);
     }
     const query = `WITH products AS (${source}) SELECT * FROM products${conditions.length ? ` WHERE ${conditions.join(" AND ")}` : ""}`;
-    const total = Number(this.db.prepare(`SELECT count(*) n FROM (${query})`).get(...values)!.n);
+    // Default counts and page selection must not replay every historical task/source.
+    const stateFiltered = !!options.filter && options.filter !== "all";
+    const listingSearch = options.search?.trim()
+      ? `${scopeCondition ? " AND" : " WHERE"} instr(lower(l.listing_json),lower(?))>0`
+      : "";
+    const listingValues = options.search?.trim() ? [options.search.trim().slice(0, 200)] : [];
+    const listingSource = `FROM listings l${scopeCondition}${listingSearch}`;
+    const total = Number(
+      stateFiltered
+        ? this.db.prepare(`SELECT count(*) n FROM (${query})`).get(...values)!.n
+        : this.db.prepare(`SELECT count(*) n ${listingSource}`).get(...listingValues)!.n,
+    );
     const totalPages = Math.max(1, Math.ceil(total / 20));
     const page = Math.max(1, Math.min(totalPages, Math.trunc(options.page || 1)));
+    const pageKeys = stateFiltered
+      ? undefined
+      : this.db
+          .prepare(`SELECT l.key ${listingSource} ORDER BY l.key ASC LIMIT 20 OFFSET ?`)
+          .all(...listingValues, (page - 1) * 20)
+          .map((row) => row.key);
+    const recordQuery = pageKeys
+      ? `WITH products AS (${source}${scopeCondition ? " AND" : " WHERE"} l.key IN (${pageKeys.map(() => "?").join(",") || "NULL"})) SELECT * FROM products${conditions.length ? ` WHERE ${conditions.join(" AND ")}` : ""} ORDER BY key ASC`
+      : `${query} ORDER BY key ASC LIMIT 20 OFFSET ?`;
     const records = this.db
-      .prepare(`${query} ORDER BY key ASC LIMIT 20 OFFSET ?`)
-      .all(...values, (page - 1) * 20)
+      .prepare(recordQuery)
+      .all(
+        ...(pageKeys
+          ? [...sourceValues, ...pageKeys, ...listingValues]
+          : [...values, (page - 1) * 20]),
+      )
       .map((row) => this.item(row, options.currentProfile, options.summary));
     yield;
-    const ranking: AnalysisItem[] = [];
-    const manualReview: AnalysisItem[] = [];
-    const profileKey = textHash(JSON.stringify(options.currentProfile || null));
-    const signature = (row: Row) =>
-      textHash(
-        JSON.stringify([row.listing_revision, row.task_revision, row.profile_json, profileKey]),
-      );
-    // Materialize only keys before yielding: never leave a SQLite iterator open
-    // while collection can update the same connection's tables.
-    const rankedRows = this.db
-      .prepare(
-        `SELECT l.key,t.id task_id,views.viewed_at FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN recommendation_views views ON views.listing_key=l.key WHERE (${stateSql})='completed' AND json_type(t.result_json,'$.valuation.bare_role_value') IN ('integer','real')${options.showViewed ? "" : " AND views.listing_key IS NULL"} ORDER BY coalesce(json_extract(t.result_json,'$.valuation.price_difference_ratio'),json_extract(t.result_json,'$.valuation.margin_of_safety')) DESC,json_extract(t.result_json,'$.score') DESC,l.key ASC`,
-      )
-      .all(...sourceValues);
-    const candidateKeys = new Set(rankedRows.map((row) => String(row.key)));
-    for (const key of this.recommendationCache.keys())
-      if (!candidateKeys.has(key)) this.recommendationCache.delete(key);
-    yield;
-    const revisions = "lv.revision listing_revision,tv.revision task_revision";
-    const rankedSource = `FROM listings l JOIN analysis_tasks t ON t.listing_key=l.key
+    let currentRanking: AnalysisItem[] = [],
+      currentManual: AnalysisItem[] = [];
+    if (options.includeRanking !== false) {
+      const ranking: AnalysisItem[] = [];
+      const manualReview: AnalysisItem[] = [];
+      const profileKey = textHash(JSON.stringify(options.currentProfile || null));
+      const signature = (row: Row) =>
+        textHash(
+          JSON.stringify([row.listing_revision, row.task_revision, row.profile_json, profileKey]),
+        );
+      // Materialize only keys before yielding: never leave a SQLite iterator open
+      // while collection can update the same connection's tables.
+      const rankedRows = this.db
+        .prepare(
+          `SELECT l.key,t.id task_id,views.viewed_at FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN recommendation_views views ON views.listing_key=l.key WHERE (${stateSql})='completed' AND json_type(t.result_json,'$.valuation.bare_role_value') IN ('integer','real')${options.showViewed ? "" : " AND views.listing_key IS NULL"} ORDER BY coalesce(json_extract(t.result_json,'$.valuation.price_difference_ratio'),json_extract(t.result_json,'$.valuation.margin_of_safety')) DESC,json_extract(t.result_json,'$.score') DESC,l.key ASC`,
+        )
+        .all(...sourceValues);
+      const candidateKeys = new Set(rankedRows.map((row) => String(row.key)));
+      for (const key of this.recommendationCache.keys())
+        if (!candidateKeys.has(key)) this.recommendationCache.delete(key);
+      yield;
+      const revisions = "lv.revision listing_revision,tv.revision task_revision";
+      // Sorting carries keys only. Batch small version identities afterwards instead
+      // of rerunning source comparisons and historical-task selection for each key.
+      const metadata = new Map<SQLOutputValue, Row>();
+      const profiles = new Map<string, SQLOutputValue>();
+      const readProfile = this.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?");
+      for (let offset = 0; offset < rankedRows.length; offset += 128) {
+        const batch = rankedRows.slice(offset, offset + 128);
+        const rows = this.db
+          .prepare(`SELECT l.key,t.id task_id,t.run_id,${revisions}
+        FROM analysis_tasks t JOIN listings l ON l.key=t.listing_key
+        JOIN record_versions lv ON lv.entity='listings' AND lv.record_key=l.key
+        JOIN record_versions tv ON tv.entity='analysis_tasks' AND tv.record_key=t.id
+        WHERE t.id IN (${batch.map(() => "?").join(",")})`)
+          .all(...batch.map((row) => row.task_id));
+        for (const row of rows) {
+          const id = String(row.run_id);
+          if (!profiles.has(id)) profiles.set(id, readProfile.get(id)?.profile_json ?? null);
+          metadata.set(row.task_id, {
+            ...row,
+            state: "completed",
+            profile_json: profiles.get(id)!,
+          });
+        }
+        yield;
+      }
+      const rankedSource = `FROM listings l JOIN analysis_tasks t ON t.listing_key=l.key
       JOIN analysis_runs selected_run ON selected_run.id=t.run_id
       JOIN record_versions lv ON lv.entity='listings' AND lv.record_key=l.key
       JOIN record_versions tv ON tv.entity='analysis_tasks' AND tv.record_key=t.id
       LEFT JOIN recommendation_views views ON views.listing_key=l.key
       WHERE l.key=? AND t.id=? AND (${taskSelection})`;
-    const rankedMetadata = this.db.prepare(
-      `SELECT l.key,${revisions},selected_run.profile_json,views.viewed_at,${stateSql} state ${rankedSource}`,
-    );
-    const rankedProduct = this.db.prepare(
-      `SELECT ${productColumns},l.detail_json,views.viewed_at,${revisions} ${rankedSource}`,
-    );
-    const selected = new Map<string, { taskId: SQLOutputValue; signature: string }>();
-    let deadline = performance.now() + 8;
-    for (const candidate of rankedRows) {
-      if (performance.now() >= deadline) {
-        yield;
-        deadline = performance.now() + 8;
-      }
-      let row = rankedMetadata.get(candidate.key, candidate.task_id, ...sourceValues);
-      if (!row || row.state !== "completed" || (!options.showViewed && row.viewed_at)) continue;
-      const key = String(row.key),
-        fingerprint = signature(row);
-      let cached = this.recommendationCache.get(key);
-      let item: AnalysisItem | undefined;
-      let record: SavedRoleRecord | undefined;
-      if (!cached || cached.signature !== fingerprint) {
-        row = rankedProduct.get(candidate.key, candidate.task_id, ...sourceValues);
-        if (!row || row.state !== "completed" || signature(row) !== fingerprint) continue;
-        item = this.item(row, options.currentProfile, options.summary);
-        record = {
-          listing: JSON.parse(String(row.listing_json)),
-          detail: JSON.parse(String(row.detail_json)),
-          status: "complete",
-          error: null,
-        };
-        cached = {
-          signature: fingerprint,
-          ...(!item.profileChanged
-            ? { recommendation: recommendationFor(record, item.valuation) }
-            : {}),
-        };
-      }
-      // One small decision per current candidate; source documents are never cached.
-      this.recommendationCache.set(key, cached);
-      const status = cached.recommendation?.status;
-      if (
-        (status === "recommended" && ranking.length < 10) ||
-        (status === "manual" && manualReview.length < 10)
-      ) {
-        if (!item) {
+      const rankedMetadata = this.db.prepare(
+        `SELECT l.key,${revisions},selected_run.profile_json,views.viewed_at,${stateSql} state ${rankedSource}`,
+      );
+      const rankedProduct = this.db.prepare(
+        `SELECT ${productColumns},l.detail_json,views.viewed_at,${revisions} ${rankedSource}`,
+      );
+      const selected = new Map<string, { taskId: SQLOutputValue; signature: string }>();
+      let deadline = performance.now() + 8;
+      for (const candidate of rankedRows) {
+        if (performance.now() >= deadline) {
+          yield;
+          deadline = performance.now() + 8;
+        }
+        const observed = metadata.get(candidate.task_id);
+        let row: Row | undefined = observed
+          ? { ...observed, viewed_at: candidate.viewed_at }
+          : undefined;
+        if (!row || row.state !== "completed" || (!options.showViewed && row.viewed_at)) continue;
+        const key = String(row.key),
+          fingerprint = signature(row);
+        let cached = this.recommendationCache.get(key);
+        let item: AnalysisItem | undefined;
+        let record: SavedRoleRecord | undefined;
+        if (!cached || cached.signature !== fingerprint) {
           row = rankedProduct.get(candidate.key, candidate.task_id, ...sourceValues);
           if (!row || row.state !== "completed" || signature(row) !== fingerprint) continue;
-        }
-        item ||= this.item(row, options.currentProfile, options.summary);
-        item.recommendationViewed = !!row.viewed_at;
-        item.recommendation = structuredClone(cached.recommendation);
-        if (status === "recommended") {
-          record ||= {
+          item = this.item(row, options.currentProfile, options.summary);
+          record = {
             listing: JSON.parse(String(row.listing_json)),
             detail: JSON.parse(String(row.detail_json)),
             status: "complete",
             error: null,
           };
-          cached.assetSummary ??= capturedAssetSummary(record);
-          item.assetSummary = structuredClone(cached.assetSummary);
-          ranking.push(item);
-        } else manualReview.push(item);
-        selected.set(key, { taskId: candidate.task_id, signature: fingerprint });
+          cached = {
+            signature: fingerprint,
+            ...(!item.profileChanged
+              ? { recommendation: recommendationFor(record, item.valuation) }
+              : {}),
+          };
+        }
+        // One small decision per current candidate; source documents are never cached.
+        this.recommendationCache.set(key, cached);
+        const status = cached.recommendation?.status;
+        if (
+          (status === "recommended" && ranking.length < 10) ||
+          (status === "manual" && manualReview.length < 10)
+        ) {
+          if (!item) {
+            row = rankedProduct.get(candidate.key, candidate.task_id, ...sourceValues);
+            if (!row || row.state !== "completed" || signature(row) !== fingerprint) continue;
+          }
+          item ||= this.item(row, options.currentProfile, options.summary);
+          item.recommendationViewed = !!row.viewed_at;
+          item.recommendation = structuredClone(cached.recommendation);
+          if (status === "recommended") {
+            record ||= {
+              listing: JSON.parse(String(row.listing_json)),
+              detail: JSON.parse(String(row.detail_json)),
+              status: "complete",
+              error: null,
+            };
+            cached.assetSummary ??= capturedAssetSummary(record);
+            item.assetSummary = structuredClone(cached.assetSummary);
+            ranking.push(item);
+          } else manualReview.push(item);
+          selected.set(key, { taskId: candidate.task_id, signature: fingerprint });
+        }
+        if (ranking.length === 10 && manualReview.length === 10) break;
       }
-      if (ranking.length === 10 && manualReview.length === 10) break;
-    }
-    // A yielding overview may overlap capture, deletion, quote expiry or a view action.
-    // Revalidate displayed rows synchronously before publishing; do not resurrect stale results.
-    const stillCurrent = (item: AnalysisItem) => {
-      const chosen = selected.get(item.key)!;
-      const row = rankedMetadata.get(item.key, chosen.taskId, ...sourceValues);
-      return (
-        !!row &&
-        row.state === "completed" &&
-        (options.showViewed || !row.viewed_at) &&
-        signature(row) === chosen.signature
-      );
-    };
-    const currentRanking = ranking.filter(stillCurrent),
+      // A yielding overview may overlap capture, deletion, quote expiry or a view action.
+      // Revalidate displayed rows synchronously before publishing; do not resurrect stale results.
+      const stillCurrent = (item: AnalysisItem) => {
+        const chosen = selected.get(item.key)!;
+        const row = rankedMetadata.get(item.key, chosen.taskId, ...sourceValues);
+        return (
+          !!row &&
+          row.state === "completed" &&
+          (options.showViewed || !row.viewed_at) &&
+          signature(row) === chosen.signature
+        );
+      };
+      currentRanking = ranking.filter(stillCurrent);
       currentManual = manualReview.filter(stillCurrent);
-    const history = this.db
+    }
+    const historyKeys = this.db
       .prepare(
-        `SELECT a.id,a.state,a.created_at,a.finished_at,a.error,t.id task_id,json_extract(t.source_listing_json,'$.name') name FROM analysis_attempts a JOIN analysis_tasks t ON a.task_id=t.id WHERE t.run_id=? ORDER BY a.created_at DESC,a.id ASC LIMIT 30`,
+        `SELECT a.id FROM analysis_attempts a JOIN analysis_tasks t ON a.task_id=t.id WHERE t.run_id=? ORDER BY a.created_at DESC,a.id ASC LIMIT 30`,
       )
       .all(run?.id || "")
+      .map((row) => row.id);
+    const history = this.db
+      .prepare(
+        `SELECT a.id,a.state,a.created_at,a.finished_at,a.error,t.id task_id,json_extract(t.source_listing_json,'$.name') name FROM analysis_attempts a JOIN analysis_tasks t ON a.task_id=t.id WHERE a.id IN (${historyKeys.map(() => "?").join(",") || "NULL"}) ORDER BY a.created_at DESC,a.id ASC`,
+      )
+      .all(...historyKeys)
       .map((row) => ({
         id: String(row.id),
         taskId: String(row.task_id),
@@ -1573,18 +1644,30 @@ export class AnalysisStore {
       ORDER BY completed.completed_at DESC,r.created_at DESC,completed.id DESC LIMIT 1)
       JOIN analysis_runs r ON r.id=t.run_id`;
     const resultTotal = Number(
-      this.db.prepare(`SELECT count(*) n ${resultsSource}`).get(...sourceValues)!.n,
+      this.db
+        .prepare(`SELECT count(*) n FROM listings l WHERE EXISTS(
+      SELECT 1 FROM analysis_tasks completed JOIN analysis_runs r ON r.id=completed.run_id
+      WHERE completed.listing_key=l.key AND completed.status='completed' AND completed.result_json IS NOT NULL
+      ${options.runId ? "AND completed.run_id=?" : ""})`)
+        .get(...sourceValues)!.n,
     );
     const resultTotalPages = Math.max(1, Math.ceil(resultTotal / 20));
     const resultPage = Math.max(
       1,
       Math.min(resultTotalPages, Math.trunc(options.resultsPage || 1)),
     );
+    const resultKeys = this.db
+      .prepare(
+        `SELECT t.id ${resultsSource} ORDER BY t.completed_at DESC,t.id DESC LIMIT 20 OFFSET ?`,
+      )
+      .all(...sourceValues, (resultPage - 1) * 20)
+      .map((row) => row.id);
     const results = this.db
       .prepare(`SELECT t.id task_id,t.source_listing_json,${resultColumn} result_json,t.completed_at,
       r.provider,r.model,r.profile_json,${stateSql} state ${resultsSource}
-      ORDER BY t.completed_at DESC,t.id DESC LIMIT 20 OFFSET ?`)
-      .all(...sourceValues, (resultPage - 1) * 20)
+      WHERE t.id IN (${resultKeys.map(() => "?").join(",") || "NULL"})
+      ORDER BY t.completed_at DESC,t.id DESC`)
+      .all(...sourceValues, ...resultKeys)
       .map((row) => {
         const listing = JSON.parse(String(row.source_listing_json)) as Listing;
         const savedProfile = row.profile_json
@@ -1613,6 +1696,7 @@ export class AnalysisStore {
         };
       });
     return {
+      ...(options.includeRanking === false ? { rankingDeferred: true } : {}),
       ...this.collectionCounts(options.scope),
       // A yielding records/ranking request must not publish the old progress snapshot.
       run: run ? this.run(run.id) : null,

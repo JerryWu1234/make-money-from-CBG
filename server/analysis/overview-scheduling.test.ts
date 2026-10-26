@@ -89,12 +89,14 @@ it("暖轮询不再从SQLite传回未变化候选的完整详情", () => {
   try {
     store.overview({ runId, summary: true });
     const original = crawl.db.prepare.bind(crawl.db);
-    let detailReads = 0;
+    let detailReads = 0,
+      candidateLookups = 0;
     const spy = vi.spyOn(crawl.db, "prepare").mockImplementation((sql) => {
       const statement = original(sql);
       const get = statement.get.bind(statement);
       const all = statement.all.bind(statement);
       statement.get = (...args) => {
+        if (sql.includes("WHERE l.key=? AND t.id=?")) candidateLookups++;
         const row = Reflect.apply(get, undefined, args) as ReturnType<typeof get>;
         if (row?.detail_json != null) detailReads++;
         return row;
@@ -109,10 +111,38 @@ it("暖轮询不再从SQLite传回未变化候选的完整详情", () => {
     try {
       expect(store.overview({ runId, summary: true }).ranking).toHaveLength(0);
       expect(detailReads).toBe(0);
+      expect(candidateLookups).toBe(0);
     } finally {
       spy.mockRestore();
     }
   } finally {
+    crawl.close();
+  }
+});
+
+it("记录分页不触发尚未打开的推荐榜扫描，仍返回当前页和完整计数", () => {
+  const { crawl, store, runId } = fixture(48),
+    prepare = crawl.db.prepare.bind(crawl.db);
+  const compute = vi.spyOn(recommendations, "recommendationFor");
+  const spy = vi.spyOn(crawl.db, "prepare").mockImplementation((sql) => {
+    if (sql.includes("ORDER BY coalesce(")) throw new Error("不应扫描推荐候选");
+    return prepare(sql);
+  });
+  try {
+    const output = store.overview({
+      includeRanking: false,
+      runId,
+      summary: true,
+      page: 2,
+    });
+    expect(output.records).toMatchObject({ page: 2, total: 48 });
+    expect(output.records.items).toHaveLength(20);
+    expect(output.records.items[0].key).toBe("poll-020");
+    expect(output.results.total).toBe(48);
+    expect(output).toMatchObject({ rankingDeferred: true });
+    expect(compute).not.toHaveBeenCalled();
+  } finally {
+    spy.mockRestore();
     crawl.close();
   }
 });

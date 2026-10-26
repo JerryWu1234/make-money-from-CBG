@@ -42,6 +42,8 @@ export class CrawlStore {
       CREATE INDEX IF NOT EXISTS listings_first_seen ON listings(first_seen_at DESC,key ASC);
       CREATE INDEX IF NOT EXISTS listings_capture_queue ON listings(status,first_seen_at,key)
         WHERE status IN ('pending','failed');
+      CREATE INDEX IF NOT EXISTS listings_complete_keys ON listings(key)
+        WHERE status='complete' AND detail_json IS NOT NULL;
       CREATE TABLE IF NOT EXISTS role_tabs (listing_key TEXT NOT NULL, tab_index INTEGER NOT NULL, name TEXT NOT NULL, snapshot_json TEXT NOT NULL, PRIMARY KEY(listing_key,tab_index));
       CREATE TABLE IF NOT EXISTS role_parameters (listing_key TEXT NOT NULL, section TEXT NOT NULL, path TEXT NOT NULL, value_json TEXT NOT NULL, PRIMARY KEY(listing_key,section,path));
       CREATE TABLE IF NOT EXISTS crawl_state (id INTEGER PRIMARY KEY CHECK(id=1), checkpoint_json TEXT, backfill_complete INTEGER NOT NULL DEFAULT 0);

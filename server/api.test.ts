@@ -129,6 +129,18 @@ it("分析状态接口等待异步汇总结果，不提前返回空Promise对象
   expect(JSON.parse(res.end.mock.calls[0][0])).toMatchObject({ records: { total: 707 } });
 });
 
+it("记录页明确跳过推荐榜，默认请求仍保留推荐计算", async () => {
+  const api = await import("./api");
+  for (const includeRanking of ["false", "true"]) {
+    const req = request(`/api/analysis/status?includeRanking=${includeRanking}`);
+    req.method = "GET";
+    await api.apiMiddleware(req, response(), vi.fn());
+    const options = mocks.analysisOverview.mock.lastCall![0];
+    if (includeRanking === "false") expect(options).toMatchObject({ includeRanking: false });
+    else expect(options).not.toHaveProperty("includeRanking");
+  }
+});
+
 it("资料待补采返回409并保留明确的角色提示", async () => {
   const message = "还有 1 个角色资料待补采：29534033。";
   mocks.startAnalysis.mockRejectedValue(

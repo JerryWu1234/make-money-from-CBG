@@ -8,8 +8,12 @@ test("商品记录尚未返回时先显示实时进度，旧记录响应不能�
     progressCalls = 0,
     recordCalls = 0;
   let release!: () => void;
+  let releaseRanking!: () => void;
   const records = new Promise<void>((resolve) => {
     release = resolve;
+  });
+  const ranking = new Promise<void>((resolve) => {
+    releaseRanking = resolve;
   });
   const run = (count: number): AnalysisRun => ({
     id: "progress-fixture",
@@ -54,9 +58,11 @@ test("商品记录尚未返回时先显示实时进度，旧记录响应不能�
       }
       if (url.pathname === "/api/analysis/status") {
         recordCalls++;
-        await records;
+        const includeRanking = url.searchParams.get("includeRanking") === "true";
+        await (includeRanking ? ranking : records);
         return route.fulfill({
           json: {
+            ...(includeRanking ? {} : { rankingDeferred: true }),
             counts,
             run: run(3),
             activeRun: run(3),
@@ -93,14 +99,30 @@ test("商品记录尚未返回时先显示实时进度，旧记录响应不能�
     await expect(current).toHaveText("6 / 20", { timeout: 5000 });
     expect(progressCalls).toBeGreaterThan(1);
     expect(recordCalls).toBe(1);
+    const initialRecords = page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === "/api/analysis/status" &&
+        url.searchParams.get("includeRanking") === "false"
+      );
+    });
     release();
+    await initialRecords;
     await expect(loading).toHaveCount(0);
     await expect(current).toHaveText("6 / 20");
+    await page.getByRole("tab", { name: "推荐榜" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "正在加载推荐榜" })).toHaveCount(1);
+    await expect(page.getByText("暂无符合推荐条件的商品")).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "推荐榜" })).toHaveText("推荐榜");
+    releaseRanking();
+    await expect(page.getByRole("status").filter({ hasText: "正在加载推荐榜" })).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: "推荐榜 0" })).toHaveCount(1);
     await page.screenshot({
       path: testInfo.outputPath("live-progress-before-records.png"),
       fullPage: true,
     });
   } finally {
     release();
+    releaseRanking();
   }
 });

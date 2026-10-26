@@ -133,6 +133,7 @@ export type AnalysisResultItem = {
   result: ProductAnalysis;
 };
 export type AnalysisOverview = {
+  rankingDeferred?: boolean;
   captureTasks?: { total: number; pending: number; failed: number };
   captureActivity?: Pick<CrawlStatus, "running" | "phase"> & {
     inFlight?: number;

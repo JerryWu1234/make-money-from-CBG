@@ -307,6 +307,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
                 search: params.get("search") || undefined,
                 filter: params.get("filter") || undefined,
                 showViewed: params.get("showViewed") === "true",
+                ...(params.get("includeRanking") === "false" ? { includeRanking: false } : {}),
                 ...(scope === "all" ? {} : { scope: scope as SavedListingScope }),
               },
               controller.signal,
