@@ -15,6 +15,7 @@ import { CAPTURE_VERSION, hasUnconfirmedEmptyEquipment } from "./compact";
 import { MAIN_TABS } from "./detail";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { watchCrawl } from "./watch";
+import { browserConnectionFailure } from "../browser-connection";
 export interface CrawlOptions {
   concurrency?: number;
   watch?: boolean;
@@ -124,7 +125,8 @@ export async function crawl(
         retryCompleted,
         detailProgress: `正在补采 ${index + 1}/${retries.length}：打开已保存商品链接…`,
       });
-      let settled = false;
+      let settled = false,
+        browserInterrupted = false;
       try {
         if (options.refresh && !(await source.onShelf(item)))
           throw new Error("刷新前未确认商品仍在售，旧详情已保留");
@@ -189,6 +191,11 @@ export async function crawl(
         }
         if (error instanceof IncompleteCaptureError && !options.refresh)
           store.savePartial(item, error.detail);
+        const connection = browserConnectionFailure(error);
+        if (connection) {
+          browserInterrupted = true;
+          throw connection;
+        }
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
         settled = true;
@@ -208,7 +215,7 @@ export async function crawl(
           throw error;
       } finally {
         retryRunning[lane]--;
-        if (signal.aborted && !settled) retryQueued[lane]++;
+        if ((signal.aborted || browserInterrupted) && !settled) retryQueued[lane]++;
         reportRetries();
       }
     });
@@ -374,6 +381,8 @@ export async function crawl(
           return;
         }
         if (error instanceof IncompleteCaptureError) store.savePartial(item, error.detail);
+        const connection = browserConnectionFailure(error);
+        if (connection) throw connection;
         store.fail(item.key, error instanceof Error ? error.message : String(error));
         if (
           !crawlAccessFailure(error) &&

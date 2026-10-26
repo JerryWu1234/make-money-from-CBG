@@ -26,6 +26,7 @@ import {
 } from "./compact";
 import { equipmentCaptureSummary, onShelfFromText, MAIN_TABS } from "./detail";
 import { IncompleteCaptureError } from "./capture-readiness";
+import { BrowserConnectionError } from "../browser-connection";
 const signal = () => new AbortController().signal;
 const item = (id: number, time = 10000 - id): Listing => ({
   ...parseListing(
@@ -315,6 +316,40 @@ describe("并发采集", () => {
     expect(db.count()).toBe(0);
   });
 });
+it.each(["backfill", "scan", "watch"])(
+  "%s 中途断连保留部分资料为待采，不算单品失败",
+  async (mode) => {
+    const db = memory(),
+      target = item(1),
+      partial = detail(target);
+    const failure = new BrowserConnectionError("disconnected");
+    target.orderTime = target.sellingTime;
+    partial.equipmentCapture!.complete = false;
+    if (mode === "backfill") db.observe(target);
+    const collector = source([[target]]),
+      publish = vi.fn();
+    collector.detail = vi
+      .fn()
+      .mockRejectedValue(new IncompleteCaptureError("断连中断", partial, failure));
+    await expect(
+      crawl(collector, db, signal(), publish, {
+        backfillOnly: mode === "backfill",
+        watch: mode === "watch",
+      }),
+    ).rejects.toBe(failure);
+    expect(readSaved(db, target.key)).toMatchObject({
+      status: "pending",
+      detail: { tabs: [{ name: "人物/修炼" }] },
+    });
+    expect(collector.detail).toHaveBeenCalledOnce();
+    expect(db.checkpoint()).toBeUndefined();
+    expect(db.count()).toBe(0);
+    if (mode === "backfill")
+      expect(publish).toHaveBeenLastCalledWith(
+        expect.objectContaining({ oldRunning: 0, oldQueued: 1 }),
+      );
+  },
+);
 it.each([false, true])(
   "采集失败保留部分详情且不推进成功断点，补采模式=%s",
   async (backfillOnly) => {

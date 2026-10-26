@@ -4,6 +4,7 @@ import type { CrawlStore } from "./store";
 import { compactListing } from "./compact";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { locateCheckpoint } from "./resume";
+import { browserConnectionFailure } from "../browser-connection";
 import {
   DEFAULT_CRAWL_CONCURRENCY,
   crawlAccessFailure,
@@ -160,6 +161,7 @@ export async function watchCrawl(
         !signal.aborted &&
         failure &&
         !crawlAccessFailure(failure.error) &&
+        !browserConnectionFailure(failure.error) &&
         !(failure.error instanceof ListingChangedError) &&
         samePendingVersion(item)
       ) {
@@ -172,12 +174,19 @@ export async function watchCrawl(
       if (signal.aborted && error instanceof IncompleteCaptureError)
         store.savePartial(item, error.detail);
       else if (
-        crawlAccessFailure(failure?.error) &&
+        (crawlAccessFailure(failure?.error) || browserConnectionFailure(failure?.error)) &&
         error instanceof IncompleteCaptureError &&
         samePendingVersion(item)
       )
         store.savePartial(item, error.detail);
       if (!signal.aborted && !failure) {
+        const connection = browserConnectionFailure(error);
+        if (connection) {
+          if (error instanceof IncompleteCaptureError) store.savePartial(item, error.detail);
+          failure = { error: connection, preserveCompleted: true };
+          publish({ message: connection.message });
+          return;
+        }
         if (error instanceof ListingUnavailableError) {
           store.markUnavailable(item.key, error.message);
           failedVersions.delete(item.key);
@@ -451,7 +460,9 @@ export async function watchCrawl(
     failure ??= {
       error,
       preserveCompleted:
-        !!crawlAccessFailure(error) || (error instanceof Error && error.name === "TimeoutError"),
+        !!crawlAccessFailure(error) ||
+        !!browserConnectionFailure(error) ||
+        (error instanceof Error && error.name === "TimeoutError"),
     };
     if (!signal.aborted && !(error instanceof SellingOrderUnavailableError))
       publish({

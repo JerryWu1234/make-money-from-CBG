@@ -233,6 +233,7 @@ export interface CrawlStatus {
   strategy?: string;
   error?: string;
   accessIssue?: CrawlAccessKind;
+  browserIssue?: import("../browser-connection").BrowserIssue;
   database: string;
 }
 

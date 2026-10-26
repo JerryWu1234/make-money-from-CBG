@@ -12,6 +12,7 @@ import { accessNavigationFailure } from "./access-navigation";
 import { crawlAccessFailure } from "./types";
 import { saveCaptureFailure } from "./capture-failure";
 import { captureBrowserStep } from "../browser-evidence";
+import { classifyBrowserFailure } from "../browser-connection";
 
 interface SourceOptions {
   listPage: Page;
@@ -83,7 +84,7 @@ export async function collectRole(
             ? error instanceof IncompleteCaptureError
               ? new IncompleteCaptureError(access.message, error.detail, access)
               : access
-            : error;
+            : classifyBrowserFailure(detailPage, error, signal);
         await saveCaptureFailure(
           detailPage,
           signal,
@@ -140,6 +141,7 @@ export function createCrawlSource({
       await captureBrowserStep(page, { flow: "collection", stage: stage + "完成", key }, signal);
       return result;
     } catch (error) {
+      const failure = classifyBrowserFailure(page, error, signal);
       // This typed signal selects runner's existing full-list scan; it is not a failed action.
       // Keep throwing it so expiry order never inherits the selling-time watermark strategy.
       const orderFallback = error instanceof SellingOrderUnavailableError;
@@ -155,7 +157,7 @@ export function createCrawlSource({
           : { flow: "collection", stage: stage + "失败", key, error },
         signal,
       );
-      throw error;
+      throw failure;
     }
   };
   return {
@@ -216,6 +218,7 @@ export function createCrawlSource({
       let closing: Promise<void> | undefined;
       const close = () => (closing ||= page.close());
       const cancel = () => {
+        log("detail.cancelled", { key: item.key, reason: local.reason });
         void close().catch((error: unknown) =>
           log("detail.close_failed", { key: item.key, error }),
         );
@@ -250,7 +253,10 @@ export function createCrawlSource({
         clearTimeout(timer);
         local.removeEventListener("abort", cancel);
         active.delete(control);
-        if (closing) await closing;
+        if (closing)
+          await closing.catch((error: unknown) =>
+            log("detail.close_failed", { key: item.key, error }),
+          );
         if (!local.aborted && !page.isClosed()) available.push(page);
       }
     },

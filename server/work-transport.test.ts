@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { openWorkTransport, WorkTransport } from "./work-transport";
+import { diagnostics } from "./diagnostics";
 
 class Socket extends EventTarget {
   static latest: Socket;
@@ -19,6 +20,20 @@ afterEach(() => {
 });
 
 describe("work-page CDP transport", () => {
+  it("异常断连保留socket错误与关闭码，不再记录空错误", () => {
+    const record = vi.spyOn(diagnostics, "record");
+    const socket = new Socket();
+    const transport = new WorkTransport(socket as unknown as WebSocket);
+    transport.onclose = vi.fn();
+    const error = Object.assign(new Error("socket reset"), { code: "ECONNRESET" });
+    socket.dispatchEvent(Object.assign(new Event("error"), { error, message: "socket reset" }));
+    expect(record).toHaveBeenCalledWith(
+      "browser.transport_error",
+      expect.objectContaining({ error, errorCode: "ECONNRESET" }),
+    );
+    expect(transport.onclose).toHaveBeenCalledWith(expect.stringContaining("调试连接"));
+    record.mockRestore();
+  });
   it("excludes existing daily tabs while preserving child-frame auto attachment", () => {
     const socket = new Socket();
     const transport = new WorkTransport(socket as unknown as WebSocket);

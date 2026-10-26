@@ -19,6 +19,7 @@ export class WorkTransport implements ConnectOverCDPTransport {
   private readonly creates = new Set<number>();
   private readonly attaches = new Map<number, Message>();
   private nextId = -1;
+  private closing = false;
 
   constructor(private readonly socket: WebSocket) {
     socket.addEventListener("message", (event) => this.receive(JSON.parse(String(event.data))));
@@ -28,10 +29,19 @@ export class WorkTransport implements ConnectOverCDPTransport {
         reason: event.reason,
         clean: event.wasClean,
       });
-      this.onclose?.(event.reason);
+      this.creates.clear();
+      this.attaches.clear();
+      this.onclose?.(event.reason || `Chrome 调试连接已断开（关闭码 ${event.code ?? "unknown"}）`);
     });
-    socket.addEventListener("error", () => {
-      diagnostics.record("browser.transport_error");
+    socket.addEventListener("error", (event) => {
+      const failure = event as ErrorEvent;
+      const error = failure.error;
+      diagnostics.record("browser.transport_error", {
+        error: error || new Error(failure.message || "Chrome 调试连接发生 WebSocket 错误"),
+        errorCode: error?.code,
+        causeCode: error?.cause?.code,
+        readyState: socket.readyState,
+      });
       this.close();
     });
   }
@@ -71,6 +81,8 @@ export class WorkTransport implements ConnectOverCDPTransport {
   }
 
   close() {
+    if (this.closing) return;
+    this.closing = true;
     this.socket.close();
   }
 }

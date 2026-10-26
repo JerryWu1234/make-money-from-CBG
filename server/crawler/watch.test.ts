@@ -96,6 +96,48 @@ afterEach(() => {
 });
 
 describe("持续发现新号和历史详情共享采集池", () => {
+  it("浏览器断连不把在途角色记为单品失败，部分资料留待补采且不推进断点", async () => {
+    const db = memory(),
+      fresh = [item(1), item(2), item(3), item(4), item(5)];
+    const src = source([fresh]);
+    const failure = Object.assign(new Error("Chrome 调试连接已断开，采集已暂停"), {
+      name: "BrowserConnectionError",
+      kind: "disconnected",
+    });
+    const blocked: Array<() => void> = [];
+    src.hover = vi.fn(async (row) => {
+      if (row.key === fresh[4].key) throw failure;
+      return row;
+    });
+    src.detail = vi.fn(
+      async (row) =>
+        new Promise<RoleDetail>((_resolve, reject) =>
+          blocked.push(() =>
+            reject(
+              new IncompleteCaptureError(
+                "断连中断读取",
+                { ...detail(row), petCapture: undefined },
+                failure,
+              ),
+            ),
+          ),
+        ),
+    );
+    const control = new AbortController();
+    const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true, concurrency: 4 }).catch(
+      (e: unknown) => e,
+    );
+    await flush();
+    expect(blocked).toHaveLength(4);
+    blocked.forEach((release) => release());
+    expect(await outcome).toBe(failure);
+    for (const row of fresh.slice(0, 4)) {
+      expect(readSaved(db, row.key)).toMatchObject({ status: "pending" });
+      expect(readSaved(db, row.key)?.detail).not.toBeNull();
+    }
+    expect(db.checkpoint()).toBeUndefined();
+    expect(db.count()).toBe(0);
+  });
   it("列表失败后收尾最多15秒，取消慢详情并保留部分资料及每件失败原因", async () => {
     vi.useFakeTimers();
     const db = memory(),

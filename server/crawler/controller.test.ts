@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   crawl: vi.fn(),
   current: vi.fn(),
   enqueue: vi.fn(),
+  getBrowser: vi.fn(),
   detailPage: { close: vi.fn(), setDefaultTimeout: vi.fn() },
 }));
 vi.mock("./store", () => ({
@@ -28,7 +29,7 @@ vi.mock("./runner", () => ({ crawl: mocks.crawl, validateCrawlOptions: vi.fn() }
 vi.mock("../cbg", () => ({ checkCbgStatus: mocks.current }));
 vi.mock("../session", () => ({
   getCbgPage: () => ({}),
-  getBrowser: async () => ({}),
+  getBrowser: mocks.getBrowser,
   createHiddenPage: async () => mocks.detailPage,
 }));
 vi.mock("./source", () => ({ createCrawlSource: () => ({}) }));
@@ -44,6 +45,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.acquire.mockReturnValue(true);
   mocks.current.mockResolvedValue({ isLoggedIn: true, running: false, workflowStep: "completed" });
+  mocks.getBrowser.mockResolvedValue({ isConnected: () => true });
   initial = undefined;
 });
 
@@ -81,6 +83,44 @@ it.each(["login", "verification", "busy"] as const)(
     expect(mocks.release).toHaveBeenCalledOnce();
   },
 );
+
+it("调试连接断开作为整轮暂停，保留计数并明确浏览器原因", async () => {
+  mocks.crawl.mockImplementation(async (_source, _store, _signal, publish) => {
+    publish({ page: 3, saved: 5 });
+    throw Object.assign(new Error("Chrome 调试连接已断开，采集已暂停"), {
+      name: "BrowserConnectionError",
+      kind: "disconnected",
+    });
+  });
+  const controller = await import("./controller");
+  initial = controller;
+  const started = await controller.startCrawl();
+  await expect(started.activity!.completion).resolves.toMatchObject({
+    phase: "paused",
+    running: false,
+    page: 3,
+    saved: 5,
+    error: undefined,
+    browserIssue: "disconnected",
+  });
+  expect(mocks.release).toHaveBeenCalledOnce();
+});
+
+it("已登录列表核验后连接消失，创建详情页时暂停且不自动重连", async () => {
+  mocks.getBrowser.mockRejectedValueOnce(new Error("浏览器未连接"));
+  const controller = await import("./controller");
+  initial = controller;
+  const started = await controller.startCrawl();
+  await expect(started.activity!.completion).resolves.toMatchObject({
+    phase: "paused",
+    running: false,
+    browserIssue: "disconnected",
+    failed: 0,
+  });
+  expect(mocks.getBrowser).toHaveBeenCalledExactlyOnceWith(false, undefined, "detail");
+  expect(mocks.crawl).not.toHaveBeenCalled();
+  expect(mocks.release).toHaveBeenCalledOnce();
+});
 
 afterEach(async () => {
   const controller = initial ?? (await import("./controller"));

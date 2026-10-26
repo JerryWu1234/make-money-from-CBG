@@ -145,6 +145,47 @@ describe("装备局部补采", () => {
       await page.close();
     }
   });
+  it("真实浏览器中途断开时保留已读标签，统一暂停且不对关闭页面继续重读", async () => {
+    const isolated = await chromium.launch({ channel: "chrome", headless: true });
+    const page = await isolated.newPage(),
+      listPage = await isolated.newPage();
+    const navigation = vi.spyOn(page, "goto");
+    let closing: Promise<void> | undefined;
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ contentType: "text/html", body: fixture(false) }),
+      );
+      const source = createCrawlSource({
+        listPage,
+        detailPage: page,
+        signal: new AbortController().signal,
+        log: vi.fn(),
+        onDetailProgress: (message) => {
+          if (!closing && message.includes("正在读取标签 2/7")) closing = isolated.close();
+        },
+      });
+      const error = await source.detail(listing).catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(IncompleteCaptureError);
+      expect((error as IncompleteCaptureError).cause).toMatchObject({
+        name: "BrowserConnectionError",
+      });
+      // Graceful Chrome.close can close targets before its transport disconnects;
+      // either observed scope must pause and preserve the same partial capture.
+      expect(["page_closed", "disconnected"]).toContain(
+        ((error as IncompleteCaptureError).cause as { kind: string }).kind,
+      );
+      expect((error as IncompleteCaptureError).detail.tabs.map((value) => value.name)).toEqual([
+        "人物/修炼",
+      ]);
+      expect(navigation).toHaveBeenCalledOnce();
+      expect(page.isClosed()).toBe(true);
+      expect(listPage.isClosed()).toBe(true);
+    } finally {
+      navigation.mockRestore();
+      await closing;
+      await isolated.close();
+    }
+  }, 30_000);
   it("主上下文求值永不返回时，总预算关闭独占页并带出已读标签，列表页保持打开", async () => {
     const page = await browser.newPage(),
       listPage = await browser.newPage();

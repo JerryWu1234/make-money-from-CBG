@@ -1,5 +1,6 @@
 import type { Page, Response } from "playwright-core";
 import { clickForInspection, hoverForInspection } from "../viewport";
+import { browserConnectionFailure, classifyBrowserFailure } from "../browser-connection";
 import { ListingUnavailableError, type Listing, type RoleDetail, type TabSnapshot } from "./types";
 import { assertAvailable, checkAborted, pace } from "./page";
 import {
@@ -1025,12 +1026,15 @@ export async function collectDetail(
       { flow: "collection", stage: `详情读取失败-${step}`, key: item.key, error: access || error },
       signal,
     );
-    const cause = signal.aborted ? signal.reason : access || error;
+    const cause = signal.aborted
+      ? signal.reason
+      : access || classifyBrowserFailure(page, error, signal);
     // 超时或已确认访问暂停带出部分资料；未知异常保留原错误。
     if (
       !tabs.length ||
       (!signal.aborted &&
         !access &&
+        !browserConnectionFailure(cause) &&
         (!(error instanceof Error) ||
           !["TimeoutError", "IncompleteDetailError"].includes(error.name) ||
           /登录|验证码|安全验证|频繁|繁忙|权限|禁止/i.test(error.message)))

@@ -3,6 +3,7 @@ import type { Listing, RoleDetail } from "./types";
 import { crawlAccessFailure } from "./types";
 import { completeSchoolSkillsFromText } from "./school-skills";
 import { isCurrentRoleCapture, roleIdentityIssues } from "./role-identity";
+import { browserConnectionFailure } from "../browser-connection";
 
 export class IncompleteCaptureError extends Error {
   constructor(
@@ -143,6 +144,7 @@ export async function collectCompleteCapture(
       if (error instanceof IncompleteCaptureError) partial = error.detail;
       checkAborted();
       if (crawlAccessFailure(error)) throw error;
+      if (browserConnectionFailure(error)) throw error;
       const cause =
         error instanceof IncompleteCaptureError && error.cause instanceof Error
           ? error.cause

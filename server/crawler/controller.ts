@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Page } from "playwright-core";
+import type { Browser, Page } from "playwright-core";
 import { getBrowser, getCbgPage, createHiddenPage } from "../session";
 import { checkCbgStatus } from "../cbg";
 import { crawl, validateCrawlOptions, type CrawlOptions } from "./runner";
@@ -15,6 +15,7 @@ import { diagnostics, watchWorkPage } from "../diagnostics";
 import { loadProfile, saveProfile } from "../analysis/profile";
 import { assertServiceOpen } from "../service-lifecycle";
 import { showBrowserWorkPages } from "../config";
+import { BrowserConnectionError, browserConnectionFailure } from "../browser-connection";
 
 type CrawlRuntime = {
   storage?: CrawlStore;
@@ -165,6 +166,7 @@ export async function startCrawl(
     error: undefined,
     failed: 0,
     accessIssue: undefined,
+    browserIssue: undefined,
     retryTotal: undefined,
     retryCompleted: undefined,
     lastItemError: undefined,
@@ -184,7 +186,20 @@ export async function startCrawl(
     const detailPages: Page[] = [];
     const createDetailPage = async () => {
       control.signal.throwIfAborted();
-      const detailPage = await createHiddenPage(await getBrowser(true, undefined, "detail"));
+      let browser: Browser | undefined;
+      let detailPage: Page;
+      try {
+        // A validated collection session must not silently reconnect after a disconnect.
+        browser = await getBrowser(false, undefined, "detail");
+        detailPage = await createHiddenPage(browser);
+      } catch (error) {
+        control.signal.throwIfAborted();
+        if (!browser || !browser.isConnected())
+          throw (
+            browserConnectionFailure(error) || new BrowserConnectionError("disconnected", error)
+          );
+        throw error;
+      }
       detailPages.push(detailPage);
       watchWorkPage(detailPage, "detail");
       log("page.ready", { kind: "detail" });
@@ -232,9 +247,12 @@ export async function startCrawl(
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       const access = crawlAccessFailure(error);
-      log(control.signal.aborted || access ? "crawl.paused" : "crawl.error", {
+      const connection = browserConnectionFailure(error);
+      const paused = control.signal.aborted || !!access || !!connection;
+      log(paused ? "crawl.paused" : "crawl.error", {
         error,
         accessIssue: access?.kind,
+        browserIssue: connection?.kind,
         page: cache.status.page,
         itemIndex: cache.status.itemIndex,
         detailProgress: cache.status.detailProgress,
@@ -242,13 +260,16 @@ export async function startCrawl(
       cache.status = {
         ...cache.status,
         running: false,
-        phase: control.signal.aborted || access ? "paused" : "error",
-        message: control.signal.aborted ? "采集已暂停，断点已保留。" : access?.message || message,
-        error: control.signal.aborted || access ? undefined : message,
+        phase: paused ? "paused" : "error",
+        message: control.signal.aborted
+          ? "采集已暂停，断点已保留。"
+          : connection?.message || access?.message || message,
+        error: paused ? undefined : message,
         accessIssue: access?.kind,
+        browserIssue: connection?.kind,
         detailProgress: undefined,
       };
-      if (!control.signal.aborted && !access) console.error("[CBG_CRAWL]", message);
+      if (!paused) console.error("[CBG_CRAWL]", message);
     })
     .finally(() => {
       clearInterval(lease);
