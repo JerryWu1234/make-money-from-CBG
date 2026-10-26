@@ -110,6 +110,7 @@ export function AnalysisPreview() {
   const preparation = data?.capturePreparation;
   const running = !!active || !!preparation;
   const waitingForRoles = active?.phase === "waiting_capture";
+  const cooling = !!active?.rateLimit && active.rateLimit.retryAt > Date.now();
   const waitingDetail = data?.captureTasks?.total ?? data?.counts.waitingDetail ?? 0;
   const pendingDetail = data?.captureTasks?.pending ?? data?.counts.pendingDetail ?? waitingDetail;
   const failedDetail = data?.captureTasks?.failed ?? data?.counts.failedDetail ?? 0;
@@ -433,6 +434,19 @@ export function AnalysisPreview() {
               个角色；修改后在下次开始、继续或重试时生效。
             </p>
             <p className="analysis-start-hint">默认新号配额 7、老号配额 3；空闲名额可互相借用。</p>
+            <p className="analysis-start-hint">
+              遇到 AI 限流时统一冷却、降低请求并发，成功后逐步恢复。
+            </p>
+            {run?.rateLimit && (
+              <p className="analysis-pending-note" role="status" aria-label="AI限流恢复状态">
+                {run.rateLimit.retryAt > Date.now()
+                  ? `AI 服务限流冷却中，最早 ${displayTime(new Date(run.rateLimit.retryAt).toISOString())} 后尝试恢复。`
+                  : active
+                    ? "AI 服务正在降速恢复。"
+                    : "下次继续时先以较低并发恢复。"}
+                模型请求恢复并发上限：{run.rateLimit.concurrency}；角色分析并发设置保持不变。
+              </p>
+            )}
             {active && (
               <p className="analysis-start-hint" role="status">
                 分析并发上限：{active.concurrency ?? 1} · 当前在途：
@@ -471,15 +485,17 @@ export function AnalysisPreview() {
                 : preparation
                   ? `正在采集并核验角色资料：${preparation.completed}/${preparation.total} 个 · ${preparation.current || "准备下一角色"} · ${preparation.message}`
                   : active
-                    ? waitingForRoles
-                      ? active.total === 0
-                        ? "正在等待首个角色资料采集完整，完成后自动开始分析，无需再次点击。"
-                        : `资料完整的现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
-                      : (active.runningCount || 0) > 1
-                        ? `正在并发处理：${active.currentItems?.join("、")} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
-                        : searchingEquipment
-                          ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
-                          : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                    ? cooling
+                      ? "AI 服务请求受限，正在等待冷却；已完成结果保留，已发出请求继续保存。"
+                      : waitingForRoles
+                        ? active.total === 0
+                          ? "正在等待首个角色资料采集完整，完成后自动开始分析，无需再次点击。"
+                          : `资料完整的现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
+                        : (active.runningCount || 0) > 1
+                          ? `正在并发处理：${active.currentItems?.join("、")} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                          : searchingEquipment
+                            ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                            : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
                     : data.counts.total === 0
                       ? "尚未采集商品；可以先开始分析并等待，角色资料采集完整后会自动分析。"
                       : run && !sameModel
@@ -559,11 +575,15 @@ export function AnalysisPreview() {
                 {preparation
                   ? "完整采集中"
                   : running
-                    ? waitingForRoles
-                      ? "等待新角色"
-                      : searchingEquipment
-                        ? "联网查价中"
-                        : "分析中"
+                    ? cooling
+                      ? "限流冷却中"
+                      : active?.rateLimit
+                        ? "降速恢复中"
+                        : waitingForRoles
+                          ? "等待新角色"
+                          : searchingEquipment
+                            ? "联网查价中"
+                            : "分析中"
                     : run?.status === "paused"
                       ? "已暂停"
                       : run?.status === "completed"

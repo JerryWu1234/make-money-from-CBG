@@ -277,6 +277,7 @@ async function runCodexRequest(
           if (event.item.type === "agent_message") finalResponse = event.item.text;
         }
         if (event.type === "turn.failed") throw new Error(event.error.message);
+        if (event.type === "error") throw new Error(event.message);
         // Closing this completed stream also releases the SDK-owned process.
         if (event.type === "turn.completed") return { items, finalResponse, usage: event.usage };
       }

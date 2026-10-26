@@ -961,6 +961,7 @@ describe("持久化的商品分析队列", () => {
       .mockImplementationOnce((_p, _s, signal) => untilAborted(signal));
     const id = await runner.start("deepseek");
     await vi.waitFor(() => expect(analyze).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(store.run(id)?.completed).toBe(1));
     await runner.pause(id);
     expect(store.run(id)).toMatchObject({ status: "paused", completed: 1, queued: 1 });
     const interrupted = store

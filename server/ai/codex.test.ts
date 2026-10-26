@@ -80,6 +80,25 @@ afterEach(async () => {
 });
 
 describe("官方 Codex 登录与 SDK", () => {
+  it("流直接返回429致命错误时保留原始原因，不误报未完成", async () => {
+    mocks.runStreamed.mockResolvedValue({
+      events: (async function* () {
+        yield {
+          type: "error",
+          message: "exceeded retry limit, last status: 429 Too Many Requests",
+        };
+      })(),
+    });
+    const { requestCodex } = await import("./codex");
+    await expect(
+      requestCodex("模拟角色", new AbortController().signal, {
+        model: "gpt-6-luna",
+        outputSchema: {},
+        bareRoleReview: true,
+      }),
+    ).rejects.toThrow("429 Too Many Requests");
+    expect(mocks.rm).toHaveBeenCalledOnce();
+  });
   it("已完成的流不再接收上级取消，避免SDK清理子进程监听后触发未处理AbortError", async () => {
     const controller = new AbortController();
     const lateAbort = vi.fn();

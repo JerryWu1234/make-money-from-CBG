@@ -9,6 +9,7 @@ test("商品记录尚未返回时先显示实时进度，旧记录响应不能�
     recordCalls = 0;
   let release!: () => void;
   let releaseRanking!: () => void;
+  let rateLimit: AnalysisRun["rateLimit"] = null;
   const records = new Promise<void>((resolve) => {
     release = resolve;
   });
@@ -34,6 +35,7 @@ test("商品记录尚未返回时先显示实时进度，旧记录响应不能�
     runningCount: 10,
     concurrency: 10,
     phase: "analysis",
+    rateLimit,
   });
   const counts = { total: 20, complete: 20, waitingDetail: 0, pendingDetail: 0, failedDetail: 0 };
   await page.route("**/*", async (route) => {
@@ -99,6 +101,19 @@ test("商品记录尚未返回时先显示实时进度，旧记录响应不能�
     await expect(current).toHaveText("6 / 20", { timeout: 5000 });
     expect(progressCalls).toBeGreaterThan(1);
     expect(recordCalls).toBe(1);
+    rateLimit = { retryAt: Date.now() + 60_000, concurrency: 1, rounds: 1 };
+    const cooling = page.getByRole("status", { name: "AI限流恢复状态" });
+    await expect(cooling).toContainText("AI 服务限流冷却中");
+    await expect(cooling).toContainText("模型请求恢复并发上限：1");
+    await expect(page.locator(".analysis-visual-focus strong")).toHaveText("限流冷却中");
+    await expect(page.getByRole("spinbutton", { name: "分析并发数" })).toHaveValue("10");
+    await page.screenshot({ path: testInfo.outputPath("rate-limit-cooling.png"), fullPage: true });
+    rateLimit = { retryAt: 0, concurrency: 2, rounds: 0 };
+    await expect(cooling).toContainText("AI 服务正在降速恢复");
+    await expect(cooling).toContainText("模型请求恢复并发上限：2");
+    await expect(page.locator(".analysis-visual-focus strong")).toHaveText("降速恢复中");
+    rateLimit = null;
+    await expect(cooling).toHaveCount(0);
     const initialRecords = page.waitForResponse((response) => {
       const url = new URL(response.url());
       return (

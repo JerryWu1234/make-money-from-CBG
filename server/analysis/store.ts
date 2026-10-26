@@ -3,6 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import { setImmediate as yieldThread } from "node:timers/promises";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import type { AiProvider } from "../ai/types";
+import { aiRequestMessage } from "../ai/request-error";
+import type { AnalysisBackoff } from "./rate-limit";
 import type { Listing, SavedRoleRecord } from "../crawler/types";
 import { analysisPrompt, RULE_VERSION, textHash } from "./contract";
 import { buildProductDocument } from "./product-document";
@@ -175,7 +177,8 @@ export class AnalysisStore {
       finished_at TEXT, raw_response TEXT, usage_json TEXT, error TEXT
     );
     CREATE INDEX IF NOT EXISTS analysis_attempts_task ON analysis_attempts(task_id,created_at DESC,id DESC);
-    CREATE TABLE IF NOT EXISTS analysis_lock (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL);`);
+    CREATE TABLE IF NOT EXISTS analysis_lock (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS analysis_provider_backoff (provider TEXT PRIMARY KEY, state_json TEXT NOT NULL);`);
     if (
       !db
         .prepare("PRAGMA table_info(analysis_tasks)")
@@ -354,8 +357,9 @@ export class AnalysisStore {
           status: String(row.status) as AnalysisRun["status"],
           createdAt: String(row.created_at),
           updatedAt: String(row.updated_at),
-          error: pauseNotice ? null : storedError,
+          error: pauseNotice || !storedError ? null : aiRequestMessage(storedError),
           pauseNotice,
+          rateLimit: this.providerBackoff(String(row.provider) as AiProvider),
           total: Number(row.total),
           completed: Number(row.completed),
           failed: Number(row.failed),
@@ -550,6 +554,22 @@ export class AnalysisStore {
     this.db
       .prepare("UPDATE analysis_runs SET concurrency=? WHERE id=?")
       .run(String(concurrency), id);
+  }
+  providerBackoff(provider: AiProvider): AnalysisBackoff | null {
+    const row = this.db
+      .prepare("SELECT state_json FROM analysis_provider_backoff WHERE provider=?")
+      .get(provider);
+    return row ? (JSON.parse(String(row.state_json)) as AnalysisBackoff) : null;
+  }
+  saveProviderBackoff(provider: AiProvider, state: AnalysisBackoff | null, owner: string) {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    if (state)
+      this.db
+        .prepare(
+          "INSERT INTO analysis_provider_backoff(provider,state_json) VALUES(?,?) ON CONFLICT(provider) DO UPDATE SET state_json=excluded.state_json",
+        )
+        .run(provider, JSON.stringify(state));
+    else this.db.prepare("DELETE FROM analysis_provider_backoff WHERE provider=?").run(provider);
   }
   private reusableResult(
     provider: AiProvider,
@@ -1177,6 +1197,7 @@ export class AnalysisStore {
       raw?: string;
       usage?: unknown;
       error?: string;
+      diagnosticError?: string;
       requeue?: boolean;
     },
   ) {
@@ -1192,7 +1213,7 @@ export class AnalysisStore {
           now(),
           outcome.raw ?? null,
           outcome.usage == null ? null : JSON.stringify(outcome.usage),
-          outcome.error ?? null,
+          outcome.diagnosticError ?? outcome.error ?? null,
           attempt,
         );
       this.db

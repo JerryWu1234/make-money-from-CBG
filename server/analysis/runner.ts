@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AiProvider } from "../ai/types";
+import { aiRequestIssue, aiRequestMessage } from "../ai/request-error";
+import { AnalysisRateLimit } from "./rate-limit";
 import type { SavedRoleRecord } from "../crawler/types";
 import { equipmentInventory, type EquipmentPricingSnapshot } from "./equipment-pricing";
 import type { PetPricingSnapshot } from "./pet-pricing";
@@ -220,15 +222,51 @@ export class AnalysisRunner {
     try {
       if (retryFailed) this.store.retry(id);
       this.store.setRun(id, "running", null, owner);
-      this.launch(id, owner, client, count);
+      this.launch(id, owner, client, count, run.error);
       return id;
     } catch (error) {
       this.store.release(owner);
       throw error;
     }
   }
-  private launch(id: string, owner: string, client: AnalysisClient, concurrency: number) {
+  private launch(
+    id: string,
+    owner: string,
+    client: AnalysisClient,
+    concurrency: number,
+    previousError?: string | null,
+  ) {
     this.store.setConcurrency(id, concurrency, owner);
+    const provider = this.store.run(id)!.provider;
+    const previous =
+      this.store.providerBackoff(provider) ||
+      (previousError && aiRequestIssue(new Error(previousError))?.kind === "rate_limit"
+        ? { retryAt: Date.now() + 30_000, concurrency: 1, rounds: 0 }
+        : null);
+    const limit = new AnalysisRateLimit(concurrency, previous, (state) =>
+      this.store.saveProviderBackoff(provider, state, owner),
+    );
+    const providerPause = { message: null as string | null };
+    const limitedClient: AnalysisClient = {
+      ...client,
+      analyze: async (prompt, schema, signal, options) => {
+        try {
+          return await limit.run(
+            () => pricingUntilAborted(client.analyze(prompt, schema, signal, options), signal),
+            signal,
+          );
+        } catch (error) {
+          if (!signal.aborted && aiRequestIssue(error)) {
+            const failure = error instanceof Error ? error : new Error("AI 服务请求受限（429）");
+            providerPause.message ||= aiRequestMessage(failure.message);
+            // Reject requests still waiting for a permit; let already issued
+            // requests settle within their existing cancellation/timeout budget.
+            limit.halt(failure);
+          }
+          throw error;
+        }
+      },
+    };
     const controller = new AbortController();
     const activity = { id, owner, controller, completion: Promise.resolve() };
     this.active = activity;
@@ -239,7 +277,14 @@ export class AnalysisRunner {
         controller.abort(new Error("无法续期分析锁，请继续分析"));
       }
     }, 30_000);
-    activity.completion = this.process(id, owner, client, controller, concurrency)
+    activity.completion = this.process(
+      id,
+      owner,
+      limitedClient,
+      controller,
+      concurrency,
+      providerPause,
+    )
       .catch((error: unknown) => {
         if (this.store.owns(owner))
           this.store.setRun(
@@ -261,6 +306,7 @@ export class AnalysisRunner {
     client: AnalysisClient,
     controller: AbortController,
     concurrency: number,
+    providerPause: { message: string | null },
   ) {
     const stop = controller.signal;
     const pending = new Set<Promise<void>>();
@@ -269,19 +315,25 @@ export class AnalysisRunner {
     let nextSingleLane: AnalysisLane = "new";
     try {
       while (!stop.aborted && this.store.owns(owner)) {
+        if (providerPause.message) {
+          await Promise.allSettled(pending);
+          if (!stop.aborted && this.store.owns(owner))
+            this.store.setRun(id, "paused", providerPause.message, owner);
+          return;
+        }
         if (this.store.run(id)?.marketExpired) {
           this.store.setRun(id, "paused", EXPIRED_MARKET_NOTICE, owner);
           return;
         }
         this.store.appendCaptured(id, owner);
-        while (!stop.aborted && pending.size < concurrency) {
+        while (!stop.aborted && !providerPause.message && pending.size < concurrency) {
           const preferredLane =
             concurrency === 1 ? nextSingleLane : running.new < limits.newLimit ? "new" : "old";
           const task = this.store.next(id, preferredLane);
           if (!task) break;
           running[task.lane]++;
           nextSingleLane = task.lane === "new" ? "old" : "new";
-          const work = this.processTask(task, owner, client, controller)
+          const work = this.processTask(task, owner, client, controller, providerPause)
             .catch((error: unknown) => {
               if (!stop.aborted && this.store.owns(owner))
                 this.store.setRun(
@@ -333,6 +385,7 @@ export class AnalysisRunner {
     owner: string,
     client: AnalysisClient,
     controller: AbortController,
+    providerPause: { message: string | null },
   ) {
     const id = task.runId;
     const stop = controller.signal;
@@ -676,19 +729,34 @@ export class AnalysisRunner {
           : signal.aborted
             ? "分析超时，请重试"
             : error instanceof Error
-              ? error.message
+              ? aiRequestMessage(error.message)
               : "分析失败";
         const fatal =
-          /401|403|429|unauth|authentication|api.?key|登录|quota|rate.?limit|额度|余额|insufficient|账号已变化|model.*(?:not available|not found|unsupported)/i.test(
+          /401|403|429|unauth|authentication|api.?key|登录|quota|rate.?limit|限流|额度|余额|insufficient|账号已变化|model.*(?:not available|not found|unsupported)/i.test(
             message,
           );
         this.store.finish(task, attempt, owner, {
           state: stop.aborted ? "interrupted" : "failed",
           error: message,
+          diagnosticError:
+            !stop.aborted && !signal.aborted && error instanceof Error
+              ? error.cause instanceof Error
+                ? error.cause.message
+                : error.message
+              : undefined,
           raw,
           usage,
           requeue: stop.aborted || fatal,
         });
+        if (!stop.aborted && providerPause.message) {
+          this.store.setRun(
+            id,
+            "running",
+            providerPause.message + " 正在保存已发出请求的结果，完成后暂停。",
+            owner,
+          );
+          return;
+        }
         pause(message);
         return;
       }

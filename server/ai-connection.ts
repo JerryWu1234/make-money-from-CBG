@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { publicAiRequestError } from "./ai/request-error";
 import {
   codexAccount,
   codexModel,
@@ -341,7 +342,7 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
             ...(options?.bareRoleReview ? { bareRoleReview: true } : {}),
           });
         } catch (error) {
-          throw new Error(publicError(error));
+          throw publicAiRequestError(error, publicError(error));
         }
       },
     };
@@ -361,7 +362,7 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
       try {
         return await requestDeepSeek(key, model, prompt, signal, 8192);
       } catch (error) {
-        throw new Error(publicError(error, key));
+        throw publicAiRequestError(error, publicError(error, key));
       }
     },
   };

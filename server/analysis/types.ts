@@ -62,6 +62,7 @@ export type AnalysisRun = {
   updatedAt: string;
   error: string | null;
   pauseNotice?: string | null;
+  rateLimit?: import("./rate-limit").AnalysisBackoff | null;
   total: number;
   completed: number;
   failed: number;
