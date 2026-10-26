@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { CrawlStore } from "./store";
 import { crawl } from "./runner";
 import { CAPTURE_VERSION } from "./compact";
-import { collectCompleteCapture, IncompleteCaptureError } from "./capture-readiness";
+import {
+  collectCompleteCapture,
+  IncompleteCaptureError,
+  DetailNavigationResetError,
+} from "./capture-readiness";
 import {
   CrawlAccessError,
   ListingChangedError,
@@ -1071,6 +1075,51 @@ describe("持续发现新号和历史详情共享采集池", () => {
     await flush();
     expect(readSaved(db, added.key)?.status).toBe("complete");
     expect(read).toHaveBeenCalledTimes(3);
+    control.abort(new Error("暂停"));
+    await outcome;
+  });
+  it("单件导航清理失败保留此前快照，其他商品及后续新号继续入库", async () => {
+    vi.useFakeTimers();
+    const db = memory(),
+      fresh = [item(1), item(2), item(3)],
+      pages = [fresh],
+      src = source(pages),
+      control = new AbortController();
+    const broken = fresh[1],
+      partial = detail(broken);
+    partial.tabs = [
+      {
+        name: "人物/修炼",
+        text: "已完整读取的原文",
+        fields: [],
+        tables: [],
+        elements: [],
+        tooltips: [],
+      },
+    ];
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce(partial)
+      .mockRejectedValue(new DetailNavigationResetError(new Error("模拟导航清理失败")));
+    src.detail = vi.fn(async (row) =>
+      row.key === broken.key ? collectCompleteCapture(read, control.signal, vi.fn()) : detail(row),
+    );
+    const outcome = crawl(src, db, control.signal, vi.fn(), {
+      watch: true,
+      concurrency: 4,
+      headIntervalMs: 100,
+    }).catch((error: unknown) => error);
+    await flush();
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(readSaved(db, broken.key)?.status).toBe("failed");
+    expect(readSaved(db, broken.key)?.detail?.tabs[0].text).toBe("已完整读取的原文");
+    expect(db.count()).toBe(2);
+    const added = item(0, 1001);
+    pages[0] = [added, ...fresh];
+    await vi.advanceTimersByTimeAsync(100);
+    await flush();
+    expect(readSaved(db, added.key)?.status).toBe("complete");
+    expect(read).toHaveBeenCalledTimes(2);
     control.abort(new Error("暂停"));
     await outcome;
   });

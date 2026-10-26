@@ -22,6 +22,9 @@ import { IncompleteCaptureError } from "./capture-readiness";
 import { readDetailIdentity } from "./detail-identity";
 import { captureBrowserStep } from "../browser-evidence";
 import { accessNavigationFailure } from "./access-navigation";
+import { DetailReadState, readDetailRevision, cachedModelsUnchanged } from "./detail-read-state";
+import { completeSchoolSkillsFromText, schoolSkillsComplete } from "./school-skills";
+import { readOfficialModels } from "./official-model-page";
 
 export const MAIN_TABS = [
   "人物/修炼",
@@ -154,7 +157,7 @@ async function inspectItems(
   worn?: { listing: Listing; source: WornEquipmentSource | null },
 ) {
   const petItems = /^召唤兽 \d+$/.test(snapshot.name);
-  const count = await page
+  const inspection = await page
     .locator(
       petItems
         ? "[data-cbg-detail-root] img[data-cbg-pet-item]:visible"
@@ -172,9 +175,24 @@ async function inspectItems(
             el.getAttribute("src") || "",
           ),
       );
-      icons.forEach((el, index) => el.setAttribute("data-cbg-inspect-index", String(index)));
-      return icons.length;
+      const models: string[] = [];
+      icons.forEach((el, index) => {
+        el.setAttribute("data-cbg-inspect-index", String(index));
+        let model = "";
+        for (
+          let node: Element | null = el, depth = 0;
+          node && depth < 3 && !node.hasAttribute("data-cbg-detail-root");
+          node = node.parentElement, depth++
+        )
+          model ||=
+            node.getAttribute("data_equip_type") || node.getAttribute("data-equip-type") || "";
+        if (model) models.push(model);
+      });
+      return { count: icons.length, models };
     });
+  const metadata = await readOfficialModels(page, inspection.models);
+  for (const issue of metadata.issues) report("物品元数据读取异常：" + JSON.stringify(issue));
+  const count = inspection.count;
   for (let index = 0; index < count; index++) {
     checkAborted(signal);
     const icon = page.locator(`[data-cbg-inspect-index="${index}"]`);
@@ -198,15 +216,8 @@ async function inspectItems(
               attrs[a.name.replace(/^data-/, "data_")] = a.value;
           }
         // Exact model metadata from the official page is an observed name, not a guessed mapping.
-        const globals = window as unknown as {
-          CBG_GAME_CONFIG?: { equip_info?: Record<string, { name?: unknown }> };
-        };
-        const model = attrs.data_equip_type;
-        const modelName =
-          model && /^[1-9]\d*$/.test(model)
-            ? globals.CBG_GAME_CONFIG?.equip_info?.[model]?.name
-            : undefined;
-        if (typeof modelName === "string") attrs.data_official_model_name = modelName;
+        delete attrs.data_official_model_name;
+        delete attrs.data_official_model_metadata;
         const container = el.closest("[data-equip-location], [data_equip_location], [id]");
         if (
           !attrs.data_equip_location &&
@@ -236,6 +247,8 @@ async function inspectItems(
       });
     let attrs = observations[0];
     if (!attrs) continue;
+    const modelMetadata = metadata.models[attrs.data_equip_type];
+    if (modelMetadata) attrs.data_official_model_metadata = modelMetadata;
     let rawLevel: string | undefined;
     if (worn) {
       const merged = mergeWornEquipmentLevel(attrs, worn.listing, worn.source);
@@ -247,7 +260,14 @@ async function inspectItems(
     // 名称、技能类别或装备属性已在元素里时直接读取，不触发无意义的提示框。
     let item = itemFromAttributes(attrs, index);
     // 已明确不在人物装备计价范围内的物品不要求普通装备属性。
-    if (!petItems && isNonRoleEquipment(item)) {
+    const dedicatedNonRoleSlot =
+      item.categorySource === "official-slot" && /^(?:法宝|灵宝|神器)$/.test(item.category || "");
+    if (
+      !petItems &&
+      isNonRoleEquipment(item) &&
+      (dedicatedNonRoleSlot ||
+        (!equipmentNameUnresolved(item.name) && (item.description || item.attributes)))
+    ) {
       snapshot.items!.push(item);
       continue;
     }
@@ -268,6 +288,7 @@ async function inspectItems(
     const incompleteEquipment =
       incompletePetEquipment ||
       (item.kind === "equipment" &&
+        !isNonRoleEquipment(item) &&
         /^道具\/法宝(?:\s*\/|$)/.test(snapshot.name) &&
         !equipmentCaptureSummary([{ ...snapshot, items: [item] }], snapshot.collectedAt || "")
           .complete);
@@ -867,6 +888,7 @@ export async function collectDetail(
   item: Listing,
   signal: AbortSignal,
   report: (message: string) => void = () => {},
+  readState = new DetailReadState(),
 ): Promise<RoleDetail> {
   await openDetail(page, item, signal, report);
   const tabs: TabSnapshot[] = [];
@@ -874,10 +896,22 @@ export async function collectDetail(
   let petCapture: RoleDetail["petCapture"];
   let step = "详情";
   let raw: RoleDetail["raw"] = {};
+  const reusedTabs: TabSnapshot[] = [];
   try {
+    const revision = await readDetailRevision(page, item);
+    readState.begin(revision);
     for (const name of MAIN_TABS) {
       step = name;
       checkAborted(signal);
+      const saved = readState.get(name);
+      if (saved && (await cachedModelsUnchanged(page, saved.tabs))) {
+        tabs.push(...saved.tabs);
+        reusedTabs.push(...saved.tabs);
+        if (saved.petCapture) petCapture = saved.petCapture;
+        report(`已核对商品原文未变，复用本轮完整标签：${name}`);
+        continue;
+      }
+      const start = tabs.length;
       report(`正在读取标签 ${MAIN_TABS.indexOf(name) + 1}/${MAIN_TABS.length}：${name}`);
       const tab = page.getByText(name, { exact: true }).filter({ visible: true }).first();
       if (!(await tab.count())) throw new Error(`详情缺少「${name}」标签，未标记完整采集`);
@@ -908,6 +942,8 @@ export async function collectDetail(
           { flow: "collection", stage: `标签读取完成-${name}`, key: item.key },
           signal,
         );
+        if (equipmentCaptureSummary(snapshots, new Date().toISOString(), equipmentIssues).complete)
+          readState.save(name, snapshots);
         continue;
       }
       if (name === "召唤兽/孩子") {
@@ -968,6 +1004,12 @@ export async function collectDetail(
           signal,
         );
       }
+      const group = tabs.slice(start).map(completeSchoolSkillsFromText);
+      if (
+        (name !== "技能" || schoolSkillsComplete(group)) &&
+        (name !== "召唤兽/孩子" || petCapture?.complete)
+      )
+        readState.save(name, group, name === "召唤兽/孩子" ? petCapture : undefined);
     }
     await captureBrowserStep(
       page,
@@ -1005,6 +1047,17 @@ export async function collectDetail(
     const now = new Date().toISOString();
     step = "角色本体核验";
     const valuation = await captureValuation(page);
+    if (
+      revision &&
+      (revision !== (await readDetailRevision(page, item)) ||
+        !(await cachedModelsUnchanged(page, reusedTabs)))
+    ) {
+      readState.invalidate();
+      throw Object.assign(
+        new Error("详情读取期间商品原文或身份变化，已取消本轮标签复用，需重新核验"),
+        { name: "IncompleteDetailError" },
+      );
+    }
     valuation.issues = [
       ...new Set([...valuation.issues, ...roleIdentityIssues(valuation.source, item)]),
     ];

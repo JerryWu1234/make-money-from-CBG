@@ -23,6 +23,8 @@ import { hoverListing, readListings } from "./page";
 import { hoverForInspection } from "../viewport";
 import { captureValuation } from "./valuation-capture";
 import { captureIssues, IncompleteCaptureError } from "./capture-readiness";
+import { cleanDiagnostic } from "../diagnostics";
+import { isNonRoleEquipment } from "./compact";
 import { CrawlStore } from "./store";
 
 vi.mock("./page", async (original) => ({
@@ -82,11 +84,13 @@ const fixture = (
   nonEquipmentHtml = "",
   equipmentDescription = "",
   equipmentHtml?: string,
+  schoolCount = 7,
 ) => {
   const gear = `<p>道具和法宝</p><div id="RoleEquip"><a data_kindid="999" data_equip_name="新武器" data_equip_desc="${equipmentDescription}" data_equip_category="武器" data_tip_box="RoleEquipTipsBox"><img ${iconKindId ? `data_kindid="${iconKindId}"` : ""} width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseout="document.getElementById('RoleEquipTipsBox').style.display='none'" onmouseover="${missingTooltip ? "" : "document.getElementById('RoleEquipTipsBox').style.display='block';document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'"}"></a></div>`;
   const skills =
     "<p>师门技能</p>" +
     ["甲", "乙", "丙", "丁", "戊", "己", "庚"]
+      .slice(0, schoolCount)
       .map(
         (suffix) =>
           `<p>150</p><img width="30" height="30" data_skill_type="school_skill" data_equip_name="测试技能${suffix}" data_equip_level="150"><p>测试技能${suffix}</p>`,
@@ -196,12 +200,13 @@ describe("装备局部补采", () => {
       await page.route(url, (route) =>
         route.fulfill({ contentType: "text/html", body: fixture(false) }),
       );
+      const log = vi.fn();
       const source = createCrawlSource({
         listPage,
         detailPage: page,
         signal: new AbortController().signal,
         detailTimeoutMs: 5000,
-        log: vi.fn(),
+        log,
         onDetailProgress: (message) => {
           if (!blocked && message.includes("正在读取标签 2/7"))
             blocked = vi
@@ -211,6 +216,21 @@ describe("装备局部补采", () => {
       });
       const error = await source.detail(listing).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(IncompleteCaptureError);
+      expect((error as Error).message).toContain("5 秒总时限");
+      expect((error as Error).message).not.toContain("采集已暂停");
+      expect(log).toHaveBeenCalledWith(
+        "detail.cancelled",
+        expect.objectContaining({
+          key: listing.key,
+          reasonCode: "DETAIL_TIMEOUT",
+          stage: expect.stringContaining("标签 2/7"),
+        }),
+      );
+      const event = log.mock.calls.find(([name]) => name === "detail.cancelled")![1];
+      expect(JSON.parse(JSON.stringify(cleanDiagnostic(event)))).toMatchObject({
+        reasonCode: "DETAIL_TIMEOUT",
+        stage: expect.stringContaining("标签 2/7"),
+      });
       expect((error as IncompleteCaptureError).detail.tabs.map((tab) => tab.name)).toEqual([
         "人物/修炼",
       ]);
@@ -224,6 +244,251 @@ describe("装备局部补采", () => {
       await listPage.close();
     }
   }, 15_000);
+  it("同一商品原文未变时，中途超时只重读未完成标签", async () => {
+    const page = await browser.newPage();
+    const progress = vi.fn();
+    let interrupted = false;
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            fixture(false) +
+            '<textarea id="equip_desc_value" hidden>same-role-source-v1</textarea><script>const EquipInfo={server_id:367,eid:"equipment-fixture"}</script>',
+        }),
+      );
+      const result = await createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        signal: new AbortController().signal,
+        log: vi.fn(),
+        onDetailProgress: (message) => {
+          progress(message);
+          if (!interrupted && message.includes("标签 7/7")) {
+            interrupted = true;
+            throw Object.assign(new Error("模拟玩家之家读取超时"), { name: "TimeoutError" });
+          }
+        },
+      }).detail(listing);
+      expect(captureIssues(result, true, true, listing)).toEqual([]);
+      expect(progress.mock.calls.filter(([message]) => message.includes("标签 2/7"))).toHaveLength(
+        1,
+      );
+      expect(progress.mock.calls.filter(([message]) => message.includes("标签 7/7"))).toHaveLength(
+        2,
+      );
+      expect(new Set(result.tabs.map((tab) => tab.name)).size).toBe(result.tabs.length);
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+  it.each(["原文变化", "内联配置变化", "身份缺失"])(
+    "重读遇到%s时不复用旧标签",
+    async (scenario) => {
+      const page = await browser.newPage();
+      const progress = vi.fn();
+      let requests = 0,
+        interrupted = false;
+      try {
+        await page.route(url, (route) => {
+          requests++;
+          const version = scenario === "原文变化" ? requests : 1;
+          const identity =
+            scenario === "身份缺失"
+              ? ""
+              : '<script>const EquipInfo={server_id:367,eid:"equipment-fixture"}</script>';
+          const config =
+            "<script>const CBG_GAME_CONFIG={equip_info:{},version:" +
+            (scenario === "内联配置变化" ? requests : 1) +
+            "}</script>";
+          return route.fulfill({
+            contentType: "text/html",
+            body:
+              fixture(false) +
+              `<textarea id="equip_desc_value" hidden>role-source-${version}</textarea>` +
+              identity +
+              config,
+          });
+        });
+        const result = await createCrawlSource({
+          listPage: page,
+          detailPage: page,
+          signal: new AbortController().signal,
+          log: vi.fn(),
+          onDetailProgress: (message) => {
+            progress(message);
+            if (!interrupted && message.includes("标签 7/7")) {
+              interrupted = true;
+              throw Object.assign(new Error("模拟末尾中断"), { name: "TimeoutError" });
+            }
+          },
+        }).detail(listing);
+        expect(captureIssues(result, true, true, listing)).toEqual([]);
+        expect(
+          progress.mock.calls.filter(([message]) => message.includes("标签 2/7")),
+        ).toHaveLength(2);
+      } finally {
+        await page.close();
+      }
+    },
+    30_000,
+  );
+  it.each(["技能不完整", "宝宝不完整"])(
+    "%s不得保存为完成检查点，重读后仍拦住半成品",
+    async (scenario) => {
+      const page = await browser.newPage();
+      const progress = vi.fn();
+      try {
+        await page.route(url, (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body:
+              fixture(
+                false,
+                scenario === "宝宝不完整" ? "<p>召唤兽(1/10)</p>" : undefined,
+                undefined,
+                "",
+                "",
+                undefined,
+                scenario === "技能不完整" ? 6 : 7,
+              ) +
+              '<textarea id="equip_desc_value" hidden>role-source</textarea><script>const EquipInfo={server_id:367,eid:"equipment-fixture"}</script>',
+          }),
+        );
+        const error = await createCrawlSource({
+          listPage: page,
+          detailPage: page,
+          signal: new AbortController().signal,
+          log: vi.fn(),
+          onDetailProgress: progress,
+        })
+          .detail(listing)
+          .catch((error: unknown) => error);
+        expect(error).toBeInstanceOf(IncompleteCaptureError);
+        const step = scenario === "技能不完整" ? "标签 2/7" : "标签 4/7";
+        expect(progress.mock.calls.filter(([message]) => message.includes(step))).toHaveLength(3);
+        expect(
+          captureIssues((error as IncompleteCaptureError).detail, true, true, listing).join("；"),
+        ).toContain(scenario === "技能不完整" ? "7项" : "宝宝");
+      } finally {
+        await page.close();
+      }
+    },
+    30_000,
+  );
+  it("已分类道具读取关联提示框用途，不继续等待人物装备数值", async () => {
+    const page = await browser.newPage();
+    try {
+      const equipment =
+        '<div id="RoleUsingEquips"></div><div id="RoleStoreEquips"><img width="40" height="40" data_equip_type="90001" data_tip_box="StoreItemTipsBox" onmouseover="document.getElementById(\'StoreItemTipsBox\').style.display=\'block\'"></div><div id="StoreItemTipsBox" style="display:none;white-space:pre-line">官网道具\n完整用途说明</div>';
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            fixture(false, undefined, undefined, "", "", equipment) +
+            '<script>class RoleNameConf{get_equip_info(){return {name:"官网道具",category:"道具"}}}</script>',
+        }),
+      );
+      const result = await createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        signal: new AbortController().signal,
+        onDetailProgress: vi.fn(),
+        log: vi.fn(),
+      }).detail(listing);
+      expect(captureIssues(result, true, true, listing)).toEqual([]);
+      expect(result.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].description).toContain(
+        "完整用途说明",
+      );
+    } finally {
+      await page.close();
+    }
+  }, 15_000);
+  it("相同原文和相同脚本中型号配置运行结果变化，须重新核对装备分类", async () => {
+    const page = await browser.newPage();
+    const progress = vi.fn();
+    let interrupted = false;
+    try {
+      const equipment =
+        '<div id="RoleUsingEquips"></div><div id="RoleStoreEquips"><img width="40" height="40" data_equip_type="90001" data_equip_desc="等级 30#r伤害 +100"></div>';
+      const config =
+        '<script>sessionStorage.fixtureRevision=String(Number(sessionStorage.fixtureRevision||0)+1);const CBG_GAME_CONFIG={equip_info:{90001:{name:"官网型号名称",category:Number(sessionStorage.fixtureRevision)===1?"道具":"人物装备"}}};const EquipInfo={server_id:367,eid:"equipment-fixture"}</script>';
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            fixture(false, undefined, undefined, "", "", equipment) +
+            '<textarea id="equip_desc_value" hidden>role-source</textarea>' +
+            config,
+        }),
+      );
+      const result = await createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        signal: new AbortController().signal,
+        log: vi.fn(),
+        onDetailProgress: (message) => {
+          progress(message);
+          if (!interrupted && message.includes("标签 7/7")) {
+            interrupted = true;
+            throw Object.assign(new Error("模拟末尾中断"), { name: "TimeoutError" });
+          }
+        },
+      }).detail(listing);
+      expect(captureIssues(result, true, true, listing)).toEqual([]);
+      const item = result.tabs.find((tab) => tab.name === "道具/法宝")!.items![0];
+      expect(isNonRoleEquipment(item)).toBe(false);
+      expect(progress.mock.calls.filter(([message]) => message.includes("标签 3/7"))).toHaveLength(
+        2,
+      );
+      expect(progress.mock.calls.filter(([message]) => message.includes("标签 2/7"))).toHaveLength(
+        1,
+      );
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
+  it("子页中断不能把父标签提前标记完成", async () => {
+    const page = await browser.newPage();
+    const progress = vi.fn();
+    let interrupted = false;
+    try {
+      const child =
+        '<script>const originalShow=show;show=function(name){originalShow(name);if(name==="坐骑")document.getElementById("panel").innerHTML+=\'<button role="tab">坐骑子页</button>\'}</script>';
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            fixture(false) +
+            '<textarea id="equip_desc_value" hidden>role-source</textarea><script>const EquipInfo={server_id:367,eid:"equipment-fixture"}</script>' +
+            child,
+        }),
+      );
+      const result = await createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        signal: new AbortController().signal,
+        log: vi.fn(),
+        onDetailProgress: (message) => {
+          progress(message);
+          if (!interrupted && message.includes("正在读取 坐骑 / 坐骑子页")) {
+            interrupted = true;
+            throw Object.assign(new Error("模拟子页中断"), { name: "TimeoutError" });
+          }
+        },
+      }).detail(listing);
+      expect(captureIssues(result, true, true, listing)).toEqual([]);
+      expect(result.tabs.some((tab) => tab.name === "坐骑 / 坐骑子页")).toBe(true);
+      expect(progress.mock.calls.filter(([message]) => message.includes("标签 5/7"))).toHaveLength(
+        2,
+      );
+      expect(progress.mock.calls.filter(([message]) => message.includes("标签 2/7"))).toHaveLength(
+        1,
+      );
+    } finally {
+      await page.close();
+    }
+  }, 30_000);
   it("非人物装备的分类不跳过召唤兽自身装备的属性读取", async () => {
     const page = await browser.newPage();
     try {
@@ -246,7 +511,17 @@ describe("装备局部补采", () => {
       await page.close();
     }
   });
-  it.each(["official-model", "tooltip-heading", "unknown", "ambiguous-tooltip"])(
+  it.each([
+    "official-model",
+    "official-resolver",
+    "official-lexical",
+    "resolver-throws",
+    "resolver-constructor-throws",
+    "resolver-metadata-getter-throws",
+    "tooltip-heading",
+    "unknown",
+    "ambiguous-tooltip",
+  ])(
     "所有角色共用名称补全且未知或串提示框不能通过：%s",
     async (mode) => {
       const page = await browser.newPage();
@@ -258,9 +533,19 @@ describe("装备局部补采", () => {
           : `${image}>`;
         const html =
           fixture(false, "<p>召唤兽(0/10)</p>", undefined, "", "", equipment) +
-          (mode === "official-model"
-            ? '<script>window.CBG_GAME_CONFIG={equip_info:{31001:{name:"官网型号名称"}}}</script>'
-            : "");
+          (mode === "resolver-metadata-getter-throws"
+            ? '<script>window.CBG_GAME_CONFIG={equip_info:{31001:{name:"官网型号名称"}}};class RoleNameConf {get_equip_info(){return {get name(){throw new Error("备用元数据属性尚未就绪")}}}}</script>'
+            : mode === "resolver-constructor-throws"
+              ? '<script>window.CBG_GAME_CONFIG={equip_info:{31001:{name:"官网型号名称"}}};class RoleNameConf {constructor(){throw new Error("备用配置尚未就绪")}}</script>'
+              : mode === "resolver-throws"
+                ? '<script>window.CBG_GAME_CONFIG={equip_info:{31001:{name:"官网型号名称"}}};class RoleNameConf {get_equip_info(){throw new Error("此型号备用查表不可用")}}</script>'
+                : mode === "official-model"
+                  ? '<script>window.CBG_GAME_CONFIG={equip_info:{31001:{name:"官网型号名称"}}}</script>'
+                  : mode === "official-resolver"
+                    ? '<script>class RoleNameConf { get_equip_info(model){return model===31001?{name:"官网型号名称"}:undefined} }</script>'
+                    : mode === "official-lexical"
+                      ? '<script>const CBG_GAME_CONFIG={equip_info:{31001:{name:"官网型号名称"}}}</script>'
+                      : "");
         await page.route(url, (route) => route.fulfill({ contentType: "text/html", body: html }));
         // The heading is deliberately not the tooltip's first line.
         await page.addInitScript(() => {
@@ -278,7 +563,8 @@ describe("装备局部补采", () => {
               document.body.append(other);
             }),
           );
-        const valid = ["official-model", "tooltip-heading"].includes(mode);
+        const official = mode.startsWith("official-") || mode.startsWith("resolver-");
+        const valid = official || mode === "tooltip-heading";
         const signal = new AbortController().signal;
         const detail = valid
           ? await createCrawlSource({
@@ -294,8 +580,8 @@ describe("装备局部补采", () => {
           expect(detail.equipmentCapture?.complete).toBe(false);
           expect(item.name).toMatch(/^图标/);
         } else {
-          expect(item.name).toBe(mode === "official-model" ? "官网型号名称" : "实际武器名称");
-          expect(item.nameSource).toBe(mode === "official-model" ? "official-model" : "tooltip");
+          expect(item.name).toBe(official ? "官网型号名称" : "实际武器名称");
+          expect(item.nameSource).toBe(official ? "official-model" : "tooltip");
           expect(detail.equipmentCapture?.complete).toBe(true);
           const store = new CrawlStore(":memory:");
           try {
@@ -449,6 +735,105 @@ describe("装备局部补采", () => {
       await page.close();
     }
   });
+  it("未完成导航须先清空旧文档，再重新导航，延迟响应不能打断下一次读取", async () => {
+    const page = await browser.newPage();
+    const goto = page.goto.bind(page);
+    const navigation = vi.spyOn(page, "goto");
+    let requests = 0;
+    navigation.mockImplementation((address, options) =>
+      goto(address, {
+        ...options,
+        ...(address === url && requests === 0 ? { timeout: 40 } : {}),
+      }),
+    );
+    try {
+      await page.route(url, async (route) => {
+        requests++;
+        if (requests === 1) await new Promise((resolve) => setTimeout(resolve, 250));
+        await route.fulfill({ contentType: "text/html", body: fixture(false) }).catch(() => {});
+      });
+      const log = vi.fn();
+      const result = await createCrawlSource({
+        listPage: page,
+        detailPage: page,
+        signal: new AbortController().signal,
+        onDetailProgress: vi.fn(),
+        log,
+      }).detail(listing);
+      expect(captureIssues(result, true, true, listing)).toEqual([]);
+      expect(navigation.mock.calls.map(([address]) => address)).toEqual([url, "about:blank", url]);
+      expect(log).toHaveBeenCalledWith(
+        "detail.navigation_reset",
+        expect.objectContaining({ key: listing.key, attempt: 1 }),
+      );
+    } finally {
+      navigation.mockRestore();
+      await page.close();
+    }
+  }, 30_000);
+  it("先读到部分资料再遇导航清理失败时保存快照，关闭本件页且不再第三次导航", async () => {
+    const page = await browser.newPage(),
+      listPage = await browser.newPage();
+    const store = new CrawlStore(":memory:");
+    const goto = page.goto.bind(page);
+    let visits = 0,
+      resets = 0,
+      interrupted = false;
+    const navigation = vi.spyOn(page, "goto").mockImplementation(async (address, options) => {
+      if (address === url && ++visits === 2)
+        throw Object.assign(new Error("page.goto: Timeout 45000ms exceeded"), {
+          name: "TimeoutError",
+        });
+      if (address === "about:blank") {
+        resets++;
+        throw new Error("模拟旧导航无法结束");
+      }
+      return goto(address, options);
+    });
+    try {
+      await page.route(url, (route) =>
+        route.fulfill({ contentType: "text/html", body: fixture(false) }),
+      );
+      const log = vi.fn();
+      const error = (await createCrawlSource({
+        listPage,
+        detailPage: page,
+        signal: new AbortController().signal,
+        log,
+        onDetailProgress: (message) => {
+          if (!interrupted && message.includes("标签 7/7")) {
+            interrupted = true;
+            throw Object.assign(new Error("模拟末尾读取中断"), { name: "TimeoutError" });
+          }
+        },
+      })
+        .detail(listing)
+        .catch((error: unknown) => error)) as IncompleteCaptureError;
+      expect(error).toBeInstanceOf(IncompleteCaptureError);
+      expect(error.cause).toMatchObject({ code: "DETAIL_NAVIGATION_RESET_FAILED" });
+      expect(error.detail.tabs.some((tab) => tab.name === "技能")).toBe(true);
+      expect(visits).toBe(2);
+      expect(resets).toBe(1);
+      expect(page.isClosed()).toBe(true);
+      expect(listPage.isClosed()).toBe(false);
+      expect(log).toHaveBeenCalledWith(
+        "detail.failed",
+        expect.objectContaining({ reasonCode: "DETAIL_NAVIGATION_RESET_FAILED" }),
+      );
+      store.observe(listing);
+      store.savePartial(listing, error.detail);
+      store.fail(listing.key, error.message);
+      const saved = store.detail(listing.key) as { status: string; detail: RoleDetail };
+      expect(saved.status).toBe("failed");
+      expect(saved.detail.tabs.some((tab) => tab.name === "技能")).toBe(true);
+      expect(store.count()).toBe(0);
+    } finally {
+      navigation.mockRestore();
+      store.close();
+      await page.close();
+      await listPage.close();
+    }
+  }, 30_000);
   it.each([
     {},
     { serverId: "367" },

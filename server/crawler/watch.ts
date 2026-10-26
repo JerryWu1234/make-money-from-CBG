@@ -477,7 +477,9 @@ export async function watchCrawl(
       source.cancelDetails && inFlight.size
         ? setTimeout(() => {
             cleanup = source.cancelDetails!(
-              new Error("采集已停止，详情超过15秒收尾时限，已保留资料待补采"),
+              Object.assign(new Error("采集已停止，详情超过15秒收尾时限，已保留资料待补采"), {
+                code: "DETAIL_DRAIN_TIMEOUT",
+              }),
             );
             void cleanup.catch(() => {});
           }, 15_000)

@@ -1,5 +1,6 @@
 import type { DetailItem, Listing, RoleDetail, TabSnapshot } from "./types";
 import { completeSchoolSkillsFromText } from "./school-skills";
+import { officialModelFromAttributes } from "./official-model";
 
 export const CAPTURE_VERSION = 9;
 export function cleanDescription(value: string) {
@@ -14,7 +15,7 @@ export function equipmentNameUnresolved(name: string) {
   const text = name.trim();
   return (
     !text ||
-    /^图标\s+\d+$/.test(text) ||
+    /^图标\s*\d+$/.test(text) ||
     /^五行\s*[：:]?\s*[金木水火土](?:\s|$)/.test(text) ||
     /^(?:等级|耐久度?|命中|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|抗物理暴击|抗法术暴击|抗固伤|固伤暴击|穿刺|狂暴|治疗能力|格挡|抵抗|固定伤害|法术伤害结果|气血回复效果|回复|固伤|法伤结果|法伤|法防|封印|抗封|治疗|抗封印)(?:等级|值)?\s*[：:]?\s*[+＋−-]?\d/.test(
       text,
@@ -126,6 +127,9 @@ function hasNonRoleInventoryEvidence(item: DetailItem) {
   return (
     item.categorySource === "element" ||
     item.categorySource === "official-slot" ||
+    (item.categorySource === "official-model" &&
+      item.officialModel?.modelId === item.modelId &&
+      item.officialModel?.category === item.category) ||
     !!observedEquipmentCategory("", "", item.modelId) ||
     item.attributes?.装备对象 === "召唤兽" ||
     /装备对象[：:]?\s*召唤兽/.test(item.description || "")
@@ -309,6 +313,7 @@ export function coreEquipmentDescription(value: string, knownJewelry = false) {
     .join("\n");
 }
 export function itemFromAttributes(attrs: Record<string, string>, index: number): DetailItem {
+  const officialModel = officialModelFromAttributes(attrs);
   const skillType = attrs.data_skill_type || attrs["data-skill-type"] || "";
   const skill = !!skillType;
   const elementName = [
@@ -317,7 +322,7 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
     attrs.data_store_name,
     attrs.alt,
   ].find((value): value is string => typeof value === "string" && !equipmentNameUnresolved(value));
-  const modelName = attrs.data_official_model_name?.trim();
+  const modelName = officialModel?.name || attrs.data_official_model_name?.trim();
   const name =
     elementName ||
     (modelName && !equipmentNameUnresolved(modelName) ? modelName : `图标 ${index + 1}`);
@@ -379,14 +384,20 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
     attrs.data_item_type_name,
     attrs.data_equip_type,
   ].find((value) => value?.trim() && !/^\d+$/.test(value.trim()));
-  const observedCategory = observedEquipmentCategory(declaredCategory, location, modelId);
+  const wornRoleSlot = /^role_using_equip_(?:[1-6]|18[7-9]|190)$/.test(location || "");
+  const modelCategory = !wornRoleSlot && !declaredCategory ? officialModel?.category : undefined;
+  const observedCategory = observedEquipmentCategory(
+    declaredCategory || modelCategory,
+    location,
+    modelId,
+  );
   // 官方图标明确给出的分类 ID；不从名字、data_type 或 data_equip_type 推算。
   const kindId = attrs.data_kindid || attrs["data-kindid"];
   // 玉魄的奇袭/效形/到期描述和技能书内容不能按普通装备字段精简。
   const description =
-    /上古玉魄|召唤兽(?:技能书|内丹)|材料/.test(observedCategory || "") ||
+    /上古玉魄|法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备/.test(observedCategory || "") ||
     location === "RolePetShipin"
-      ? cleanDescription(rawDescription)
+      ? cleanDescription([rawDescription, officialModel?.description].filter(Boolean).join("\n"))
       : coreEquipmentDescription(
           rawDescription,
           /灵饰|戒指|耳饰|手镯|佩饰|配饰/.test(observedCategory || "") ||
@@ -406,7 +417,7 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
       ? /lingbao|灵宝|shenqi|神器|fabao|法宝/i.test(storage)
         ? ("official-slot" as const)
         : ("description" as const)
-      : observedEquipmentCategory("", "", modelId)
+      : modelCategory || observedEquipmentCategory("", "", modelId)
         ? ("official-model" as const)
         : declaredCategory
           ? ("element" as const)
@@ -421,6 +432,7 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
     ...(category ? { category, categorySource } : {}),
     ...(kindId ? { kindId } : {}),
     ...(modelId ? { modelId } : {}),
+    ...(officialModel ? { officialModel } : {}),
     ...(location ? { location } : {}),
     ...(description ? { description } : {}),
     ...(Object.keys(attributes).length ? { attributes } : {}),

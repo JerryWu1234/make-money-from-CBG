@@ -24,6 +24,31 @@ const complete = () => ({
   },
   petCapture: { version: 1 as const, collectedAt: "now", complete: true, issues: [] as string[] },
 });
+
+it.each(["读取返回时", "重读前"])(
+  "%s单件预算到期保留真实超时原因，不显示整轮暂停",
+  async (stage) => {
+    const controller = new AbortController();
+    const reason = Object.assign(new Error("角色详情采集超过 180 秒总时限"), {
+      name: "IncompleteDetailError",
+    });
+    const partial = complete();
+    partial.equipmentCapture.complete = false;
+    partial.equipmentCapture.issues = ["装备名称缺失"];
+    const read = vi.fn(async () => {
+      if (stage === "读取返回时") controller.abort(reason);
+      return partial;
+    });
+    const error = (await collectCompleteCapture(read, controller.signal, () =>
+      controller.abort(reason),
+    ).catch((error: unknown) => error)) as IncompleteCaptureError;
+    expect(error.message).toContain(reason.message);
+    expect(error.message).not.toContain("采集已暂停");
+    expect(error.cause).toBe(reason);
+    expect(error.detail).toBe(partial);
+    expect(read).toHaveBeenCalledOnce();
+  },
+);
 it("采集本轮自动重读缺项，核验通过才返回完整资料", async () => {
   const partial = complete();
   partial.equipmentCapture.complete = false;
@@ -34,6 +59,23 @@ it("采集本轮自动重读缺项，核验通过才返回完整资料", async (
   expect(captureIssues(captured, true)).toEqual([]);
   expect(read).toHaveBeenCalledTimes(2);
   expect(report).toHaveBeenCalledWith(expect.stringContaining("本轮内自动重读"));
+});
+it("已有部分资料后导航清理失败，带出部分资料且停止本件后续重读", async () => {
+  const partial = complete();
+  partial.equipmentCapture.complete = false;
+  partial.equipmentCapture.issues = ["待补齐武器"];
+  const reason = Object.assign(new Error("详情导航清理失败"), {
+    name: "IncompleteDetailError",
+    code: "DETAIL_NAVIGATION_RESET_FAILED",
+  });
+  const read = vi.fn().mockResolvedValueOnce(partial).mockRejectedValue(reason);
+  const error = (await collectCompleteCapture(read, new AbortController().signal, vi.fn()).catch(
+    (error: unknown) => error,
+  )) as IncompleteCaptureError;
+  expect(error).toBeInstanceOf(IncompleteCaptureError);
+  expect(error.detail).toBe(partial);
+  expect(error.cause).toBe(reason);
+  expect(read).toHaveBeenCalledTimes(2);
 });
 it("三次仍缺项时在采集阶段失败，不返回可分析的半成品", async () => {
   const partial = complete();

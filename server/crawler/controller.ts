@@ -115,7 +115,11 @@ export function savedRecords(
 }
 export function stopCrawl(reason: "manual" | "time_limit" = "manual") {
   diagnostics.record("crawl.stop_requested", { running: isCrawling(), reason });
-  cache.abort?.abort(new Error(reason === "time_limit" ? "达到最长运行时长" : "用户暂停采集"));
+  cache.abort?.abort(
+    Object.assign(new Error(reason === "time_limit" ? "达到最长运行时长" : "用户暂停采集"), {
+      code: reason === "time_limit" ? "CRAWL_TIME_LIMIT" : "CRAWL_MANUAL_PAUSE",
+    }),
+  );
   if (cache.status.running)
     cache.status = { ...cache.status, message: "正在暂停，当前已入库数据和断点会保留…" };
   return crawlStatus();

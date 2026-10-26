@@ -118,6 +118,8 @@ export interface PetSnapshot {
   innerSkills: DetailItem[];
 }
 export interface DetailItem {
+  /** Metadata returned for this exact model by the official page, never inferred from a name. */
+  officialModel?: { modelId: string; name?: string; description?: string; category?: string };
   nameSource?: "element" | "official-model" | "tooltip";
   categorySource?: "element" | "official-model" | "official-slot" | "description";
   index: number;

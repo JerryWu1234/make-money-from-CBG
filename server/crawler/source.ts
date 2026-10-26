@@ -7,12 +7,21 @@ import {
   type Listing,
   type SavedRoleRecord,
 } from "./types";
-import { collectCompleteCapture, captureIssues, IncompleteCaptureError } from "./capture-readiness";
+import {
+  collectCompleteCapture,
+  captureIssues,
+  IncompleteCaptureError,
+  CaptureDeadlineError,
+  captureAbortMessage,
+  isRetryableDetailNavigation,
+  DetailNavigationResetError,
+} from "./capture-readiness";
 import { accessNavigationFailure } from "./access-navigation";
 import { crawlAccessFailure } from "./types";
 import { saveCaptureFailure } from "./capture-failure";
 import { captureBrowserStep } from "../browser-evidence";
 import { classifyBrowserFailure } from "../browser-connection";
+import { DetailReadState } from "./detail-read-state";
 
 interface SourceOptions {
   listPage: Page;
@@ -38,10 +47,20 @@ export async function collectRole(
   }: Pick<SourceOptions, "signal" | "savedRecord" | "onDetailProgress" | "log">,
 ) {
   const started = Date.now();
+  const readState = new DetailReadState();
   let attempt = 0;
+  let reusedTabs = 0;
   let stage = "开始读取角色详情";
   log("detail.start", { key: item.key });
   const report = (message: string) => {
+    const metadataPrefix = "物品元数据读取异常：";
+    if (message.startsWith(metadataPrefix)) {
+      log("detail.model_metadata_error", {
+        key: item.key,
+        ...JSON.parse(message.slice(metadataPrefix.length)),
+      });
+      return;
+    }
     const prefix = "召唤兽图标核对异常：";
     if (message.startsWith(prefix)) {
       log("detail.pet_icon_mismatch", {
@@ -51,6 +70,11 @@ export async function collectRole(
       return;
     }
     stage = message;
+    const reusedPrefix = "已核对商品原文未变，复用本轮完整标签：";
+    if (message.startsWith(reusedPrefix)) {
+      reusedTabs++;
+      log("detail.tab_reused", { key: item.key, attempt, tab: message.slice(reusedPrefix.length) });
+    }
     onDetailProgress(`${item.name || item.eid}：${message}`);
   };
   const previous = savedRecord?.(item.key);
@@ -65,7 +89,7 @@ export async function collectRole(
           !captureIssues(previous.detail, true, true, item).length &&
           MAIN_TABS.every((name) => previous.detail!.tabs.some((tab) => tab.name === name))
             ? await collectValuationDetail(detailPage, item, previous.detail, signal, report)
-            : await collectDetail(detailPage, item, signal, report);
+            : await collectDetail(detailPage, item, signal, report, readState);
         const issues = captureIssues(detail, true, true, item);
         if (issues.length)
           await saveCaptureFailure(
@@ -91,6 +115,27 @@ export async function collectRole(
           { key: item.key, attempt, stage, error: failure },
           log,
         );
+        if (!signal.aborted && isRetryableDetailNavigation(failure)) {
+          // A timed-out goto can still be navigating. Commit an empty document before
+          // retrying so its late response or scheduled reload cannot interrupt the next goto.
+          const resetStarted = Date.now();
+          try {
+            await detailPage.goto("about:blank", { waitUntil: "commit", timeout: 5000 });
+            signal.throwIfAborted();
+            log("detail.navigation_reset", {
+              key: item.key,
+              attempt,
+              durationMs: Date.now() - resetStarted,
+              error: failure,
+            });
+          } catch (resetError) {
+            signal.throwIfAborted();
+            const connection = classifyBrowserFailure(detailPage, resetError, signal);
+            if (connection !== resetError) throw connection;
+            await detailPage.close().catch(() => {});
+            throw new DetailNavigationResetError(resetError);
+          }
+        }
         throw failure;
       }
     },
@@ -99,7 +144,7 @@ export async function collectRole(
     item,
   );
   if (signal.aborted)
-    throw new IncompleteCaptureError("采集已中断，已保留读取资料", result, signal.reason);
+    throw new IncompleteCaptureError(captureAbortMessage(signal.reason), result, signal.reason);
   await captureBrowserStep(
     detailPage,
     { flow: "collection", stage: "角色详情读取完成", key: item.key },
@@ -108,6 +153,8 @@ export async function collectRole(
   log("detail.collected", {
     key: item.key,
     durationMs: Date.now() - started,
+    attempts: attempt,
+    reusedTabs,
     equipmentComplete: result.equipmentCapture?.complete,
     equipmentIssues: result.equipmentCapture?.issues,
     petsComplete: result.petCapture?.complete,
@@ -215,10 +262,48 @@ export function createCrawlSource({
       if (!page) throw new Error("并发采集需要独立的角色详情页");
       const control = new AbortController();
       const local = AbortSignal.any([signal, control.signal]);
+      const started = Date.now();
+      let stage = "准备读取详情";
+      const failureLog = (event: string, error: unknown) => {
+        const cause = local.aborted
+          ? local.reason
+          : error instanceof Error
+            ? error.cause
+            : undefined;
+        let reasonCode: string | undefined;
+        for (
+          let reason = local.aborted ? local.reason : error, depth = 0;
+          reason instanceof Error && depth < 5;
+          reason = reason.cause, depth++
+        ) {
+          if ("code" in reason && typeof reason.code === "string") {
+            reasonCode = reason.code;
+            break;
+          }
+        }
+        try {
+          log(event, {
+            key: item.key,
+            stage,
+            durationMs: Date.now() - started,
+            reasonCode:
+              reasonCode ||
+              (signal.aborted
+                ? "CRAWL_CANCELLED"
+                : local.aborted
+                  ? "DETAIL_CANCELLED"
+                  : "DETAIL_READ_FAILED"),
+            error,
+            cause,
+          });
+        } catch {
+          /* Diagnostics cannot replace a capture failure or prevent page cleanup. */
+        }
+      };
       let closing: Promise<void> | undefined;
       const close = () => (closing ||= page.close());
       const cancel = () => {
-        log("detail.cancelled", { key: item.key, reason: local.reason });
+        failureLog("detail.cancelled", local.reason);
         void close().catch((error: unknown) =>
           log("detail.close_failed", { key: item.key, error }),
         );
@@ -227,15 +312,7 @@ export function createCrawlSource({
       if (local.aborted) cancel();
       active.set(control, close);
       const timer = setTimeout(
-        () =>
-          control.abort(
-            Object.assign(
-              new Error(
-                `角色详情采集超过 ${detailTimeoutMs / 1000} 秒总时限，已停止本件读取并保留资料`,
-              ),
-              { name: "IncompleteDetailError" },
-            ),
-          ),
+        () => control.abort(new CaptureDeadlineError(detailTimeoutMs, stage)),
         detailTimeoutMs,
       );
       try {
@@ -245,10 +322,14 @@ export function createCrawlSource({
           savedRecord,
           log,
           onDetailProgress: (message) => {
+            stage = message;
             local.throwIfAborted();
             onDetailProgress(message);
           },
         });
+      } catch (error) {
+        failureLog("detail.failed", error);
+        throw error;
       } finally {
         clearTimeout(timer);
         local.removeEventListener("abort", cancel);
