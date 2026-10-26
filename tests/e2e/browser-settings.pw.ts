@@ -34,6 +34,7 @@ async function mount(
     crawlRunning: options.crawlRunning ?? false,
     readFailures: options.readFailures ?? 0,
     browserStates: undefined as unknown[] | undefined,
+    statusOverride: undefined as Record<string, unknown> | undefined,
     saveError: "",
     settingsReads: 0,
     statusReads: 0,
@@ -102,6 +103,7 @@ async function mount(
             : state.ready
               ? browserStatus
               : idle;
+          if (state.statusOverride) body = { ...(body as object), ...state.statusOverride };
           if (state.browserStates) body = { ...(body as object), browsers: state.browserStates };
           break;
         }
@@ -329,6 +331,8 @@ test("两路状态独立显示，专用浏览器扫码不遮住已就绪日常�
       mode: "dedicated",
       running: true,
       isLoggedIn: false,
+      loginStatus: "logged_out",
+      needLogin: true,
       workflowStep: "logging_in",
       message: "专用浏览器请扫码",
       qrCodeUrl:
@@ -339,10 +343,79 @@ test("两路状态独立显示，专用浏览器扫码不遮住已就绪日常�
   const dedicated = page.getByRole("region", { name: "专用浏览器状态", exact: true });
   const daily = page.getByRole("region", { name: "日常 Chrome 状态", exact: true });
   await expect(dedicated).toContainText("专用浏览器请扫码");
-  await expect(dedicated.getByRole("img")).toBeVisible();
+  await expect(dedicated.getByRole("img")).toHaveCount(0);
+  await expect(page.getByRole("img", { name: "专用浏览器登录二维码" })).toBeVisible();
   await expect(daily).toContainText("角色列表已就绪");
   await expect(
     page.getByRole("button", { name: "继续采集 / 检查新增", exact: true }),
   ).toBeEnabled();
   await expect(page.locator("#open-cbg-btn")).toBeDisabled();
+});
+
+const loginQr = (mode: BrowserMode) => ({
+  ...browserStatus,
+  mode,
+  activeBrowserMode: mode,
+  running: true,
+  workflowStep: "logging_in",
+  loginStatus: "logged_out",
+  isLoggedIn: false,
+  needLogin: true,
+  message: `${mode}等待扫码`,
+  qrCodeUrl:
+    "data:image/svg+xml," +
+    encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180"><rect width="180" height="180" fill="white"/><text x="10" y="90">${mode}</text></svg>`,
+    ),
+});
+
+test("单浏览器只显示一个扫码入口，不在状态卡与主区域重复显示", async ({ page }) => {
+  const state = await mount(page, { mode: "dedicated", queryRunning: true });
+  state.statusOverride = loginQr("dedicated");
+  state.browserStates = [loginQr("dedicated")];
+  await expect(page.getByRole("region", { name: "专用浏览器状态", exact: true })).toContainText(
+    "dedicated等待扫码",
+  );
+  await expect(page.getByRole("img", { name: /登录二维码/ })).toHaveCount(1);
+  expect(state.opens).toBe(0);
+});
+
+test("双浏览器共用一个扫码区，切换只改变展示，登录后自动轮到另一浏览器", async ({
+  page,
+}, testInfo) => {
+  const state = await mount(page, { queryRunning: true });
+  state.statusOverride = loginQr("dedicated");
+  state.browserStates = [loginQr("dedicated"), loginQr("daily")];
+  await expect(page.getByRole("region", { name: "日常 Chrome 状态", exact: true })).toContainText(
+    "daily等待扫码",
+  );
+  await expect(page.getByRole("img", { name: /登录二维码/ })).toHaveCount(1);
+  const login = page.getByRole("region", { name: "扫码登录", exact: true });
+  await expect(login.getByRole("img")).toHaveAttribute("src", loginQr("dedicated").qrCodeUrl);
+  await login.getByRole("button", { name: "日常 Chrome", exact: true }).click();
+  await expect(login.getByRole("img")).toHaveAttribute("src", loginQr("daily").qrCodeUrl);
+  await login.screenshot({ path: testInfo.outputPath("single-qr-dual-browser.png") });
+  state.browserStates = [
+    loginQr("dedicated"),
+    { ...browserStatus, mode: "daily", needLogin: false, qrCodeUrl: loginQr("daily").qrCodeUrl },
+  ];
+  await expect(login.getByRole("img")).toHaveAttribute("src", loginQr("dedicated").qrCodeUrl);
+  state.statusOverride = {
+    ...browserStatus,
+    needLogin: false,
+    qrCodeUrl: loginQr("dedicated").qrCodeUrl,
+  };
+  state.browserStates = [
+    {
+      ...browserStatus,
+      mode: "dedicated",
+      needLogin: false,
+      qrCodeUrl: loginQr("dedicated").qrCodeUrl,
+    },
+    { ...browserStatus, mode: "daily", needLogin: false },
+  ];
+  await expect(login).toHaveCount(0);
+  await expect(page.getByRole("img", { name: /登录二维码/ })).toHaveCount(0);
+  expect(state.opens).toBe(0);
+  expect(state.saves).toEqual([]);
 });

@@ -4,6 +4,7 @@ import { normalizeBrowserState } from "./browser-state";
 import "./style.css";
 import { CrawlPanel } from "./CrawlPanel";
 import { BrowserSettings, type BrowserMode } from "./BrowserSettings";
+import { BrowserLogin } from "./BrowserLogin";
 
 const FLOW: [WorkflowStep, string][] = [
   ["logging_in", "扫码登录"],
@@ -204,7 +205,7 @@ export function App() {
         </button>
         <p className="status-note">
           {browserModes.length === 2
-            ? "两种浏览器分别登录并查询角色列表；可在上方查看各自状态和二维码。"
+            ? "两种浏览器分别登录并查询角色列表；上方显示各自状态，下方统一扫码区每次显示一个二维码。"
             : browserMode === "dedicated"
               ? "查询在项目专用浏览器中运行，本页显示二维码、进度与查询结果。"
               : result?.workPagesVisible
@@ -250,15 +251,7 @@ export function App() {
                 : result.message}
             </p>
             {result.error && <p className="error-message">错误编号：{result.error.code}</p>}
-            {result.qrCodeUrl && !transportError && (result.browsers?.length || 0) < 2 && (
-              <div className="qr-hero-section">
-                <strong>使用网易大神或将军令扫码</strong>
-                <div className="qr-image-wrapper">
-                  <img src={result.qrCodeUrl} alt="藏宝阁登录二维码" className="qr-image-main" />
-                </div>
-                <p className="status-note">手机确认后，请在本页等待角色列表加载。</p>
-              </div>
-            )}
+            <BrowserLogin result={result} activeMode={browserMode} unavailable={!!transportError} />
             {result.isLoggedIn && !transportError && (
               <div className="account-summary">
                 {result.serverName !== "未指定服务器" && <span>服务器：{result.serverName}</span>}

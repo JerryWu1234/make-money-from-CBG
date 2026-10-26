@@ -1875,9 +1875,13 @@ body {
   border: 1px solid var(--border-color, #334155);
   border-radius: 10px;
 }
-.browser-login-qr {
-  display: block;
-  width: 180px;
-  max-width: 100%;
-  margin: 12px 0;
+.qr-browser-choices {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+}
+.qr-browser-choices [aria-pressed="true"] {
+  border-color: #62dccb;
+  color: #62dccb;
 }

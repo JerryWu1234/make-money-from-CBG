@@ -197,13 +197,6 @@ export function BrowserSettings({
                   : "等待启动"}
           </strong>
           <p className={state.error ? "error-message" : "status-note"}>{state.message}</p>
-          {state.qrCodeUrl && (
-            <img
-              className="browser-login-qr"
-              src={state.qrCodeUrl}
-              alt={`${state.mode === "dedicated" ? "专用浏览器" : "日常 Chrome"}登录二维码`}
-            />
-          )}
         </section>
       ))}
       <p className="status-note" role="status">
