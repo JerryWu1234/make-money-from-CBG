@@ -6,8 +6,14 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { Codex, type WebSearchItem, type ThreadItem } from "@openai/codex-sdk";
 import type { CodexLogin } from "./types";
+import { codexHomeEnv } from "./codex-home";
 
-type Account = { type: "chatgpt"; email: string | null; planType: string | null };
+type Account = {
+  type: "chatgpt";
+  email: string | null;
+  planType: string | null;
+  workspaceId?: string | null;
+};
 type Rpc = {
   request: <T>(method: string, params?: Record<string, unknown>) => Promise<T>;
   stop: () => void;
@@ -17,20 +23,10 @@ let server: Promise<Rpc> | null = null;
 let login: CodexLogin | null = null;
 let loginTimeout: ReturnType<typeof setTimeout> | undefined;
 
-// Subscription requests must not inherit an API key from the Node service.
-function codexEnvironment() {
-  return Object.fromEntries(
-    Object.entries(process.env).filter(
-      (entry): entry is [string, string] =>
-        entry[1] !== undefined &&
-        !["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"].includes(entry[0]),
-    ),
-  );
-}
-
 async function startServer(): Promise<Rpc> {
   const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
   const cliDirectory = dirname(sdkRequire.resolve("@openai/codex/package.json"));
+  const env = codexHomeEnv();
   const directory = await mkdtemp(join(tmpdir(), "cbg-codex-auth-"));
   const child = spawn(
     process.execPath,
@@ -43,8 +39,10 @@ async function startServer(): Promise<Rpc> {
       'forced_login_method="chatgpt"',
       "-c",
       'model_provider="openai"',
+      "-c",
+      'cli_auth_credentials_store="file"',
     ],
-    { cwd: directory, env: codexEnvironment(), stdio: ["pipe", "pipe", "pipe"] },
+    { cwd: directory, env, stdio: ["pipe", "pipe", "pipe"] },
   );
   const pending = new Map<
     number,
@@ -150,10 +148,18 @@ function authServer() {
 export async function codexAccount() {
   const result = await (
     await authServer()
-  ).request<{ account: Account | { type: string } | null }>("account/read", {
+  ).request<{
+    account: Account | { type: string } | null;
+    workspaceRouting?: { chatgptAccountId?: string } | null;
+  }>("account/read", {
     refreshToken: false,
   });
-  return result.account?.type === "chatgpt" ? (result.account as Account) : null;
+  return result.account?.type === "chatgpt"
+    ? {
+        ...(result.account as Account),
+        workspaceId: result.workspaceRouting?.chatgptAccountId || null,
+      }
+    : null;
 }
 
 export async function startCodexLogin(): Promise<CodexLogin> {
@@ -233,9 +239,10 @@ async function runCodexRequest(
   try {
     signal.throwIfAborted();
     const codex = new Codex({
-      env: codexEnvironment(),
+      env: codexHomeEnv(),
       config: {
         forced_login_method: "chatgpt",
+        cli_auth_credentials_store: "file",
         model_provider: "openai",
         ...(!probe && !search && options?.model === "gpt-6-luna" ? { service_tier: "fast" } : {}),
         ...(probe || search || options?.bareRoleReview

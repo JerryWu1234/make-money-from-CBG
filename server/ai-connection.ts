@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { publicAiRequestError } from "./ai/request-error";
 import { CodexPool } from "./ai/codex-pool";
+import { codexHomeDirectory } from "./ai/codex-home";
 import {
   codexAccount,
   codexModel,
@@ -49,6 +50,7 @@ export { startCodexLogin, codexLoginStatus, cancelCodexLogin } from "./ai/codex"
 const CONFIG_FILE = resolve("data/ai-connections.json");
 const PROBE_PROMPT = "Reply with exactly READY. Do not use tools.";
 const connections: Partial<Record<AiProvider, AiConnectionStatus>> = {};
+let codexWorkspaceId: string | null = null;
 const active = new Map<AiProvider, AbortController>();
 type DeepSeekConfig = { apiKey?: string; model?: string };
 
@@ -108,7 +110,9 @@ async function codexStatus(): Promise<AiConnectionStatus> {
     const sameAccount =
       identity &&
       previous?.account?.email === identity.email &&
-      previous.account.plan === identity.plan;
+      previous.account.plan === identity.plan &&
+      codexWorkspaceId === (account?.workspaceId ?? null);
+    codexWorkspaceId = account?.workspaceId ?? null;
     codex = account
       ? { ...(sameAccount ? previous : { state: "configured" as const }), account: identity }
       : { state: "login_required" };
@@ -173,12 +177,14 @@ export async function verifyAi(
       if (before.state === "error" && !before.account)
         throw new Error(before.error || "Codex 登录服务不可用");
       if (!before.account) return (connections.codex = { state: "login_required" });
+      const beforeWorkspaceId = codexWorkspaceId;
       response = await probeCodex(PROBE_PROMPT, signal);
       const account = await codexAccount();
       if (
         !account ||
         account.email !== before.account.email ||
-        account.planType !== before.account.plan
+        account.planType !== before.account.plan ||
+        (account.workspaceId ?? null) !== beforeWorkspaceId
       )
         throw new Error("ChatGPT 登录账号已变化，请重新验证");
       status = { state: "connected", account: before.account };
@@ -319,6 +325,9 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
   if (provider === "codex") {
     const account = await codexAccount();
     if (!account) throw new Error("请先登录 ChatGPT，再开始分析");
+    if (!account.email) throw new Error("无法确认 Codex 登录账号，暂不能安全复用会话，请重新登录");
+    const accountEmail = account.email;
+    const workspaceId = account.workspaceId ?? null;
     if (selectedModel && !(await codexModels()).some((item) => item.id === selectedModel))
       throw new Error("Codex 模型不在当前模型列表中，请重新选择或使用默认模型");
     const model = selectedModel || (await codexModel());
@@ -328,7 +337,10 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
       searchPets,
       searchPetGear,
       createSessionPool(concurrency: number) {
-        const pool = new CodexPool(concurrency, model);
+        const pool = new CodexPool(concurrency, model, undefined, {
+          statePath: resolve(codexHomeDirectory(), "cbg-analysis-pool.sqlite"),
+          accountId: JSON.stringify([accountEmail, workspaceId]),
+        });
         return {
           async acquire(signal: AbortSignal) {
             const lease = await pool.acquire(signal);
@@ -340,7 +352,11 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
                 options?: AnalysisRequestOptions,
               ) {
                 const current = await codexAccount();
-                if (!current || current.email !== account.email)
+                if (
+                  !current ||
+                  current.email !== account.email ||
+                  (current.workspaceId ?? null) !== workspaceId
+                )
                   throw new Error("ChatGPT 登录账号已变化，请重新连接");
                 requestSignal.throwIfAborted();
                 try {
@@ -362,7 +378,11 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
         options?: AnalysisRequestOptions,
       ) {
         const current = await codexAccount();
-        if (!current || current.email !== account.email)
+        if (
+          !current ||
+          current.email !== account.email ||
+          (current.workspaceId ?? null) !== workspaceId
+        )
           throw new Error("ChatGPT 登录账号已变化，请重新连接");
         try {
           return await requestCodex(prompt, signal, {

@@ -1,9 +1,13 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { chmodSync, lstatSync, mkdirSync } from "node:fs";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
+import { DatabaseSync } from "node:sqlite";
+import { codexHomeEnv } from "./codex-home";
 
 export type CodexPoolEvent = { method: string; params?: unknown; error?: Error };
 export type CodexPoolTransport = {
@@ -22,6 +26,7 @@ type Slot = {
   bare?: boolean;
   directory?: string;
   firstTurnId?: string;
+  persistentDirty?: boolean;
   current?: {
     turns: Map<string, TurnEvents>;
     expected?: string;
@@ -41,6 +46,94 @@ type Waiter = {
   signal: AbortSignal;
   abort: () => void;
 };
+
+/** Only clean threads may be claimed; a crash leaves the claimed thread isolated. */
+class PersistentThreads {
+  private readonly db: DatabaseSync;
+  private readonly account: string;
+  private readonly workspaces: string;
+  constructor(path: string, accountId: string) {
+    if (!accountId.trim()) throw new Error("Codex 账号标识缺失，无法复用会话");
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    this.workspaces = join(dirname(path), "cbg-pool-workspaces");
+    mkdirSync(this.workspaces, { recursive: true, mode: 0o700 });
+    if (!lstatSync(this.workspaces).isDirectory())
+      throw new Error("Codex 会话目录无效，已暂停分析");
+    this.account = createHash("sha256").update(accountId).digest("hex");
+    this.db = new DatabaseSync(path);
+    if (path !== ":memory:") chmodSync(path, 0o600);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS reusable_threads (
+      id TEXT PRIMARY KEY, account TEXT NOT NULL, model TEXT NOT NULL,
+      bare INTEGER NOT NULL, version INTEGER NOT NULL, state TEXT NOT NULL, workspace TEXT
+    )`);
+    const columns = this.db.prepare("PRAGMA table_info(reusable_threads)").all();
+    if (!columns.some((column) => column.name === "workspace"))
+      this.db.exec("ALTER TABLE reusable_threads ADD COLUMN workspace TEXT");
+  }
+  claim(model: string, bare: boolean): { id: string; workspace: string } | undefined {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare(
+          "SELECT id,workspace FROM reusable_threads WHERE account=? AND model=? AND bare=? AND version=2 AND state='clean' ORDER BY id LIMIT 1",
+        )
+        .get(this.account, model, Number(bare));
+      if (!row) {
+        this.db.exec("COMMIT");
+        return undefined;
+      }
+      const id = String(row.id);
+      this.dirty(id);
+      this.db.exec("COMMIT");
+      return { id, workspace: String(row.workspace) };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  async createWorkspace() {
+    return await mkdtemp(join(this.workspaces, "thread-"));
+  }
+  async restoreWorkspace(name: string) {
+    if (!/^thread-[A-Za-z0-9]+$/.test(name)) throw new Error("Codex 会话目录无效，已暂停分析");
+    const directory = join(this.workspaces, name);
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (!lstatSync(directory).isDirectory()) throw new Error("Codex 会话目录无效，已暂停分析");
+    await this.clearWorkspace(directory);
+    return directory;
+  }
+  async clearWorkspace(directory: string) {
+    if (dirname(directory) !== this.workspaces || !lstatSync(directory).isDirectory())
+      throw new Error("Codex 会话目录无效，已暂停分析");
+    for (const entry of await readdir(directory))
+      await rm(join(directory, entry), { recursive: true, force: true });
+  }
+  add(id: string, model: string, bare: boolean, directory: string) {
+    const workspace = basename(directory);
+    if (dirname(directory) !== this.workspaces || !/^thread-[A-Za-z0-9]+$/.test(workspace))
+      throw new Error("Codex 会话目录无效，已暂停分析");
+    this.db
+      .prepare(
+        "INSERT INTO reusable_threads(id,account,model,bare,version,state,workspace) VALUES(?,?,?,?,2,'dirty',?)",
+      )
+      .run(id, this.account, model, Number(bare), workspace);
+  }
+  dirty(id: string) {
+    const result = this.db
+      .prepare("UPDATE reusable_threads SET state='dirty' WHERE id=? AND state='clean'")
+      .run(id);
+    if (result.changes !== 1) throw new Error("Codex 持久会话状态无效，已暂停分析");
+  }
+  clean(id: string) {
+    const result = this.db
+      .prepare("UPDATE reusable_threads SET state='clean' WHERE id=? AND state='dirty'")
+      .run(id);
+    if (result.changes !== 1) throw new Error("Codex 持久会话状态无效，已暂停分析");
+  }
+  close() {
+    this.db.close();
+  }
+}
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -69,13 +162,7 @@ async function startTransport(): Promise<CodexPoolTransport> {
   const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
   const cliDirectory = dirname(sdkRequire.resolve("@openai/codex/package.json"));
   const directory = await mkdtemp(join(tmpdir(), "cbg-codex-pool-"));
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter(
-      (entry): entry is [string, string] =>
-        entry[1] !== undefined &&
-        !["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"].includes(entry[0]),
-    ),
-  );
+  const env = codexHomeEnv();
   const child = spawn(
     process.execPath,
     [
@@ -85,6 +172,8 @@ async function startTransport(): Promise<CodexPoolTransport> {
       "stdio://",
       "-c",
       'forced_login_method="chatgpt"',
+      "-c",
+      'cli_auth_credentials_store="file"',
       "-c",
       'model_provider="openai"',
     ],
@@ -282,12 +371,16 @@ export class CodexPool {
   private unsubscribe?: () => void;
   private failure?: Error;
   private closed = false;
+  private readonly persistent?: PersistentThreads;
   constructor(
     private readonly size: number,
     private readonly model: string,
     private readonly createTransport: () => Promise<CodexPoolTransport> = startTransport,
+    persistence?: { statePath: string; accountId: string },
   ) {
     if (!Number.isSafeInteger(size) || size < 1) throw new Error("分析并发数必须是正整数");
+    if (persistence)
+      this.persistent = new PersistentThreads(persistence.statePath, persistence.accountId);
   }
   private fail(error: Error) {
     this.failure ||= error;
@@ -457,9 +550,62 @@ export class CodexPool {
     try {
       const rpc = await this.rpc();
       abortSignal.throwIfAborted();
-      slot.directory ||= await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
-      abortSignal.throwIfAborted();
+      let claimed = false;
+      if (!slot.threadId && this.persistent) {
+        const existing = this.persistent.claim(this.model, bare);
+        if (existing) {
+          claimed = true;
+          slot.persistentDirty = true;
+          try {
+            slot.directory = await this.persistent.restoreWorkspace(existing.workspace);
+            abortSignal.throwIfAborted();
+            const resumed = object(
+              await rpc.request("thread/resume", {
+                threadId: existing.id,
+                cwd: slot.directory,
+                model: this.model,
+                modelProvider: "openai",
+                sandbox: "read-only",
+                approvalPolicy: "never",
+                config: {
+                  web_search: "disabled",
+                  ...(bare
+                    ? {
+                        features: {
+                          shell_tool: false,
+                          unified_exec: false,
+                          hooks: false,
+                          multi_agent: false,
+                          apps: false,
+                        },
+                      }
+                    : {}),
+                },
+                ...(this.model === "gpt-6-luna" ? { serviceTier: "fast" } : {}),
+              }),
+            );
+            if (object(resumed.thread).id !== existing.id)
+              throw new Error("Codex 恢复会话返回了错误 ID");
+            const history = object(
+              await rpc.request("thread/turns/list", { threadId: existing.id, limit: 1 }),
+            );
+            if (!Array.isArray(history.data) || history.data.length)
+              throw new Error("Codex 恢复会话历史未清空，会话已隔离");
+            slot.threadId = existing.id;
+            slot.bare = bare;
+          } catch (error) {
+            this.fail(asError(error));
+            throw error;
+          }
+        }
+      }
+      if (!this.persistent && !slot.directory)
+        slot.directory = await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
       if (!slot.threadId) {
+        slot.directory ||= this.persistent
+          ? await this.persistent.createWorkspace()
+          : await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
+        abortSignal.throwIfAborted();
         let start: Record<string, unknown>;
         try {
           start = object(
@@ -503,8 +649,25 @@ export class CodexPool {
         }
         slot.threadId = threadId;
         slot.bare = bare;
+        try {
+          this.persistent?.add(threadId, this.model, bare, slot.directory);
+          claimed = !!this.persistent;
+          slot.persistentDirty = claimed;
+        } catch (error) {
+          this.fail(asError(error));
+          throw error;
+        }
       }
       abortSignal.throwIfAborted();
+      if (this.persistent && !claimed) {
+        try {
+          this.persistent.dirty(slot.threadId);
+          slot.persistentDirty = true;
+        } catch (error) {
+          this.fail(asError(error));
+          throw error;
+        }
+      }
       current.startSent = true;
       const started = object(
         await rpc.request("turn/start", {
@@ -578,7 +741,16 @@ export class CodexPool {
         if (!Array.isArray(history.data) || history.data.length)
           throw new Error("Codex 会话历史未清空，会话已隔离");
       }
-      if (slot.directory) await rm(slot.directory, { recursive: true, force: true });
+      if (slot.directory) {
+        if (this.persistent) await this.persistent.clearWorkspace(slot.directory);
+        else await rm(slot.directory, { recursive: true, force: true });
+      }
+      if (slot.threadId && this.persistent && slot.persistentDirty) {
+        this.persistent.clean(slot.threadId);
+        slot.persistentDirty = false;
+        slot.threadId = undefined;
+        slot.bare = undefined;
+      }
       slot.directory = undefined;
       slot.firstTurnId = undefined;
       slot.current = undefined;
@@ -603,10 +775,14 @@ export class CodexPool {
     this.closed = true;
     this.fail(new Error("Codex 会话池已关闭"));
     for (const slot of this.slots) slot.current?.abort.abort(new Error("Codex 会话池已关闭"));
-    if (this.transport) {
-      const transport = await this.transport.catch(() => undefined);
-      if (transport) await transport.close();
+    try {
+      if (this.transport) {
+        const transport = await this.transport.catch(() => undefined);
+        if (transport) await transport.close();
+      }
+    } finally {
+      this.unsubscribe?.();
+      this.persistent?.close();
     }
-    this.unsubscribe?.();
   }
 }

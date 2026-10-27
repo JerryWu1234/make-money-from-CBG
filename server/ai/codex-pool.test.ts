@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { EventEmitter } from "node:events";
 import { once } from "node:events";
-import { readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
+import { DatabaseSync } from "node:sqlite";
 import {
   CodexPool,
   CodexPoolRpcError,
@@ -13,6 +15,12 @@ import {
 } from "./codex-pool";
 
 const spawnMock = vi.hoisted(() => vi.fn());
+vi.mock("./codex-home", () => ({
+  codexHomeEnv: () => ({
+    CODEX_HOME: "/private/tmp/cbg-pool-fixture",
+    CODEX_SQLITE_HOME: "/private/tmp/cbg-pool-fixture",
+  }),
+}));
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
   spawn: spawnMock,
@@ -44,6 +52,11 @@ class FakeTransport implements CodexPoolTransport {
     if (method === "thread/start") {
       const id = `thread-${++this.nextThread}`;
       this.histories.set(id, []);
+      return { thread: { id } };
+    }
+    if (method === "thread/resume") {
+      const id = String(params.threadId);
+      if (!this.histories.has(id)) throw new Error("unknown persisted thread");
       return { thread: { id } };
     }
     if (method === "turn/start") {
@@ -125,6 +138,395 @@ afterEach(async () => {
 });
 
 describe("Codex 固定会话池", () => {
+  // Failure cases: restarted pool starts new threads instead of resuming clean ones;
+  // unsaved results or interrupted threads are reused; changed account/model/scope
+  // gets another context; a resumed thread with history leaks it into the next role.
+  it("跨池只恢复已保存并清空的持久线程，失败线程不复用", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-pool-restart-test-"));
+    const transport = new FakeTransport();
+    const options = { statePath: join(directory, "pool.sqlite"), accountId: "fixture-account" };
+    const signal = new AbortController().signal;
+    const pool = () => {
+      const instance = new CodexPool(1, "gpt-6-luna", async () => transport, options);
+      pools.push(instance);
+      return instance;
+    };
+    try {
+      const first = pool();
+      const lease = await first.acquire(signal);
+      const pending = lease.run("role-a", {}, signal, { bareRoleReview: true });
+      const [id, turn] = (await turns(transport, 1))[0]!;
+      transport.finish(id, "result-a");
+      expect((await pending).text).toBe("result-a");
+      await lease.release(true);
+      const unused = await first.acquire(signal);
+      await unused.release(true);
+      await first.close();
+
+      const second = pool();
+      const again = await second.acquire(signal);
+      const pendingAgain = again.run("role-b", {}, signal, { bareRoleReview: true });
+      const [id2, turn2] = (await turns(transport, 2))[1]!;
+      expect(turn2.threadId).toBe(turn.threadId);
+      expect(transport.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+      transport.finish(id2, "result-b");
+      await pendingAgain;
+      await expect(again.release(false)).rejects.toThrow("分析结果未保存");
+      await second.close();
+
+      const third = pool();
+      const replacement = await third.acquire(signal);
+      const pendingThird = replacement.run("role-c", {}, signal, { bareRoleReview: true });
+      const [id3, turn3] = (await turns(transport, 3))[2]!;
+      expect(turn3.threadId).not.toBe(turn.threadId);
+      transport.finish(id3, "result-c");
+      await pendingThird;
+      await replacement.release(true);
+      await third.close();
+    } finally {
+      await Promise.allSettled(pools.splice(0).map((entry) => entry.close()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("持久线程按账号、模型和分析范围隔离", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-pool-config-test-"));
+    const statePath = join(directory, "pool.sqlite");
+    const transport = new FakeTransport();
+    const signal = new AbortController().signal;
+    const used: string[] = [];
+    async function role(accountId: string, model: string, bareRoleReview: boolean) {
+      const pool = new CodexPool(1, model, async () => transport, { statePath, accountId });
+      pools.push(pool);
+      const lease = await pool.acquire(signal);
+      const count = transport.turns.size + 1;
+      const pending = lease.run("fixture-role", {}, signal, { bareRoleReview });
+      const [id, turn] = (await turns(transport, count))[count - 1]!;
+      transport.finish(id, "fixture-result");
+      await pending;
+      used.push(turn.threadId);
+      await lease.release(true);
+      await pool.close();
+    }
+    try {
+      await role("account-a", "model-a", true);
+      await role("account-b", "model-a", true);
+      await role("account-a", "model-b", true);
+      await role("account-a", "model-a", false);
+      await role("account-a", "model-a", true);
+      expect(new Set(used.slice(0, 4)).size).toBe(4);
+      expect(used[4]).toBe(used[0]);
+    } finally {
+      await Promise.allSettled(pools.splice(0).map((entry) => entry.close()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("恢复线程出现旧历史时暂停且隔离该线程", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-pool-dirty-test-"));
+    const transport = new FakeTransport();
+    const options = { statePath: join(directory, "pool.sqlite"), accountId: "fixture-account" };
+    const signal = new AbortController().signal;
+    const createPool = () => {
+      const pool = new CodexPool(1, "model-a", async () => transport, options);
+      pools.push(pool);
+      return pool;
+    };
+    try {
+      const first = createPool();
+      const lease = await first.acquire(signal);
+      const pending = lease.run("role-a", {}, signal);
+      const [id, turn] = (await turns(transport, 1))[0]!;
+      transport.finish(id, "result-a");
+      await pending;
+      await lease.release(true);
+      await first.close();
+      transport.histories.set(turn.threadId, ["unexpected-old-turn"]);
+
+      const second = createPool();
+      const resumed = await second.acquire(signal);
+      await expect(resumed.run("role-b", {}, signal)).rejects.toThrow("历史未清空");
+      expect(transport.turns.size).toBe(1);
+      await second.close();
+
+      const third = createPool();
+      const replacement = await third.acquire(signal);
+      const later = replacement.run("role-c", {}, signal);
+      const [id2, turn2] = (await turns(transport, 2))[1]!;
+      expect(turn2.threadId).not.toBe(turn.threadId);
+      transport.finish(id2, "result-c");
+      await later;
+      await replacement.release(true);
+      await third.close();
+    } finally {
+      await Promise.allSettled(pools.splice(0).map((entry) => entry.close()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("结果返回但未落库时，重启池不复用可能含旧资料的线程", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-pool-abandoned-test-"));
+    const transport = new FakeTransport();
+    const options = { statePath: join(directory, "pool.sqlite"), accountId: "fixture-account" };
+    const signal = new AbortController().signal;
+    const createPool = () => {
+      const pool = new CodexPool(1, "model-a", async () => transport, options);
+      pools.push(pool);
+      return pool;
+    };
+    try {
+      const first = createPool();
+      const lease = await first.acquire(signal);
+      const pending = lease.run("role-a", {}, signal);
+      const [id, turn] = (await turns(transport, 1))[0]!;
+      transport.finish(id, "not-yet-persisted");
+      await pending;
+      await first.close();
+
+      const second = createPool();
+      const next = await second.acquire(signal);
+      const later = next.run("role-b", {}, signal);
+      const [id2, turn2] = (await turns(transport, 2))[1]!;
+      expect(turn2.threadId).not.toBe(turn.threadId);
+      transport.finish(id2, "result-b");
+      await later;
+      await next.release(true);
+      await second.close();
+    } finally {
+      await Promise.allSettled(pools.splice(0).map((entry) => entry.close()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("两个槽交错领取时不会同时绑定同一持久线程", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-pool-claim-test-"));
+    const transport = new FakeTransport();
+    const pool = new CodexPool(2, "model-a", async () => transport, {
+      statePath: join(directory, "pool.sqlite"),
+      accountId: "fixture-account",
+    });
+    pools.push(pool);
+    const signal = new AbortController().signal;
+    try {
+      const first = await pool.acquire(signal);
+      const waitingSlot = await pool.acquire(signal);
+      const pending = first.run("role-a", {}, signal);
+      const [id, turn] = (await turns(transport, 1))[0]!;
+      transport.finish(id, "result-a");
+      await pending;
+      await first.release(true);
+
+      const second = waitingSlot.run("role-b", {}, signal);
+      const [id2, turn2] = (await turns(transport, 2))[1]!;
+      expect(turn2.threadId).toBe(turn.threadId);
+      const otherSlot = await pool.acquire(signal);
+      const third = otherSlot.run("role-c", {}, signal);
+      const [id3, turn3] = (await turns(transport, 3))[2]!;
+      expect(turn3.threadId).not.toBe(turn2.threadId);
+      transport.finish(id2, "result-b");
+      transport.finish(id3, "result-c");
+      await Promise.all([second, third]);
+      await Promise.all([waitingSlot.release(true), otherSlot.release(true)]);
+      await pool.close();
+    } finally {
+      await Promise.allSettled(pools.splice(0).map((entry) => entry.close()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("两个池同时运行时使用不同持久线程", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-pool-multiple-test-"));
+    const transport = new FakeTransport();
+    const options = { statePath: join(directory, "pool.sqlite"), accountId: "fixture-account" };
+    const signal = new AbortController().signal;
+    const createPool = () => {
+      const pool = new CodexPool(1, "model-a", async () => transport, options);
+      pools.push(pool);
+      return pool;
+    };
+    try {
+      const seed = createPool();
+      const seedLease = await seed.acquire(signal);
+      const seedRun = seedLease.run("seed", {}, signal);
+      const [seedId, seedTurn] = (await turns(transport, 1))[0]!;
+      transport.finish(seedId, "seed-result");
+      await seedRun;
+      await seedLease.release(true);
+      await seed.close();
+
+      const first = createPool();
+      const second = createPool();
+      const leaseA = await first.acquire(signal);
+      const leaseB = await second.acquire(signal);
+      const pendingA = leaseA.run("role-a", {}, signal);
+      const pendingB = leaseB.run("role-b", {}, signal);
+      const started = (await turns(transport, 3)).slice(1);
+      expect(new Set(started.map(([, turn]) => turn.threadId)).size).toBe(2);
+      expect(started.some(([, turn]) => turn.threadId === seedTurn.threadId)).toBe(true);
+      const startCwds = transport.calls
+        .filter((call) => call.method === "thread/start")
+        .map((call) => String(call.params.cwd));
+      expect(new Set(startCwds).size).toBe(2);
+      expect(transport.calls.filter((call) => call.method === "thread/resume")[0]!.params.cwd).toBe(
+        startCwds[0],
+      );
+      for (const [id, turn] of started) transport.finish(id, `result:${turn.prompt}`);
+      await Promise.all([pendingA, pendingB]);
+      await Promise.all([leaseA.release(true), leaseB.release(true)]);
+      await Promise.all([first.close(), second.close()]);
+    } finally {
+      await Promise.allSettled(pools.splice(0).map((entry) => entry.close()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // Failure cases: concurrent roles share an ID, a restart creates new sessions,
+  // stale role turns remain, or results are routed to a different role.
+  it("10 个持久线程跨池并发恢复，保持 ID 并隔离角色", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-pool-ten-restart-"));
+    const transport = new FakeTransport();
+    const options = { statePath: join(directory, "pool.sqlite"), accountId: "fixture-account" };
+    const signal = new AbortController().signal;
+    const createPool = () => {
+      const pool = new CodexPool(10, "model-a", async () => transport, options);
+      pools.push(pool);
+      return pool;
+    };
+    try {
+      const first = createPool();
+      const leases = await Promise.all(Array.from({ length: 10 }, () => first.acquire(signal)));
+      const pending = leases.map((lease, index) =>
+        lease.run(`role-a-${index}`, {}, signal, { bareRoleReview: true }),
+      );
+      const started = await turns(transport, 10);
+      const firstIds = new Set(started.map(([, turn]) => turn.threadId));
+      expect(firstIds.size).toBe(10);
+      for (const [id, turn] of [...started].reverse()) {
+        expect(transport.histories.get(turn.threadId)).toEqual([id]);
+        transport.finish(id, `result:${turn.prompt}`);
+      }
+      expect((await Promise.all(pending)).map((item) => item.text).sort()).toEqual(
+        Array.from({ length: 10 }, (_, index) => `result:role-a-${index}`).sort(),
+      );
+      await Promise.all(leases.map((lease) => lease.release(true)));
+      for (const id of firstIds) expect(transport.histories.get(id)).toEqual([]);
+      await first.close();
+
+      const second = createPool();
+      const next = await Promise.all(Array.from({ length: 10 }, () => second.acquire(signal)));
+      const pendingNext = next.map((lease, index) =>
+        lease.run(`role-b-${index}`, {}, signal, { bareRoleReview: true }),
+      );
+      const resumed = (await turns(transport, 20)).slice(10);
+      expect(new Set(resumed.map(([, turn]) => turn.threadId))).toEqual(firstIds);
+      expect(transport.calls.filter((call) => call.method === "thread/start")).toHaveLength(10);
+      expect(transport.calls.filter((call) => call.method === "thread/resume")).toHaveLength(10);
+      for (const [id, turn] of [...resumed].reverse()) {
+        expect(transport.histories.get(turn.threadId)).toEqual([id]);
+        transport.finish(id, `result:${turn.prompt}`);
+      }
+      expect((await Promise.all(pendingNext)).map((item) => item.text).sort()).toEqual(
+        Array.from({ length: 10 }, (_, index) => `result:role-b-${index}`).sort(),
+      );
+      await Promise.all(next.map((lease) => lease.release(true)));
+      for (const id of firstIds) expect(transport.histories.get(id)).toEqual([]);
+      await second.close();
+    } finally {
+      await Promise.allSettled(pools.splice(0).map((entry) => entry.close()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  // Failure cases: the reusable thread points to a deleted or different cwd,
+  // previous role files remain, two threads share a cwd, or missing cwd cannot recover.
+  it("持久线程跨角色及跨池保持相同目录，并清除上次角色文件", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-pool-workspace-test-"));
+    const transport = new FakeTransport();
+    const options = { statePath: join(directory, "pool.sqlite"), accountId: "fixture-account" };
+    const signal = new AbortController().signal;
+    const createPool = () => {
+      const pool = new CodexPool(1, "model-a", async () => transport, options);
+      pools.push(pool);
+      return pool;
+    };
+    try {
+      const first = createPool();
+      const a = await first.acquire(signal);
+      const aRun = a.run("role-a", {}, signal);
+      const [aId] = (await turns(transport, 1))[0]!;
+      const cwd = String(
+        transport.calls.find((call) => call.method === "thread/start")!.params.cwd,
+      );
+      await writeFile(join(cwd, "previous-role.txt"), "fixture");
+      transport.finish(aId, "result-a");
+      await aRun;
+      await a.release(true);
+      expect(existsSync(cwd)).toBe(true);
+      expect(existsSync(join(cwd, "previous-role.txt"))).toBe(false);
+
+      const b = await first.acquire(signal);
+      const bRun = b.run("role-b", {}, signal);
+      const [bId] = (await turns(transport, 2))[1]!;
+      expect(transport.calls.filter((call) => call.method === "thread/resume")[0]!.params.cwd).toBe(
+        cwd,
+      );
+      transport.finish(bId, "result-b");
+      await bRun;
+      await b.release(true);
+      await first.close();
+
+      await rm(cwd, { recursive: true });
+      const second = createPool();
+      const c = await second.acquire(signal);
+      const cRun = c.run("role-c", {}, signal);
+      const [cId] = (await turns(transport, 3))[2]!;
+      expect(transport.calls.filter((call) => call.method === "thread/resume")[1]!.params.cwd).toBe(
+        cwd,
+      );
+      expect(existsSync(cwd)).toBe(true);
+      transport.finish(cId, "result-c");
+      await cRun;
+      await c.release(true);
+      await second.close();
+    } finally {
+      await Promise.allSettled(pools.splice(0).map((entry) => entry.close()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("持久目录元数据异常时不访问目录，也不发送角色资料", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "cbg-pool-invalid-workspace-"));
+    const statePath = join(directory, "pool.sqlite");
+    const transport = new FakeTransport();
+    const signal = new AbortController().signal;
+    const options = { statePath, accountId: "fixture-account" };
+    const createPool = () => {
+      const pool = new CodexPool(1, "model-a", async () => transport, options);
+      pools.push(pool);
+      return pool;
+    };
+    try {
+      const first = createPool();
+      const lease = await first.acquire(signal);
+      const pending = lease.run("role-a", {}, signal);
+      const [id] = (await turns(transport, 1))[0]!;
+      transport.finish(id, "result-a");
+      await pending;
+      await lease.release(true);
+      await first.close();
+      const db = new DatabaseSync(statePath);
+      db.prepare("UPDATE reusable_threads SET workspace=?").run("../outside");
+      db.close();
+      const second = createPool();
+      const next = await second.acquire(signal);
+      await expect(next.run("role-b", {}, signal)).rejects.toThrow("会话目录无效");
+      expect(transport.turns.size).toBe(1);
+      await second.close();
+    } finally {
+      await Promise.allSettled(pools.splice(0).map((entry) => entry.close()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   // Failure cases: close returns while the native child is still alive; SIGTERM is ignored;
   // an already-exited process is signalled again; or an uncertain shutdown deletes its cwd.
   it
@@ -185,6 +587,11 @@ describe("Codex 固定会话池", () => {
         const signal = new AbortController().signal;
         const lease = await pool.acquire(signal);
         expect((await lease.run("role", {}, signal)).text).toBe("ok");
+        expect(spawnMock.mock.calls[0]![1]).toContain('cli_auth_credentials_store="file"');
+        expect(spawnMock.mock.calls[0]![2].env).toMatchObject({
+          CODEX_HOME: "/private/tmp/cbg-pool-fixture",
+          CODEX_SQLITE_HOME: "/private/tmp/cbg-pool-fixture",
+        });
         await lease.release(true);
         grandchild = Number(await readFile(join(directory, "fixture-child.pid"), "utf8"));
         await vi.waitFor(() =>

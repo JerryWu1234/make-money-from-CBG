@@ -13,6 +13,20 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
 vi.mock("node:fs/promises", () => ({ mkdtemp: mocks.mkdtemp, rm: mocks.rm }));
+vi.mock("./codex-home", () => ({
+  codexHomeEnv: () => {
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([key]) => !["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"].includes(key),
+      ),
+    );
+    return {
+      ...env,
+      CODEX_HOME: "/private/tmp/cbg-home-fixture",
+      CODEX_SQLITE_HOME: "/private/tmp/cbg-home-fixture",
+    };
+  },
+}));
 vi.mock("@openai/codex-sdk", () => ({
   Codex: vi.fn(function (options: unknown) {
     mocks.options(options);
@@ -80,6 +94,19 @@ afterEach(async () => {
 });
 
 describe("官方 Codex 登录与 SDK", () => {
+  it("读取账号时保留可用的工作区标识，缺失时使用空值", async () => {
+    rpcResults["account/read"] = {
+      account: { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" },
+      workspaceRouting: { chatgptAccountId: "fixture-workspace" },
+    };
+    const { codexAccount } = await import("./codex");
+    expect(await codexAccount()).toMatchObject({ workspaceId: "fixture-workspace" });
+    rpcResults["account/read"] = {
+      account: { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" },
+      workspaceRouting: null,
+    };
+    expect(await codexAccount()).toMatchObject({ workspaceId: null });
+  });
   it("流直接返回429致命错误时保留原始原因，不误报未完成", async () => {
     mocks.runStreamed.mockResolvedValue({
       events: (async function* () {
@@ -178,6 +205,11 @@ describe("官方 Codex 登录与 SDK", () => {
   it("发起官方浏览器登录，并接收完成通知", async () => {
     const codex = await import("./codex");
     const login = await codex.startCodexLogin();
+    expect(mocks.spawn.mock.calls[0][1]).toContain('cli_auth_credentials_store="file"');
+    expect(mocks.spawn.mock.calls[0][2].env).toMatchObject({
+      CODEX_HOME: "/private/tmp/cbg-home-fixture",
+      CODEX_SQLITE_HOME: "/private/tmp/cbg-home-fixture",
+    });
     expect(login.state).toBe("pending");
     expect(login.authUrl).toMatch(/^https:\/\/auth\.openai\.com\//);
     expect(requests.find((request) => request.method === "account/login/start")?.params.type).toBe(
@@ -207,7 +239,10 @@ describe("官方 Codex 登录与 SDK", () => {
     const options = mocks.options.mock.calls[0][0];
     expect(options.env.OPENAI_API_KEY).toBeUndefined();
     expect(options.env.CODEX_API_KEY).toBeUndefined();
+    expect(options.env.CODEX_HOME).toBe("/private/tmp/cbg-home-fixture");
+    expect(options.env.CODEX_SQLITE_HOME).toBe("/private/tmp/cbg-home-fixture");
     expect(options.config.forced_login_method).toBe("chatgpt");
+    expect(options.config.cli_auth_credentials_store).toBe("file");
     expect(options.config.features).toEqual({
       shell_tool: false,
       unified_exec: false,
