@@ -1,16 +1,9 @@
-import {
-  createBackgroundPage,
-  getBrowser,
-  getCbgPage,
-  getActiveBrowserMode,
-  markBrowserReady,
-  clearBrowserReady,
-} from "./session";
+import { createBackgroundPage, getBrowser, getCbgPage, getActiveBrowserMode } from "./session";
 import { buildPageState, disconnectedState } from "./page-state";
 import { isNavigationTransition, readStableSnapshot, runFixedWorkflow } from "./workflow";
 import type { OpenCbgResult } from "./types";
 import { diagnostics, watchWorkPage, workflowDiagnostic } from "./diagnostics";
-import { enabledBrowserModes, type BrowserMode } from "./browser-settings";
+import type { BrowserMode } from "./browser-settings";
 import { assertServiceOpen } from "./service-lifecycle";
 
 type WorkflowCache = {
@@ -45,7 +38,6 @@ function createWorkflow(mode: BrowserMode) {
   function openCbg(): OpenCbgResult {
     assertServiceOpen();
     if (cache.task) return cache.state;
-    clearBrowserReady(mode);
     cache.generation = (cache.generation || 0) + 1;
     diagnostics.record("workflow.start");
     const started = Date.now();
@@ -72,13 +64,10 @@ function createWorkflow(mode: BrowserMode) {
         cache.state = { ...cache.state, ...update };
         recordState();
       });
-      if (cache.state.workflowStep === "completed" && cache.state.isLoggedIn)
-        markBrowserReady(mode);
       recordState();
       diagnostics.record("workflow.completed", { durationMs: Date.now() - started });
     })()
       .catch((error: unknown) => {
-        clearBrowserReady(mode);
         const detail = error instanceof Error ? error.message : "流程执行失败";
         const code = `CBG_${(cache.state.workflowStep || "unknown").toUpperCase()}`;
         diagnostics.record("workflow.error", { code, error, durationMs: Date.now() - started });
@@ -113,7 +102,6 @@ function createWorkflow(mode: BrowserMode) {
 
   function resetBrowserWorkflow() {
     if (cache.task) throw new Error("角色查询仍在运行，请等待结束后切换");
-    clearBrowserReady(mode);
     cache.generation = (cache.generation || 0) + 1;
     cache.state = {
       ...disconnectedState("浏览器运行方式已切换，请开始查询角色列表。"),
@@ -133,7 +121,6 @@ function createWorkflow(mode: BrowserMode) {
     const page = getCbgPage(mode);
     const generation = cache.generation;
     if (!page) {
-      clearBrowserReady(mode);
       cache.state = {
         ...disconnectedState("后台工作页已关闭，请重新开始。"),
         workflowStep: "idle",
@@ -146,7 +133,6 @@ function createWorkflow(mode: BrowserMode) {
       const auth = buildPageState(await readStableSnapshot(page, 1500));
       if (generation !== cache.generation || page !== getCbgPage(mode)) return cache.state;
       if (!auth.isLoggedIn) {
-        clearBrowserReady(mode);
         cache.state = {
           ...auth,
           running: false,
@@ -165,7 +151,6 @@ function createWorkflow(mode: BrowserMode) {
     } catch (error) {
       if (generation !== cache.generation || page !== getCbgPage(mode)) return cache.state;
       if (!isNavigationTransition(error)) {
-        clearBrowserReady(mode);
         diagnostics.record("workflow.status_error", { error });
         cache.state = {
           ...disconnectedState("无法读取后台工作页，请重新开始。"),
@@ -190,26 +175,17 @@ function createWorkflow(mode: BrowserMode) {
 function workflow(mode: BrowserMode) {
   return (workflows[mode] ??= createWorkflow(mode));
 }
-function combined(states: OpenCbgResult[]): OpenCbgResult {
-  const modes = enabledBrowserModes();
-  const index = modes.indexOf(getActiveBrowserMode());
-  // Keep the list browser fixed so collection never receives another browser's identity.
-  const primary = states[index >= 0 ? index : 0];
-  return {
-    ...primary,
-    activeBrowserMode: getActiveBrowserMode(),
-    browsers: states.map((state, i) => ({ ...state, mode: modes[i] })),
-  };
+function currentState(state: OpenCbgResult): OpenCbgResult {
+  const mode = getActiveBrowserMode();
+  return { ...state, activeBrowserMode: mode, browsers: [{ ...state, mode }] };
 }
 export function openCbg(): OpenCbgResult {
-  const entries = enabledBrowserModes().map(workflow);
-  if (!isBrowserWorkflowRunning()) entries.forEach((entry) => entry.openCbg());
-  return combined(entries.map((entry) => entry.state()));
+  const entry = workflow(getActiveBrowserMode());
+  if (!isBrowserWorkflowRunning()) entry.openCbg();
+  return currentState(entry.state());
 }
 export async function checkCbgStatus(): Promise<OpenCbgResult> {
-  return combined(
-    await Promise.all(enabledBrowserModes().map((mode) => workflow(mode).checkCbgStatus())),
-  );
+  return currentState(await workflow(getActiveBrowserMode()).checkCbgStatus());
 }
 export const isBrowserWorkflowRunning = () =>
   Object.values(workflows).some((entry) => entry.isBrowserWorkflowRunning());

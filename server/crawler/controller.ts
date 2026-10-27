@@ -194,7 +194,7 @@ export async function startCrawl(
       let detailPage: Page;
       try {
         // A validated collection session must not silently reconnect after a disconnect.
-        browser = await getBrowser(false, undefined, "detail");
+        browser = await getBrowser(false);
         detailPage = await createHiddenPage(browser);
       } catch (error) {
         control.signal.throwIfAborted();

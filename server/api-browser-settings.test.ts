@@ -264,7 +264,7 @@ it("控制请求尚未完成或 HTTP 已断开时保留 pending，业务结束�
   expect(browserControl.pending).toBe(0);
 });
 
-it("多选保存完整传递两种方式，拒绝空选择和重复值", async () => {
+it("兼容单元素 modes 保存，但拒绝双开、空选择和重复值", async () => {
   mocks.changeBrowserModes.mockImplementation(async (modes) => {
     mocks.browserSessionSettings.mockReturnValue({
       mode: modes[0],
@@ -273,17 +273,15 @@ it("多选保存完整传递两种方式，拒绝空选择和重复值", async (
       busy: false,
     });
   });
-  const res = await invoke(
-    request("/api/browser/settings/save", "POST", { modes: ["dedicated", "daily"] }),
-  );
+  const res = await invoke(request("/api/browser/settings/save", "POST", { modes: ["daily"] }));
   expect(res.statusCode).toBe(200);
   expect(mocks.changeBrowserModes).toHaveBeenCalledExactlyOnceWith(
-    ["dedicated", "daily"],
+    ["daily"],
     expect.any(Function),
     mocks.resetBrowserWorkflow,
   );
-  expect(JSON.parse(res.end.mock.calls[0][0]).modes).toEqual(["dedicated", "daily"]);
-  for (const modes of [[], ["daily", "daily"], ["chrome"], null, "daily"]) {
+  expect(JSON.parse(res.end.mock.calls[0][0]).modes).toEqual(["daily"]);
+  for (const modes of [[], ["dedicated", "daily"], ["daily", "daily"], ["chrome"], null, "daily"]) {
     const invalid = await invoke(request("/api/browser/settings/save", "POST", { modes }));
     expect(invalid.statusCode).toBe(400);
   }

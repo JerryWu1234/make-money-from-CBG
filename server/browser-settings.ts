@@ -9,7 +9,7 @@ export const isBrowserMode = (value: unknown): value is BrowserMode =>
 export const BROWSER_MODES: BrowserMode[] = ["dedicated", "daily"];
 export const isBrowserModes = (value: unknown): value is BrowserMode[] =>
   Array.isArray(value) &&
-  value.length > 0 &&
+  value.length === 1 &&
   value.every(isBrowserMode) &&
   new Set(value).size === value.length;
 export type BrowserSelection = { mode: BrowserMode; modes?: BrowserMode[] };
@@ -22,21 +22,24 @@ export class BrowserSettingsStore {
     try {
       const stored: unknown = JSON.parse(readFileSync(this.file, "utf8"));
       if (stored && typeof stored === "object") {
-        if ("modes" in stored && isBrowserModes(stored.modes))
-          return selection(
-            BROWSER_MODES.filter((mode) => (stored.modes as BrowserMode[]).includes(mode)),
-          );
+        if ("modes" in stored && Array.isArray(stored.modes)) {
+          const modes = stored.modes;
+          if (isBrowserModes(modes)) return selection(modes);
+          // 旧版双开拥有两套独立登录；收敛到保存登录的专用会话，不改写或清除配置。
+          if (modes.length === 2 && BROWSER_MODES.every((mode) => modes.includes(mode)))
+            return selection(["dedicated"]);
+        }
         if ("mode" in stored && isBrowserMode(stored.mode)) return selection([stored.mode]);
       }
     } catch {
       // Reading settings never starts either browser.
     }
-    return selection([...BROWSER_MODES]);
+    return selection(["dedicated"]);
   }
 
   save(value: unknown): BrowserSelection {
     const modes = isBrowserMode(value) ? [value] : value;
-    if (!isBrowserModes(modes)) throw new Error("浏览器运行方式无效，请至少选择一种方式");
+    if (!isBrowserModes(modes)) throw new Error("浏览器运行方式无效，请只选择一种方式");
     const next = selection(BROWSER_MODES.filter((mode) => modes.includes(mode)));
     mkdirSync(path.dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${randomUUID()}.tmp`;
@@ -61,10 +64,6 @@ export class BrowserSettingsStore {
 const store = new BrowserSettingsStore(path.resolve("data/browser-settings.json"));
 export const browserSettings = () => store.get();
 export const saveBrowserSettings = (value: unknown) => store.save(value);
-export const enabledBrowserModes = (): BrowserMode[] => {
-  const settings = browserSettings();
-  return settings.modes || [settings.mode];
-};
 
 // Count requests until their business promises settle, including after HTTP disconnects.
 const controlKey = Symbol.for("cbg.browser-control.v1");

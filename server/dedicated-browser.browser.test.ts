@@ -121,3 +121,29 @@ it("专用配置重开后保留持久 cookie 和 localStorage，其他配置保�
   }
   if (cleanupError) throw cleanupError;
 }, 90_000);
+
+it("专用配置重开后保留未设到期时间的 session 登录 cookie", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cbg-session-cookie-regression-"));
+  let context: BrowserContext | undefined;
+  try {
+    vi.stubEnv("CBG_SHOW_WORK_PAGES", "0");
+    context = await openDedicatedBrowser(directory);
+    await context.addCookies([
+      { name: "session-login-fixture", value: "saved-session-login", url: origin },
+    ]);
+    expect(
+      (await context.cookies(origin)).find((cookie) => cookie.name === "session-login-fixture")
+        ?.expires,
+    ).toBe(-1);
+    await context.close();
+    context = await openDedicatedBrowser(directory);
+    expect(
+      (await context.cookies(origin)).find((cookie) => cookie.name === "session-login-fixture")
+        ?.value,
+    ).toBe("saved-session-login");
+  } finally {
+    await context?.close();
+    await rm(directory, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+  }
+}, 60_000);

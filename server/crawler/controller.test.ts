@@ -117,7 +117,7 @@ it("已登录列表核验后连接消失，创建详情页时暂停且不自动�
     browserIssue: "disconnected",
     failed: 0,
   });
-  expect(mocks.getBrowser).toHaveBeenCalledExactlyOnceWith(false, undefined, "detail");
+  expect(mocks.getBrowser).toHaveBeenCalledExactlyOnceWith(false);
   expect(mocks.crawl).not.toHaveBeenCalled();
   expect(mocks.release).toHaveBeenCalledOnce();
 });

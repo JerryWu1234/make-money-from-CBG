@@ -45,3 +45,12 @@ it.each([
   await expect(openDedicatedBrowser("/temporary/profile")).rejects.toMatchObject({ kind });
   expect(mocks.launch).toHaveBeenCalledOnce();
 });
+
+it("专用 profile 使用 Chrome 原生会话恢复以保留 session cookie", async () => {
+  mocks.launch.mockResolvedValue({});
+  await openDedicatedBrowser("/temporary/private-profile");
+  expect(mocks.launch).toHaveBeenCalledWith(
+    "/temporary/private-profile",
+    expect.objectContaining({ args: ["--restore-last-session"] }),
+  );
+});

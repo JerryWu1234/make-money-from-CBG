@@ -28,7 +28,6 @@ export function App() {
   const [transportError, setTransportError] = useState<string | null>(null);
   const [crawling, setCrawling] = useState(false);
   const [starting, setStarting] = useState(false);
-  const [browserModes, setBrowserModes] = useState<BrowserMode[]>(["dedicated", "daily"]);
   const [browserMode, setBrowserMode] = useState<BrowserMode>("dedicated");
   const [browserSettingsBusy, setBrowserSettingsBusy] = useState(true);
   const browserSettingsBusyRef = useRef(true);
@@ -131,7 +130,7 @@ export function App() {
 
   const step = result?.workflowStep || "idle";
   const running = result?.running === true;
-  const querying = running || !!result?.browsers?.some((state) => state.running);
+  const querying = running;
   const completed = step === "completed" && !transportError;
   const stepIndex = ORDER.indexOf(step);
 
@@ -140,11 +139,9 @@ export function App() {
       <div className="card">
         <header className="card-header">
           <div className="badge">
-            {browserModes.length === 2
-              ? "专用浏览器 + 日常 Chrome · 同时启动"
-              : browserMode === "dedicated"
-                ? "项目专用浏览器 · 保存登录状态"
-                : "在本页完成 · 复用日常浏览器登录状态"}
+            {browserMode === "dedicated"
+              ? "项目专用浏览器 · 保存登录状态"
+              : "在本页完成 · 复用日常浏览器登录状态"}
           </div>
           <h1 className="title">藏宝阁角色查询</h1>
           <p className="subtitle">扫码登录后，自动进入跨服购买，选择3年以上服并加载角色列表。</p>
@@ -153,12 +150,8 @@ export function App() {
           </a>
         </header>
         <BrowserSettings
-          active={
-            starting || running || crawling || !!result?.browsers?.some((state) => state.running)
-          }
+          active={starting || running || crawling}
           onBusy={setSettingsBusy}
-          onModes={setBrowserModes}
-          states={result?.browsers}
           onMode={setBrowserMode}
           onSaved={browserModeSaved}
         />
@@ -204,13 +197,11 @@ export function App() {
                   : "开始查询角色"}
         </button>
         <p className="status-note">
-          {browserModes.length === 2
-            ? "两种浏览器分别登录并查询角色列表；上方显示各自状态，下方统一扫码区每次显示一个二维码。"
-            : browserMode === "dedicated"
-              ? "查询在项目专用浏览器中运行，本页显示二维码、进度与查询结果。"
-              : result?.workPagesVisible
-                ? "已开启原始工作页显示，可在 Chrome 窗口查看列表和详情；停止后保留页面供检查。"
-                : "藏宝阁在隐藏工作页中运行，本页显示二维码、进度与查询结果。"}
+          {browserMode === "dedicated"
+            ? "查询在项目专用浏览器中运行，本页显示二维码、进度与查询结果。"
+            : result?.workPagesVisible
+              ? "已开启原始工作页显示，可在 Chrome 窗口查看列表和详情；停止后保留页面供检查。"
+              : "藏宝阁在隐藏工作页中运行，本页显示二维码、进度与查询结果。"}
           {browserMode === "dedicated"
             ? "使用项目专用浏览器保存登录；首次使用或登录过期时仍需扫码。"
             : "连接日常 Chrome 时，如有调试授权提示请允许；连接断开后重新连接可能再次提示。"}{" "}
@@ -251,7 +242,7 @@ export function App() {
                 : result.message}
             </p>
             {result.error && <p className="error-message">错误编号：{result.error.code}</p>}
-            <BrowserLogin result={result} activeMode={browserMode} unavailable={!!transportError} />
+            <BrowserLogin result={result} unavailable={!!transportError} />
             {result.isLoggedIn && !transportError && (
               <div className="account-summary">
                 {result.serverName !== "未指定服务器" && <span>服务器：{result.serverName}</span>}

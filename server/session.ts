@@ -9,7 +9,6 @@ import { openDedicatedBrowser } from "./dedicated-browser";
 import {
   browserControl,
   browserSettings,
-  enabledBrowserModes,
   isBrowserModes,
   saveBrowserSettings,
   browserBusyError,
@@ -32,9 +31,6 @@ type BrowserSession = {
 type Session = ReturnType<typeof createSession>;
 type SessionPool = {
   sessions: Partial<Record<BrowserMode, Session>>;
-  active?: BrowserMode;
-  ready: Set<BrowserMode>;
-  detailIndex: number;
   closing: boolean;
   creation: Promise<void>;
 };
@@ -42,8 +38,6 @@ const sessionKey = Symbol.for("cbg.browser-session.v1");
 const runtime = globalThis as typeof globalThis & { [sessionKey]?: SessionPool };
 const pool = (runtime[sessionKey] ??= {
   sessions: {},
-  ready: new Set<BrowserMode>(),
-  detailIndex: 0,
   closing: false,
   creation: Promise.resolve(),
 });
@@ -57,6 +51,23 @@ function createSession(mode: BrowserMode) {
   async function getBrowser(allowConnect = false): Promise<Browser> {
     if (cache.closing || pool.closing) throw browserBusyError("本地服务正在关闭，请稍后重试");
     if (browserControl.changing) throw browserBusyError();
+    // 配置回滚也可能写盘失败；新连接不能越过另一个模式遗留的真实会话。
+    const others = Object.entries(pool.sessions)
+      .filter(([otherMode, entry]) => otherMode !== mode && entry.hasSessionResources())
+      .map(([, entry]) => entry);
+    if (others.some((entry) => entry.browserSessionSettings().busy)) throw browserBusyError();
+    if (others.length) {
+      if (!allowConnect)
+        throw new Error("浏览器未连接；其他浏览器会话尚未关闭，请重新开始以重试清理");
+      await Promise.all(others.map((entry) => entry.closeBrowserSession()));
+      if (
+        cache.closing ||
+        pool.closing ||
+        browserControl.changing ||
+        mode !== getActiveBrowserMode()
+      )
+        throw browserBusyError();
+    }
     if (cache.cleanup) {
       if (!allowConnect) throw new Error("浏览器未连接；旧会话尚未关闭，请重新开始以重试清理");
       await closeBrowserSession();
@@ -128,7 +139,6 @@ function createSession(mode: BrowserMode) {
     browser.on("disconnected", () => {
       diagnostics.record("browser.disconnected", { mode });
       if (cache.cachedBrowser === browser) {
-        pool.ready.delete(mode);
         cache.cachedBrowser = null;
         cache.selectedPage = null;
         cache.context = null;
@@ -153,7 +163,6 @@ function createSession(mode: BrowserMode) {
       transport: cache.transport,
     };
     const { browser, context, transport } = pending;
-    pool.ready.delete(mode);
     if (browser || context || transport) cache.cleanup = pending;
     cache.cachedBrowser = null;
     cache.selectedPage = null;
@@ -163,6 +172,17 @@ function createSession(mode: BrowserMode) {
       await cache.hiddenPageCreation;
       if (context) {
         try {
+          // 仅清理本项目的私有 context。保留空白会话使 Chrome 原生保留 session cookie，
+          // 同时阻止下次启动恢复旧列表/详情页；日常 Chrome 从不经过这条路径。
+          if (browser?.isConnected()) {
+            const blank = await context.newPage();
+            await Promise.all(
+              context
+                .pages()
+                .filter((page) => page !== blank)
+                .map((page) => page.close()),
+            );
+          }
           await context.close();
         } catch (error) {
           diagnostics.record("browser.context_close_error", { error });
@@ -312,6 +332,13 @@ function createSession(mode: BrowserMode) {
     shutdownBrowserSession,
     resetBrowserSessionLifecycle,
     closeBrowserSession,
+    hasSessionResources: () =>
+      !!(
+        cache.cleanup ||
+        cache.cachedBrowser?.isConnected() ||
+        cache.connectionPromise ||
+        cache.closePromise
+      ),
     owns: (browser: Browser) => cache.cachedBrowser === browser,
   };
 }
@@ -319,23 +346,11 @@ function session(mode = getActiveBrowserMode()) {
   return (pool.sessions[mode] ??= createSession(mode));
 }
 export function getActiveBrowserMode(): BrowserMode {
-  return pool.active || browserSettings().mode;
+  return browserSettings().mode;
 }
-export function markBrowserReady(mode: BrowserMode) {
-  if (pool.closing) return;
-  pool.ready.add(mode);
-  pool.active ??= mode;
-}
-export function clearBrowserReady(mode: BrowserMode) {
-  pool.ready.delete(mode);
-}
-export function getBrowser(allowConnect = false, mode?: BrowserMode, purpose?: "detail") {
-  if (purpose === "detail" && !mode) {
-    const ready = enabledBrowserModes().filter(
-      (value) => pool.ready.has(value) && pool.sessions[value]?.browserSessionSettings().connected,
-    );
-    if (ready.length) mode = ready[pool.detailIndex++ % ready.length];
-  }
+export function getBrowser(allowConnect = false, mode?: BrowserMode) {
+  if (mode && mode !== getActiveBrowserMode())
+    throw new Error("请先切换浏览器运行方式，再开始查询");
   return session(mode).getBrowser(allowConnect);
 }
 export const getCbgPage = (mode?: BrowserMode) => session(mode).getCbgPage();
@@ -348,7 +363,7 @@ export function createHiddenPage(browser: Browser): Promise<Page> {
   return (owner || session()).createHiddenPage(browser);
 }
 export function browserSessionSettings() {
-  const modes = enabledBrowserModes();
+  const modes = [getActiveBrowserMode()];
   const browsers = modes.map((mode) => ({ ...session(mode).browserSessionSettings(), mode }));
   return {
     mode: getActiveBrowserMode(),
@@ -363,7 +378,7 @@ export async function changeBrowserModes(
   busy: () => boolean,
   reset: () => void,
 ) {
-  if (!isBrowserModes(modes)) throw new Error("请至少选择一种浏览器方式");
+  if (!isBrowserModes(modes)) throw new Error("请只选择一种浏览器方式");
   if (
     pool.closing ||
     browserControl.changing ||
@@ -371,9 +386,12 @@ export async function changeBrowserModes(
     Object.values(pool.sessions).some((entry) => entry.browserSessionSettings().busy)
   )
     throw browserBusyError("查询、采集或分析正在运行，请先暂停并等待任务结束后切换浏览器");
+  const previous = browserSettings();
   browserControl.changing = true;
+  let saved = false;
   try {
     saveBrowserSettings(modes);
+    saved = true;
     reset();
     const results = await Promise.allSettled(
       Object.values(pool.sessions).map((entry) => entry.closeBrowserSession()),
@@ -385,10 +403,20 @@ export async function changeBrowserModes(
         String(errors[0].reason),
       );
     pool.sessions = {};
-    pool.active = undefined;
-    pool.ready.clear();
-    pool.detailIndex = 0;
     diagnostics.record("browser.modes_changed", { modes });
+  } catch (error) {
+    if (saved) {
+      try {
+        saveBrowserSettings(previous.modes || [previous.mode]);
+      } catch (rollbackError) {
+        diagnostics.record("browser.mode_rollback_error", { error, rollbackError });
+        throw new AggregateError(
+          [error, rollbackError],
+          `${String(error)}；浏览器运行方式回滚失败`,
+        );
+      }
+    }
+    throw error;
   } finally {
     browserControl.changing = false;
   }
@@ -398,9 +426,6 @@ export function changeBrowserMode(mode: BrowserMode, busy: () => boolean, reset:
 }
 export async function shutdownBrowserSession() {
   pool.closing = true;
-  pool.ready.clear();
-  pool.active = undefined;
-  pool.detailIndex = 0;
   const results = await Promise.allSettled(
     Object.values(pool.sessions).map((entry) => entry.shutdownBrowserSession()),
   );

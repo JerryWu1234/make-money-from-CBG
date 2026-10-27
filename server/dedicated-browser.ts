@@ -34,6 +34,8 @@ export async function openDedicatedBrowser(
   try {
     return await chromium.launchPersistentContext(directory, {
       channel: "chrome",
+      // Chrome 的会话 cookie 需要恢复上次会话；关停时仅保留空白页，避免重开业务标签。
+      args: ["--restore-last-session"],
       headless: !showBrowserWorkPages(),
       viewport: { width: 1280, height: 900 },
       timeout: 60_000,

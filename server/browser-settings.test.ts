@@ -15,13 +15,13 @@ afterEach(() => {
     rmSync(directory, { recursive: true, force: true });
 });
 
-it("默认启用两种浏览器，读取不创建配置且不影响截图配置", () => {
+it("默认只启用保存登录的专用浏览器，读取不创建配置且不影响截图配置", () => {
   const file = temporary();
   const screenshots = path.join(path.dirname(file), "runtime-settings.json");
   writeFileSync(screenshots, '{"saveScreenshots":false}');
   expect(new BrowserSettingsStore(file).get()).toEqual({
     mode: "dedicated",
-    modes: ["dedicated", "daily"],
+    modes: ["dedicated"],
   });
   expect(readdirSync(path.dirname(file))).toEqual(["runtime-settings.json"]);
   const store = new BrowserSettingsStore(file);
@@ -47,27 +47,28 @@ it.each([undefined, null, "", "chrome", true, {}, []])(
   },
 );
 
-it("新安装默认同时启用两种浏览器，并保存独立勾选结果", () => {
+it("默认单主会话，拒绝双选和重复值，保留日常 Chrome 的明确选择", () => {
   const file = temporary();
   const store = new BrowserSettingsStore(file);
-  expect(store.get()).toMatchObject({ modes: ["dedicated", "daily"] });
-  store.save(["dedicated", "daily"]);
-  expect(new BrowserSettingsStore(file).get()).toMatchObject({ modes: ["dedicated", "daily"] });
+  expect(store.get()).toEqual({ mode: "dedicated", modes: ["dedicated"] });
   store.save(["daily"]);
-  expect(new BrowserSettingsStore(file).get()).toMatchObject({ modes: ["daily"] });
-  expect(() => store.save([])).toThrow();
-  expect(() => store.save(["daily", "daily"])).toThrow();
-  expect(new BrowserSettingsStore(file).get()).toMatchObject({ modes: ["daily"] });
+  expect(new BrowserSettingsStore(file).get()).toEqual({ mode: "daily", modes: ["daily"] });
+  for (const value of [[], ["dedicated", "daily"], ["daily", "daily"]])
+    expect(() => store.save(value)).toThrow("浏览器运行方式无效");
+  expect(new BrowserSettingsStore(file).get()).toEqual({ mode: "daily", modes: ["daily"] });
 });
 
-it("旧版单选配置保留用户选择，下次保存写成多选配置", () => {
+it.each([
+  [{ mode: "daily" }, "daily"],
+  [{ mode: "dedicated" }, "dedicated"],
+  [{ mode: "daily", modes: ["daily"] }, "daily"],
+  [{ mode: "daily", modes: ["daily", "dedicated"] }, "dedicated"],
+  [{ mode: "dedicated", modes: ["dedicated", "daily"] }, "dedicated"],
+])("兼容旧配置 %j，双开收敛为专用浏览器且只读不改配置", (stored, expected) => {
   const file = temporary();
-  writeFileSync(file, '{"mode":"daily"}');
+  const original = JSON.stringify(stored);
+  writeFileSync(file, original);
   const store = new BrowserSettingsStore(file);
-  expect(store.get()).toEqual({ mode: "daily", modes: ["daily"] });
-  store.save(["daily", "dedicated"]);
-  expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
-    mode: "dedicated",
-    modes: ["dedicated", "daily"],
-  });
+  expect(store.get()).toEqual({ mode: expected, modes: [expected] });
+  expect(readFileSync(file, "utf8")).toBe(original);
 });

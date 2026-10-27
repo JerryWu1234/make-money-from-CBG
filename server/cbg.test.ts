@@ -4,9 +4,7 @@ import { buildPageState, disconnectedState, type PageSnapshot } from "./page-sta
 const mocks = vi.hoisted(() => ({
   getBrowser: vi.fn(),
   getActiveBrowserMode: vi.fn(),
-  markBrowserReady: vi.fn(),
-  clearBrowserReady: vi.fn(),
-  enabledBrowserModes: vi.fn(),
+  browserSettings: vi.fn(),
   createBackgroundPage: vi.fn(),
   getCbgPage: vi.fn(),
   runFixedWorkflow: vi.fn(),
@@ -16,7 +14,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./session", () => mocks);
 vi.mock("./browser-settings", async (original) => ({
   ...(await original<typeof import("./browser-settings")>()),
-  enabledBrowserModes: mocks.enabledBrowserModes,
+  browserSettings: mocks.browserSettings,
 }));
 vi.mock("./diagnostics", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./diagnostics")>()),
@@ -32,8 +30,8 @@ beforeEach(() => {
   Reflect.deleteProperty(globalThis, Symbol.for("cbg.workflow-state.v1"));
   vi.resetModules();
   vi.clearAllMocks();
-  mocks.enabledBrowserModes.mockReturnValue(["daily"]);
-  mocks.getActiveBrowserMode.mockReturnValue("daily");
+  mocks.browserSettings.mockReturnValue({ mode: "daily", modes: ["daily"] });
+  mocks.getActiveBrowserMode.mockImplementation(() => mocks.browserSettings().mode);
   const page = { isClosed: () => false };
   mocks.getBrowser.mockResolvedValue({});
   mocks.getCbgPage.mockReturnValue(page);
@@ -261,81 +259,26 @@ describe("开发服务重载后的流程复用", () => {
   });
 });
 
-describe("同时启动两种浏览器", () => {
-  it("同时开始两路独立登录，一路等待扫码不阻塞另一条已就绪列表，也不重复开始", async () => {
-    mocks.enabledBrowserModes.mockReturnValue(["dedicated", "daily"]);
-    mocks.getActiveBrowserMode.mockReturnValue("daily");
-    const dedicatedPage = { mode: "dedicated" };
-    const dailyPage = { mode: "daily" };
-    mocks.getBrowser.mockImplementation(async (_connect, mode) => ({ mode }));
-    mocks.createBackgroundPage.mockImplementation(async (_browser, mode) =>
-      mode === "daily" ? dailyPage : dedicatedPage,
-    );
-    let finish!: (value: ReturnType<typeof completed>) => void;
-    mocks.runFixedWorkflow.mockImplementation(async (page, publish) => {
-      if (page === dailyPage) return completed();
-      publish({
-        connected: true,
-        isLoggedIn: false,
-        running: true,
-        workflowStep: "logging_in",
-        qrCodeUrl: "data:image/png;base64,dedicated",
-      });
-      return new Promise((resolve) => {
-        finish = resolve;
-      });
-    });
+describe("一个浏览器登录入口", () => {
+  it.each(["dedicated", "daily"])("%s 模式只启动和读取一个主会话", async (mode) => {
+    mocks.browserSettings.mockReturnValue({ mode, modes: [mode] });
     const flow = await import("./cbg");
     flow.openCbg();
-    await vi.waitFor(() => expect(mocks.runFixedWorkflow).toHaveBeenCalledTimes(2));
-    try {
-      const state = await flow.checkCbgStatus();
-      expect(state).toMatchObject({ workflowStep: "completed", isLoggedIn: true });
-      expect(state.browsers).toEqual([
-        expect.objectContaining({
-          mode: "dedicated",
-          workflowStep: "logging_in",
-          qrCodeUrl: "data:image/png;base64,dedicated",
-        }),
-        expect.objectContaining({ mode: "daily", workflowStep: "completed" }),
-      ]);
-      flow.openCbg();
-      expect(mocks.getBrowser.mock.calls).toEqual([
-        [true, "dedicated"],
-        [true, "daily"],
-      ]);
-      expect(mocks.markBrowserReady).toHaveBeenCalledWith("daily");
-    } finally {
-      finish(completed());
-      await flow.finishBrowserWorkflow();
-    }
-    expect(mocks.markBrowserReady).toHaveBeenCalledWith("dedicated");
-  });
-  it("日常 Chrome 连接失败不会取消专用浏览器查询，分别报告错误", async () => {
-    mocks.enabledBrowserModes.mockReturnValue(["dedicated", "daily"]);
-    mocks.getActiveBrowserMode.mockReturnValue("dedicated");
-    mocks.getBrowser.mockImplementation(async (_connect, mode) => {
-      if (mode === "daily") throw new Error("日常调试端口未启动");
-      return {};
+    await flow.finishBrowserWorkflow();
+    expect(mocks.getBrowser).toHaveBeenCalledExactlyOnceWith(true, mode);
+    expect(mocks.runFixedWorkflow).toHaveBeenCalledOnce();
+    expect(await flow.checkCbgStatus()).toMatchObject({
+      activeBrowserMode: mode,
+      browsers: [expect.objectContaining({ mode, workflowStep: "completed" })],
     });
-    const log = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      const flow = await import("./cbg");
-      flow.openCbg();
-      await flow.finishBrowserWorkflow();
-      expect(await flow.checkCbgStatus()).toMatchObject({
-        workflowStep: "completed",
-        isLoggedIn: true,
-        browsers: [
-          expect.objectContaining({ mode: "dedicated", workflowStep: "completed" }),
-          expect.objectContaining({
-            mode: "daily",
-            error: { message: "日常调试端口未启动", code: "CBG_CONNECTING" },
-          }),
-        ],
-      });
-    } finally {
-      log.mockRestore();
-    }
+  });
+
+  it("旧双选配置不会启动第二个扫码流程", async () => {
+    mocks.browserSettings.mockReturnValue({ mode: "dedicated", modes: ["dedicated", "daily"] });
+    const flow = await import("./cbg");
+    flow.openCbg();
+    await flow.finishBrowserWorkflow();
+    expect(mocks.getBrowser).toHaveBeenCalledExactlyOnceWith(true, "dedicated");
+    expect((await flow.checkCbgStatus()).browsers).toHaveLength(1);
   });
 });
