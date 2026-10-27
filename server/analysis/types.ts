@@ -139,12 +139,6 @@ export type AnalysisOverview = {
   captureActivity?: Pick<CrawlStatus, "running" | "phase"> & {
     inFlight?: number;
   };
-  capturePreparation?: {
-    total: number;
-    completed: number;
-    current: string | null;
-    message: string;
-  };
   profile?: Pick<
     AnalysisProfile,
     | "hash"
@@ -181,13 +175,7 @@ export type AnalysisOverview = {
 };
 export type AnalysisProgress = Pick<
   AnalysisOverview,
-  | "counts"
-  | "captureTasks"
-  | "run"
-  | "activeRun"
-  | "captureActivity"
-  | "capturePreparation"
-  | "profile"
+  "counts" | "captureTasks" | "run" | "activeRun" | "captureActivity" | "profile"
 >;
 export type AnalysisDetail = {
   assetCounts?: CapturedAssetCounts | null;

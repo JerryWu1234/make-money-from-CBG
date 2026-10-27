@@ -150,6 +150,31 @@ describe("持久化的商品分析队列", () => {
       crawl.db.prepare("SELECT status,error FROM analysis_tasks WHERE run_id=?").get(id),
     ).toMatchObject({ status: "skipped", error: expect.stringContaining("不再重试") });
   });
+  it("有限批次先分析完整项，缺资料待办保留并暂停，不能标为全部完成", async () => {
+    const { crawl, store, runner, analyze } = setup(["a", "b"]);
+    const id = store.createRun("codex", "test-model", false, undefined, true, 2);
+    const incomplete = crawl.detail("b") as SavedRoleRecord;
+    incomplete.detail!.equipmentCapture!.complete = false;
+    incomplete.detail!.equipmentCapture!.issues = ["装备属性未完整读取"];
+    crawl.save(incomplete.listing, incomplete.detail!);
+    await runner.resume(id);
+    await runner.settled();
+    expect(analyze).toHaveBeenCalledOnce();
+    expect(store.run(id)).toMatchObject({ status: "paused", completed: 1, queued: 1, failed: 0 });
+    expect(store.run(id)?.error).toContain("资料未完整");
+    expect(
+      crawl.db
+        .prepare("SELECT status FROM analysis_tasks WHERE run_id=? AND listing_key='b'")
+        .get(id)!.status,
+    ).toBe("queued");
+    incomplete.detail!.equipmentCapture!.complete = true;
+    incomplete.detail!.equipmentCapture!.issues = [];
+    crawl.save(incomplete.listing, incomplete.detail!);
+    await runner.resume(id);
+    await runner.settled();
+    expect(analyze).toHaveBeenCalledTimes(2);
+    expect(store.run(id)).toMatchObject({ status: "completed", completed: 2, queued: 0 });
+  });
   it("异步查价期间确认不存在，返回后在发模型前跳过并保留已保存查价证据", async () => {
     const { crawl, store, runner, analyze, profile, pricing, searchEquipment } =
       await valuationSetup();

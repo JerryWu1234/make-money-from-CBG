@@ -305,6 +305,9 @@ export class AnalysisStore {
       .prepare(`SELECT r.*,count(CASE WHEN t.status!='skipped' THEN t.id END) total,
       coalesce(sum(t.status='completed'),0) completed,coalesce(sum(t.status='failed'),0) failed,
       coalesce(sum(t.status='queued'),0) queued,coalesce(sum(t.reused),0) reused,
+      EXISTS(SELECT 1 FROM analysis_tasks ready JOIN listings l ON l.key=ready.listing_key
+        WHERE ready.run_id=r.id AND ready.status='queued' AND l.status='complete'
+        AND l.detail_json IS NOT NULL) ready_queued,
       coalesce(sum(t.status='running'),0) running_count,
       coalesce(sum(t.status='running' AND t.queue_lane='new'),0) new_running,
       coalesce(sum(t.status='running' AND t.queue_lane='old'),0) old_running,
@@ -384,7 +387,7 @@ export class AnalysisStore {
             row.status === "running" &&
             row.follow_capture === "1" &&
             !row.phase &&
-            !Number(row.queued)
+            !row.ready_queued
               ? "waiting_capture"
               : (nullable(row.phase) as AnalysisRun["phase"]),
           ...(profile
@@ -469,7 +472,7 @@ export class AnalysisStore {
     };
   }
   /** Refresh unfinished inputs after collection, retaining the run's original settings. */
-  refreshPendingCaptures(id: string) {
+  refreshPendingCaptures(id: string, listingKey?: string) {
     const run = this.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(id);
     if (!run) throw new Error("分析批次不存在");
     const profile = run.profile_json
@@ -478,8 +481,9 @@ export class AnalysisStore {
     const rows = this.db
       .prepare(`SELECT t.id,t.source_listing_json,t.source_detail_json,l.listing_json,l.detail_json
       FROM analysis_tasks t JOIN listings l ON l.key=t.listing_key
-      WHERE t.run_id=? AND t.status IN ('queued','waiting_pricing','failed') AND l.status='complete' AND l.detail_json IS NOT NULL`)
-      .all(id);
+      WHERE t.run_id=? AND t.status IN ('queued','waiting_pricing','failed') AND l.status='complete' AND l.detail_json IS NOT NULL
+      ${listingKey === undefined ? "" : "AND t.listing_key=?"}`)
+      .all(id, ...(listingKey === undefined ? [] : [listingKey]));
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const row of rows) {
@@ -969,17 +973,24 @@ export class AnalysisStore {
   }
   next(runId: string, preferredLane?: AnalysisLane): AnalysisTask | null {
     this.skipUnavailableQueued(runId);
-    const row = this.db
-      .prepare(
-        `SELECT t.*,r.profile_json,
+    const next = this.db.prepare(
+      `SELECT t.*,r.profile_json,${matchingSourceSql} AS source_matches,
           (SELECT length(trim(coalesce(a.raw_response,'')))>0 FROM analysis_attempts a
            WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1) last_attempt_had_response
          FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id JOIN listings l ON l.key=t.listing_key
          WHERE t.run_id=? AND t.status='queued' AND l.status='complete' AND l.detail_json IS NOT NULL
          ORDER BY CASE WHEN t.queue_lane=? THEN 0 ELSE 1 END,t.ordinal ASC LIMIT 1`,
-      )
-      .get(runId, preferredLane ?? null);
+    );
+    let row = next.get(runId, preferredLane ?? null);
     if (!row) return null;
+    if (row.source_matches !== 1) {
+      // Collection may finish while analysis is waiting. Refresh only this input;
+      // unchanged tasks use the indexed source match rather than a queue-wide scan.
+      this.refreshPendingCaptures(runId, String(row.listing_key));
+      row = next.get(runId, preferredLane ?? null);
+      if (!row) return null;
+      if (row.source_matches !== 1) throw new Error("角色资料正在更新，请资料稳定后继续分析");
+    }
     const task: AnalysisTask = {
       id: String(row.id),
       runId,

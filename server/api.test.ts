@@ -141,19 +141,6 @@ it("记录页明确跳过推荐榜，默认请求仍保留推荐计算", async (
   }
 });
 
-it("资料待补采返回409并保留明确的角色提示", async () => {
-  const message = "还有 1 个角色资料待补采：29534033。";
-  mocks.startAnalysis.mockRejectedValue(
-    Object.assign(new Error(message), { name: "CapturePreparationError" }),
-  );
-  const res = response();
-  await (
-    await import("./api")
-  ).apiMiddleware(request("/api/analysis/start", { provider: "codex" }), res, vi.fn());
-  expect(res.statusCode).toBe(409);
-  expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ error: message });
-});
-
 it("明确确认飞升公式只保存当前角色的确认，不启动或修改分析批次", async () => {
   const productKeys = ["159:one", "377:two"];
   mocks.confirmSchoolFormula.mockReturnValue({ confirmed: 2, productKeys });

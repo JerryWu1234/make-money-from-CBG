@@ -77,6 +77,25 @@ function setup(filename = ":memory:") {
   };
 }
 describe("分析队列持续处理并等待新角色", () => {
+  it("旧队列只有缺资料项时显示等待资料，不误报模型正在分析", async () => {
+    const x = setup();
+    x.add("ready", 0);
+    x.add("waiting", 1);
+    const id = await x.runner.start("codex", false, undefined, false, undefined, 1, undefined, 1);
+    expect(x.analyzed).toEqual(["ready"]);
+    x.crawl.fail("waiting", "等待用户补齐资料");
+    x.release();
+    await vi.waitFor(() =>
+      expect(x.store.run(id)).toMatchObject({
+        status: "running",
+        runningCount: 0,
+        completed: 1,
+        queued: 1,
+        phase: "waiting_capture",
+      }),
+    );
+    expect(x.analyzed).toEqual(["ready"]);
+  });
   it("候选和采集失败不触发模型，完整商品发布后立即分析且不重复", async () => {
     const x = setup();
     x.release();

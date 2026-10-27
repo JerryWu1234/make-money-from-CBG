@@ -369,7 +369,15 @@ export class AnalysisRunner {
             stop.addEventListener("abort", done, { once: true });
           });
         } else {
-          this.store.setRun(id, "completed", null, owner);
+          const queued = this.store.run(id)?.queued || 0;
+          this.store.setRun(
+            id,
+            queued ? "paused" : "completed",
+            queued
+              ? `还有 ${queued} 个角色资料未完整，待办已保留；请在采集工作台补齐后继续分析。`
+              : null,
+            owner,
+          );
           return;
         }
       }

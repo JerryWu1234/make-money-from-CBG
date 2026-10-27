@@ -568,11 +568,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
         : error instanceof Error && error.name === "SchoolFormulaConfirmationError"
           ? 400
           : error instanceof Error &&
-              [
-                "CapturePreparationError",
-                "LogStorageTokenError",
-                "BrowserSessionBusyError",
-              ].includes(error.name)
+              ["LogStorageTokenError", "BrowserSessionBusyError"].includes(error.name)
             ? 409
             : 500;
     res.end(JSON.stringify({ error: error instanceof Error ? error.message : "请求失败" }));

@@ -1,15 +1,7 @@
 import { prepareAnalysisClient } from "../ai-connection";
 import type { AiProvider } from "../ai/types";
-import {
-  crawlDatabase,
-  captureRetryItems,
-  startCrawl,
-  crawlActivity,
-  crawlStatus,
-  isCrawling,
-  stopCrawl,
-} from "../crawler/controller";
-import { AnalysisRunner, pricingUntilAborted } from "./runner";
+import { crawlDatabase, crawlStatus } from "../crawler/controller";
+import { AnalysisRunner } from "./runner";
 import { AnalysisStore } from "./store";
 import { EXPIRED_MARKET_NOTICE, refreshMarket, marketServers } from "./market";
 import { createProfile, loadProfile, saveProfile, PROMPT_FILE } from "./profile";
@@ -20,31 +12,16 @@ import { assertServiceOpen } from "../service-lifecycle";
 import { confirmAscendedSchoolFormula } from "./school-confirmation";
 import { overviewOffThread, shutdownOverviewWorkers } from "./overview-worker";
 
-type CapturePreparation = {
-  controller: AbortController;
-  ownsCapture: boolean;
-  total: number;
-  completion: Promise<void>;
-  status: typeof crawlStatus;
-  stopOwnedCapture: () => void;
-  activity?: NonNullable<ReturnType<typeof crawlActivity>>;
-};
 type AnalysisService = {
   store: AnalysisStore;
   runner: AnalysisRunner;
-  preparing?: CapturePreparation;
 };
 const serviceKey = Symbol.for("cbg.analysis-service.v1");
 const runtime = globalThis as typeof globalThis & { [serviceKey]?: AnalysisService };
 function service() {
   let analysis = runtime[serviceKey];
   // A page or Vite module reload must keep the in-flight queue and its abort controller.
-  if (
-    !analysis ||
-    (!(analysis.store instanceof AnalysisStore) &&
-      !analysis.runner.isRunning() &&
-      !analysis.preparing)
-  ) {
+  if (!analysis || (!(analysis.store instanceof AnalysisStore) && !analysis.runner.isRunning())) {
     const store = new AnalysisStore(crawlDatabase());
     analysis = runtime[serviceKey] = {
       store,
@@ -57,8 +34,7 @@ export function appendCapturedAnalysis() {
   return runtime[serviceKey]?.runner.appendCaptured() || 0;
 }
 function overviewStatus(profile: ReturnType<typeof loadProfile>) {
-  const preparation = service().preparing;
-  const capture = preparation?.ownsCapture ? preparation.status() : crawlStatus();
+  const capture = crawlStatus();
   return {
     ...(capture
       ? {
@@ -68,16 +44,6 @@ function overviewStatus(profile: ReturnType<typeof loadProfile>) {
             ...(capture.running && (capture.phase === "collecting" || capture.phase === "retrying")
               ? { inFlight: (capture.newRunning || 0) + (capture.oldRunning || 0) }
               : {}),
-          },
-        }
-      : {}),
-    ...(preparation
-      ? {
-          capturePreparation: {
-            total: preparation.total,
-            completed: capture?.retryCompleted || 0,
-            current: capture?.current || null,
-            message: capture?.detailProgress || capture?.message || "正在采集并核验角色完整资料…",
           },
         }
       : {}),
@@ -120,69 +86,6 @@ export function analysisProgress(options: Parameters<AnalysisStore["progress"]>[
   return { ...current.store.progress(options), ...overviewStatus(profile) };
 }
 
-async function prepareCaptures(keys?: string[]) {
-  const analysis = service();
-  if (analysis.preparing) throw new Error("正在采集角色完整资料，请等待当前准备完成");
-  const missing = captureRetryItems(keys);
-  if (!missing.length) {
-    reconcileCapturedEquipmentCategories(analysis.store.db, keys);
-    return;
-  }
-  const preparation: CapturePreparation = {
-    controller: new AbortController(),
-    ownsCapture: false,
-    total: missing.length,
-    completion: Promise.resolve(),
-    status: crawlStatus,
-    stopOwnedCapture: () => {
-      if (preparation.activity && crawlActivity() === preparation.activity) stopCrawl();
-    },
-  };
-  analysis.preparing = preparation;
-  preparation.completion = (async () => {
-    const signal = preparation.controller.signal;
-    if (isCrawling()) {
-      const activity = crawlActivity();
-      if (!activity) throw new Error("当前采集状态尚未稳定，请稍后重试");
-      await pricingUntilAborted(activity.completion, signal);
-    }
-    signal.throwIfAborted();
-    const remaining = captureRetryItems(keys);
-    if (!remaining.length) return;
-    const attempt = await startCrawl("manual", undefined, {
-      backfillOnly: true,
-      keys: remaining.map((item) => item.key),
-    });
-    preparation.ownsCapture = attempt.started;
-    preparation.activity = attempt.activity || undefined;
-    if (signal.aborted && attempt.started) {
-      preparation.stopOwnedCapture();
-      await attempt.activity?.completion;
-    }
-    signal.throwIfAborted();
-    if (!attempt.activity) throw new Error("角色资料采集尚未启动");
-    const status = await pricingUntilAborted(attempt.activity.completion, signal);
-    signal.throwIfAborted();
-    if (status.phase === "error" || status.phase === "paused")
-      throw new Error(status.error || status.message);
-    const incomplete = captureRetryItems(keys);
-    if (incomplete.length)
-      throw Object.assign(
-        new Error(
-          `还有 ${incomplete.length} 个角色资料待补采：${incomplete
-            .slice(0, 5)
-            .map((item) => item.name)
-            .join("、")}${incomplete.length > 5 ? "等" : ""}。` +
-            "请先在采集列表查看失败原因并补采，资料完整后再开始分析。",
-        ),
-        { name: "CapturePreparationError" },
-      );
-  })().finally(() => {
-    if (analysis.preparing === preparation) analysis.preparing = undefined;
-  });
-  await preparation.completion;
-  reconcileCapturedEquipmentCategories(analysis.store.db, keys);
-}
 export async function analysisSettings() {
   const db = service().store.db;
   let marketError: string | undefined;
@@ -230,23 +133,16 @@ export async function startAnalysis(
   analysisConcurrency(concurrency);
   validateSampleSelection(sample, sampleSize, productKeys);
   const analysis = service();
-  if (
-    !analysis.runner.isRunning() &&
-    !(
-      !sample &&
-      !productKeys &&
-      (isCrawling() || analysis.store.counts().total === 0 || analysis.store.counts().complete > 0)
-    )
-  ) {
+  if (sample && !analysis.runner.isRunning()) {
     const keys =
       productKeys ||
-      (sample
-        ? analysis.store.db
-            .prepare("SELECT key FROM listings ORDER BY key ASC LIMIT ?")
-            .all(sampleSize)
-            .map((row) => String(row.key))
-        : undefined);
-    await prepareCaptures(keys);
+      analysis.store.db
+        .prepare(
+          "SELECT key FROM listings WHERE status='complete' AND detail_json IS NOT NULL ORDER BY key ASC LIMIT ?",
+        )
+        .all(sampleSize)
+        .map((row) => String(row.key));
+    if (keys.length) reconcileCapturedEquipmentCategories(analysis.store.db, keys);
   }
   try {
     await refreshMarket(service().store.db);
@@ -300,7 +196,7 @@ export async function resumeAnalysis(id: string, retry = false, concurrency?: nu
       )
       .all(id)
       .map((task) => String(task.listing_key));
-    if (keys.length) await prepareCaptures(keys);
+    if (keys.length) reconcileCapturedEquipmentCategories(analysis.store.db, keys);
     analysis.store.refreshPendingCaptures(id);
   }
   assertServiceOpen();
@@ -308,15 +204,6 @@ export async function resumeAnalysis(id: string, retry = false, concurrency?: nu
   return service().store.run(id);
 }
 export async function pauseAnalysis(id?: string) {
-  const preparation = service().preparing;
-  if (preparation) {
-    preparation.controller.abort(new Error("已暂停完整资料采集准备"));
-    if (preparation.ownsCapture) {
-      preparation.stopOwnedCapture();
-      await preparation.activity?.completion;
-    }
-    await preparation.completion.catch(() => {});
-  }
   await service().runner.pause(id);
   return id ? service().store.run(id) : service().store.activeRun();
 }
@@ -329,10 +216,9 @@ export function markRecommendationViewed(key: unknown) {
   return service().store.markRecommendationViewed(key);
 }
 export function isAnalyzing() {
-  return !!service().preparing || service().runner.isRunning();
+  return service().runner.isRunning();
 }
 export async function shutdownAnalysis() {
-  if (runtime[serviceKey]?.preparing) await pauseAnalysis();
   if (runtime[serviceKey]) await runtime[serviceKey].runner.shutdown();
   await shutdownOverviewWorkers();
 }

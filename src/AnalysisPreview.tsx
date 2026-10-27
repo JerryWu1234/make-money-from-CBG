@@ -107,8 +107,7 @@ export function AnalysisPreview() {
   const operation = useRef(false);
   const run = data?.run;
   const active = data?.activeRun;
-  const preparation = data?.capturePreparation;
-  const running = !!active || !!preparation;
+  const running = !!active;
   const waitingForRoles = active?.phase === "waiting_capture";
   const cooling = !!active?.rateLimit && active.rateLimit.retryAt > Date.now();
   const waitingDetail = data?.captureTasks?.total ?? data?.counts.waitingDetail ?? 0;
@@ -172,26 +171,17 @@ export function AnalysisPreview() {
           }
           firstLoad.current = false;
         }
-        const {
-          run,
-          activeRun,
-          counts,
-          captureTasks,
-          captureActivity,
-          capturePreparation,
-          profile,
-        } = next;
+        const { run, activeRun, counts, captureTasks, captureActivity, profile } = next;
         setProgress({
           run,
           activeRun,
           counts,
           captureTasks,
           captureActivity,
-          capturePreparation,
           profile,
         });
         setProgressError(null);
-        timer = setTimeout(refresh, next.activeRun || next.capturePreparation ? 1500 : 5000);
+        timer = setTimeout(refresh, next.activeRun ? 1500 : 5000);
       } catch (failure) {
         if (controller.signal.aborted) return;
         setProgressError(pollingError(failure, "读取分析进度"));
@@ -267,7 +257,7 @@ export function AnalysisPreview() {
         setRevision((value) => value + 1);
       } catch (failure) {
         const message = failure instanceof Error ? failure.message : "操作失败，请重试";
-        setError(message === "已暂停完整资料采集准备" ? null : message);
+        setError(message);
       } finally {
         operation.current = false;
         setBusy(false);
@@ -322,29 +312,27 @@ export function AnalysisPreview() {
       setError(failure instanceof Error ? failure.message : "无法保存查看记录");
     }
   };
-  const startLabel = preparation
-    ? "正在完整采集…"
-    : busy
-      ? "正在处理…"
-      : running
-        ? waitingForRoles
-          ? "等待新角色…"
-          : searchingEquipment
-            ? "正在查价…"
-            : "正在分析…"
-        : run && !sameModel
-          ? "按新模型开始分析"
-          : run && !sameMarket
-            ? "刷新行情并重新分析"
-            : run && !sameCalculation
-              ? "按新规则开始分析"
-              : run?.status === "paused"
-                ? "继续分析"
-                : run?.status === "completed"
-                  ? "分析新增或已更新商品"
-                  : data?.counts.complete === 0
-                    ? "开始分析并等待采集"
-                    : "开始分析已有商品";
+  const startLabel = busy
+    ? "正在处理…"
+    : running
+      ? waitingForRoles
+        ? "等待新角色…"
+        : searchingEquipment
+          ? "正在查价…"
+          : "正在分析…"
+      : run && !sameModel
+        ? "按新模型开始分析"
+        : run && !sameMarket
+          ? "刷新行情并重新分析"
+          : run && !sameCalculation
+            ? "按新规则开始分析"
+            : run?.status === "paused"
+              ? "继续分析"
+              : run?.status === "completed"
+                ? "分析新增或已更新商品"
+                : data?.counts.complete === 0
+                  ? "开始分析并等待采集"
+                  : "开始分析已有商品";
 
   return (
     <div className="analysis-page">
@@ -406,13 +394,13 @@ export function AnalysisPreview() {
               >
                 分析设置
               </button>
-              {(active || preparation) && (
+              {active && (
                 <button
                   className="analysis-button analysis-button-stop"
-                  disabled={busy && !preparation}
+                  disabled={busy}
                   onClick={() => void mutate("/api/analysis/pause", { runId: active?.id })}
                 >
-                  {preparation ? "暂停资料采集" : "暂停分析"}
+                  暂停分析
                 </button>
               )}
               {!running &&
@@ -482,33 +470,31 @@ export function AnalysisPreview() {
             <p className="analysis-start-hint" role="status">
               {!data
                 ? "正在读取已采集商品…"
-                : preparation
-                  ? `正在采集并核验角色资料：${preparation.completed}/${preparation.total} 个 · ${preparation.current || "准备下一角色"} · ${preparation.message}`
-                  : active
-                    ? cooling
-                      ? "AI 服务请求受限，正在等待冷却；已完成结果保留，已发出请求继续保存。"
-                      : waitingForRoles
-                        ? active.total === 0
-                          ? "正在等待首个角色资料采集完整，完成后自动开始分析，无需再次点击。"
-                          : `资料完整的现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
-                        : (active.runningCount || 0) > 1
-                          ? `正在并发处理：${active.currentItems?.join("、")} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
-                          : searchingEquipment
-                            ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
-                            : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
-                    : data.counts.total === 0
-                      ? "尚未采集商品；可以先开始分析并等待，角色资料采集完整后会自动分析。"
-                      : run && !sameModel
-                        ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
-                        : run && !sameMarket
-                          ? "本批次区服行情已过期。重新分析将刷新行情并使用新批次，已有结果保留。"
-                          : run && !sameCalculation
-                            ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
-                            : run?.status === "paused"
-                              ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续时沿用原计价设置，并发数使用当前输入。`
-                              : run?.status === "completed"
-                                ? `本批次已处理：${run.completed} 件成功，${run.failed} 件失败，${waitingPricing} 件价格待补齐。待补齐项保留进度，需单独重试。`
-                                : `${data.counts.complete} 件资料完整，可以开始分析；${captureSummary}。`}
+                : active
+                  ? cooling
+                    ? "AI 服务请求受限，正在等待冷却；已完成结果保留，已发出请求继续保存。"
+                    : waitingForRoles
+                      ? active.total === 0
+                        ? "正在等待首个角色资料采集完整，完成后自动开始分析，无需再次点击。"
+                        : `资料完整的现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
+                      : (active.runningCount || 0) > 1
+                        ? `正在并发处理：${active.currentItems?.join("、")} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                        : searchingEquipment
+                          ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                          : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                  : data.counts.total === 0
+                    ? "尚未采集商品；可以先开始分析并等待，角色资料采集完整后会自动分析。"
+                    : run && !sameModel
+                      ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
+                      : run && !sameMarket
+                        ? "本批次区服行情已过期。重新分析将刷新行情并使用新批次，已有结果保留。"
+                        : run && !sameCalculation
+                          ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
+                          : run?.status === "paused"
+                            ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续时沿用原计价设置，并发数使用当前输入。`
+                            : run?.status === "completed"
+                              ? `本批次已处理：${run.completed} 件成功，${run.failed} 件失败，${waitingPricing} 件价格待补齐。待补齐项保留进度，需单独重试。`
+                              : `${data.counts.complete} 件资料完整，可以开始分析；${captureSummary}。`}
             </p>
             {waitingForRoles && (
               <div className="analysis-pending-note" role="status" aria-label="采集续采提示">
@@ -572,25 +558,23 @@ export function AnalysisPreview() {
             <div className="analysis-visual-focus">
               <small>当前状态</small>
               <strong>
-                {preparation
-                  ? "完整采集中"
-                  : running
-                    ? cooling
-                      ? "限流冷却中"
-                      : active?.rateLimit
-                        ? "降速恢复中"
-                        : waitingForRoles
-                          ? "等待新角色"
-                          : searchingEquipment
-                            ? "联网查价中"
-                            : "分析中"
-                    : run?.status === "paused"
-                      ? "已暂停"
-                      : run?.status === "completed"
-                        ? waitingPricing
-                          ? "有价格待补齐"
-                          : "已处理"
-                        : "待开始"}
+                {running
+                  ? cooling
+                    ? "限流冷却中"
+                    : active?.rateLimit
+                      ? "降速恢复中"
+                      : waitingForRoles
+                        ? "等待新角色"
+                        : searchingEquipment
+                          ? "联网查价中"
+                          : "分析中"
+                  : run?.status === "paused"
+                    ? "已暂停"
+                    : run?.status === "completed"
+                      ? waitingPricing
+                        ? "有价格待补齐"
+                        : "已处理"
+                      : "待开始"}
               </strong>
               <span>
                 {run
