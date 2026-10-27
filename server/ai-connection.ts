@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { publicAiRequestError } from "./ai/request-error";
+import { CodexPool } from "./ai/codex-pool";
 import {
   codexAccount,
   codexModel,
@@ -326,6 +327,34 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
       searchEquipment,
       searchPets,
       searchPetGear,
+      createSessionPool(concurrency: number) {
+        const pool = new CodexPool(concurrency, model);
+        return {
+          async acquire(signal: AbortSignal) {
+            const lease = await pool.acquire(signal);
+            return {
+              async analyze(
+                prompt: string,
+                schema: unknown,
+                requestSignal: AbortSignal,
+                options?: AnalysisRequestOptions,
+              ) {
+                const current = await codexAccount();
+                if (!current || current.email !== account.email)
+                  throw new Error("ChatGPT 登录账号已变化，请重新连接");
+                requestSignal.throwIfAborted();
+                try {
+                  return await lease.run(prompt, schema, requestSignal, options);
+                } catch (error) {
+                  throw publicAiRequestError(error, publicError(error));
+                }
+              },
+              release: (persisted: boolean) => lease.release(persisted),
+            };
+          },
+          close: () => pool.close(),
+        };
+      },
       async analyze(
         prompt: string,
         schema: unknown,

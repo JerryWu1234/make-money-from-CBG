@@ -49,6 +49,16 @@ export type AnalysisClient = {
     signal: AbortSignal,
     options?: import("../ai/types").AnalysisRequestOptions,
   ) => Promise<{ text: string; usage?: unknown; truncated?: boolean }>;
+  createSessionPool?: (concurrency: number) => AnalysisSessionPool;
+  acquireSession?: (signal: AbortSignal) => Promise<AnalysisSession>;
+};
+export type AnalysisSession = {
+  analyze: AnalysisClient["analyze"];
+  release: (persisted: boolean) => Promise<void>;
+};
+export type AnalysisSessionPool = {
+  acquire: (signal: AbortSignal) => Promise<AnalysisSession>;
+  close: () => Promise<void>;
 };
 export const MAX_PRICING_ROUNDS = 16;
 const MAX_ROLE_PRICING_MS = 45 * 60_000;
@@ -247,25 +257,41 @@ export class AnalysisRunner {
       this.store.saveProviderBackoff(provider, state, owner),
     );
     const providerPause = { message: null as string | null };
+    const pool = client.createSessionPool?.(concurrency);
+    const limitAnalysis = async (
+      run: () => ReturnType<AnalysisClient["analyze"]>,
+      signal: AbortSignal,
+    ) => {
+      try {
+        return await limit.run(() => pricingUntilAborted(run(), signal), signal);
+      } catch (error) {
+        if (!signal.aborted && aiRequestIssue(error)) {
+          const failure = error instanceof Error ? error : new Error("AI 服务请求受限（429）");
+          providerPause.message ||= aiRequestMessage(failure.message);
+          limit.halt(failure);
+        }
+        throw error;
+      }
+    };
     const limitedClient: AnalysisClient = {
       ...client,
-      analyze: async (prompt, schema, signal, options) => {
-        try {
-          return await limit.run(
-            () => pricingUntilAborted(client.analyze(prompt, schema, signal, options), signal),
-            signal,
-          );
-        } catch (error) {
-          if (!signal.aborted && aiRequestIssue(error)) {
-            const failure = error instanceof Error ? error : new Error("AI 服务请求受限（429）");
-            providerPause.message ||= aiRequestMessage(failure.message);
-            // Reject requests still waiting for a permit; let already issued
-            // requests settle within their existing cancellation/timeout budget.
-            limit.halt(failure);
+      analyze: (prompt, schema, signal, options) =>
+        limitAnalysis(() => client.analyze(prompt, schema, signal, options), signal),
+      ...(pool
+        ? {
+            acquireSession: async (signal: AbortSignal) => {
+              const session = await pool.acquire(signal);
+              return {
+                analyze: (prompt, schema, requestSignal, options) =>
+                  limitAnalysis(
+                    () => session.analyze(prompt, schema, requestSignal, options),
+                    requestSignal,
+                  ),
+                release: (persisted: boolean) => session.release(persisted),
+              } satisfies AnalysisSession;
+            },
           }
-          throw error;
-        }
-      },
+        : {}),
     };
     const controller = new AbortController();
     const activity = { id, owner, controller, completion: Promise.resolve() };
@@ -285,6 +311,7 @@ export class AnalysisRunner {
       concurrency,
       providerPause,
     )
+      .finally(() => pool?.close())
       .catch((error: unknown) => {
         if (this.store.owns(owner))
           this.store.setRun(
@@ -699,11 +726,14 @@ export class AnalysisRunner {
       const attempt = this.store.begin(task, owner, prompt);
       const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
       let raw: string | undefined, usage: unknown;
+      let session: AnalysisSession | undefined;
+      let persisted = false;
       try {
         if (Buffer.byteLength(prompt, "utf8") > 256 * 1024)
           throw new Error("分析请求超过 256 KiB，已保留原文，请先核对请求长度后重试");
+        if (client.acquireSession) session = await client.acquireSession(signal);
         const response = await pricingUntilAborted(
-          client.analyze(
+          (session?.analyze ?? client.analyze)(
             prompt,
             task.profile ? VALUATION_SCHEMA : ANALYSIS_SCHEMA,
             signal,
@@ -729,6 +759,7 @@ export class AnalysisRunner {
             )
           : validateAnalysis(raw, task.document, task.record);
         this.store.finish(task, attempt, owner, { state: "completed", result, raw, usage });
+        persisted = true;
         return;
       } catch (error) {
         if (!this.store.owns(owner)) return;
@@ -756,6 +787,7 @@ export class AnalysisRunner {
           usage,
           requeue: stop.aborted || fatal,
         });
+        persisted = true;
         if (!stop.aborted && providerPause.message) {
           this.store.setRun(
             id,
@@ -767,6 +799,8 @@ export class AnalysisRunner {
         }
         pause(message);
         return;
+      } finally {
+        await session?.release(persisted);
       }
     }
   }
