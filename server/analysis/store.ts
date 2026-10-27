@@ -1609,7 +1609,7 @@ export class AnalysisStore {
         this.recommendationCache.set(key, cached);
         const status = cached.recommendation?.status;
         if (
-          (status === "recommended" && ranking.length < 10) ||
+          (status === "recommended" && ranking.length < 50) ||
           (status === "manual" && manualReview.length < 10)
         ) {
           if (!item) {
@@ -1632,7 +1632,7 @@ export class AnalysisStore {
           } else manualReview.push(item);
           selected.set(key, { taskId: candidate.task_id, signature: fingerprint });
         }
-        if (ranking.length === 10 && manualReview.length === 10) break;
+        if (ranking.length === 50 && manualReview.length === 10) break;
       }
       // A yielding overview may overlap capture, deletion, quote expiry or a view action.
       // Revalidate displayed rows synchronously before publishing; do not resurrect stale results.

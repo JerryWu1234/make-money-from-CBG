@@ -93,6 +93,9 @@ export function AnalysisPreview() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [showViewed, setShowViewed] = useState(false);
+  const [copyNotice, setCopyNotice] = useState<{ message: string; error: boolean } | null>(null);
+  const [copying, setCopying] = useState(false);
+  const copyOperation = useRef(false);
   const [revision, setRevision] = useState(0);
   const [busy, setBusy] = useState(false);
   const [concurrency, setConcurrency] = useState(String(DEFAULT_ANALYSIS_CONCURRENCY));
@@ -310,6 +313,43 @@ export function AnalysisPreview() {
       setRevision((value) => value + 1);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "无法保存查看记录");
+    }
+  };
+  const copyRecommendation = async (item: AnalysisItem) => {
+    if (copyOperation.current) return;
+    copyOperation.current = true;
+    setCopying(true);
+    setCopyNotice(null);
+    const content = [
+      `角色：${item.name}`,
+      `区服：${item.server}`,
+      `挂牌价格：${price(item.price)}`,
+      ...(item.valuation ? [`裸号预估价：${valuationMoney(item.valuation.bare_role_value)}`] : []),
+      ...(item.recommendation ? [`差额：${valuationMoney(item.recommendation.gap)}`] : []),
+      item.assetSummary?.equipment || "装备资料未采齐",
+      item.assetSummary?.pets || "宝宝资料未采齐",
+      ...(item.url ? [`商品链接：${item.url}`] : []),
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      setCopyNotice({ message: "复制失败，请检查浏览器剪贴板权限后重试。", error: true });
+      copyOperation.current = false;
+      setCopying(false);
+      return;
+    }
+    try {
+      await request("/api/analysis/recommendation/view", { key: item.key });
+      setRevision((value) => value + 1);
+      setCopyNotice({ message: `${item.name} 已复制，并标记为已查看。`, error: false });
+    } catch {
+      setCopyNotice({
+        message: `${item.name} 已复制，但未能保存已查看状态，请重试。`,
+        error: true,
+      });
+    } finally {
+      copyOperation.current = false;
+      setCopying(false);
     }
   };
   const startLabel = busy
@@ -653,9 +693,12 @@ export function AnalysisPreview() {
                   />
                   显示已查看的推荐
                 </label>
+                {copyNotice && (
+                  <p role={copyNotice.error ? "alert" : "status"}>{copyNotice.message}</p>
+                )}
                 <div className="analysis-list-intro">
                   <span>
-                    挂牌价低于裸号预估价直接入榜，无需装备或宝宝配置门槛；其他商品沿用金额阶梯和配置条件，不限制差额百分比，最多展示10个
+                    挂牌价低于裸号预估价直接入榜，无需装备或宝宝配置门槛；其他商品沿用金额阶梯和配置条件，不限制差额百分比，最多展示50个
                   </span>
                   <span>差额 = 挂牌价 − 裸号估值</span>
                   <span>
@@ -762,6 +805,9 @@ export function AnalysisPreview() {
                           : `配置参考分 ${item.score}`}
                       </span>
                       <button onClick={() => void viewRecommendation(item)}>查看分析依据 →</button>
+                      <button disabled={copying} onClick={() => void copyRecommendation(item)}>
+                        一键复制
+                      </button>
                     </div>
                   </article>
                 ))}
