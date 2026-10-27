@@ -1,5 +1,5 @@
 import type { Page } from "playwright-core";
-import { collectDetail, collectValuationDetail, isOnShelf, MAIN_TABS } from "./detail";
+import { collectDetail, isOnShelf, MAIN_TABS } from "./detail";
 import { gotoPage, hoverListing, pace, prepareList } from "./page";
 import {
   SellingOrderUnavailableError,
@@ -21,7 +21,7 @@ import { crawlAccessFailure } from "./types";
 import { saveCaptureFailure } from "./capture-failure";
 import { captureBrowserStep } from "../browser-evidence";
 import { classifyBrowserFailure } from "../browser-connection";
-import { DetailReadState } from "./detail-read-state";
+import { roleIdentityIssues } from "./role-identity";
 
 interface SourceOptions {
   listPage: Page;
@@ -35,7 +35,7 @@ interface SourceOptions {
   detailTimeoutMs?: number;
 }
 
-/** 完整抓取一个角色，包括标签、装备、宝宝及采集完整性重读。 */
+/** 完整商品直接复用；新商品读取一次，未读到资料前的导航失败可有界恢复。 */
 export async function collectRole(
   detailPage: Page,
   item: Listing,
@@ -46,10 +46,28 @@ export async function collectRole(
     log,
   }: Pick<SourceOptions, "signal" | "savedRecord" | "onDetailProgress" | "log">,
 ) {
+  signal.throwIfAborted();
+  const previous = savedRecord?.(item.key);
+  if (
+    previous?.status === "complete" &&
+    previous.listing.key === item.key &&
+    previous.listing.serverId === item.serverId &&
+    previous.listing.eid === item.eid &&
+    previous.listing.ordersn === item.ordersn &&
+    previous.listing.sellingTime === item.sellingTime &&
+    previous.listing.price === item.price &&
+    previous.detail &&
+    previous.detail.captureMode === "all" &&
+    !roleIdentityIssues(previous.detail.valuation?.source, item).length &&
+    !captureIssues(previous.detail, true, true, item).length &&
+    MAIN_TABS.every((name) => previous.detail!.tabs.some((tab) => tab.name === name))
+  ) {
+    onDetailProgress(`${item.name || item.eid}：资料已完整，使用已保存的采集结果`);
+    log("detail.reused", { key: item.key, collectedAt: previous.detail.collectedAt });
+    return structuredClone(previous.detail);
+  }
   const started = Date.now();
-  const readState = new DetailReadState();
   let attempt = 0;
-  let reusedTabs = 0;
   let stage = "开始读取角色详情";
   log("detail.start", { key: item.key });
   const report = (message: string) => {
@@ -70,26 +88,15 @@ export async function collectRole(
       return;
     }
     stage = message;
-    const reusedPrefix = "已核对商品原文未变，复用本轮完整标签：";
-    if (message.startsWith(reusedPrefix)) {
-      reusedTabs++;
-      log("detail.tab_reused", { key: item.key, attempt, tab: message.slice(reusedPrefix.length) });
-    }
     onDetailProgress(`${item.name || item.eid}：${message}`);
   };
-  const previous = savedRecord?.(item.key);
   const result = await collectCompleteCapture(
     async () => {
       attempt++;
       stage = "开始读取角色详情";
       try {
         await pace(signal, 1800, 1700);
-        const detail =
-          previous?.detail &&
-          !captureIssues(previous.detail, true, true, item).length &&
-          MAIN_TABS.every((name) => previous.detail!.tabs.some((tab) => tab.name === name))
-            ? await collectValuationDetail(detailPage, item, previous.detail, signal, report)
-            : await collectDetail(detailPage, item, signal, report, readState);
+        const detail = await collectDetail(detailPage, item, signal, report);
         const issues = captureIssues(detail, true, true, item);
         if (issues.length)
           await saveCaptureFailure(
@@ -154,7 +161,6 @@ export async function collectRole(
     key: item.key,
     durationMs: Date.now() - started,
     attempts: attempt,
-    reusedTabs,
     equipmentComplete: result.equipmentCapture?.complete,
     equipmentIssues: result.equipmentCapture?.issues,
     petsComplete: result.petCapture?.complete,

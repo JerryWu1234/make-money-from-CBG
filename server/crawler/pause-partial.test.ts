@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from "vite-plus/test";
 import { gunzipSync } from "node:zlib";
 import { analysisRecord } from "../../tests/fixtures/analysis";
 import { AnalysisStore } from "../analysis/store";
-import { collectCompleteCapture } from "./capture-readiness";
+import { collectCompleteCapture, IncompleteCaptureError } from "./capture-readiness";
 import { crawl } from "./runner";
 import { CrawlStore } from "./store";
 import type { CrawlSource, SavedRoleRecord } from "./types";
@@ -22,9 +22,15 @@ function setup() {
   partial.raw = { preserved: "暂停前已读原文", attributes: { test: 42 } };
   const control = new AbortController();
   const read = vi.fn(async () => {
-    if (read.mock.calls.length === 1) return partial;
     await new Promise<void>((_resolve, reject) => {
-      control.signal.addEventListener("abort", () => reject(control.signal.reason), { once: true });
+      control.signal.addEventListener(
+        "abort",
+        () =>
+          reject(
+            new IncompleteCaptureError("读取暂停，保留本轮资料", partial, control.signal.reason),
+          ),
+        { once: true },
+      );
     });
     return partial;
   });
@@ -49,7 +55,7 @@ function setup() {
 }
 
 it.each(["finite", "backfill", "watch"])(
-  "%s链路第一次缺项后在第二次读取等待时暂停，原文持久化为pending且不发布分析",
+  "%s链路单次读取已有部分资料时暂停，原文持久化为pending且不发布分析",
   async (mode) => {
     const { store, record, partial, control, read, source } = setup();
     if (mode === "backfill") store.observe(record.listing);
@@ -59,7 +65,7 @@ it.each(["finite", "backfill", "watch"])(
       watch: mode === "watch",
       backfillOnly: mode === "backfill",
     }).catch((error: unknown) => error);
-    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
     const reason = new Error("用户暂停采集");
     control.abort(reason);
     expect(await outcome).toBe(reason);
@@ -123,7 +129,7 @@ it("刷新已有完整商品时暂停保留旧完整详情，不用本轮partial
     keys: [record.listing.key],
     concurrency: 2,
   }).catch((error: unknown) => error);
-  await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  await vi.waitFor(() => expect(read).toHaveBeenCalledOnce());
   const reason = new Error("用户暂停采集");
   control.abort(reason);
   expect(await outcome).toBe(reason);

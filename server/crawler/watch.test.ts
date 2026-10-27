@@ -2,11 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { CrawlStore } from "./store";
 import { crawl } from "./runner";
 import { CAPTURE_VERSION } from "./compact";
-import {
-  collectCompleteCapture,
-  IncompleteCaptureError,
-  DetailNavigationResetError,
-} from "./capture-readiness";
+import { collectCompleteCapture, IncompleteCaptureError } from "./capture-readiness";
 import {
   CrawlAccessError,
   ListingChangedError,
@@ -1078,7 +1074,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
     control.abort(new Error("暂停"));
     await outcome;
   });
-  it("单件导航清理失败保留此前快照，其他商品及后续新号继续入库", async () => {
+  it("单件缺项只处理一次并保留快照，其他商品及后续新号继续入库", async () => {
     vi.useFakeTimers();
     const db = memory(),
       fresh = [item(1), item(2), item(3)],
@@ -1097,10 +1093,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
         tooltips: [],
       },
     ];
-    const read = vi
-      .fn()
-      .mockResolvedValueOnce(partial)
-      .mockRejectedValue(new DetailNavigationResetError(new Error("模拟导航清理失败")));
+    const read = vi.fn().mockResolvedValue(partial);
     src.detail = vi.fn(async (row) =>
       row.key === broken.key ? collectCompleteCapture(read, control.signal, vi.fn()) : detail(row),
     );
@@ -1110,7 +1103,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
       headIntervalMs: 100,
     }).catch((error: unknown) => error);
     await flush();
-    expect(read).toHaveBeenCalledTimes(2);
+    expect(read).toHaveBeenCalledOnce();
     expect(readSaved(db, broken.key)?.status).toBe("failed");
     expect(readSaved(db, broken.key)?.detail?.tabs[0].text).toBe("已完整读取的原文");
     expect(db.count()).toBe(2);
@@ -1119,7 +1112,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
     await vi.advanceTimersByTimeAsync(100);
     await flush();
     expect(readSaved(db, added.key)?.status).toBe("complete");
-    expect(read).toHaveBeenCalledTimes(2);
+    expect(read).toHaveBeenCalledOnce();
     control.abort(new Error("暂停"));
     await outcome;
   });

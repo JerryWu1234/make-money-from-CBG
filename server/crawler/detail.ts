@@ -22,8 +22,7 @@ import { IncompleteCaptureError } from "./capture-readiness";
 import { readDetailIdentity } from "./detail-identity";
 import { captureBrowserStep } from "../browser-evidence";
 import { accessNavigationFailure } from "./access-navigation";
-import { DetailReadState, readDetailRevision, cachedModelsUnchanged } from "./detail-read-state";
-import { completeSchoolSkillsFromText, schoolSkillsComplete } from "./school-skills";
+import { readDetailRevision } from "./detail-read-state";
 import { readOfficialModels } from "./official-model-page";
 
 export const MAIN_TABS = [
@@ -788,107 +787,11 @@ async function inspectEquipmentTabs(
   return snapshots;
 }
 
-/** Refresh pricing, equipment and pets; retain unrelated skill snapshots. */
-export async function collectValuationDetail(
-  page: Page,
-  item: Listing,
-  previous: RoleDetail,
-  signal: AbortSignal,
-  report: (message: string) => void = () => {},
-) {
-  try {
-    await openDetail(page, item, signal, report);
-    const valuation = await captureValuation(page);
-    const identityIssues = roleIdentityIssues(valuation.source, item);
-    if (identityIssues.length)
-      throw Object.assign(new Error("详情商品身份未核验：" + identityIssues.join("；")), {
-        name: "IncompleteDetailError",
-      });
-    const now = new Date().toISOString();
-    const equipmentIssues: string[] = [];
-    let petCapture: RoleDetail["petCapture"];
-    const tabs = previous.tabs
-      .filter(
-        (tab) =>
-          !/^(?:坐骑|道具\/法宝)\s*\//.test(tab.name) && !/^召唤兽\/孩子(?:\s*\/|$)/.test(tab.name),
-      )
-      .map((tab) => ({ ...tab, collectedAt: tab.collectedAt || previous.collectedAt }));
-    for (const name of ["人物/修炼", "道具/法宝", "召唤兽/孩子", "坐骑"]) {
-      checkAborted(signal);
-      report("正在补采估值资料：" + name);
-      await clickForInspection(
-        page.getByText(name, { exact: true }).filter({ visible: true }).first(),
-      );
-      await settled(page, signal);
-      await captureBrowserStep(
-        page,
-        { flow: "collection", stage: `补采标签切换-${name}`, key: item.key },
-        signal,
-      );
-      const snapshot = { ...(await capture(page, name)), collectedAt: now };
-      if (name === "道具/法宝") {
-        const snapshots = await inspectEquipmentTabs(
-          page,
-          snapshot,
-          signal,
-          report,
-          equipmentIssues,
-          item,
-        );
-        tabs.push(...snapshots.slice(1).map((tab) => ({ ...tab, collectedAt: now })));
-      }
-      if (name === "召唤兽/孩子")
-        petCapture = await inspectPets(page, snapshot, signal, report, now);
-      const index = tabs.findIndex((tab) => tab.name === name);
-      if (index >= 0 && name !== "道具/法宝")
-        tabs[index] = {
-          ...snapshot,
-          items: tabs[index].items,
-          itemsCollectedAt:
-            tabs[index].itemsCollectedAt || tabs[index].collectedAt || previous.collectedAt,
-        };
-      else if (index >= 0) tabs[index] = snapshot;
-      else tabs.push(snapshot);
-      if (name === "坐骑")
-        tabs.push(
-          ...(await captureMountEntries(page, signal, report)).map((tab) => ({
-            ...tab,
-            collectedAt: now,
-          })),
-        );
-    }
-    await captureBrowserStep(
-      page,
-      { flow: "collection", stage: "补采资料读取完成", key: item.key },
-      signal,
-    );
-    return {
-      ...previous,
-      captureMode: "all" as const,
-      captureVersion: CAPTURE_VERSION,
-      valuation,
-      equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
-      petCapture,
-      tabs,
-      collectedAt: now,
-      raw: {},
-    };
-  } catch (error) {
-    await captureBrowserStep(
-      page,
-      { flow: "collection", stage: "补采资料读取失败", key: item.key, error },
-      signal,
-    );
-    throw error;
-  }
-}
-
 export async function collectDetail(
   page: Page,
   item: Listing,
   signal: AbortSignal,
   report: (message: string) => void = () => {},
-  readState = new DetailReadState(),
 ): Promise<RoleDetail> {
   await openDetail(page, item, signal, report);
   const tabs: TabSnapshot[] = [];
@@ -896,22 +799,12 @@ export async function collectDetail(
   let petCapture: RoleDetail["petCapture"];
   let step = "详情";
   let raw: RoleDetail["raw"] = {};
-  const reusedTabs: TabSnapshot[] = [];
+  let valuation: RoleDetail["valuation"];
   try {
     const revision = await readDetailRevision(page, item);
-    readState.begin(revision);
     for (const name of MAIN_TABS) {
       step = name;
       checkAborted(signal);
-      const saved = readState.get(name);
-      if (saved && (await cachedModelsUnchanged(page, saved.tabs))) {
-        tabs.push(...saved.tabs);
-        reusedTabs.push(...saved.tabs);
-        if (saved.petCapture) petCapture = saved.petCapture;
-        report(`已核对商品原文未变，复用本轮完整标签：${name}`);
-        continue;
-      }
-      const start = tabs.length;
       report(`正在读取标签 ${MAIN_TABS.indexOf(name) + 1}/${MAIN_TABS.length}：${name}`);
       const tab = page.getByText(name, { exact: true }).filter({ visible: true }).first();
       if (!(await tab.count())) throw new Error(`详情缺少「${name}」标签，未标记完整采集`);
@@ -942,8 +835,6 @@ export async function collectDetail(
           { flow: "collection", stage: `标签读取完成-${name}`, key: item.key },
           signal,
         );
-        if (equipmentCaptureSummary(snapshots, new Date().toISOString(), equipmentIssues).complete)
-          readState.save(name, snapshots);
         continue;
       }
       if (name === "召唤兽/孩子") {
@@ -1004,12 +895,6 @@ export async function collectDetail(
           signal,
         );
       }
-      const group = tabs.slice(start).map(completeSchoolSkillsFromText);
-      if (
-        (name !== "技能" || schoolSkillsComplete(group)) &&
-        (name !== "召唤兽/孩子" || petCapture?.complete)
-      )
-        readState.save(name, group, name === "召唤兽/孩子" ? petCapture : undefined);
     }
     await captureBrowserStep(
       page,
@@ -1046,17 +931,11 @@ export async function collectDetail(
     report("全部标签读取完成，正在保存详情…");
     const now = new Date().toISOString();
     step = "角色本体核验";
-    const valuation = await captureValuation(page);
-    if (
-      revision &&
-      (revision !== (await readDetailRevision(page, item)) ||
-        !(await cachedModelsUnchanged(page, reusedTabs)))
-    ) {
-      readState.invalidate();
-      throw Object.assign(
-        new Error("详情读取期间商品原文或身份变化，已取消本轮标签复用，需重新核验"),
-        { name: "IncompleteDetailError" },
-      );
+    valuation = await captureValuation(page);
+    if (revision && revision !== (await readDetailRevision(page, item))) {
+      const issue = "详情读取期间商品原文或身份变化，本次采集未完成，需重新核验";
+      valuation.issues = [...new Set([...valuation.issues, issue])];
+      throw Object.assign(new Error(issue), { name: "IncompleteDetailError" });
     }
     valuation.issues = [
       ...new Set([...valuation.issues, ...roleIdentityIssues(valuation.source, item)]),
@@ -1094,6 +973,8 @@ export async function collectDetail(
     )
       throw cause;
     const now = new Date().toISOString();
+    if (valuation && error instanceof Error && error.name === "IncompleteDetailError")
+      valuation.issues = [...new Set([...valuation.issues, error.message])];
     throw new IncompleteCaptureError(
       `详情读取中断（${step}）：${cause instanceof Error ? cause.message : String(cause)}`,
       {
@@ -1105,7 +986,9 @@ export async function collectDetail(
         raw,
         equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
         petCapture,
-        // 未执行完本轮读取，不能附上完整本体核验凭据或借用上一轮资料。
+        // Retain this read's completed body evidence, including any revision issue;
+        // missing checks stay missing and a changed source cannot become complete.
+        valuation,
       },
       cause,
     );

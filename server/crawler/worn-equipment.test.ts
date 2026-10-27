@@ -142,7 +142,7 @@ it.each(
   expect(equipmentNameUnresolved(name)).toBe(true);
 });
 
-it("显式0级仍缺真实名称时三次有界重读后隔离保存原始来源，不占完整角色额度或推进断点", async () => {
+it("显式0级仍缺真实名称时只读取一次并隔离原始来源，不占完整角色额度或推进断点", async () => {
   const record = analysisRecord("unresolved-name"),
     store = new CrawlStore(":memory:");
   try {
@@ -181,7 +181,7 @@ it("显式0级仍缺真实名称时三次有界重读后隔离保存原始来源
       name: "IncompleteDetailError",
       detail: expect.objectContaining({ raw: record.detail!.raw }),
     });
-    expect(reads).toBe(3);
+    expect(reads).toBe(1);
     store.observe(record.listing);
     expect(store.save(record.listing, record.detail!)).toBe(false);
     expect(store.count()).toBe(0);

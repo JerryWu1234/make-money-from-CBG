@@ -182,16 +182,20 @@ export async function collectCompleteCapture(
       )
         throw cause;
       last = error instanceof Error ? error : cause;
-      if (attempt < 3) report(`资料尚未核验完整，正在本轮内自动重读 ${attempt}/2：${last.message}`);
+      // Only retry a navigation that failed before any role data was read. Once
+      // tabs or a checked result exist, keep that evidence and report its gaps;
+      // restarting the whole role would discard work and repeat the same failure.
+      if (partial || !isRetryableDetailNavigation(cause)) break;
+      if (attempt < 3) report(`详情尚未打开，正在重新导航 ${attempt}/2：${last.message}`);
     }
   }
   if (partial)
     throw new IncompleteCaptureError(
-      "本轮采集重读后仍未完整，未进入角色分析：" + last!.message,
+      "角色资料采集未完成，未进入角色分析：" + last!.message,
       partial,
       last!,
     );
-  throw Object.assign(new Error("本轮采集重读后仍未完整，未进入角色分析：" + last!.message), {
+  throw Object.assign(new Error("角色资料采集未完成，未进入角色分析：" + last!.message), {
     name: "IncompleteDetailError",
     cause: last,
   });
