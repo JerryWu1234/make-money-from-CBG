@@ -329,7 +329,7 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
     await listPage.goto("https://xyq.cbg.163.com/list");
     await page.goto("http://cbg-ui.test/");
     const count = page.getByRole("spinbutton", { name: "并发抓取数" });
-    await expect(count).toHaveValue("10");
+    await expect(count).toHaveValue("6");
     await expect(count).toHaveAttribute("min", "2");
     await expect(count).toHaveAttribute("step", "2");
     const start = page.getByRole("button", { name: /开始采集详情|继续采集 \/ 检查新增/ });

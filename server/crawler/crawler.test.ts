@@ -9,7 +9,6 @@ import { crawl, validateCrawlOptions } from "./runner";
 import { locateCheckpoint, prepareCrawlPages } from "./resume";
 import type { CrawlSource, SavedRoleRecord } from "./types";
 import {
-  DEFAULT_CRAWL_CONCURRENCY,
   ListingChangedError,
   ListingUnavailableError,
   type Checkpoint,
@@ -214,7 +213,7 @@ describe("并发采集", () => {
       return detail(row);
     });
     const task = crawl(src, db, signal(), vi.fn(), { concurrency });
-    const limit = concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
+    const limit = concurrency ?? 6;
     await vi.waitFor(() => expect(releases).toHaveLength(limit));
     expect(db.retryItems()).toHaveLength(rows.length);
     while (db.count() < rows.length) {

@@ -697,11 +697,11 @@ describe("持续发现新号和历史详情共享采集池", () => {
   });
 
   it.each([undefined, 4, 6, 8, 10])(
-    "无上架排序时 %s 并发（默认10）新号排队优先，排队清空后老号补满空位",
+    "无上架排序时 %s 并发（默认6）新号排队优先，排队清空后老号补满空位",
     async (concurrency) => {
       vi.useFakeTimers();
       const db = memory(),
-        pool = concurrency ?? 10,
+        pool = concurrency ?? 6,
         fresh = Array.from({ length: pool + 2 }, (_, i) => item(i + 1)),
         old = Array.from({ length: pool }, (_, i) => item(i + 20));
       const src = source([fresh, old]);

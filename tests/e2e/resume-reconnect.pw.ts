@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import type { CrawlStatus } from "../../server/crawler/types";
@@ -8,7 +8,8 @@ for (const cancel of [false, true]) {
   test(`重启后断点续采：连接失败可重试，${cancel ? "取消等待后不自动采集" : "恢复后自动采集一次"}`, async ({
     page,
     context,
-  }) => {
+  }, testInfo) => {
+    let startPayload: unknown;
     let opened = false,
       allowReady = false,
       failConnection = true,
@@ -88,7 +89,8 @@ for (const cancel of [false, true]) {
           case "/api/crawl/start":
             expect(allowReady).toBe(true);
             expect(failConnection).toBe(false);
-            expect(route.request().postDataJSON()).toEqual({ concurrency: 10 });
+            startPayload = route.request().postDataJSON();
+            expect(startPayload).toEqual({ concurrency: 6 });
             startCalls++;
             Object.assign(status, {
               running: true,
@@ -153,5 +155,23 @@ for (const cancel of [false, true]) {
     expect(startCalls).toBe(1);
     expect(status.totalSaved).toBe(4);
     expect(status.checkpoint?.key).toBe("367:saved-role");
+    await page.screenshot({ path: testInfo.outputPath("resume.png"), fullPage: true });
+    await writeFile(
+      testInfo.outputPath("evidence.json"),
+      JSON.stringify(
+        {
+          fixture: true,
+          cancel,
+          openCalls,
+          startCalls,
+          startPayload,
+          checkpoint: status.checkpoint,
+          repeat:
+            "vp run build && vp exec playwright test tests/e2e/resume-reconnect.pw.ts --workers=1",
+        },
+        null,
+        2,
+      ),
+    );
   });
 }

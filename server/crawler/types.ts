@@ -1,4 +1,4 @@
-export const DEFAULT_CRAWL_CONCURRENCY = 10;
+export const DEFAULT_CRAWL_CONCURRENCY = 6;
 export type CrawlLane = "new" | "old";
 export interface HeadCheckpoint {
   time: string;
