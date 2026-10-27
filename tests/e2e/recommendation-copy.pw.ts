@@ -11,16 +11,18 @@ import { createProfile } from "../../server/analysis/profile";
 import { analysisRecord, analysisResponse } from "../fixtures/analysis";
 import type { SavedRoleRecord } from "../../server/crawler/types";
 
-// Failure cases: more than ten recommendations are truncated; copy loses important fields;
-// failed clipboard writes mark items viewed; failed view saves hide items; successful views
-// disappear only temporarily and return after reload. Clipboard and API transport are simulated.
-test("推荐榜显示更多商品，复制成功后持久标记，失败保留推荐", async ({ page }, testInfo) => {
+// Failure cases: more than 50 recommendations are inaccessible; paging changes ordering;
+// missing links or failed clipboard writes mark items viewed; failed view saves hide items;
+// successful views return after reload; removing the last page leaves an invalid page;
+// old cards or page controls remain active during a delayed page request.
+// Clipboard and API transport are simulated.
+test("推荐榜分页浏览、复制链接并保留已查看状态", async ({ page }, testInfo) => {
   const database = testInfo.outputPath("recommendation-copy.sqlite");
   await mkdir(path.dirname(database), { recursive: true });
   const crawl = new CrawlStore(database);
   const store = new AnalysisStore(crawl.db);
   try {
-    const keys = Array.from({ length: 12 }, (_, index) => `copy-${String(index).padStart(2, "0")}`);
+    const keys = Array.from({ length: 52 }, (_, index) => `copy-${String(index).padStart(2, "0")}`);
     for (const key of keys) {
       const record = analysisRecord(key);
       record.listing.price = "1000";
@@ -54,8 +56,14 @@ test("推荐榜显示更多商品，复制成功后持久标记，失败保留�
         .run(JSON.stringify(result), new Date().toISOString(), key);
     }
     crawl.db.prepare("UPDATE analysis_runs SET status='completed' WHERE id=?").run(batch);
-    expect(store.overview().ranking).toHaveLength(12);
+    expect(store.overview().ranking).toHaveLength(20);
     let failViewSave = false;
+    let holdSecondPage = false;
+    let secondPageStarted = false;
+    let releaseSecondPage!: () => void;
+    const secondPageWait = new Promise<void>((resolve) => {
+      releaseSecondPage = resolve;
+    });
     await page.addInitScript(() => {
       Object.defineProperty(navigator, "clipboard", {
         configurable: true,
@@ -90,12 +98,27 @@ test("推荐榜显示更多商品，复制成功后持久标记，失败保留�
         else if (
           url.pathname === "/api/analysis/status" ||
           url.pathname === "/api/analysis/progress"
-        )
-          body = store.overview({
+        ) {
+          if (
+            holdSecondPage &&
+            url.pathname === "/api/analysis/status" &&
+            url.searchParams.get("rankingPage") === "2"
+          ) {
+            secondPageStarted = true;
+            await secondPageWait;
+            holdSecondPage = false;
+          }
+          const overview = store.overview({
             summary: true,
             showViewed: url.searchParams.get("showViewed") === "true",
+            rankingPage: Number(url.searchParams.get("rankingPage") || 1),
           });
-        else if (url.pathname === "/api/analysis/recommendation/view") {
+          // Simulate an old record whose response no longer has a product URL.
+          overview.ranking = overview.ranking.map((item) =>
+            item.key === "copy-00" ? { ...item, url: "" } : item,
+          );
+          body = overview;
+        } else if (url.pathname === "/api/analysis/recommendation/view") {
           if (failViewSave) return route.fulfill({ status: 500, json: { error: "模拟保存失败" } });
           body = store.markRecommendationViewed(route.request().postDataJSON().key);
         } else throw new Error("未模拟接口：" + url.pathname);
@@ -121,40 +144,75 @@ test("推荐榜显示更多商品，复制成功后持久标记，失败保留�
     const card = (key: string) => cards.filter({ hasText: `角色${key}` });
     const viewedRows = () =>
       crawl.db.prepare("SELECT listing_key FROM recommendation_views ORDER BY listing_key").all();
-    await expect(cards).toHaveCount(12);
-    await expect(card("copy-11")).toBeVisible();
+    await expect(cards).toHaveCount(20);
+    await expect(ranking).toContainText("共 52 件");
+    await expect(ranking).toContainText("第 1 / 3 页");
+    await card("copy-00").getByRole("button", { name: "一键复制" }).click();
+    await expect(ranking).toContainText("链接");
+    await expect(card("copy-00")).toBeVisible();
+    expect(viewedRows()).toEqual([]);
+    expect(await page.evaluate(() => sessionStorage.getItem("copied-content"))).toBeNull();
 
     await page.evaluate(() => sessionStorage.setItem("reject-copy", "yes"));
-    await card("copy-00").getByRole("button", { name: "一键复制" }).click();
+    await card("copy-01").getByRole("button", { name: "一键复制" }).click();
     await expect(ranking).toContainText("复制失败");
-    await expect(card("copy-00")).toBeVisible();
+    await expect(card("copy-01")).toBeVisible();
     expect(viewedRows()).toEqual([]);
 
     await page.evaluate(() => sessionStorage.removeItem("reject-copy"));
     failViewSave = true;
-    await card("copy-01").getByRole("button", { name: "一键复制" }).click();
+    await card("copy-02").getByRole("button", { name: "一键复制" }).click();
     await expect(ranking).toContainText("已复制，但未能保存已查看状态");
-    await expect(card("copy-01")).toBeVisible();
+    await expect(card("copy-02")).toBeVisible();
     expect(viewedRows()).toEqual([]);
     failViewSave = false;
 
-    await card("copy-02").getByRole("button", { name: "一键复制" }).click();
+    await card("copy-03").getByRole("button", { name: "一键复制" }).click();
     await expect(ranking).toContainText("已复制，并标记为已查看");
-    await expect(cards).toHaveCount(11);
+    await expect(cards).toHaveCount(20);
+    await expect(card("copy-03")).toHaveCount(0);
     const copied = await page.evaluate(() => sessionStorage.getItem("copied-content"));
-    expect(copied).toContain("角色：角色copy-02");
+    expect(copied).toContain("角色：角色copy-03");
     expect(copied).toContain("区服：测试服");
     expect(copied).toContain("挂牌价格：");
     expect(copied).toContain("裸号预估价：");
-    expect(copied).toContain("商品链接：https://xyq.cbg.163.com/equip?s=367&eid=item-copy-02");
-    expect(viewedRows()).toEqual([{ listing_key: "copy-02" }]);
+    expect(copied).toContain("商品链接：https://xyq.cbg.163.com/equip?s=367&eid=item-copy-03");
+    expect(viewedRows()).toEqual([{ listing_key: "copy-03" }]);
+
+    holdSecondPage = true;
+    await ranking.getByRole("button", { name: "下一页" }).click();
+    await expect.poll(() => secondPageStarted).toBe(true);
+    await expect(ranking.getByText("正在加载推荐榜…")).toBeVisible();
+    await expect(cards).toHaveCount(0);
+    await expect(ranking.getByRole("button", { name: "上一页" })).toBeDisabled();
+    await expect(ranking.getByRole("button", { name: "下一页" })).toBeDisabled();
+    await page.screenshot({ path: testInfo.outputPath("page-loading.png"), fullPage: true });
+    releaseSecondPage();
+    await expect(ranking).toContainText("第 2 / 3 页");
+    await expect(cards).toHaveCount(20);
+    await expect(card("copy-21")).toBeVisible();
+    await expect(card("copy-00")).toHaveCount(0);
+    await ranking.getByRole("button", { name: "下一页" }).click();
+    await expect(ranking).toContainText("第 3 / 3 页");
+    await expect(cards).toHaveCount(11);
+    await expect(card("copy-51")).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("third-page.png"), fullPage: true });
+
+    // Another viewer marks most remaining items while this page is open.
+    for (let n = 40; n <= 50; n++) store.markRecommendationViewed(`copy-${n}`);
+    await card("copy-51").getByRole("button", { name: "一键复制" }).click();
+    await expect(ranking).toContainText("第 2 / 2 页");
+    await expect(ranking).toContainText("共 39 件");
+    await expect(cards).toHaveCount(19);
     await page.reload();
     await page.getByRole("tab", { name: /推荐榜/ }).click();
-    await expect(cards).toHaveCount(11);
-    await expect(card("copy-02")).toHaveCount(0);
+    await expect(cards).toHaveCount(20);
+    await expect(card("copy-03")).toHaveCount(0);
     await ranking.getByRole("checkbox", { name: "显示已查看的推荐" }).check();
-    await expect(cards).toHaveCount(12);
-    await expect(card("copy-02")).toContainText("已查看");
+    await expect(ranking).toContainText("共 52 件");
+    await expect(ranking).toContainText("第 1 / 3 页");
+    await expect(cards).toHaveCount(20);
+    await expect(card("copy-03")).toContainText("已查看");
     await page.screenshot({
       path: testInfo.outputPath("recommendations-viewed.png"),
       fullPage: true,
@@ -165,10 +223,17 @@ test("推荐榜显示更多商品，复制成功后持久标记，失败保留�
         {
           simulated: { listings: true, apiTransport: true, clipboard: true },
           real: "SQLite persistence and rendered UI",
-          initialRecommendations: 12,
+          initialRecommendations: 52,
           copied,
           viewed: viewedRows(),
-          failureCases: ["clipboard rejected", "view save rejected"],
+          finalUnviewed: 39,
+          observedPages: 3,
+          failureCases: [
+            "missing link",
+            "clipboard rejected",
+            "view save rejected",
+            "delayed page response",
+          ],
           repeat:
             "vp run build && vp exec playwright test tests/e2e/recommendation-copy.pw.ts --workers=1",
         },

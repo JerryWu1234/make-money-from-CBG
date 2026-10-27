@@ -81,6 +81,7 @@ export function AnalysisPreview() {
     ? {
         runs: [],
         ranking: [],
+        rankingPagination: { page: 1, totalPages: 1, total: 0 },
         records: { page: 1, totalPages: 1, total: 0, items: [] },
         results: { page: 1, totalPages: 1, total: 0, items: [] },
         history: [],
@@ -89,6 +90,7 @@ export function AnalysisPreview() {
       }
     : snapshot;
   const [page, setPage] = useState(1);
+  const [rankingPage, setRankingPage] = useState(1);
   const [resultsPage, setResultsPage] = useState(1);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
@@ -205,6 +207,7 @@ export function AnalysisPreview() {
         const params = new URLSearchParams({
           provider,
           page: String(page),
+          rankingPage: String(rankingPage),
           resultsPage: String(resultsPage),
           search,
           filter,
@@ -221,6 +224,12 @@ export function AnalysisPreview() {
         setData(next);
         setLoadError(null);
         if (next.records.page !== page) setPage(next.records.page);
+        if (
+          tab === "ranking" &&
+          next.rankingPagination &&
+          next.rankingPagination.page !== rankingPage
+        )
+          setRankingPage(next.rankingPagination.page);
         if (next.results && next.results.page !== resultsPage) setResultsPage(next.results.page);
         timer = setTimeout(refresh, 5000);
       } catch (failure) {
@@ -234,7 +243,7 @@ export function AnalysisPreview() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [provider, page, resultsPage, search, filter, showViewed, tab, revision]);
+  }, [provider, page, rankingPage, resultsPage, search, filter, showViewed, tab, revision]);
 
   const mutate = useCallback(
     async (path: string, body: Record<string, unknown>) => {
@@ -317,6 +326,10 @@ export function AnalysisPreview() {
   };
   const copyRecommendation = async (item: AnalysisItem) => {
     if (copyOperation.current) return;
+    if (!item.url?.trim()) {
+      setCopyNotice({ message: "商品链接缺失，无法复制，请重新采集后重试。", error: true });
+      return;
+    }
     copyOperation.current = true;
     setCopying(true);
     setCopyNotice(null);
@@ -328,7 +341,7 @@ export function AnalysisPreview() {
       ...(item.recommendation ? [`差额：${valuationMoney(item.recommendation.gap)}`] : []),
       item.assetSummary?.equipment || "装备资料未采齐",
       item.assetSummary?.pets || "宝宝资料未采齐",
-      ...(item.url ? [`商品链接：${item.url}`] : []),
+      `商品链接：${item.url}`,
     ].join("\n");
     try {
       await navigator.clipboard.writeText(content);
@@ -669,7 +682,9 @@ export function AnalysisPreview() {
                 onClick={() => setTab("ranking")}
               >
                 推荐榜{" "}
-                {snapshot && !snapshot.rankingDeferred && <span>{data?.ranking.length || 0}</span>}
+                {snapshot && !snapshot.rankingDeferred && (
+                  <span>{data?.rankingPagination?.total || 0}</span>
+                )}
               </button>
               <button role="tab" aria-selected={tab === "all"} onClick={() => setTab("all")}>
                 全部商品 <span>{data?.counts.total || 0}</span>
@@ -689,16 +704,21 @@ export function AnalysisPreview() {
                   <input
                     type="checkbox"
                     checked={showViewed}
-                    onChange={(event) => setShowViewed(event.target.checked)}
+                    onChange={(event) => {
+                      setShowViewed(event.target.checked);
+                      setRankingPage(1);
+                      setData(null);
+                    }}
                   />
                   显示已查看的推荐
                 </label>
+                {!snapshot && <p role="status">正在加载推荐榜…</p>}
                 {copyNotice && (
                   <p role={copyNotice.error ? "alert" : "status"}>{copyNotice.message}</p>
                 )}
                 <div className="analysis-list-intro">
                   <span>
-                    挂牌价低于裸号预估价直接入榜，无需装备或宝宝配置门槛；其他商品沿用金额阶梯和配置条件，不限制差额百分比，最多展示50个
+                    挂牌价低于裸号预估价直接入榜，无需装备或宝宝配置门槛；其他商品沿用金额阶梯和配置条件，不限制差额百分比
                   </span>
                   <span>差额 = 挂牌价 − 裸号估值</span>
                   <span>
@@ -738,79 +758,110 @@ export function AnalysisPreview() {
                     </p>
                   </div>
                 )}
-                {data?.ranking.map((item, index) => (
-                  <article
-                    className={`analysis-rank-card ${index === 0 ? "analysis-rank-first" : ""}`}
-                    key={item.key}
-                  >
-                    <div className="analysis-rank-number">
-                      {String(index + 1).padStart(2, "0")}
-                      <small>
-                        {item.valuation
-                          ? item.valuation.comparison_mode === "listing-only"
-                            ? "价格比较"
-                            : "购买参考"
-                          : "配置参考"}
-                      </small>
-                    </div>
-                    <div className="analysis-rank-main">
-                      <div className="analysis-rank-title">
-                        <h3>{item.name}</h3>
-                        <span>{item.server}</span>
+                {snapshot &&
+                  data?.ranking.map((item, index) => (
+                    <article
+                      className={`analysis-rank-card ${rankingPage === 1 && index === 0 ? "analysis-rank-first" : ""}`}
+                      key={item.key}
+                    >
+                      <div className="analysis-rank-number">
+                        {String((rankingPage - 1) * 20 + index + 1).padStart(2, "0")}
+                        <small>
+                          {item.valuation
+                            ? item.valuation.comparison_mode === "listing-only"
+                              ? "价格比较"
+                              : "购买参考"
+                            : "配置参考"}
+                        </small>
                       </div>
-                      <p>{item.summary}</p>
-                      <p>
-                        列表核对：{displayTime(item.lastSeenAt)} · 资料采集：
-                        {displayTime(item.collectedAt)}
-                      </p>
-                      {item.recommendation && (
+                      <div className="analysis-rank-main">
+                        <div className="analysis-rank-title">
+                          <h3>{item.name}</h3>
+                          <span>{item.server}</span>
+                        </div>
+                        <p>{item.summary}</p>
                         <p>
-                          差额 {valuationMoney(item.recommendation.gap)} ·{" "}
-                          {item.recommendation.factors.length} 类配置，
-                          {item.recommendation.strongerFactors.length} 类较强
+                          列表核对：{displayTime(item.lastSeenAt)} · 资料采集：
+                          {displayTime(item.collectedAt)}
                         </p>
-                      )}
-                      {item.recommendation?.basis === "bare-role-discount" && (
-                        <p>入榜依据：挂牌低于裸号预估价</p>
-                      )}
-                      <div className="analysis-rank-assets" aria-label="装备和宝宝简要信息">
-                        {item.assetSummary ? (
-                          <>
-                            <p>{item.assetSummary.equipment}</p>
-                            <p>{item.assetSummary.pets}</p>
-                          </>
-                        ) : (
-                          <p>装备和宝宝资料未采齐</p>
+                        {item.recommendation && (
+                          <p>
+                            差额 {valuationMoney(item.recommendation.gap)} ·{" "}
+                            {item.recommendation.factors.length} 类配置，
+                            {item.recommendation.strongerFactors.length} 类较强
+                          </p>
                         )}
+                        {item.recommendation?.basis === "bare-role-discount" && (
+                          <p>入榜依据：挂牌低于裸号预估价</p>
+                        )}
+                        <div className="analysis-rank-assets" aria-label="装备和宝宝简要信息">
+                          {item.assetSummary ? (
+                            <>
+                              <p>{item.assetSummary.equipment}</p>
+                              <p>{item.assetSummary.pets}</p>
+                            </>
+                          ) : (
+                            <p>装备和宝宝资料未采齐</p>
+                          )}
+                        </div>
+                        <div className="analysis-tags">
+                          {item.recommendationViewed && <span>已查看</span>}
+                          {item.highlights.map((item, index) => (
+                            <span key={index}>{item}</span>
+                          ))}
+                        </div>
                       </div>
-                      <div className="analysis-tags">
-                        {item.recommendationViewed && <span>已查看</span>}
-                        {item.highlights.map((item, index) => (
-                          <span key={index}>{item}</span>
-                        ))}
+                      <div className="analysis-rank-side">
+                        <small>挂牌价格</small>
+                        <strong>{price(item.price)}</strong>
+                        {item.valuation && (
+                          <span>裸号预估价 {valuationMoney(item.valuation.bare_role_value)}</span>
+                        )}
+                        <span>
+                          {item.valuation
+                            ? item.valuation.comparison_mode === "listing-only"
+                              ? valuationPriceDifferenceText(item.valuation) ||
+                                valuationDecisionLabel(item.valuation)
+                              : `最高买入 ${valuationMoney(item.valuation.max_listing_price)}`
+                            : `配置参考分 ${item.score}`}
+                        </span>
+                        <button onClick={() => void viewRecommendation(item)}>
+                          查看分析依据 →
+                        </button>
+                        <button disabled={copying} onClick={() => void copyRecommendation(item)}>
+                          一键复制
+                        </button>
                       </div>
-                    </div>
-                    <div className="analysis-rank-side">
-                      <small>挂牌价格</small>
-                      <strong>{price(item.price)}</strong>
-                      {item.valuation && (
-                        <span>裸号预估价 {valuationMoney(item.valuation.bare_role_value)}</span>
-                      )}
-                      <span>
-                        {item.valuation
-                          ? item.valuation.comparison_mode === "listing-only"
-                            ? valuationPriceDifferenceText(item.valuation) ||
-                              valuationDecisionLabel(item.valuation)
-                            : `最高买入 ${valuationMoney(item.valuation.max_listing_price)}`
-                          : `配置参考分 ${item.score}`}
-                      </span>
-                      <button onClick={() => void viewRecommendation(item)}>查看分析依据 →</button>
-                      <button disabled={copying} onClick={() => void copyRecommendation(item)}>
-                        一键复制
-                      </button>
-                    </div>
-                  </article>
-                ))}
+                    </article>
+                  ))}
+                {!snapshot?.rankingDeferred && (
+                  <div className="analysis-pagination">
+                    <span>
+                      共 {data?.rankingPagination?.total || 0} 件 · 第 {rankingPage} /{" "}
+                      {data?.rankingPagination?.totalPages || 1} 页
+                    </span>
+                    <button
+                      disabled={!snapshot || rankingPage <= 1}
+                      onClick={() => {
+                        setData(null);
+                        setRankingPage((value) => value - 1);
+                      }}
+                    >
+                      上一页
+                    </button>
+                    <button
+                      disabled={
+                        !snapshot || rankingPage >= (data?.rankingPagination?.totalPages || 1)
+                      }
+                      onClick={() => {
+                        setData(null);
+                        setRankingPage((value) => value + 1);
+                      }}
+                    >
+                      下一页
+                    </button>
+                  </div>
+                )}
               </div>
             ) : tab === "all" ? (
               <div role="tabpanel" aria-label="全部商品">

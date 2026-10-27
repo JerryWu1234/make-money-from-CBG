@@ -175,6 +175,61 @@ it("让出线程期间出现更新的完整分析结果，不能再发布旧任�
   }
 });
 
+it("汇总期间标记已查看，不计入分页总数且不显示旧推荐", async () => {
+  const { crawl, store, runId } = fixture();
+  try {
+    crawl.db
+      .prepare("UPDATE analysis_tasks SET result_json=?")
+      .run(JSON.stringify({ valuation: { bare_role_value: 1500, decision: "PASS" } }));
+    const original = recommendations.recommendationFor;
+    const compute = vi.spyOn(recommendations, "recommendationFor").mockImplementation((...args) => {
+      const until = performance.now() + 2;
+      while (performance.now() < until) {
+        /* CPU fixture */
+      }
+      return original(...args);
+    });
+    const pending = store.overviewAsync({ runId, summary: true });
+    while (!compute.mock.calls.length) await yieldThread();
+    store.markRecommendationViewed("poll-000");
+    const output = await pending;
+    expect(output.ranking.map((item) => item.key)).not.toContain("poll-000");
+    expect(output.rankingPagination).toEqual({ page: 1, totalPages: 3, total: 47 });
+    expect(output.ranking).toHaveLength(20);
+  } finally {
+    crawl.close();
+  }
+});
+
+it("并发请求隐藏已查看时，显示已查看的分页不丢失其结果", async () => {
+  const { crawl, store, runId } = fixture();
+  try {
+    crawl.db
+      .prepare("UPDATE analysis_tasks SET result_json=?")
+      .run(JSON.stringify({ valuation: { bare_role_value: 1500, decision: "PASS" } }));
+    store.markRecommendationViewed("poll-000");
+    const original = recommendations.recommendationFor;
+    const compute = vi.spyOn(recommendations, "recommendationFor").mockImplementation((...args) => {
+      const until = performance.now() + 2;
+      while (performance.now() < until) {
+        /* CPU fixture: allow the two requests to interleave. */
+      }
+      return original(...args);
+    });
+    const showing = store.overviewAsync({ runId, summary: true, showViewed: true });
+    while (!compute.mock.calls.length) await yieldThread();
+    const hidden = store.overview({ runId, summary: true, showViewed: false });
+    const visible = await showing;
+    expect(hidden.rankingPagination?.total).toBe(47);
+    expect(hidden.ranking.map((item) => item.key)).not.toContain("poll-000");
+    expect(visible.rankingPagination).toEqual({ page: 1, totalPages: 3, total: 48 });
+    expect(visible.ranking).toHaveLength(20);
+    expect(visible.ranking[0]).toMatchObject({ key: "poll-000", recommendationViewed: true });
+  } finally {
+    crawl.close();
+  }
+});
+
 it("轻量进度不传回角色原文或计算推荐，后续完成数立即可见", () => {
   const { crawl, store, runId } = fixture();
   const compute = vi.spyOn(recommendations, "recommendationFor");

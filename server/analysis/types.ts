@@ -160,6 +160,7 @@ export type AnalysisOverview = {
   activeRun: AnalysisRun | null;
   runs: AnalysisRun[];
   ranking: AnalysisItem[];
+  rankingPagination?: { page: number; totalPages: number; total: number };
   manualReview?: AnalysisItem[];
   records: { page: number; totalPages: number; total: number; items: AnalysisItem[] };
   results: { page: number; totalPages: number; total: number; items: AnalysisResultItem[] };

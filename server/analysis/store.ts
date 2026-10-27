@@ -1422,6 +1422,7 @@ export class AnalysisStore {
       runId?: string;
       page?: number;
       resultsPage?: number;
+      rankingPage?: number;
       currentProfile?: AnalysisProfile;
       search?: string;
       filter?: string;
@@ -1513,9 +1514,18 @@ export class AnalysisStore {
       .map((row) => this.item(row, options.currentProfile, options.summary));
     yield;
     let currentRanking: AnalysisItem[] = [],
-      currentManual: AnalysisItem[] = [];
+      currentManual: AnalysisItem[] = [],
+      rankingPagination: AnalysisOverview["rankingPagination"];
     if (options.includeRanking !== false) {
-      const ranking: AnalysisItem[] = [];
+      const ranking: {
+        key: string;
+        taskId: SQLOutputValue;
+        signature: string;
+        cached: {
+          recommendation?: AnalysisItem["recommendation"];
+          assetSummary?: AnalysisItem["assetSummary"];
+        };
+      }[] = [];
       const manualReview: AnalysisItem[] = [];
       const profileKey = textHash(JSON.stringify(options.currentProfile || null));
       const signature = (row: Row) =>
@@ -1608,10 +1618,9 @@ export class AnalysisStore {
         // One small decision per current candidate; source documents are never cached.
         this.recommendationCache.set(key, cached);
         const status = cached.recommendation?.status;
-        if (
-          (status === "recommended" && ranking.length < 50) ||
-          (status === "manual" && manualReview.length < 10)
-        ) {
+        if (status === "recommended") {
+          ranking.push({ key, taskId: candidate.task_id, signature: fingerprint, cached });
+        } else if (status === "manual" && manualReview.length < 10) {
           if (!item) {
             row = rankedProduct.get(candidate.key, candidate.task_id, ...sourceValues);
             if (!row || row.state !== "completed" || signature(row) !== fingerprint) continue;
@@ -1619,20 +1628,9 @@ export class AnalysisStore {
           item ||= this.item(row, options.currentProfile, options.summary);
           item.recommendationViewed = !!row.viewed_at;
           item.recommendation = structuredClone(cached.recommendation);
-          if (status === "recommended") {
-            record ||= {
-              listing: JSON.parse(String(row.listing_json)),
-              detail: JSON.parse(String(row.detail_json)),
-              status: "complete",
-              error: null,
-            };
-            cached.assetSummary ??= capturedAssetSummary(record);
-            item.assetSummary = structuredClone(cached.assetSummary);
-            ranking.push(item);
-          } else manualReview.push(item);
+          manualReview.push(item);
           selected.set(key, { taskId: candidate.task_id, signature: fingerprint });
         }
-        if (ranking.length === 50 && manualReview.length === 10) break;
       }
       // A yielding overview may overlap capture, deletion, quote expiry or a view action.
       // Revalidate displayed rows synchronously before publishing; do not resurrect stale results.
@@ -1646,8 +1644,41 @@ export class AnalysisStore {
           signature(row) === chosen.signature
         );
       };
-      currentRanking = ranking.filter(stillCurrent);
       currentManual = manualReview.filter(stillCurrent);
+      // Recheck every eligible key after the yielding scan so removed or viewed items
+      // do not inflate totals or leave an empty page.
+      const validRanking = ranking.filter((entry) => {
+        const row = rankedMetadata.get(entry.key, entry.taskId, ...sourceValues);
+        return (
+          !!row &&
+          row.state === "completed" &&
+          (options.showViewed || !row.viewed_at) &&
+          signature(row) === entry.signature
+        );
+      });
+      const rankingTotal = validRanking.length;
+      const rankingTotalPages = Math.max(1, Math.ceil(rankingTotal / 20));
+      const requestedPage = Number.isFinite(options.rankingPage)
+        ? Math.trunc(options.rankingPage!)
+        : 1;
+      const rankingPage = Math.max(1, Math.min(rankingTotalPages, requestedPage));
+      rankingPagination = { page: rankingPage, totalPages: rankingTotalPages, total: rankingTotal };
+      for (const entry of validRanking.slice((rankingPage - 1) * 20, rankingPage * 20)) {
+        const row = rankedProduct.get(entry.key, entry.taskId, ...sourceValues);
+        const { cached } = entry;
+        if (!row || row.state !== "completed" || signature(row) !== entry.signature) continue;
+        const item = this.item(row, options.currentProfile, options.summary);
+        item.recommendationViewed = !!row.viewed_at;
+        item.recommendation = structuredClone(cached.recommendation);
+        cached.assetSummary ??= capturedAssetSummary({
+          listing: JSON.parse(String(row.listing_json)),
+          detail: JSON.parse(String(row.detail_json)),
+          status: "complete",
+          error: null,
+        });
+        item.assetSummary = structuredClone(cached.assetSummary);
+        currentRanking.push(item);
+      }
     }
     const historyKeys = this.db
       .prepare(
@@ -1735,6 +1766,7 @@ export class AnalysisStore {
       activeRun: this.activeRun(),
       runs,
       ranking: currentRanking,
+      ...(rankingPagination ? { rankingPagination } : {}),
       manualReview: currentManual,
       records: { page, totalPages, total, items: records },
       history,

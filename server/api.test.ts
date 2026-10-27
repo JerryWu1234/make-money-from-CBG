@@ -141,6 +141,16 @@ it("记录页明确跳过推荐榜，默认请求仍保留推荐计算", async (
   }
 });
 
+it("分析状态接口传递独立的推荐榜页码", async () => {
+  const req = request("/api/analysis/status?page=1&rankingPage=3");
+  req.method = "GET";
+  await (await import("./api")).apiMiddleware(req, response(), vi.fn());
+  expect(mocks.analysisOverview).toHaveBeenCalledWith(
+    expect.objectContaining({ page: 1, rankingPage: 3 }),
+    expect.any(AbortSignal),
+  );
+});
+
 it("明确确认飞升公式只保存当前角色的确认，不启动或修改分析批次", async () => {
   const productKeys = ["159:one", "377:two"];
   mocks.confirmSchoolFormula.mockReturnValue({ confirmed: 2, productKeys });

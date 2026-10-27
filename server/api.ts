@@ -303,6 +303,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
                 runId: params.get("runId") || undefined,
                 page: Number(params.get("page") || 1),
                 resultsPage: Number(params.get("resultsPage") || 1),
+                rankingPage: Number(params.get("rankingPage") || 1),
                 summary: true,
                 search: params.get("search") || undefined,
                 filter: params.get("filter") || undefined,
