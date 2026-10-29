@@ -1220,6 +1220,10 @@ body {
 .scan-schedule-time label {
   min-width: 130px;
 }
+.scan-schedule-time input {
+  color-scheme: dark;
+  cursor: pointer;
+}
 .scan-schedule-time button,
 .scan-schedule-add-time {
   width: auto;
