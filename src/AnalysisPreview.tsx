@@ -13,6 +13,7 @@ import { AiConnectionControl } from "./AiConnectionControl";
 import { AssetCounts, EquipmentSummary } from "./AssetCounts";
 import { AnalysisResultDrawer } from "./AnalysisResultDrawer";
 import { AnalysisSettings } from "./AnalysisSettings";
+import { IndexedDbCleanup } from "./IndexedDbCleanup";
 import {
   valuationDecisionLabel,
   valuationMoney,
@@ -646,6 +647,7 @@ export function AnalysisPreview() {
             </div>
           </div>
         </section>
+        <IndexedDbCleanup />
         <div className="analysis-overview" aria-label="分析页面概览">
           <div>
             <span className="analysis-overview-icon">01</span>

@@ -5,6 +5,7 @@ import { RoleDetailDrawer } from "./RoleDetailDrawer";
 import { SavedRoleList, displayTime } from "./SavedRoleList";
 import { ScanSchedulePanel } from "./ScanSchedulePanel";
 import { RunRecordSettings } from "./RunRecordSettings";
+import { IndexedDbCleanup } from "./IndexedDbCleanup";
 import { replaceSavedRecordKey, savedRecordKey } from "./saved-view-state";
 
 type Status = CrawlStatus & {
@@ -177,6 +178,7 @@ export function CrawlPanel({
         开关只影响新分析任务；已开始的分析沿用原设置。
       </p>
       <RunRecordSettings />
+      <IndexedDbCleanup />
       <label className="crawl-concurrency">
         并发抓取数
         <input
