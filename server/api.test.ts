@@ -141,6 +141,22 @@ it("记录页明确跳过推荐榜，默认请求仍保留推荐计算", async (
   }
 });
 
+it("列表页签开关只接受明确的false，旧请求继续读取两种分页", async () => {
+  const api = await import("./api");
+  for (const value of ["false", "true", "0", ""]) {
+    const req = request(`/api/analysis/status?includeRecords=${value}&includeResults=${value}`);
+    req.method = "GET";
+    await api.apiMiddleware(req, response(), vi.fn());
+    const options = mocks.analysisOverview.mock.lastCall![0];
+    if (value === "false")
+      expect(options).toMatchObject({ includeRecords: false, includeResults: false });
+    else {
+      expect(options).not.toHaveProperty("includeRecords");
+      expect(options).not.toHaveProperty("includeResults");
+    }
+  }
+});
+
 it("分析状态接口传递独立的推荐榜页码", async () => {
   const req = request("/api/analysis/status?page=1&rankingPage=3");
   req.method = "GET";

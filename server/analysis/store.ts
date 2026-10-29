@@ -69,37 +69,56 @@ const stateSql = `CASE WHEN l.status!='complete' OR l.detail_json IS NULL THEN '
   WHEN t.status='completed' AND (${expiredPricingSql}) THEN 'stale'
   ELSE t.status END`;
 
-function overviewResult(result: ProductAnalysis | null, summary: boolean) {
-  if (!summary || !result?.valuation) return result;
+function overviewResult(result: ProductAnalysis | null, summary: boolean): ProductAnalysis | null {
+  if (!summary || !result) return result;
   const value = result.valuation;
   return {
     ...result,
-    valuation: {
-      ...value,
-      equipment_pricing: value.equipment_pricing
-        ? {
-            ...value.equipment_pricing,
-            items: [],
-            queries: [],
-            rawResponse: "",
-            searchItems: [],
-            searchAttempts: [],
-            requestText: undefined,
-          }
-        : undefined,
-      pet_pricing: value.pet_pricing
-        ? {
-            ...value.pet_pricing,
-            items: [],
-            queries: [],
-            rawResponse: "",
-            searchItems: [],
-            searchAttempts: [],
-            requestText: undefined,
-            gearPricing: undefined,
-          }
-        : undefined,
-    },
+    dimensions: result.dimensions
+      ? {
+          foundation: { ...result.dimensions.foundation, evidence: [] },
+          equipment: { ...result.dimensions.equipment, evidence: [] },
+          pets: { ...result.dimensions.pets, evidence: [] },
+        }
+      : result.dimensions,
+    ...(value
+      ? {
+          valuation: {
+            ...value,
+            items: (value.items ?? []).map((item) => ({
+              ...item,
+              input: "",
+              formula: "",
+              evidence: [],
+            })),
+            extracted_facts: undefined,
+            ai_explanation: undefined,
+            equipment_pricing: value.equipment_pricing
+              ? {
+                  ...value.equipment_pricing,
+                  items: [],
+                  queries: [],
+                  rawResponse: "",
+                  searchItems: [],
+                  searchAttempts: [],
+                  requestText: undefined,
+                }
+              : undefined,
+            pet_pricing: value.pet_pricing
+              ? {
+                  ...value.pet_pricing,
+                  items: [],
+                  queries: [],
+                  rawResponse: "",
+                  searchItems: [],
+                  searchAttempts: [],
+                  requestText: undefined,
+                  gearPricing: undefined,
+                }
+              : undefined,
+          },
+        }
+      : {}),
   };
 }
 
@@ -1429,6 +1448,8 @@ export class AnalysisStore {
       summary?: boolean;
       showViewed?: boolean;
       includeRanking?: boolean;
+      includeRecords?: boolean;
+      includeResults?: boolean;
       scope?: import("../crawler/types").SavedListingScope;
     } = {},
   ): Generator<void, AnalysisOverview, void> {
@@ -1459,7 +1480,14 @@ export class AnalysisStore {
               (field) => `'$.valuation.${key}.${field}'`,
             ),
           )
-          .concat("'$.valuation.pet_pricing.gearPricing'")
+          .concat(
+            "'$.valuation.pet_pricing.gearPricing'",
+            "'$.valuation.extracted_facts'",
+            "'$.valuation.ai_explanation'",
+            "'$.dimensions.foundation.evidence'",
+            "'$.dimensions.equipment.evidence'",
+            "'$.dimensions.pets.evidence'",
+          )
           .join(",")})`
       : "t.result_json";
     const productColumns = `l.key,l.listing_json,l.collected_at,l.last_seen_at,l.status collection_status,t.id task_id,${resultColumn} result_json,t.error task_error,selected_run.profile_json,${stateSql} state`;
@@ -1495,23 +1523,26 @@ export class AnalysisStore {
     );
     const totalPages = Math.max(1, Math.ceil(total / 20));
     const page = Math.max(1, Math.min(totalPages, Math.trunc(options.page || 1)));
-    const pageKeys = stateFiltered
-      ? undefined
-      : this.db
-          .prepare(`SELECT l.key ${listingSource} ORDER BY l.key ASC LIMIT 20 OFFSET ?`)
-          .all(...listingValues, (page - 1) * 20)
-          .map((row) => row.key);
-    const recordQuery = pageKeys
-      ? `WITH products AS (${source}${scopeCondition ? " AND" : " WHERE"} l.key IN (${pageKeys.map(() => "?").join(",") || "NULL"})) SELECT * FROM products${conditions.length ? ` WHERE ${conditions.join(" AND ")}` : ""} ORDER BY key ASC`
-      : `${query} ORDER BY key ASC LIMIT 20 OFFSET ?`;
-    const records = this.db
-      .prepare(recordQuery)
-      .all(
-        ...(pageKeys
-          ? [...sourceValues, ...pageKeys, ...listingValues]
-          : [...values, (page - 1) * 20]),
-      )
-      .map((row) => this.item(row, options.currentProfile, options.summary));
+    let records: AnalysisItem[] = [];
+    if (options.includeRecords !== false) {
+      const pageKeys = stateFiltered
+        ? undefined
+        : this.db
+            .prepare(`SELECT l.key ${listingSource} ORDER BY l.key ASC LIMIT 20 OFFSET ?`)
+            .all(...listingValues, (page - 1) * 20)
+            .map((row) => row.key);
+      const recordQuery = pageKeys
+        ? `WITH products AS (${source}${scopeCondition ? " AND" : " WHERE"} l.key IN (${pageKeys.map(() => "?").join(",") || "NULL"})) SELECT * FROM products${conditions.length ? ` WHERE ${conditions.join(" AND ")}` : ""} ORDER BY key ASC`
+        : `${query} ORDER BY key ASC LIMIT 20 OFFSET ?`;
+      records = this.db
+        .prepare(recordQuery)
+        .all(
+          ...(pageKeys
+            ? [...sourceValues, ...pageKeys, ...listingValues]
+            : [...values, (page - 1) * 20]),
+        )
+        .map((row) => this.item(row, options.currentProfile, options.summary));
+    }
     yield;
     let currentRanking: AnalysisItem[] = [],
       currentManual: AnalysisItem[] = [],
@@ -1719,45 +1750,48 @@ export class AnalysisStore {
       1,
       Math.min(resultTotalPages, Math.trunc(options.resultsPage || 1)),
     );
-    const resultKeys = this.db
-      .prepare(
-        `SELECT t.id ${resultsSource} ORDER BY t.completed_at DESC,t.id DESC LIMIT 20 OFFSET ?`,
-      )
-      .all(...sourceValues, (resultPage - 1) * 20)
-      .map((row) => row.id);
-    const results = this.db
-      .prepare(`SELECT t.id task_id,t.source_listing_json,${resultColumn} result_json,t.completed_at,
+    let results: AnalysisOverview["results"]["items"] = [];
+    if (options.includeResults !== false) {
+      const resultKeys = this.db
+        .prepare(
+          `SELECT t.id ${resultsSource} ORDER BY t.completed_at DESC,t.id DESC LIMIT 20 OFFSET ?`,
+        )
+        .all(...sourceValues, (resultPage - 1) * 20)
+        .map((row) => row.id);
+      results = this.db
+        .prepare(`SELECT t.id task_id,t.source_listing_json,${resultColumn} result_json,t.completed_at,
       r.provider,r.model,r.profile_json,${stateSql} state ${resultsSource}
       WHERE t.id IN (${resultKeys.map(() => "?").join(",") || "NULL"})
       ORDER BY t.completed_at DESC,t.id DESC`)
-      .all(...sourceValues, ...resultKeys)
-      .map((row) => {
-        const listing = JSON.parse(String(row.source_listing_json)) as Listing;
-        const savedProfile = row.profile_json
-          ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
-          : null;
-        return {
-          taskId: String(row.task_id),
-          name: listing.name,
-          server: listing.serverName || listing.serverId,
-          price: listing.price,
-          provider: String(row.provider) as AiProvider,
-          model: String(row.model),
-          completedAt: String(row.completed_at),
-          stale: row.state !== "completed",
-          profileHash: savedProfile?.hash || null,
-          profileChanged:
-            !!options.currentProfile &&
-            !isDeepStrictEqual(
-              profileScope(savedProfile, listing.serverId, listing.key),
-              profileScope(options.currentProfile, listing.serverId, listing.key),
-            ),
-          result: overviewResult(
-            JSON.parse(String(row.result_json)) as ProductAnalysis,
-            !!options.summary,
-          )!,
-        };
-      });
+        .all(...sourceValues, ...resultKeys)
+        .map((row) => {
+          const listing = JSON.parse(String(row.source_listing_json)) as Listing;
+          const savedProfile = row.profile_json
+            ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
+            : null;
+          return {
+            taskId: String(row.task_id),
+            name: listing.name,
+            server: listing.serverName || listing.serverId,
+            price: listing.price,
+            provider: String(row.provider) as AiProvider,
+            model: String(row.model),
+            completedAt: String(row.completed_at),
+            stale: row.state !== "completed",
+            profileHash: savedProfile?.hash || null,
+            profileChanged:
+              !!options.currentProfile &&
+              !isDeepStrictEqual(
+                profileScope(savedProfile, listing.serverId, listing.key),
+                profileScope(options.currentProfile, listing.serverId, listing.key),
+              ),
+            result: overviewResult(
+              JSON.parse(String(row.result_json)) as ProductAnalysis,
+              !!options.summary,
+            )!,
+          };
+        });
+    }
     return {
       ...(options.includeRanking === false ? { rankingDeferred: true } : {}),
       ...this.collectionCounts(options.scope),
