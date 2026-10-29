@@ -109,9 +109,9 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   const plan = page.getByRole("region", { name: "定时循环扫描" });
   for (const day of ["周二", "周四", "周六", "周日"])
     await plan.getByRole("checkbox", { name: day }).uncheck();
-  await plan.getByLabel("周一执行时间").fill("22:00");
-  await plan.getByLabel("周三执行时间").fill("10:00");
-  await plan.getByLabel("周五执行时间").fill("15:00");
+  await plan.getByLabel("周一执行时间 1", { exact: true }).fill("22:00");
+  await plan.getByLabel("周三执行时间 1", { exact: true }).fill("10:00");
+  await plan.getByLabel("周五执行时间 1", { exact: true }).fill("15:00");
   await plan.getByLabel("最长运行时长（分钟，可选）").fill("45");
   await expect(plan.getByRole("button", { name: "启用计划" })).toBeDisabled();
   await plan.getByRole("button", { name: "保存设置" }).click();
@@ -129,7 +129,7 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
     ],
   );
   await plan.getByRole("radio", { name: "每天循环" }).check();
-  await plan.getByLabel("每天执行时间").fill("08:30");
+  await plan.getByLabel("每天执行时间 1", { exact: true }).fill("08:30");
   await plan.getByLabel("最长运行时长（分钟，可选）").fill("");
   await plan.getByRole("button", { name: "保存设置" }).click();
   assert.equal(schedule.config.scheduleType, "daily");
@@ -137,7 +137,7 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   assert.equal(schedule.config.maxDurationMinutes, null);
   await plan.screenshot({ path: testInfo.outputPath("scan-schedule-daily.png") });
   await plan.getByRole("radio", { name: "每周循环" }).check();
-  await expect(plan.getByLabel("周一执行时间")).toHaveValue("22:00");
+  await expect(plan.getByLabel("周一执行时间 1", { exact: true })).toHaveValue("22:00");
   await plan.getByLabel("最长运行时长（分钟，可选）").fill("60");
   await plan.getByRole("button", { name: "保存设置" }).click();
   assert.equal(schedule.config.scheduleType, "weekly");
@@ -242,8 +242,8 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   const statusReadsBeforeReload = browserStatusReads;
   const openReadsBeforeReload = browserOpenReads;
   await page.reload();
-  await expect(plan.getByLabel("周一执行时间")).toHaveValue("22:00");
-  await expect(plan.getByLabel("周三执行时间")).toHaveValue("10:00");
+  await expect(plan.getByLabel("周一执行时间 1", { exact: true })).toHaveValue("22:00");
+  await expect(plan.getByLabel("周三执行时间 1", { exact: true })).toHaveValue("10:00");
   await expect(plan.getByLabel("最长运行时长（分钟，可选）")).toHaveValue("60");
   await expect(plan.getByRole("checkbox", { name: "周二" })).not.toBeChecked();
   await page.getByRole("button", { name: /角色k45 ·/ }).waitFor();

@@ -43,9 +43,10 @@ function timesOf(setting: TimeSetting) {
 }
 
 function withTimes(times: string[]): TimeSetting {
-  return times.length === 1
-    ? { startTime: times[0] }
-    : { startTime: times[0], additionalStartTimes: times.slice(1) };
+  return {
+    startTime: times[0],
+    additionalStartTimes: times.length > 1 ? times.slice(1) : undefined,
+  };
 }
 
 function TimeInputs({
@@ -71,6 +72,7 @@ function TimeInputs({
               aria-label={`${label}执行时间 ${index + 1}`}
               value={time}
               disabled={disabled}
+              onClick={(event) => event.currentTarget.showPicker?.()}
               onChange={(event) =>
                 onChange(
                   withTimes(
@@ -81,6 +83,19 @@ function TimeInputs({
               required
             />
           </label>
+          {time && (
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={disabled}
+              aria-label={`清空${label}执行时间 ${index + 1}`}
+              onClick={() =>
+                onChange(withTimes(times.map((item, position) => (position === index ? "" : item))))
+              }
+            >
+              清空
+            </button>
+          )}
           {times.length > 1 && (
             <button
               type="button"
