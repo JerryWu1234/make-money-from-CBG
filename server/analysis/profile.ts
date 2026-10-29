@@ -198,7 +198,11 @@ function initialize(db: DatabaseSync) {
     "CREATE TABLE IF NOT EXISTS analysis_settings (id INTEGER PRIMARY KEY CHECK(id=1), settings_json TEXT NOT NULL)",
   );
 }
-export function loadProfile(db: DatabaseSync, file = PROMPT_FILE) {
+export function loadProfile(
+  db: DatabaseSync,
+  file = PROMPT_FILE,
+  options: { allowExpiredMarket?: boolean } = {},
+) {
   initialize(db);
   const row = db.prepare("SELECT settings_json FROM analysis_settings WHERE id=1").get();
   const stored = row ? (JSON.parse(String(row.settings_json)) as Record<string, unknown>) : null;
@@ -216,7 +220,8 @@ export function loadProfile(db: DatabaseSync, file = PROMPT_FILE) {
           sumAdvancedMounts: RECOMMENDED_RULES.sumAdvancedMounts,
         }
       : stored || DEFAULT_SETTINGS;
-  const market = marketServers(db);
+  // Historical views retain market identity; execution requires fresh data by default.
+  const market = marketServers(db, Date.now(), options.allowExpiredMarket);
   const manual = normalizeSettings(settings).servers.filter(
     (row: ValuationSettings["servers"][number]) => row.source !== "auto",
   );

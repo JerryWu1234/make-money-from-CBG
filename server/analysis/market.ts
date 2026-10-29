@@ -107,7 +107,11 @@ export function parseMarketPages(
     throw new Error("全服行情未能可靠匹配服务器，保留原有参数");
   return result;
 }
-export function marketServers(db: DatabaseSync, now = Date.now()): MarketServer[] {
+export function marketServers(
+  db: DatabaseSync,
+  now = Date.now(),
+  allowExpired = false,
+): MarketServer[] {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='analysis_market'").get()) return [];
   const row = db.prepare("SELECT snapshot_json FROM analysis_market WHERE id=1").get();
   if (!row) return [];
@@ -115,7 +119,7 @@ export function marketServers(db: DatabaseSync, now = Date.now()): MarketServer[
     servers: MarketServer[];
     fetchedAt: string;
   };
-  return now - Date.parse(data.fetchedAt) < 24 * 60 * 60 * 1000 ? data.servers : [];
+  return allowExpired || now - Date.parse(data.fetchedAt) < 24 * 60 * 60 * 1000 ? data.servers : [];
 }
 let refreshing: Promise<MarketServer[]> | null = null;
 export async function refreshMarket(

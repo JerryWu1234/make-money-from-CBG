@@ -780,6 +780,11 @@ export function AnalysisPreview() {
                           <span>{item.server}</span>
                         </div>
                         <p>{item.summary}</p>
+                        {item.marketExpired && (
+                          <p className="analysis-pending-note">
+                            历史结果 · 行情已过期，请刷新后重新分析
+                          </p>
+                        )}
                         <p>
                           列表核对：{displayTime(item.lastSeenAt)} · 资料采集：
                           {displayTime(item.collectedAt)}
@@ -1243,7 +1248,6 @@ export function AnalysisPreview() {
             setSettingsOpen(true);
           }}
           onShowRole={(key) => {
-            setTaskId(null);
             setRoleKey(key);
           }}
         />
