@@ -6,7 +6,12 @@ import { ScheduleConfigError } from "./crawler/schedule-time";
 import { validateSampleSelection } from "./analysis/sample-selection";
 import { analysisConcurrency } from "./analysis/types";
 import type { SavedListingScope } from "./crawler/types";
-import { browserControl, browserBusyError, isBrowserMode } from "./browser-settings";
+import {
+  browserControl,
+  browserBusyError,
+  isBrowserMode,
+  isBrowserModes,
+} from "./browser-settings";
 
 const getRoutes = new Set([
   "/api/browser/status",
@@ -23,6 +28,7 @@ const getRoutes = new Set([
   "/api/ai/models",
   "/api/ai/login/status",
   "/api/analysis/status",
+  "/api/analysis/progress",
   "/api/analysis/detail",
   "/api/analysis/input",
   "/api/analysis/settings",
@@ -135,7 +141,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
   try {
     const scope = new URL(req.url!, expectedOrigin).searchParams.get("scope") || "all";
     if (
-      (pathname === "/api/crawl/records" || pathname === "/api/analysis/status") &&
+      (pathname === "/api/crawl/records" ||
+        pathname === "/api/analysis/status" ||
+        pathname === "/api/analysis/progress") &&
       !["all", "complete", "tasks"].includes(scope)
     ) {
       res.statusCode = 400;
@@ -165,8 +173,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
         : {};
     if (browserUseRoutes.has(pathname) && browserControl.changing) throw browserBusyError();
     if (pathname === "/api/browser/settings" || pathname === "/api/browser/settings/save") {
-      const mode = (body as Record<string, unknown>).mode;
-      if (pathname.endsWith("/save") && !isBrowserMode(mode)) {
+      const { mode, modes } = body as Record<string, unknown>;
+      if (
+        pathname.endsWith("/save") &&
+        !(modes === undefined ? isBrowserMode(mode) : isBrowserModes(modes))
+      ) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: "浏览器运行方式无效" }));
         return;
@@ -182,7 +193,13 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
         workflow.isBrowserWorkflowRunning() ||
         capture.isCrawling() ||
         analysis.isAnalyzing();
-      if (pathname.endsWith("/save"))
+      if (pathname.endsWith("/save") && modes !== undefined)
+        await session.changeBrowserModes(
+          modes as ("daily" | "dedicated")[],
+          busy,
+          workflow.resetBrowserWorkflow,
+        );
+      else if (pathname.endsWith("/save"))
         await session.changeBrowserMode(
           mode as "daily" | "dedicated",
           busy,
@@ -250,6 +267,15 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
       const runId = typeof input.runId === "string" ? input.runId : "";
       let result: unknown;
       switch (pathname) {
+        case "/api/analysis/progress": {
+          const provider = params.get("provider");
+          result = analysis.analysisProgress({
+            provider: provider ? (await import("./ai-connection")).aiProvider(provider) : undefined,
+            runId: params.get("runId") || undefined,
+            ...(scope === "all" ? {} : { scope: scope as SavedListingScope }),
+          });
+          break;
+        }
         case "/api/analysis/settings":
           result = await analysis.analysisSettings();
           break;
@@ -261,17 +287,36 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
           break;
         case "/api/analysis/status": {
           const provider = params.get("provider");
-          result = analysis.analysisOverview({
-            provider: provider ? (await import("./ai-connection")).aiProvider(provider) : undefined,
-            runId: params.get("runId") || undefined,
-            page: Number(params.get("page") || 1),
-            resultsPage: Number(params.get("resultsPage") || 1),
-            summary: true,
-            search: params.get("search") || undefined,
-            filter: params.get("filter") || undefined,
-            showViewed: params.get("showViewed") === "true",
-            ...(scope === "all" ? {} : { scope: scope as SavedListingScope }),
-          });
+          const controller = new AbortController();
+          const cancel = () => controller.abort(new Error("商品记录请求已断开"));
+          const deadline = setTimeout(
+            () => controller.abort(new Error("读取商品记录超时")),
+            12_000,
+          );
+          res.once("close", cancel);
+          try {
+            result = await analysis.analysisOverviewAsync(
+              {
+                provider: provider
+                  ? (await import("./ai-connection")).aiProvider(provider)
+                  : undefined,
+                runId: params.get("runId") || undefined,
+                page: Number(params.get("page") || 1),
+                resultsPage: Number(params.get("resultsPage") || 1),
+                rankingPage: Number(params.get("rankingPage") || 1),
+                summary: true,
+                search: params.get("search") || undefined,
+                filter: params.get("filter") || undefined,
+                showViewed: params.get("showViewed") === "true",
+                ...(params.get("includeRanking") === "false" ? { includeRanking: false } : {}),
+                ...(scope === "all" ? {} : { scope: scope as SavedListingScope }),
+              },
+              controller.signal,
+            );
+          } finally {
+            clearTimeout(deadline);
+            res.removeListener("close", cancel);
+          }
           break;
         }
         case "/api/analysis/recommendation/view":
@@ -524,11 +569,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
         : error instanceof Error && error.name === "SchoolFormulaConfirmationError"
           ? 400
           : error instanceof Error &&
-              [
-                "CapturePreparationError",
-                "LogStorageTokenError",
-                "BrowserSessionBusyError",
-              ].includes(error.name)
+              ["LogStorageTokenError", "BrowserSessionBusyError"].includes(error.name)
             ? 409
             : 500;
     res.end(JSON.stringify({ error: error instanceof Error ? error.message : "请求失败" }));

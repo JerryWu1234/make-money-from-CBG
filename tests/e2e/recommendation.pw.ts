@@ -162,7 +162,10 @@ test("推荐榜裸号折价与原差额阶梯→已查看筛选→全部商品�
             defaultModel: "fixture-model",
             models: [{ id: "fixture-model", name: "测试模型" }],
           };
-        else if (url.pathname === "/api/analysis/status")
+        else if (
+          url.pathname === "/api/analysis/status" ||
+          url.pathname === "/api/analysis/progress"
+        )
           body = store.overview({
             summary: true,
             showViewed: url.searchParams.get("showViewed") === "true",

@@ -1,5 +1,26 @@
 import type { DetailItem, TabSnapshot } from "./types";
 
+export function schoolSkillsComplete(tabs: TabSnapshot[]) {
+  const schoolTabs = tabs.filter((tab) => tab.name === "技能").map(completeSchoolSkillsFromText);
+  const skills = schoolTabs.flatMap((tab) =>
+    (tab.items || []).filter((item) => item.category === "师门技能"),
+  );
+  const names = skills.map((item) => (typeof item.name === "string" ? item.name.trim() : ""));
+  return (
+    schoolTabs.length === 1 &&
+    skills.length === 7 &&
+    new Set(names).size === 7 &&
+    names.every(Boolean) &&
+    skills.every(
+      (item) =>
+        item.kind === "skill" &&
+        typeof item.level === "string" &&
+        /^\d+$/.test(item.level) &&
+        Number.isSafeInteger(Number(item.level)),
+    )
+  );
+}
+
 /** Fill an icon omission only when the saved school-skill text proves all seven pairs. */
 export function completeSchoolSkillsFromText(tab: TabSnapshot): TabSnapshot {
   if (tab.name !== "技能" || !tab.items) return tab;

@@ -1,15 +1,21 @@
 import { randomUUID } from "node:crypto";
-import type { Page } from "playwright-core";
+import type { Browser, Page } from "playwright-core";
 import { getBrowser, getCbgPage, createHiddenPage } from "../session";
 import { checkCbgStatus } from "../cbg";
 import { crawl, validateCrawlOptions, type CrawlOptions } from "./runner";
 import { createCrawlSource } from "./source";
 import { CrawlStore } from "./store";
-import { DEFAULT_CRAWL_CONCURRENCY, type CrawlStatus, type SavedRoleRecord } from "./types";
+import {
+  DEFAULT_CRAWL_CONCURRENCY,
+  crawlAccessFailure,
+  type CrawlStatus,
+  type SavedRoleRecord,
+} from "./types";
 import { diagnostics, watchWorkPage } from "../diagnostics";
 import { loadProfile, saveProfile } from "../analysis/profile";
 import { assertServiceOpen } from "../service-lifecycle";
 import { showBrowserWorkPages } from "../config";
+import { BrowserConnectionError, browserConnectionFailure } from "../browser-connection";
 
 type CrawlRuntime = {
   storage?: CrawlStore;
@@ -52,6 +58,7 @@ export function crawlStatus() {
     ...cache.status,
     totalSaved: store().count(),
     checkpoint: store().checkpoint(),
+    latestComplete: store().latestComplete(),
     recent: store().recent(),
   };
 }
@@ -108,7 +115,11 @@ export function savedRecords(
 }
 export function stopCrawl(reason: "manual" | "time_limit" = "manual") {
   diagnostics.record("crawl.stop_requested", { running: isCrawling(), reason });
-  cache.abort?.abort(new Error(reason === "time_limit" ? "达到最长运行时长" : "用户暂停采集"));
+  cache.abort?.abort(
+    Object.assign(new Error(reason === "time_limit" ? "达到最长运行时长" : "用户暂停采集"), {
+      code: reason === "time_limit" ? "CRAWL_TIME_LIMIT" : "CRAWL_MANUAL_PAUSE",
+    }),
+  );
   if (cache.status.running)
     cache.status = { ...cache.status, message: "正在暂停，当前已入库数据和断点会保留…" };
   return crawlStatus();
@@ -158,6 +169,8 @@ export async function startCrawl(
     skipped: 0,
     error: undefined,
     failed: 0,
+    accessIssue: undefined,
+    browserIssue: undefined,
     retryTotal: undefined,
     retryCompleted: undefined,
     lastItemError: undefined,
@@ -177,7 +190,20 @@ export async function startCrawl(
     const detailPages: Page[] = [];
     const createDetailPage = async () => {
       control.signal.throwIfAborted();
-      const detailPage = await createHiddenPage(await getBrowser(true));
+      let browser: Browser | undefined;
+      let detailPage: Page;
+      try {
+        // A validated collection session must not silently reconnect after a disconnect.
+        browser = await getBrowser(false);
+        detailPage = await createHiddenPage(browser);
+      } catch (error) {
+        control.signal.throwIfAborted();
+        if (!browser || !browser.isConnected())
+          throw (
+            browserConnectionFailure(error) || new BrowserConnectionError("disconnected", error)
+          );
+        throw error;
+      }
       detailPages.push(detailPage);
       watchWorkPage(detailPage, "detail");
       log("page.ready", { kind: "detail" });
@@ -224,8 +250,13 @@ export async function startCrawl(
   })()
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      log(control.signal.aborted ? "crawl.paused" : "crawl.error", {
+      const access = crawlAccessFailure(error);
+      const connection = browserConnectionFailure(error);
+      const paused = control.signal.aborted || !!access || !!connection;
+      log(paused ? "crawl.paused" : "crawl.error", {
         error,
+        accessIssue: access?.kind,
+        browserIssue: connection?.kind,
         page: cache.status.page,
         itemIndex: cache.status.itemIndex,
         detailProgress: cache.status.detailProgress,
@@ -233,12 +264,16 @@ export async function startCrawl(
       cache.status = {
         ...cache.status,
         running: false,
-        phase: control.signal.aborted ? "paused" : "error",
-        message: control.signal.aborted ? "采集已暂停，断点已保留。" : message,
-        error: control.signal.aborted ? undefined : message,
+        phase: paused ? "paused" : "error",
+        message: control.signal.aborted
+          ? "采集已暂停，断点已保留。"
+          : connection?.message || access?.message || message,
+        error: paused ? undefined : message,
+        accessIssue: access?.kind,
+        browserIssue: connection?.kind,
         detailProgress: undefined,
       };
-      if (!control.signal.aborted) console.error("[CBG_CRAWL]", message);
+      if (!paused) console.error("[CBG_CRAWL]", message);
     })
     .finally(() => {
       clearInterval(lease);

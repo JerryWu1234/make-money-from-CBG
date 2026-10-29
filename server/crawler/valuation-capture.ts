@@ -1,6 +1,7 @@
 import type { Page } from "playwright-core";
 import type { ValuationCapture } from "./types";
 import { roleIdentityIssues } from "./role-identity";
+import { readDetailIdentity } from "./detail-identity";
 
 const object = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === "object" && !Array.isArray(value)
@@ -221,49 +222,54 @@ export function normalizeValuationSource(source: Record<string, unknown>): Valua
 }
 
 export async function captureValuation(page: Page): Promise<ValuationCapture> {
-  const source = await page.evaluate(() => {
-    const globals = window as unknown as Record<string, unknown>;
-    const decode = globals.decode_desc;
-    const Parser = globals.RoleInfoParser as new (
-      text: string,
-      options: Record<string, unknown>,
-    ) => {
-      raw_info: Record<string, unknown>;
-      result: { shenqi?: unknown; basic_info?: Record<string, unknown> };
-    };
-    const encoded = document.querySelector<HTMLTextAreaElement>("#equip_desc_value")?.value;
-    if (typeof decode !== "function" || typeof Parser !== "function" || !encoded) return null;
-    const equip = globals.EquipInfo as Record<string, unknown> | undefined;
-    const identifier = (value: unknown) =>
-      typeof value === "string" || typeof value === "number" ? String(value) : "";
-    const parser = new Parser(decode(encoded), {
-      resUrl: globals.ResUrl,
-      serverId: equip?.server_id,
-    });
-    const raw = parser.raw_info;
-    return {
-      riders: raw.AllRider ?? {},
-      advancedMount: raw.jinjie_rider_info ?? { isJinJie: 0 },
-      artifact: raw.shenqi ?? null,
-      hasArtifact: parser.result.shenqi !== false,
-      idEffects: raw.idbid_desc ?? null,
-      goldIdFlag: parser.result.basic_info?.is_gold_id,
-      assets: {
-        iCash: raw.iCash,
-        iSaving: raw.iSaving,
-        iLearnCash: raw.iLearnCash,
-        xianyu: raw.xianyu,
-      },
-      allSkills: raw.all_skills,
-      holyLevel: raw.i3FlyLv,
-      serverId: identifier(equip?.server_id),
-      eid: identifier(equip?.eid),
-      askingPrice: document
-        .querySelector<HTMLElement>("[data-cbg-detail-root]")
-        ?.innerText.match(/价格[：:]\s*[￥¥]\s*([\d,.]+)/)?.[1]
-        ?.replaceAll(",", ""),
-    };
-  });
+  const identity = await readDetailIdentity(page);
+  const source = await page.evaluate(
+    ({ serverId, eid }) => {
+      const globals = window as unknown as Record<string, unknown>;
+      const decode = globals.decode_desc;
+      const Parser = globals.RoleInfoParser as new (
+        text: string,
+        options: Record<string, unknown>,
+      ) => {
+        raw_info: Record<string, unknown>;
+        result: { shenqi?: unknown; basic_info?: Record<string, unknown> };
+      };
+      const encoded = document.querySelector<HTMLTextAreaElement>("#equip_desc_value")?.value;
+      if (typeof decode !== "function" || typeof Parser !== "function" || !encoded) return null;
+      const parser = new Parser(decode(encoded), {
+        resUrl: globals.ResUrl,
+        serverId,
+      });
+      const raw = parser.raw_info;
+      return {
+        riders: raw.AllRider ?? {},
+        advancedMount: raw.jinjie_rider_info ?? { isJinJie: 0 },
+        artifact: raw.shenqi ?? null,
+        hasArtifact: parser.result.shenqi !== false,
+        idEffects: raw.idbid_desc ?? null,
+        goldIdFlag: parser.result.basic_info?.is_gold_id,
+        assets: {
+          iCash: raw.iCash,
+          iSaving: raw.iSaving,
+          iLearnCash: raw.iLearnCash,
+          xianyu: raw.xianyu,
+        },
+        allSkills: raw.all_skills,
+        holyLevel: raw.i3FlyLv,
+        serverId,
+        eid,
+        askingPrice: document
+          .querySelector<HTMLElement>("[data-cbg-detail-root]")
+          ?.innerText.match(/价格[：:]\s*[￥¥]\s*([\d,.]+)/)?.[1]
+          ?.replaceAll(",", ""),
+      };
+    },
+    { serverId: identity.serverId, eid: identity.eid },
+  );
+  const after = await readDetailIdentity(page);
+  if (after.serverId !== identity.serverId || after.eid !== identity.eid)
+    identity.issues.push("详情读取期间商品身份发生变化");
+  identity.issues.push(...after.issues);
   if (!source)
     return {
       version: 1,
@@ -274,6 +280,9 @@ export async function captureValuation(page: Page): Promise<ValuationCapture> {
   const capture = normalizeValuationSource({ ...source, collectedAt: new Date().toISOString() });
   return {
     ...capture,
-    issues: [...new Set([...capture.issues, ...roleIdentityIssues(capture.source)])],
+    source: { ...capture.source, identityObservations: identity.observations },
+    issues: [
+      ...new Set([...capture.issues, ...identity.issues, ...roleIdentityIssues(capture.source)]),
+    ],
   };
 }

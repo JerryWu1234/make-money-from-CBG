@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AiProvider } from "../ai/types";
+import { aiRequestIssue, aiRequestMessage } from "../ai/request-error";
+import { AnalysisRateLimit } from "./rate-limit";
 import type { SavedRoleRecord } from "../crawler/types";
 import { equipmentInventory, type EquipmentPricingSnapshot } from "./equipment-pricing";
 import type { PetPricingSnapshot } from "./pet-pricing";
@@ -47,6 +49,16 @@ export type AnalysisClient = {
     signal: AbortSignal,
     options?: import("../ai/types").AnalysisRequestOptions,
   ) => Promise<{ text: string; usage?: unknown; truncated?: boolean }>;
+  createSessionPool?: (concurrency: number) => AnalysisSessionPool;
+  acquireSession?: (signal: AbortSignal) => Promise<AnalysisSession>;
+};
+export type AnalysisSession = {
+  analyze: AnalysisClient["analyze"];
+  release: (persisted: boolean) => Promise<void>;
+};
+export type AnalysisSessionPool = {
+  acquire: (signal: AbortSignal) => Promise<AnalysisSession>;
+  close: () => Promise<void>;
 };
 export const MAX_PRICING_ROUNDS = 16;
 const MAX_ROLE_PRICING_MS = 45 * 60_000;
@@ -220,15 +232,67 @@ export class AnalysisRunner {
     try {
       if (retryFailed) this.store.retry(id);
       this.store.setRun(id, "running", null, owner);
-      this.launch(id, owner, client, count);
+      this.launch(id, owner, client, count, run.error);
       return id;
     } catch (error) {
       this.store.release(owner);
       throw error;
     }
   }
-  private launch(id: string, owner: string, client: AnalysisClient, concurrency: number) {
+  private launch(
+    id: string,
+    owner: string,
+    client: AnalysisClient,
+    concurrency: number,
+    previousError?: string | null,
+  ) {
     this.store.setConcurrency(id, concurrency, owner);
+    const provider = this.store.run(id)!.provider;
+    const previous =
+      this.store.providerBackoff(provider) ||
+      (previousError && aiRequestIssue(new Error(previousError))?.kind === "rate_limit"
+        ? { retryAt: Date.now() + 30_000, concurrency: 1, rounds: 0 }
+        : null);
+    const limit = new AnalysisRateLimit(concurrency, previous, (state) =>
+      this.store.saveProviderBackoff(provider, state, owner),
+    );
+    const providerPause = { message: null as string | null };
+    const pool = client.createSessionPool?.(concurrency);
+    const limitAnalysis = async (
+      run: () => ReturnType<AnalysisClient["analyze"]>,
+      signal: AbortSignal,
+    ) => {
+      try {
+        return await limit.run(() => pricingUntilAborted(run(), signal), signal);
+      } catch (error) {
+        if (!signal.aborted && aiRequestIssue(error)) {
+          const failure = error instanceof Error ? error : new Error("AI 服务请求受限（429）");
+          providerPause.message ||= aiRequestMessage(failure.message);
+          limit.halt(failure);
+        }
+        throw error;
+      }
+    };
+    const limitedClient: AnalysisClient = {
+      ...client,
+      analyze: (prompt, schema, signal, options) =>
+        limitAnalysis(() => client.analyze(prompt, schema, signal, options), signal),
+      ...(pool
+        ? {
+            acquireSession: async (signal: AbortSignal) => {
+              const session = await pool.acquire(signal);
+              return {
+                analyze: (prompt, schema, requestSignal, options) =>
+                  limitAnalysis(
+                    () => session.analyze(prompt, schema, requestSignal, options),
+                    requestSignal,
+                  ),
+                release: (persisted: boolean) => session.release(persisted),
+              } satisfies AnalysisSession;
+            },
+          }
+        : {}),
+    };
     const controller = new AbortController();
     const activity = { id, owner, controller, completion: Promise.resolve() };
     this.active = activity;
@@ -239,7 +303,15 @@ export class AnalysisRunner {
         controller.abort(new Error("无法续期分析锁，请继续分析"));
       }
     }, 30_000);
-    activity.completion = this.process(id, owner, client, controller, concurrency)
+    activity.completion = this.process(
+      id,
+      owner,
+      limitedClient,
+      controller,
+      concurrency,
+      providerPause,
+    )
+      .finally(() => pool?.close())
       .catch((error: unknown) => {
         if (this.store.owns(owner))
           this.store.setRun(
@@ -261,6 +333,7 @@ export class AnalysisRunner {
     client: AnalysisClient,
     controller: AbortController,
     concurrency: number,
+    providerPause: { message: string | null },
   ) {
     const stop = controller.signal;
     const pending = new Set<Promise<void>>();
@@ -269,19 +342,25 @@ export class AnalysisRunner {
     let nextSingleLane: AnalysisLane = "new";
     try {
       while (!stop.aborted && this.store.owns(owner)) {
+        if (providerPause.message) {
+          await Promise.allSettled(pending);
+          if (!stop.aborted && this.store.owns(owner))
+            this.store.setRun(id, "paused", providerPause.message, owner);
+          return;
+        }
         if (this.store.run(id)?.marketExpired) {
           this.store.setRun(id, "paused", EXPIRED_MARKET_NOTICE, owner);
           return;
         }
         this.store.appendCaptured(id, owner);
-        while (!stop.aborted && pending.size < concurrency) {
+        while (!stop.aborted && !providerPause.message && pending.size < concurrency) {
           const preferredLane =
             concurrency === 1 ? nextSingleLane : running.new < limits.newLimit ? "new" : "old";
           const task = this.store.next(id, preferredLane);
           if (!task) break;
           running[task.lane]++;
           nextSingleLane = task.lane === "new" ? "old" : "new";
-          const work = this.processTask(task, owner, client, controller)
+          const work = this.processTask(task, owner, client, controller, providerPause)
             .catch((error: unknown) => {
               if (!stop.aborted && this.store.owns(owner))
                 this.store.setRun(
@@ -317,7 +396,15 @@ export class AnalysisRunner {
             stop.addEventListener("abort", done, { once: true });
           });
         } else {
-          this.store.setRun(id, "completed", null, owner);
+          const queued = this.store.run(id)?.queued || 0;
+          this.store.setRun(
+            id,
+            queued ? "paused" : "completed",
+            queued
+              ? `还有 ${queued} 个角色资料未完整，待办已保留；请在采集工作台补齐后继续分析。`
+              : null,
+            owner,
+          );
           return;
         }
       }
@@ -333,6 +420,7 @@ export class AnalysisRunner {
     owner: string,
     client: AnalysisClient,
     controller: AbortController,
+    providerPause: { message: string | null },
   ) {
     const id = task.runId;
     const stop = controller.signal;
@@ -638,11 +726,14 @@ export class AnalysisRunner {
       const attempt = this.store.begin(task, owner, prompt);
       const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
       let raw: string | undefined, usage: unknown;
+      let session: AnalysisSession | undefined;
+      let persisted = false;
       try {
         if (Buffer.byteLength(prompt, "utf8") > 256 * 1024)
           throw new Error("分析请求超过 256 KiB，已保留原文，请先核对请求长度后重试");
+        if (client.acquireSession) session = await client.acquireSession(signal);
         const response = await pricingUntilAborted(
-          client.analyze(
+          (session?.analyze ?? client.analyze)(
             prompt,
             task.profile ? VALUATION_SCHEMA : ANALYSIS_SCHEMA,
             signal,
@@ -668,6 +759,7 @@ export class AnalysisRunner {
             )
           : validateAnalysis(raw, task.document, task.record);
         this.store.finish(task, attempt, owner, { state: "completed", result, raw, usage });
+        persisted = true;
         return;
       } catch (error) {
         if (!this.store.owns(owner)) return;
@@ -676,21 +768,39 @@ export class AnalysisRunner {
           : signal.aborted
             ? "分析超时，请重试"
             : error instanceof Error
-              ? error.message
+              ? aiRequestMessage(error.message)
               : "分析失败";
         const fatal =
-          /401|403|429|unauth|authentication|api.?key|登录|quota|rate.?limit|额度|余额|insufficient|账号已变化|model.*(?:not available|not found|unsupported)/i.test(
+          /401|403|429|unauth|authentication|api.?key|登录|quota|rate.?limit|限流|额度|余额|insufficient|账号已变化|model.*(?:not available|not found|unsupported)/i.test(
             message,
           );
         this.store.finish(task, attempt, owner, {
           state: stop.aborted ? "interrupted" : "failed",
           error: message,
+          diagnosticError:
+            !stop.aborted && !signal.aborted && error instanceof Error
+              ? error.cause instanceof Error
+                ? error.cause.message
+                : error.message
+              : undefined,
           raw,
           usage,
           requeue: stop.aborted || fatal,
         });
+        persisted = true;
+        if (!stop.aborted && providerPause.message) {
+          this.store.setRun(
+            id,
+            "running",
+            providerPause.message + " 正在保存已发出请求的结果，完成后暂停。",
+            owner,
+          );
+          return;
+        }
         pause(message);
         return;
+      } finally {
+        await session?.release(persisted);
       }
     }
   }

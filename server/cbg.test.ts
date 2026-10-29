@@ -3,6 +3,8 @@ import { buildPageState, disconnectedState, type PageSnapshot } from "./page-sta
 
 const mocks = vi.hoisted(() => ({
   getBrowser: vi.fn(),
+  getActiveBrowserMode: vi.fn(),
+  browserSettings: vi.fn(),
   createBackgroundPage: vi.fn(),
   getCbgPage: vi.fn(),
   runFixedWorkflow: vi.fn(),
@@ -10,6 +12,10 @@ const mocks = vi.hoisted(() => ({
   record: vi.fn(),
 }));
 vi.mock("./session", () => mocks);
+vi.mock("./browser-settings", async (original) => ({
+  ...(await original<typeof import("./browser-settings")>()),
+  browserSettings: mocks.browserSettings,
+}));
 vi.mock("./diagnostics", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./diagnostics")>()),
   diagnostics: { record: mocks.record },
@@ -24,6 +30,8 @@ beforeEach(() => {
   Reflect.deleteProperty(globalThis, Symbol.for("cbg.workflow-state.v1"));
   vi.resetModules();
   vi.clearAllMocks();
+  mocks.browserSettings.mockReturnValue({ mode: "daily", modes: ["daily"] });
+  mocks.getActiveBrowserMode.mockImplementation(() => mocks.browserSettings().mode);
   const page = { isClosed: () => false };
   mocks.getBrowser.mockResolvedValue({});
   mocks.getCbgPage.mockReturnValue(page);
@@ -248,5 +256,29 @@ describe("开发服务重载后的流程复用", () => {
       message: "后台工作页已关闭，请重新开始。",
     });
     expect(mocks.runFixedWorkflow).toHaveBeenCalledOnce();
+  });
+});
+
+describe("一个浏览器登录入口", () => {
+  it.each(["dedicated", "daily"])("%s 模式只启动和读取一个主会话", async (mode) => {
+    mocks.browserSettings.mockReturnValue({ mode, modes: [mode] });
+    const flow = await import("./cbg");
+    flow.openCbg();
+    await flow.finishBrowserWorkflow();
+    expect(mocks.getBrowser).toHaveBeenCalledExactlyOnceWith(true, mode);
+    expect(mocks.runFixedWorkflow).toHaveBeenCalledOnce();
+    expect(await flow.checkCbgStatus()).toMatchObject({
+      activeBrowserMode: mode,
+      browsers: [expect.objectContaining({ mode, workflowStep: "completed" })],
+    });
+  });
+
+  it("旧双选配置不会启动第二个扫码流程", async () => {
+    mocks.browserSettings.mockReturnValue({ mode: "dedicated", modes: ["dedicated", "daily"] });
+    const flow = await import("./cbg");
+    flow.openCbg();
+    await flow.finishBrowserWorkflow();
+    expect(mocks.getBrowser).toHaveBeenCalledExactlyOnceWith(true, "dedicated");
+    expect((await flow.checkCbgStatus()).browsers).toHaveLength(1);
   });
 });

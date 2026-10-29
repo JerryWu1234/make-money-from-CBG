@@ -1,5 +1,6 @@
 import {
   DEFAULT_CRAWL_CONCURRENCY,
+  crawlAccessFailure,
   ListingChangedError,
   ListingUnavailableError,
   SellingOrderUnavailableError,
@@ -14,6 +15,7 @@ import { CAPTURE_VERSION, hasUnconfirmedEmptyEquipment } from "./compact";
 import { MAIN_TABS } from "./detail";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { watchCrawl } from "./watch";
+import { browserConnectionFailure } from "../browser-connection";
 export interface CrawlOptions {
   concurrency?: number;
   watch?: boolean;
@@ -123,7 +125,8 @@ export async function crawl(
         retryCompleted,
         detailProgress: `正在补采 ${index + 1}/${retries.length}：打开已保存商品链接…`,
       });
-      let settled = false;
+      let settled = false,
+        browserInterrupted = false;
       try {
         if (options.refresh && !(await source.onShelf(item)))
           throw new Error("刷新前未确认商品仍在售，旧详情已保留");
@@ -187,7 +190,12 @@ export async function crawl(
           return;
         }
         if (error instanceof IncompleteCaptureError && !options.refresh)
-          store.save(item, error.detail);
+          store.savePartial(item, error.detail);
+        const connection = browserConnectionFailure(error);
+        if (connection) {
+          browserInterrupted = true;
+          throw connection;
+        }
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
         settled = true;
@@ -197,12 +205,17 @@ export async function crawl(
           failed,
           retryCompleted: ++retryCompleted,
           lastItemError: `商品 ${item.key}：${message}`,
-          detailProgress: "该商品详情待重试，继续正常采集",
+          current: item.name || item.eid,
+          detailProgress: `商品 ${item.name || item.eid} 详情未完整，已保留待重试：${message}`,
         });
-        if (!(error instanceof Error && error.name === "IncompleteDetailError")) throw error;
+        if (
+          crawlAccessFailure(error) ||
+          !(error instanceof Error && error.name === "IncompleteDetailError")
+        )
+          throw error;
       } finally {
         retryRunning[lane]--;
-        if (signal.aborted && !settled) retryQueued[lane]++;
+        if ((signal.aborted || browserInterrupted) && !settled) retryQueued[lane]++;
         reportRetries();
       }
     });
@@ -367,9 +380,15 @@ export async function crawl(
           });
           return;
         }
-        if (error instanceof IncompleteCaptureError) store.save(item, error.detail);
+        if (error instanceof IncompleteCaptureError) store.savePartial(item, error.detail);
+        const connection = browserConnectionFailure(error);
+        if (connection) throw connection;
         store.fail(item.key, error instanceof Error ? error.message : String(error));
-        if (error instanceof Error && error.name === "IncompleteDetailError") {
+        if (
+          !crawlAccessFailure(error) &&
+          error instanceof Error &&
+          error.name === "IncompleteDetailError"
+        ) {
           failed++;
           publish({
             failed,

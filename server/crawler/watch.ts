@@ -4,8 +4,10 @@ import type { CrawlStore } from "./store";
 import { compactListing } from "./compact";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { locateCheckpoint } from "./resume";
+import { browserConnectionFailure } from "../browser-connection";
 import {
   DEFAULT_CRAWL_CONCURRENCY,
+  crawlAccessFailure,
   ListingChangedError,
   ListingDisappearedError,
   ListingUnavailableError,
@@ -81,7 +83,7 @@ export async function watchCrawl(
   };
   const queued = () => {
     const queues: Record<CrawlLane, Listing[]> = { new: [], old: [] };
-    for (const item of store.retryItems())
+    for (const item of store.pendingItems())
       if (
         !inFlight.has(item.key) &&
         (!failedVersions.has(item.key) || failedVersions.get(item.key) !== item.sellingTime)
@@ -114,6 +116,13 @@ export async function watchCrawl(
     )
       store.markBackfillComplete();
   };
+  const samePendingVersion = (item: Listing) => {
+    const current = store.detail(item.key) as SavedRoleRecord | null;
+    return (
+      current?.status === "pending" &&
+      isDeepStrictEqual(current.listing, JSON.parse(JSON.stringify(compactListing(item))))
+    );
+  };
   const capture = async (item: Listing, lane: CrawlLane) => {
     try {
       check();
@@ -123,12 +132,7 @@ export async function watchCrawl(
       signal.throwIfAborted();
       if (failure) {
         if (!failure.preserveCompleted) throw failure.error;
-        const current = store.detail(item.key) as SavedRoleRecord | null;
-        if (
-          current?.status !== "pending" ||
-          !isDeepStrictEqual(current.listing, JSON.parse(JSON.stringify(compactListing(item))))
-        )
-          throw new ListingChangedError();
+        if (!samePendingVersion(item)) throw new ListingChangedError();
       }
       const history =
         lane === "old" && store.captureLane(item.key) === "old"
@@ -153,9 +157,36 @@ export async function watchCrawl(
       }
       publish({ saved, totalSaved: store.count() });
     } catch (error) {
+      if (
+        !signal.aborted &&
+        failure &&
+        !crawlAccessFailure(failure.error) &&
+        !browserConnectionFailure(failure.error) &&
+        !(failure.error instanceof ListingChangedError) &&
+        samePendingVersion(item)
+      ) {
+        if (error instanceof IncompleteCaptureError) store.savePartial(item, error.detail);
+        const message = error instanceof Error ? error.message : String(error);
+        store.fail(item.key, message);
+        failedVersions.set(item.key, item.sellingTime);
+        failed++;
+      }
       if (signal.aborted && error instanceof IncompleteCaptureError)
         store.savePartial(item, error.detail);
+      else if (
+        (crawlAccessFailure(failure?.error) || browserConnectionFailure(failure?.error)) &&
+        error instanceof IncompleteCaptureError &&
+        samePendingVersion(item)
+      )
+        store.savePartial(item, error.detail);
       if (!signal.aborted && !failure) {
+        const connection = browserConnectionFailure(error);
+        if (connection) {
+          if (error instanceof IncompleteCaptureError) store.savePartial(item, error.detail);
+          failure = { error: connection, preserveCompleted: true };
+          publish({ message: connection.message });
+          return;
+        }
         if (error instanceof ListingUnavailableError) {
           store.markUnavailable(item.key, error.message);
           failedVersions.delete(item.key);
@@ -168,14 +199,15 @@ export async function watchCrawl(
           });
           return;
         }
-        if (error instanceof IncompleteCaptureError) store.save(item, error.detail);
+        const access = crawlAccessFailure(error);
+        if (error instanceof IncompleteCaptureError) store.savePartial(item, error.detail);
         const message = error instanceof Error ? error.message : String(error);
         store.fail(item.key, message);
         failedVersions.set(item.key, item.sellingTime);
         failed++;
         publish({ failed, lastItemError: `商品 ${item.key}：${message}` });
-        if (!(error instanceof Error && error.name === "IncompleteDetailError"))
-          failure ??= { error };
+        if (access || !(error instanceof Error && error.name === "IncompleteDetailError"))
+          failure ??= { error, preserveCompleted: !!access };
       }
     }
   };
@@ -236,11 +268,18 @@ export async function watchCrawl(
         return item;
       }
     } catch (error) {
-      if (!(error instanceof ListingDisappearedError))
-        failure ??= {
-          error,
-          preserveCompleted: error instanceof Error && error.name === "TimeoutError",
-        };
+      if (!(error instanceof ListingDisappearedError)) {
+        const timeout = error instanceof Error && error.name === "TimeoutError";
+        failure ??= { error, preserveCompleted: timeout || !!crawlAccessFailure(error) };
+        // 发现阶段失败也必须登记为任务；不能把未核验的列表资料发布为完整商品。
+        // 已在途或完整的同版本商品由原任务负责，避免覆盖其有效资料。
+        if (timeout && !inFlight.has(listed.key) && !store.observe(listed, lane)) {
+          store.fail(listed.key, error.message);
+          failedVersions.set(listed.key, listed.sellingTime);
+          failed++;
+          report();
+        }
+      }
       throw error;
     }
   };
@@ -329,6 +368,8 @@ export async function watchCrawl(
 
   publish({
     phase: "collecting",
+    current: undefined,
+    detailProgress: undefined,
     message: "优先采集新上架角色，空闲名额继续从原断点补齐历史角色…",
   });
   try {
@@ -416,15 +457,39 @@ export async function watchCrawl(
   } catch (error) {
     if (error instanceof ListingChangedError)
       error.message = "列表在采集中发生变化，已暂停以免漏采或保存旧资料";
-    failure ??= { error };
+    failure ??= {
+      error,
+      preserveCompleted:
+        !!crawlAccessFailure(error) ||
+        !!browserConnectionFailure(error) ||
+        (error instanceof Error && error.name === "TimeoutError"),
+    };
     if (!signal.aborted && !(error instanceof SellingOrderUnavailableError))
       publish({
         message: "采集遇到错误，已停止派发；正在结束在途任务并保存仍有效的完整详情…",
         lastItemError: error instanceof Error ? error.message : String(error),
       });
   } finally {
-    // 暂停、列表失败、安全验证和租约中止都必须等在途页面操作结束。
-    await Promise.all(inFlight.values());
+    // Give valid in-flight captures a short grace period, then cancel their owned pages.
+    // Still await their actual cleanup; never release the lease while old work can save.
+    let cleanup: Promise<void> | undefined;
+    const timer =
+      source.cancelDetails && inFlight.size
+        ? setTimeout(() => {
+            cleanup = source.cancelDetails!(
+              Object.assign(new Error("采集已停止，详情超过15秒收尾时限，已保留资料待补采"), {
+                code: "DETAIL_DRAIN_TIMEOUT",
+              }),
+            );
+            void cleanup.catch(() => {});
+          }, 15_000)
+        : undefined;
+    try {
+      await Promise.all(inFlight.values());
+    } finally {
+      clearTimeout(timer);
+      await cleanup;
+    }
   }
   signal.throwIfAborted();
   if (failure) throw failure.error;

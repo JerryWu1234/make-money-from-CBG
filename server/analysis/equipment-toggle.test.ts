@@ -179,7 +179,8 @@ it("直接恢复旧body任务也不会绕过完整性检查进入AI", async () =
     crawl.observe(record.listing);
     crawl.save(record.listing, record.detail!);
     const id = store.createRun("codex", "test", true, createProfile(template), true);
-    const legacy = { ...record.detail!, captureMode: "body" };
+    const legacy = { ...record.detail!, captureMode: "body" as const };
+    expect(crawl.save(record.listing, legacy)).toBe(false);
     crawl.db
       .prepare("UPDATE analysis_tasks SET source_detail_json=? WHERE run_id=?")
       .run(JSON.stringify(legacy), id);
@@ -190,8 +191,59 @@ it("直接恢复旧body任务也不会绕过完整性检查进入AI", async () =
       status: "paused",
       completed: 0,
       queued: 1,
-      error: expect.stringContaining("完整采集"),
+      error: expect.stringContaining("资料未完整"),
     });
+    expect(crawl.retryItems()).toHaveLength(1);
+    expect(crawl.detail(record.listing.key)).toMatchObject({
+      status: "failed",
+      detail: { captureMode: "body" },
+    });
+  } finally {
+    await runner.shutdown();
+    crawl.close();
+  }
+});
+
+it("旧body任务已有完整入库资料时仅刷新输入，关闭装备分析后正常完成", async () => {
+  const crawl = new CrawlStore(":memory:"),
+    store = new AnalysisStore(crawl.db);
+  const record = fullRecord();
+  const profile = createProfile(template);
+  const analyze = vi.fn().mockResolvedValue({
+    text: JSON.stringify({
+      decision: calculateValuation(record, profile).decision,
+      reason: "使用已完整核验的入库资料",
+      extracted_facts: [],
+    }),
+  });
+  const search = vi.fn().mockRejectedValue(new Error("不应查价"));
+  const runner = new AnalysisRunner(store, async () => ({
+    model: "test",
+    analyze,
+    searchEquipment: search,
+    searchPets: search,
+    searchPetGear: search,
+  }));
+  try {
+    crawl.observe(record.listing);
+    expect(crawl.save(record.listing, record.detail!)).toBe(true);
+    const id = store.createRun("codex", "test", true, profile, true);
+    crawl.db
+      .prepare("UPDATE analysis_tasks SET source_detail_json=? WHERE run_id=?")
+      .run(JSON.stringify({ ...record.detail!, captureMode: "body" }), id);
+    await runner.resume(id);
+    await runner.settled();
+    expect(analyze).toHaveBeenCalledOnce();
+    expect(search).not.toHaveBeenCalled();
+    expect(store.run(id)).toMatchObject({ status: "completed", completed: 1, queued: 0 });
+    expect(
+      crawl.db.prepare("SELECT source_detail_json FROM analysis_tasks WHERE run_id=?").get(id)!
+        .source_detail_json,
+    ).toBe(
+      crawl.db.prepare("SELECT detail_json FROM listings WHERE key=?").get(record.listing.key)!
+        .detail_json,
+    );
+    expect(crawl.retryItems()).toEqual([]);
   } finally {
     await runner.shutdown();
     crawl.close();

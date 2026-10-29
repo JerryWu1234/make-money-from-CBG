@@ -1,6 +1,10 @@
 import { defineConfig } from "vite-plus";
+import type { Plugin } from "vite-plus";
 import react from "@vitejs/plugin-react";
+import { realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { apiMiddleware } from "./server/api";
+import { codexHomeDirectory } from "./server/ai/codex-home";
 import { initializeScanSchedule } from "./server/crawler/schedule";
 import { createLocalServiceShutdown } from "./server/shutdown";
 import { resetServiceLifecycle } from "./server/service-lifecycle";
@@ -8,9 +12,72 @@ import { resetBrowserSessionLifecycle } from "./server/session";
 
 let closeService: (() => Promise<void>) | undefined;
 
+/** Vite's glob deny checks the requested path, so resolve symlink targets first. */
+export function codexHomeGuard(home = codexHomeDirectory): Plugin {
+  return {
+    name: "cbg-codex-home-guard",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        let pathnames: string[];
+        try {
+          const rawPathname = new URL(req.url || "/", "http://localhost").pathname;
+          // Vite's static middleware uses decodeURI, which preserves encoded
+          // separators that decodeURIComponent would turn into other paths.
+          pathnames = [
+            ...new Set([rawPathname, decodeURI(rawPathname), decodeURIComponent(rawPathname)]),
+          ];
+        } catch {
+          res.statusCode = 400;
+          res.end();
+          return;
+        }
+        let protectedHome: string;
+        try {
+          protectedHome = realpathSync(home());
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return next();
+          res.statusCode = 403;
+          res.end();
+          return;
+        }
+        const candidates = pathnames.flatMap((pathname) => {
+          const fsPath = pathname.startsWith("/@fs/") ? pathname.slice(5) : null;
+          return fsPath
+            ? [isAbsolute(fsPath) ? fsPath : resolve(sep, fsPath)]
+            : [
+                resolve(server.config.root, `.${pathname}`),
+                ...(server.config.publicDir
+                  ? [resolve(server.config.publicDir, `.${pathname}`)]
+                  : []),
+              ];
+        });
+        for (const candidate of candidates) {
+          try {
+            const target = realpathSync(candidate);
+            const path = relative(protectedHome, target);
+            if (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path)) {
+              res.statusCode = 403;
+              res.end();
+              return;
+            }
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+              res.statusCode = 403;
+              res.end();
+              return;
+            }
+          }
+        }
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     react(),
+    codexHomeGuard(),
     {
       name: "cbg-browser-middleware",
       configureServer(server) {
@@ -67,6 +134,19 @@ export default defineConfig({
     host: "127.0.0.1",
     port: 5173,
     strictPort: true,
+    fs: {
+      // Preserve Vite's defaults and block the separate Codex home even when a
+      // parent workspace includes it in Vite's default allow list.
+      deny: [
+        ".env",
+        ".env.*",
+        "*.{crt,pem,key,p12,pfx,cer,der}",
+        ".npmrc",
+        ".yarnrc.yml",
+        "**/.git/**",
+        "**/make-money-from-cbg/*/codex-home/**",
+      ],
+    },
     watch: { ignored: ["**/.chrome-cbg-profile/**", "**/.git/**", "**/data/**"] },
   },
   // Preserve the user's prompt bytes and their recorded SHA-256.

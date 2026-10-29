@@ -1,6 +1,7 @@
 // 真实 Playwright 会话集成回归：只启动临时专用配置，全部业务页面请求使用模拟响应。
 // 不连接日常 Chrome、不使用 data/browser-profile，也不验证藏宝阁登录有效期。
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import type { Browser, BrowserContext } from "playwright-core";
@@ -53,7 +54,7 @@ afterEach(() => {
   delete runtime[sessionKey];
 });
 
-it("并发连接与建页共享专用会话，context 关闭失败后真实 Browser.close 兜底并可重开", async () => {
+it("专用会话关闭重开保留持久登录，不连接日常 Chrome；关闭失败仍清理并可重开", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "cbg-session-browser-regression-"));
   const profile = path.join(root, "dedicated-profile");
   const artifacts = path.resolve("artifacts/session-browser-regression");
@@ -105,6 +106,15 @@ it("并发连接与建页共享专用会话，context 关闭失败后真实 Brow
       list.goto(`${origin}/list`, { waitUntil: "domcontentloaded" }),
       detail.goto(`${origin}/detail`, { waitUntil: "domcontentloaded" }),
     ]);
+    await context.addCookies([
+      {
+        name: "saved-login",
+        value: "isolated-session",
+        url: origin,
+        expires: Math.floor(Date.now() / 1000) + 3600,
+      },
+    ]);
+    await list.evaluate(() => localStorage.setItem("saved-login-marker", "preserved"));
     await detail.screenshot({ path: path.join(evidence, "shared-persistent-context.png") });
     expect(dailyTarget).not.toHaveBeenCalled();
     expect(mocks.resolveCdpEndpoint).not.toHaveBeenCalled();
@@ -114,7 +124,10 @@ it("并发连接与建页共享专用会话，context 关闭失败后真实 Brow
     const closeError = new Error("模拟 context.close 首次失败");
     const contextClose = vi.spyOn(context, "close").mockRejectedValueOnce(closeError);
     const browserClose = vi.spyOn(browser, "close");
-    await expect(session.shutdownBrowserSession()).rejects.toBe(closeError);
+    await expect(session.shutdownBrowserSession()).rejects.toMatchObject({
+      name: "AggregateError",
+      errors: [closeError],
+    });
     expect(contextClose).toHaveBeenCalledOnce();
     expect(browserClose).toHaveBeenCalledOnce();
     expect(browser.isConnected()).toBe(false);
@@ -135,6 +148,15 @@ it("并发连接与建页共享专用会话，context 关闭失败后真实 Brow
     const reopened = await session.createBackgroundPage(restarted);
     await reopened.goto(`${origin}/reopened`, { waitUntil: "domcontentloaded" });
     expect(await reopened.locator("h1").innerText()).toBe("专用会话集成回归");
+    expect(
+      (await reopened.context().cookies(origin)).find((cookie) => cookie.name === "saved-login")
+        ?.value,
+    ).toBe("isolated-session");
+    expect(await reopened.evaluate(() => localStorage.getItem("saved-login-marker"))).toBe(
+      "preserved",
+    );
+    expect(mocks.resolveCdpEndpoint).not.toHaveBeenCalled();
+    expect(mocks.verifyCdpEndpoint).not.toHaveBeenCalled();
     await session.shutdownBrowserSession();
     expect(restarted.isConnected()).toBe(false);
     session.resetBrowserSessionLifecycle();
@@ -170,3 +192,72 @@ it("并发连接与建页共享专用会话，context 关闭失败后真实 Brow
   }
   if (cleanupError) throw cleanupError;
 }, 90_000);
+
+it("服务会话重启保留 session 登录 cookie，且不恢复或重放旧工作页", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cbg-login-session-restart-"));
+  const contexts = new Set<BrowserContext>();
+  const evidence = path.join(root, "evidence");
+  await mkdir(evidence);
+  mocks.evidenceDirectory.mockReturnValue(evidence);
+  let operations = 0;
+  const fixture = createServer((request, response) => {
+    if (request.url === "/work") {
+      response.setHeader("Content-Type", "text/html");
+      response.end(
+        '<body><script>fetch("/operation").then(() => document.body.dataset.ready="1")</script>',
+      );
+    } else if (request.url === "/operation") {
+      operations++;
+      response.end("ok");
+    } else {
+      response.statusCode = 404;
+      response.end();
+    }
+  });
+  await new Promise<void>((resolve) => fixture.listen(0, "127.0.0.1", resolve));
+  const address = fixture.address();
+  if (!address || typeof address === "string") throw new Error("本地夹具未就绪");
+  const origin = `http://127.0.0.1:${address.port}`;
+  try {
+    const real = await vi.importActual<typeof import("./dedicated-browser")>("./dedicated-browser");
+    mocks.openDedicatedBrowser.mockImplementation(async () => {
+      const context = await real.openDedicatedBrowser(path.join(root, "private-profile"));
+      contexts.add(context);
+      return context;
+    });
+    const session = await import("./session");
+    const browser = await session.getBrowser(true);
+    for (const page of [
+      await session.createBackgroundPage(browser),
+      await session.createHiddenPage(browser),
+    ]) {
+      await page.goto(`${origin}/work`);
+      await page.waitForFunction(() => document.body.dataset.ready === "1");
+    }
+    expect(operations).toBe(2);
+    await browser
+      .contexts()[0]
+      .addCookies([{ name: "session-login", value: "preserved-session", url: origin }]);
+    await session.shutdownBrowserSession();
+
+    // 模拟进程内缓存不存在；所有登录信息只能来自同一私有 Chrome profile。
+    delete runtime[sessionKey];
+    vi.resetModules();
+    const restarted = await import("./session");
+    const reopened = await restarted.getBrowser(true);
+    const context = reopened.contexts()[0];
+    expect(
+      (await context.cookies(origin)).find((cookie) => cookie.name === "session-login")?.value,
+    ).toBe("preserved-session");
+    expect(context.pages().every((page) => page.url() === "about:blank")).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(operations).toBe(2);
+    expect(mocks.resolveCdpEndpoint).not.toHaveBeenCalled();
+    expect(mocks.verifyCdpEndpoint).not.toHaveBeenCalled();
+    await restarted.shutdownBrowserSession();
+  } finally {
+    await Promise.allSettled([...contexts].map((context) => context.close()));
+    await new Promise<void>((resolve) => fixture.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+}, 60_000);

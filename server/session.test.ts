@@ -57,8 +57,11 @@ describe("项目专用浏览器会话", () => {
         connected = false;
       }),
     };
+    const blank = { close: vi.fn() };
     const context = {
       browser: () => browser,
+      newPage: vi.fn(async () => blank),
+      pages: () => [blank],
       close: vi.fn(async () => {
         connected = false;
       }),
@@ -74,7 +77,7 @@ describe("项目专用浏览器会话", () => {
   it("状态查询不启动浏览器，并发开始只启动一个持久上下文且模块重载后继续复用", async () => {
     const { browser } = dedicated();
     const first = await import("./session");
-    expect(first.browserSessionSettings()).toEqual({
+    expect(first.browserSessionSettings()).toMatchObject({
       mode: "dedicated",
       connected: false,
       busy: false,
@@ -153,6 +156,77 @@ describe("项目专用浏览器会话", () => {
     await expect(session.getBrowser()).rejects.toThrow("浏览器未连接");
     await session.shutdownBrowserSession();
     expect(context.close).toHaveBeenCalledTimes(2);
+  });
+
+  it("旧浏览器关闭和兜底都失败时回滚真实持久选择，不能启动日常 Chrome", async () => {
+    const { context, browser } = dedicated();
+    let selected = {
+      mode: "dedicated" as "dedicated" | "daily",
+      modes: ["dedicated"] as ("dedicated" | "daily")[],
+    };
+    vi.mocked(browserSettings).mockImplementation(() => selected);
+    vi.mocked(saveBrowserSettings).mockImplementation((value) => {
+      const modes = typeof value === "string" ? [value] : (value as ("dedicated" | "daily")[]);
+      selected = {
+        mode: modes[0] as "dedicated" | "daily",
+        modes: modes as ("dedicated" | "daily")[],
+      };
+      return selected;
+    });
+    const session = await import("./session");
+    await session.getBrowser(true);
+    context.close.mockRejectedValueOnce(new Error("旧上下文关闭失败"));
+    browser.close.mockRejectedValueOnce(new Error("旧浏览器兜底关闭失败"));
+    await expect(session.changeBrowserMode("daily", () => false, vi.fn())).rejects.toThrow(
+      "旧上下文关闭失败",
+    );
+    expect(selected.mode).toBe("dedicated");
+    expect(session.browserSessionSettings().mode).toBe("dedicated");
+    expect(() => session.getBrowser(true, "daily")).toThrow("请先切换");
+    expect(connectOverCDP).not.toHaveBeenCalled();
+    await session.changeBrowserMode("daily", () => false, vi.fn());
+    const daily = { on: vi.fn(), isConnected: () => true, close: vi.fn() };
+    connectOverCDP.mockResolvedValueOnce(daily);
+    expect(await session.getBrowser(true)).toBe(daily);
+    expect(context.close).toHaveBeenCalledTimes(2);
+    expect(connectOverCDP).toHaveBeenCalledOnce();
+    await session.shutdownBrowserSession();
+  });
+
+  it("即使选择回滚写盘失败，其他模式遗留 cleanup 未成功前不得连接新浏览器", async () => {
+    const { context, browser } = dedicated();
+    let selected = {
+      mode: "dedicated" as "dedicated" | "daily",
+      modes: ["dedicated"] as ("dedicated" | "daily")[],
+    };
+    vi.mocked(browserSettings).mockImplementation(() => selected);
+    vi.mocked(saveBrowserSettings).mockImplementation((value) => {
+      const modes = (typeof value === "string" ? [value] : value) as ("dedicated" | "daily")[];
+      if (modes[0] === "dedicated") throw new Error("选择回滚写盘失败");
+      selected = { mode: modes[0], modes };
+      return selected;
+    });
+    const session = await import("./session");
+    await session.getBrowser(true);
+    context.close
+      .mockRejectedValueOnce(new Error("旧上下文关闭失败"))
+      .mockRejectedValueOnce(new Error("旧上下文仍关闭失败"));
+    browser.close
+      .mockRejectedValueOnce(new Error("旧浏览器兜底关闭失败"))
+      .mockRejectedValueOnce(new Error("旧浏览器仍关闭失败"));
+    const daily = { on: vi.fn(), isConnected: () => true, close: vi.fn() };
+    connectOverCDP.mockResolvedValue(daily);
+    await expect(session.changeBrowserMode("daily", () => false, vi.fn())).rejects.toThrow(
+      "旧上下文关闭失败",
+    );
+    expect(selected.mode).toBe("daily");
+    await expect(session.getBrowser(true)).rejects.toThrow("旧上下文仍关闭失败");
+    expect(connectOverCDP).not.toHaveBeenCalled();
+    await session.changeBrowserMode("daily", () => false, vi.fn());
+    expect(context.close).toHaveBeenCalledTimes(3);
+    expect(await session.getBrowser(true)).toBe(daily);
+    expect(connectOverCDP).toHaveBeenCalledOnce();
+    await session.shutdownBrowserSession();
   });
 
   it("服务退出期间晚完成的启动立即关闭配置，不留下后台浏览器", async () => {
@@ -530,4 +604,30 @@ describe("并发创建后台页", () => {
     expect(await next).toBe(workers[0]);
     expect(process.env.PW_CHROMIUM_ATTACH_TO_OTHER).toBeUndefined();
   });
+});
+
+it("全部详情复用所选的专用浏览器，不自动连接日常 Chrome", async () => {
+  let connected = true;
+  const browser = { on: vi.fn(), isConnected: () => connected, close: vi.fn() };
+  const blank = { close: vi.fn() };
+  const context = {
+    browser: () => browser,
+    newPage: vi.fn(async () => blank),
+    pages: () => [blank],
+    close: vi.fn(async () => {
+      connected = false;
+    }),
+  };
+  vi.mocked(browserSettings).mockReturnValue({ mode: "dedicated", modes: ["dedicated"] });
+  vi.mocked(openDedicatedBrowser).mockResolvedValue(context as never);
+  const session = await import("./session");
+  expect(await session.getBrowser(true)).toBe(browser);
+  const details = await Promise.all(Array.from({ length: 10 }, () => session.getBrowser(false)));
+  expect(new Set(details)).toEqual(new Set([browser]));
+  expect(() => session.getBrowser(true, "daily")).toThrow("请先切换");
+  expect(openDedicatedBrowser).toHaveBeenCalledOnce();
+  expect(openWorkTransport).not.toHaveBeenCalled();
+  expect(connectOverCDP).not.toHaveBeenCalled();
+  await session.shutdownBrowserSession();
+  expect(context.close).toHaveBeenCalledOnce();
 });

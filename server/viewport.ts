@@ -13,10 +13,22 @@ export async function ensureWorkViewport(page: Page) {
     await page.setViewportSize(WORK_VIEWPORT);
   }
 }
+/** Use the verified locator directly in the main world, without adopting a node handle. */
+export async function clickForInspection(element: Locator) {
+  const clicked = await element.evaluateAll((elements) => {
+    if (elements.length !== 1) return false;
+    (elements[0] as HTMLElement).click();
+    return true;
+  });
+  if (!clicked)
+    throw Object.assign(new Error("待读取标签或分页目标已变化，未执行点击"), {
+      name: "IncompleteDetailError",
+    });
+}
 export async function hoverForInspection(
   page: Page,
   element: Locator,
-  recoveredActionability?: (stage: "scroll" | "visibility") => void,
+  recoveredActionability?: (stage: "scroll" | "visibility" | "handle") => void,
 ) {
   await ensureWorkViewport(page);
   // 移出上一个图标，触发网站自己的 mouseout；仅让提示框不拦截后续鼠标。
@@ -40,9 +52,14 @@ export async function hoverForInspection(
       document.head.appendChild(style);
     }
   });
-  await element.evaluate((el) =>
-    el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }),
-  );
+  // Locator.evaluate 会先把节点从隔离上下文转换到主上下文，额外等待
+  // DOM.resolveNode；受控复现中，节点已可见仍会卡在这一步。
+  // evaluateAll 在主上下文按当前定位器求值，不传回单个元素句柄。
+  // 节点已消失时交给下面的原生 hover 正常定位，不能把滚动成功当作悬停成功。
+  await element.evaluateAll((elements) => {
+    if (elements.length > 1) throw new Error("待悬停目标不唯一，已停止以免读取错误商品");
+    elements[0]?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+  });
   try {
     await element.hover({ timeout: 5000 });
   } catch (error) {
@@ -53,11 +70,21 @@ export async function hoverForInspection(
         (error.message.includes("element is visible and stable") &&
           error.message.includes("scrolling into view if needed"))) &&
       !error.message.includes("performing hover action");
-    if (actionabilityTimeout) {
-      // 隐藏工作页的帧等待或 CDP 滚动可能停滞。先核对当前 DOM 的可见性、
+    const handleTimeout =
+      error.name === "TimeoutError" &&
+      error.message.startsWith("locator.hover:") &&
+      error.message.includes("locator resolved to") &&
+      !/attempting hover action|waiting for element|visible and stable|not visible|not stable|intercepts pointer events|performing hover action|hover action done|scrolling into view if needed/.test(
+        error.message,
+      );
+    if (actionabilityTimeout || handleTimeout) {
+      // 原生 hover 还可能停在已解析节点后的句柄读取，尚未进入动作检查。
+      // 不重新请求句柄；先核对当前 DOM 的可见性、
       // 稳定几何和鼠标命中，再发一次原生鼠标动作；真实遮挡或不可见仍然失败。
       const point = () =>
-        element.evaluate((el) => {
+        element.evaluateAll((elements) => {
+          if (elements.length !== 1) return null;
+          const el = elements[0];
           if (
             !el.isConnected ||
             !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
@@ -80,14 +107,21 @@ export async function hoverForInspection(
       if (!before || !after || JSON.stringify(before) !== JSON.stringify(after)) throw error;
       await page.mouse.move(after.x, after.y);
       if (
-        !(await element.evaluate(
-          (el, { x, y }) => el.isConnected && el.contains(document.elementFromPoint(x, y)),
+        !(await element.evaluateAll(
+          (elements, { x, y }) =>
+            elements.length === 1 &&
+            elements[0].isConnected &&
+            elements[0].contains(document.elementFromPoint(x, y)),
           after,
         ))
       )
         throw error;
       recoveredActionability?.(
-        error.message.includes("scrolling into view if needed") ? "scroll" : "visibility",
+        handleTimeout
+          ? "handle"
+          : error.message.includes("scrolling into view if needed")
+            ? "scroll"
+            : "visibility",
       );
       return;
     }
@@ -106,9 +140,10 @@ export async function hoverForInspection(
       );
       await page.setViewportSize({ width, height: 1080 });
     }
-    await element.evaluate((el) =>
-      el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" }),
-    );
+    await element.evaluateAll((elements) => {
+      if (elements.length > 1) throw new Error("待悬停目标不唯一，已停止以免读取错误商品");
+      elements[0]?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+    });
     await element.hover({ timeout: 5000 });
   }
 }

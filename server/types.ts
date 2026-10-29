@@ -24,6 +24,8 @@ export interface RoleList {
 }
 
 export interface OpenCbgResult {
+  activeBrowserMode?: "dedicated" | "daily";
+  browsers?: (OpenCbgResult & { mode: "dedicated" | "daily" })[];
   workPagesVisible?: boolean;
   connected: boolean;
   loginStatus: "unknown" | "logged_out" | "logged_in";

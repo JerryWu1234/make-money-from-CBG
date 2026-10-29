@@ -116,6 +116,7 @@ test("分析并发10→保留报价并暂停→改为2继续→自动分析新�
             models: [{ id: "test-model", name: "模拟模型" }],
           };
           break;
+        case "/api/analysis/progress":
         case "/api/analysis/status":
           body = { ...store.overview({ runId: batch || undefined }), profile };
           break;

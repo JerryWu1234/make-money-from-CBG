@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mocks = vi.hoisted(() => ({
   analysisOverview: vi.fn(),
+  analysisProgress: vi.fn(),
   analysisDetail: vi.fn(),
   startAnalysis: vi.fn(),
   resumeAnalysis: vi.fn(),
@@ -13,7 +14,10 @@ const mocks = vi.hoisted(() => ({
   saveAnalysisSettings: vi.fn(),
   record: vi.fn(),
 }));
-vi.mock("./analysis/controller", () => mocks);
+vi.mock("./analysis/controller", () => ({
+  ...mocks,
+  analysisOverviewAsync: mocks.analysisOverview,
+}));
 vi.mock("./ai-connection", () => ({
   aiProvider: (value: unknown) => {
     if (value !== "codex" && value !== "deepseek") throw new Error("请选择 Codex 或 DeepSeek");
@@ -135,17 +139,37 @@ describe("商品分析 HTTP 链路", () => {
       response() as unknown as ServerResponse,
       vi.fn(),
     );
-    expect(mocks.analysisOverview).toHaveBeenCalledWith({
-      provider: "deepseek",
-      page: 2,
-      resultsPage: 1,
-      summary: true,
-      showViewed: false,
-      search: "宝宝",
-      filter: "failed",
-      runId: undefined,
-    });
+    expect(mocks.analysisOverview).toHaveBeenCalledWith(
+      {
+        provider: "deepseek",
+        page: 2,
+        resultsPage: 1,
+        summary: true,
+        showViewed: false,
+        search: "宝宝",
+        filter: "failed",
+        runId: undefined,
+      },
+      expect.any(AbortSignal),
+    );
     expect(mocks.startAnalysis).toHaveBeenCalledTimes(1);
+  });
+  it("实时进度走独立轻量接口，不执行记录和排名汇总", async () => {
+    mocks.analysisProgress.mockReturnValue({ run: { completed: 42 }, activeRun: null });
+    const { apiMiddleware } = await import("./api");
+    const res = response();
+    await apiMiddleware(
+      request("/api/analysis/progress?provider=codex&scope=complete"),
+      res as unknown as ServerResponse,
+      vi.fn(),
+    );
+    expect(mocks.analysisProgress).toHaveBeenCalledWith({
+      provider: "codex",
+      runId: undefined,
+      scope: "complete",
+    });
+    expect(mocks.analysisOverview).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
   });
   it("开始分析传入所选模型，默认留空；无效类型不会启动队列", async () => {
     const { apiMiddleware } = await import("./api");

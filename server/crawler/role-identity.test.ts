@@ -60,7 +60,7 @@ it("当前身份精确一致可通过；旧非当前合同不伪造身份也不�
 });
 
 it.each(["missing", "mismatch"])(
-  "%s身份有界重读后归档隔离，不发布、不推进成功断点",
+  "%s身份只读取一次并归档隔离，不发布、不推进成功断点",
   async (kind) => {
     const store = new CrawlStore(":memory:");
     const record = currentRecord();
@@ -76,7 +76,7 @@ it.each(["missing", "mismatch"])(
         record.listing,
       ).catch((error: unknown) => error);
       expect(error).toBeInstanceOf(IncompleteCaptureError);
-      expect(read).toHaveBeenCalledTimes(3);
+      expect(read).toHaveBeenCalledOnce();
       const point = {
         key: record.listing.key,
         page: 1,

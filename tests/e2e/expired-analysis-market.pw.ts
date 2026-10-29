@@ -62,6 +62,7 @@ test("过期行情显示重新分析入口，点击建立新批次而非恢复�
             models: [{ id: "test-model", name: "测试模型" }],
           };
           break;
+        case "/api/analysis/progress":
         case "/api/analysis/status":
           body = {
             ...store.overview(),

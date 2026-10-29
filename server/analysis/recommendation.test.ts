@@ -387,12 +387,12 @@ it("空号直入榜单沿用原排序、已查看和有效结果约束，并保�
   }
 });
 
-// Failure cases: viewed rows reappear after refresh, top ten are not replenished,
-// showing all bypasses eligibility, invalid keys mutate history, or clear retains old views.
-it("查看记录持久化，默认隐藏并补足10条，显示全部保留已查看标记", () => {
+// Failure cases: page boundaries truncate eligible rows, viewed rows reappear,
+// a shrinking last page is empty, invalid pages crash, or showing all bypasses eligibility.
+it("推荐分页包含50条以后的商品，查看后隐藏并在末页缩减时回退", () => {
   const crawl = new CrawlStore(":memory:");
   try {
-    for (let n = 0; n < 12; n++) {
+    for (let n = 0; n < 52; n++) {
       const r = record();
       r.listing.key = "view-" + String(n).padStart(2, "0");
       crawl.observe(r.listing);
@@ -403,22 +403,47 @@ it("查看记录持久化，默认隐藏并补足10条，显示全部保留已�
     crawl.db
       .prepare("UPDATE analysis_tasks SET status='completed',result_json=?")
       .run(JSON.stringify({ valuation: valuation() }));
-    expect(store.overview().ranking.map((i) => i.key)).toHaveLength(10);
+    const keys = (from: number, count: number) =>
+      Array.from({ length: count }, (_, n) => "view-" + String(n + from).padStart(2, "0"));
+    expect(store.overview()).toMatchObject({
+      rankingPagination: { page: 1, totalPages: 3, total: 52 },
+    });
+    expect(store.overview().ranking.map((i) => i.key)).toEqual(keys(0, 20));
+    expect(store.overview({ rankingPage: 2 }).ranking.map((i) => i.key)).toEqual(keys(20, 20));
+    expect(store.overview({ rankingPage: 3 }).ranking.map((i) => i.key)).toEqual(keys(40, 12));
+    expect(store.overview({ rankingPage: 999 }).rankingPagination).toEqual({
+      page: 3,
+      totalPages: 3,
+      total: 52,
+    });
+    for (const invalidPage of [NaN, Infinity, -1, 0])
+      expect(store.overview({ rankingPage: invalidPage }).rankingPagination?.page).toBe(1);
+    expect(store.overview({ includeRanking: false, rankingPage: 2 })).not.toHaveProperty(
+      "rankingPagination",
+    );
     expect(store.markRecommendationViewed("view-00")).toEqual({ key: "view-00", viewed: true });
     store.markRecommendationViewed("view-00");
     expect(crawl.db.prepare("SELECT count(*) n FROM recommendation_views").get()!.n).toBe(1);
-    expect(store.overview().ranking.map((i) => i.key)).toEqual(
-      Array.from({ length: 10 }, (_, n) => "view-" + String(n + 1).padStart(2, "0")),
-    );
+    expect(store.overview().ranking.map((i) => i.key)).toEqual(keys(1, 20));
+    expect(store.overview({ rankingPage: 3 }).ranking.map((i) => i.key)).toEqual(keys(41, 11));
     const reopened = new AnalysisStore(crawl.db);
     expect(reopened.overview().ranking.some((i) => i.key === "view-00")).toBe(false);
     expect(reopened.overview({ showViewed: true }).ranking[0]).toMatchObject({
       key: "view-00",
       recommendationViewed: true,
     });
+    for (const key of keys(40, 12)) store.markRecommendationViewed(key);
+    const shrunk = store.overview({ rankingPage: 3 });
+    expect(shrunk.rankingPagination).toEqual({ page: 2, totalPages: 2, total: 39 });
+    expect(shrunk.ranking.map((item) => item.key)).toEqual(keys(21, 19));
+    expect(store.overview({ rankingPage: 3, showViewed: true }).rankingPagination).toEqual({
+      page: 3,
+      totalPages: 3,
+      total: 52,
+    });
     for (const key of [null, undefined, 1, "", " view-00", "x".repeat(101), "missing"])
       expect(() => store.markRecommendationViewed(key)).toThrow();
-    expect(store.overview().results.total).toBe(12);
+    expect(store.overview().results.total).toBe(52);
     crawl.clear();
     expect(crawl.db.prepare("SELECT count(*) n FROM recommendation_views").get()!.n).toBe(0);
   } finally {
@@ -478,12 +503,12 @@ it("大资料榜单只排序轻量候选，再按原序补足推荐和人工复�
     });
     try {
       const first = store.overview({ runId, summary: true, currentProfile: profile });
-      const keys = (kind: string, start = 0) =>
+      const keys = (kind: string, start = 0, count = 10) =>
         Array.from(
-          { length: 10 },
+          { length: count },
           (_, index) => `${kind}-${String(index + start).padStart(2, "0")}`,
         );
-      expect(first.ranking.map((item) => item.key)).toEqual(keys("recommended"));
+      expect(first.ranking.map((item) => item.key)).toEqual(keys("recommended", 0, 12));
       expect(first.manualReview?.map((item) => item.key)).toEqual(keys("manual"));
       expect(first.ranking[0].taskId).toBe(
         crawl.db
@@ -499,14 +524,14 @@ it("大资料榜单只排序轻量候选，再按原序补足推荐和人工复�
         filter: "ready",
       });
       expect(filtered.records.total).toBe(0);
-      expect(filtered.ranking.map((item) => item.key)).toEqual(keys("recommended", 1));
+      expect(filtered.ranking.map((item) => item.key)).toEqual(keys("recommended", 1, 11));
       expect(filtered.manualReview?.map((item) => item.key)).toEqual(keys("manual"));
       expect(store.overview({ runId, showViewed: true }).ranking[0]).toMatchObject({
         key: "recommended-00",
         recommendationViewed: true,
       });
       const nextRun = store.createRun("codex", "test", false, profile);
-      expect(store.overview().ranking.map((item) => item.key)).toEqual(keys("recommended", 1));
+      expect(store.overview().ranking.map((item) => item.key)).toEqual(keys("recommended", 1, 11));
       expect(store.overview({ runId: nextRun }).ranking).toEqual([]);
       expect(sortQueries.length).toBeGreaterThan(0);
       for (const query of sortQueries) {

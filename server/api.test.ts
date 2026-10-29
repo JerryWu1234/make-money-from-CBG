@@ -32,7 +32,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./crawler/controller", () => mocks);
 vi.mock("./crawler/schedule", () => mocks);
 vi.mock("./browser", () => mocks);
-vi.mock("./analysis/controller", () => mocks);
+vi.mock("./analysis/controller", () => ({
+  ...mocks,
+  analysisOverviewAsync: mocks.analysisOverview,
+}));
 vi.mock("./ai-connection", () => mocks);
 vi.mock("./analysis/equipment-check", () => mocks);
 vi.mock("./analysis/pet-check", () => mocks);
@@ -62,7 +65,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.doMock("./analysis/controller", () => {
     mocks.analysisControllerImported();
-    return mocks;
+    return { ...mocks, analysisOverviewAsync: mocks.analysisOverview };
   });
   vi.doMock("./analysis/equipment-check", () => {
     mocks.equipmentCheckImported();
@@ -96,6 +99,7 @@ it("正式商品分析接口转交完整范围，拒绝无效范围", async () =
   await (await import("./api")).apiMiddleware(req, response(), vi.fn());
   expect(mocks.analysisOverview).toHaveBeenCalledWith(
     expect.objectContaining({ scope: "complete" }),
+    expect.any(AbortSignal),
   );
   for (const path of ["/api/analysis/status", "/api/crawl/records"]) {
     const invalid = request(`${path}?scope=unknown`);
@@ -106,17 +110,45 @@ it("正式商品分析接口转交完整范围，拒绝无效范围", async () =
   }
 });
 
-it("资料待补采返回409并保留明确的角色提示", async () => {
-  const message = "还有 1 个角色资料待补采：29534033。";
-  mocks.startAnalysis.mockRejectedValue(
-    Object.assign(new Error(message), { name: "CapturePreparationError" }),
+it("分析状态接口等待异步汇总结果，不提前返回空Promise对象", async () => {
+  let finish!: (value: unknown) => void;
+  mocks.analysisOverview.mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
   );
+  const req = request("/api/analysis/status");
+  req.method = "GET";
   const res = response();
-  await (
-    await import("./api")
-  ).apiMiddleware(request("/api/analysis/start", { provider: "codex" }), res, vi.fn());
-  expect(res.statusCode).toBe(409);
-  expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({ error: message });
+  const pending = (await import("./api")).apiMiddleware(req, res, vi.fn());
+  while (!finish) await Promise.resolve();
+  expect(res.end).not.toHaveBeenCalled();
+  finish({ ranking: [], records: { total: 707 } });
+  await pending;
+  expect(JSON.parse(res.end.mock.calls[0][0])).toMatchObject({ records: { total: 707 } });
+});
+
+it("记录页明确跳过推荐榜，默认请求仍保留推荐计算", async () => {
+  const api = await import("./api");
+  for (const includeRanking of ["false", "true"]) {
+    const req = request(`/api/analysis/status?includeRanking=${includeRanking}`);
+    req.method = "GET";
+    await api.apiMiddleware(req, response(), vi.fn());
+    const options = mocks.analysisOverview.mock.lastCall![0];
+    if (includeRanking === "false") expect(options).toMatchObject({ includeRanking: false });
+    else expect(options).not.toHaveProperty("includeRanking");
+  }
+});
+
+it("分析状态接口传递独立的推荐榜页码", async () => {
+  const req = request("/api/analysis/status?page=1&rankingPage=3");
+  req.method = "GET";
+  await (await import("./api")).apiMiddleware(req, response(), vi.fn());
+  expect(mocks.analysisOverview).toHaveBeenCalledWith(
+    expect.objectContaining({ page: 1, rankingPage: 3 }),
+    expect.any(AbortSignal),
+  );
 });
 
 it("明确确认飞升公式只保存当前角色的确认，不启动或修改分析批次", async () => {
@@ -642,6 +674,7 @@ it("推荐查看接口仅保存标记，读取默认隐藏且支持显示已查�
     await apiMiddleware(read, response(), vi.fn());
     expect(mocks.analysisOverview).toHaveBeenLastCalledWith(
       expect.objectContaining({ showViewed: show }),
+      expect.any(AbortSignal),
     );
   }
   expect(mocks.startAnalysis).not.toHaveBeenCalled();

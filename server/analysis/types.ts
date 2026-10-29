@@ -62,6 +62,7 @@ export type AnalysisRun = {
   updatedAt: string;
   error: string | null;
   pauseNotice?: string | null;
+  rateLimit?: import("./rate-limit").AnalysisBackoff | null;
   total: number;
   completed: number;
   failed: number;
@@ -133,15 +134,10 @@ export type AnalysisResultItem = {
   result: ProductAnalysis;
 };
 export type AnalysisOverview = {
+  rankingDeferred?: boolean;
   captureTasks?: { total: number; pending: number; failed: number };
   captureActivity?: Pick<CrawlStatus, "running" | "phase"> & {
     inFlight?: number;
-  };
-  capturePreparation?: {
-    total: number;
-    completed: number;
-    current: string | null;
-    message: string;
   };
   profile?: Pick<
     AnalysisProfile,
@@ -164,6 +160,7 @@ export type AnalysisOverview = {
   activeRun: AnalysisRun | null;
   runs: AnalysisRun[];
   ranking: AnalysisItem[];
+  rankingPagination?: { page: number; totalPages: number; total: number };
   manualReview?: AnalysisItem[];
   records: { page: number; totalPages: number; total: number; items: AnalysisItem[] };
   results: { page: number; totalPages: number; total: number; items: AnalysisResultItem[] };
@@ -177,6 +174,10 @@ export type AnalysisOverview = {
     error: string | null;
   }[];
 };
+export type AnalysisProgress = Pick<
+  AnalysisOverview,
+  "counts" | "captureTasks" | "run" | "activeRun" | "captureActivity" | "profile"
+>;
 export type AnalysisDetail = {
   assetCounts?: CapturedAssetCounts | null;
   taskId: string;

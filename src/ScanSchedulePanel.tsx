@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { pollingError } from "./request-error";
 import type { StoredSchedule } from "../server/crawler/schedule-store";
 import type { ScanDayConfig, ScanScheduleConfig } from "../server/crawler/schedule-time";
 
@@ -151,8 +152,7 @@ export function ScanSchedulePanel({ ready, running }: { ready: boolean; running:
           setTransportError("");
         }
       } catch (cause) {
-        if (!closed)
-          setTransportError(cause instanceof Error ? cause.message : "定时计划服务不可用");
+        if (!closed) setTransportError(pollingError(cause, "读取计划状态"));
       } finally {
         if (!closed) timer = setTimeout(() => void poll(), 1500);
       }

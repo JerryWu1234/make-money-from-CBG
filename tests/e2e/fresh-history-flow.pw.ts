@@ -308,6 +308,7 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
             models: [{ id: "test-model", name: "模拟模型" }],
           };
           break;
+        case "/api/analysis/progress":
         case "/api/analysis/status":
           body = { ...analysisStore!.overview({ runId: batch || undefined }), profile };
           break;
@@ -358,7 +359,7 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
     await page.goto("http://cbg-flow.test/");
     const crawlCount = page.getByRole("spinbutton", { name: "并发抓取数" });
     const startCapture = page.getByRole("button", { name: /开始采集详情|继续采集 \/ 检查新增/ });
-    await expect(crawlCount).toHaveValue("10");
+    await expect(crawlCount).toHaveValue("6");
     await crawlCount.fill("4");
     await startCapture.click();
     await expect.poll(() => countLanes(activeCapture)).toEqual({ new: 2, old: 2 });
@@ -428,7 +429,7 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
     for (let number = 1; number <= 6; number++) release(`o${number}`, captureGates, allowedCapture);
     release("n9", captureGates, allowedCapture);
     await page.reload();
-    await expect(crawlCount).toHaveValue("10");
+    await expect(crawlCount).toHaveValue("6");
     await crawlCount.fill("4");
     await startCapture.click();
     await expect.poll(() => store.count()).toBe(15);

@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { CrawlStore } from "./store";
 import { crawl } from "./runner";
 import { CAPTURE_VERSION } from "./compact";
-import { collectCompleteCapture } from "./capture-readiness";
+import { collectCompleteCapture, IncompleteCaptureError } from "./capture-readiness";
 import {
+  CrawlAccessError,
   ListingChangedError,
   ListingDisappearedError,
   ListingUnavailableError,
@@ -95,6 +96,227 @@ afterEach(() => {
 });
 
 describe("持续发现新号和历史详情共享采集池", () => {
+  it("浏览器断连不把在途角色记为单品失败，部分资料留待补采且不推进断点", async () => {
+    const db = memory(),
+      fresh = [item(1), item(2), item(3), item(4), item(5)];
+    const src = source([fresh]);
+    const failure = Object.assign(new Error("Chrome 调试连接已断开，采集已暂停"), {
+      name: "BrowserConnectionError",
+      kind: "disconnected",
+    });
+    const blocked: Array<() => void> = [];
+    src.hover = vi.fn(async (row) => {
+      if (row.key === fresh[4].key) throw failure;
+      return row;
+    });
+    src.detail = vi.fn(
+      async (row) =>
+        new Promise<RoleDetail>((_resolve, reject) =>
+          blocked.push(() =>
+            reject(
+              new IncompleteCaptureError(
+                "断连中断读取",
+                { ...detail(row), petCapture: undefined },
+                failure,
+              ),
+            ),
+          ),
+        ),
+    );
+    const control = new AbortController();
+    const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true, concurrency: 4 }).catch(
+      (e: unknown) => e,
+    );
+    await flush();
+    expect(blocked).toHaveLength(4);
+    blocked.forEach((release) => release());
+    expect(await outcome).toBe(failure);
+    for (const row of fresh.slice(0, 4)) {
+      expect(readSaved(db, row.key)).toMatchObject({ status: "pending" });
+      expect(readSaved(db, row.key)?.detail).not.toBeNull();
+    }
+    expect(db.checkpoint()).toBeUndefined();
+    expect(db.count()).toBe(0);
+  });
+  it("列表失败后收尾最多15秒，取消慢详情并保留部分资料及每件失败原因", async () => {
+    vi.useFakeTimers();
+    const db = memory(),
+      fresh = [item(1), item(2), item(3), item(4), item(5)];
+    const src = source([fresh]);
+    const blocked = new Map<string, (reason: Error) => void>();
+    const error = Object.assign(new Error("page.waitForFunction: Timeout 45000ms exceeded."), {
+      name: "TimeoutError",
+    });
+    src.hover = vi.fn(async (row) => {
+      if (row.key === fresh[4].key) throw error;
+      return row;
+    });
+    src.detail = vi.fn(
+      async (row) =>
+        new Promise<RoleDetail>((_resolve, reject) => {
+          blocked.set(row.key, (reason) =>
+            reject(
+              new IncompleteCaptureError(
+                "详情收尾中断",
+                { ...detail(row), petCapture: undefined },
+                reason,
+              ),
+            ),
+          );
+        }),
+    );
+    const cancel = vi.fn(async (reason: Error) => {
+      blocked.forEach((reject) => reject(reason));
+    });
+    Object.assign(src, { cancelDetails: cancel });
+    const control = new AbortController();
+    const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true, concurrency: 4 }).catch(
+      (e: unknown) => e,
+    );
+    try {
+      await flush();
+      expect(blocked.size).toBe(4);
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(cancel).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(await outcome).toBe(error);
+      expect(db.count()).toBe(0);
+      for (const row of fresh.slice(0, 4)) {
+        expect(readSaved(db, row.key)).toMatchObject({
+          status: "failed",
+          error: expect.stringContaining("收尾"),
+        });
+        expect(readSaved(db, row.key)?.detail).not.toBeNull();
+      }
+      expect(db.checkpoint()).toBeUndefined();
+      const before = db.db.prepare("SELECT total_changes() n").get()!.n;
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(db.db.prepare("SELECT total_changes() n").get()!.n).toBe(before);
+    } finally {
+      control.abort(new Error("cleanup"));
+      blocked.forEach((reject) => reject(new Error("cleanup")));
+      await outcome;
+    }
+  });
+  it.each([false, true])("登录暂停时保留其它有效在途资料，版本变更=%s", async (changed) => {
+    const db = memory(),
+      bad = item(1),
+      good = item(2),
+      anchor = item(20);
+    db.observe(anchor);
+    const point = {
+      key: anchor.key,
+      time: anchor.orderTime,
+      order: "selling_time DESC",
+      page: 2,
+      savedAt: "before",
+    };
+    db.save(anchor, detail(anchor), point);
+    const src = source([[bad, good]]);
+    let rejectBad!: (error: Error) => void;
+    let finishGood!: () => void;
+    src.detail = vi.fn(async (row) => {
+      if (row.key === bad.key)
+        await new Promise<void>((_resolve, reject) => {
+          rejectBad = reject;
+        });
+      else
+        await new Promise<void>((resolve) => {
+          finishGood = resolve;
+        });
+      return detail(row);
+    });
+    const control = new AbortController();
+    const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true, concurrency: 4 }).catch(
+      (error: unknown) => error,
+    );
+    await flush();
+    expect(src.detail).toHaveBeenCalledTimes(2);
+    rejectBad(new CrawlAccessError("login"));
+    await flush();
+    if (changed) db.observe({ ...good, price: "200" });
+    finishGood();
+    const error = await outcome;
+    expect(error).toMatchObject({ name: "CrawlAccessError", kind: "login" });
+    expect(readSaved(db, bad.key)?.status).toBe("failed");
+    expect(readSaved(db, good.key)?.status).toBe(changed ? "pending" : "complete");
+    expect(db.checkpoint()).toEqual(point);
+    expect(src.detail).toHaveBeenCalledTimes(2);
+  });
+
+  it("登录中断时已读部分资料留为待补齐，不成为完整商品，也不再派发", async () => {
+    const db = memory(),
+      bad = item(1),
+      src = source([[bad]]);
+    const partial = { ...detail(bad), tabs: [], petCapture: undefined };
+    src.detail = vi
+      .fn()
+      .mockRejectedValue(
+        new IncompleteCaptureError("读取中断：登录", partial, new CrawlAccessError("login")),
+      );
+    const error = await crawl(src, db, new AbortController().signal, vi.fn(), {
+      watch: true,
+      concurrency: 4,
+    }).catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(IncompleteCaptureError);
+    expect(readSaved(db, bad.key)?.status).toBe("failed");
+    expect(readSaved(db, bad.key)?.detail?.petCapture).toBeUndefined();
+    expect(db.count()).toBe(0);
+    expect(src.detail).toHaveBeenCalledOnce();
+  });
+
+  it("持续扫描期间只在启动时核对旧完整资料，后续派发不再全库检查", async () => {
+    const db = memory(),
+      src = source([[item(1), item(2), item(3)]]),
+      control = new AbortController();
+    const legacy = vi.spyOn(db, "retryItems"),
+      pending = vi.spyOn(db, "pendingItems");
+    const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true, concurrency: 4 }).catch(
+      (error: unknown) => error,
+    );
+    await flush();
+    expect(db.count()).toBe(3);
+    // beginRetry validates one dispatched key; unscoped full validation runs once.
+    expect(legacy.mock.calls.filter(([keys]) => keys === undefined)).toHaveLength(1);
+    expect(pending).toHaveBeenCalled();
+    control.abort(new Error("暂停"));
+    await outcome;
+  });
+
+  it("首个登录异常之后，另一在途任务的部分资料仍按当前版本保留", async () => {
+    const db = memory(),
+      first = item(1),
+      second = item(2),
+      src = source([[first, second]]);
+    let finishSecond!: () => void;
+    const partial = { ...detail(second), petCapture: undefined };
+    src.detail = vi.fn(async (row) => {
+      if (row.key === first.key) throw new CrawlAccessError("login");
+      await new Promise<void>((resolve) => {
+        finishSecond = resolve;
+      });
+      throw new IncompleteCaptureError(
+        "部分资料：登录中断",
+        partial,
+        new CrawlAccessError("login"),
+      );
+    });
+    const outcome = crawl(src, db, new AbortController().signal, vi.fn(), {
+      watch: true,
+      concurrency: 4,
+    }).catch((error: unknown) => error);
+    await flush();
+    finishSecond();
+    await outcome;
+    expect(readSaved(db, second.key)).toMatchObject({
+      status: "pending",
+      detail: { url: second.url },
+    });
+    expect(db.count()).toBe(0);
+    expect(src.detail).toHaveBeenCalledTimes(2);
+  });
+
   it("历史待采池满时让出头扫，旧在途逐个释放的空位优先派新且两侧队列有界", async () => {
     vi.useFakeTimers();
     const db = memory(),
@@ -360,6 +582,12 @@ describe("持续发现新号和历史详情共享采集池", () => {
             ?.attempt_count,
         ).toBe(attemptsBeforeDiscovery);
         expect(publish).toHaveBeenCalledWith(expect.objectContaining({ saved: 2, failed: 1 }));
+        const patches = publish.mock.calls.map(([patch]) => patch as Partial<CrawlStatus>);
+        const failedAt = patches.findIndex((patch) => patch.lastItemError?.includes(bad.key));
+        expect(patches[failedAt]).toMatchObject({ current: bad.name });
+        const discovery = patches.slice(failedAt + 1).find((patch) => patch.phase === "collecting");
+        expect(discovery).toHaveProperty("detailProgress", undefined);
+        expect(discovery).toHaveProperty("current", undefined);
         expect(db.checkpoint()?.key).not.toBe(good.key);
       } finally {
         control.abort(new Error("暂停"));
@@ -469,11 +697,11 @@ describe("持续发现新号和历史详情共享采集池", () => {
   });
 
   it.each([undefined, 4, 6, 8, 10])(
-    "无上架排序时 %s 并发（默认10）新号排队优先，排队清空后老号补满空位",
+    "无上架排序时 %s 并发（默认6）新号排队优先，排队清空后老号补满空位",
     async (concurrency) => {
       vi.useFakeTimers();
       const db = memory(),
-        pool = concurrency ?? 10,
+        pool = concurrency ?? 6,
         fresh = Array.from({ length: pool + 2 }, (_, i) => item(i + 1)),
         old = Array.from({ length: pool }, (_, i) => item(i + 20));
       const src = source([fresh, old]);
@@ -843,6 +1071,48 @@ describe("持续发现新号和历史详情共享采集池", () => {
     await flush();
     expect(readSaved(db, added.key)?.status).toBe("complete");
     expect(read).toHaveBeenCalledTimes(3);
+    control.abort(new Error("暂停"));
+    await outcome;
+  });
+  it("单件缺项只处理一次并保留快照，其他商品及后续新号继续入库", async () => {
+    vi.useFakeTimers();
+    const db = memory(),
+      fresh = [item(1), item(2), item(3)],
+      pages = [fresh],
+      src = source(pages),
+      control = new AbortController();
+    const broken = fresh[1],
+      partial = detail(broken);
+    partial.tabs = [
+      {
+        name: "人物/修炼",
+        text: "已完整读取的原文",
+        fields: [],
+        tables: [],
+        elements: [],
+        tooltips: [],
+      },
+    ];
+    const read = vi.fn().mockResolvedValue(partial);
+    src.detail = vi.fn(async (row) =>
+      row.key === broken.key ? collectCompleteCapture(read, control.signal, vi.fn()) : detail(row),
+    );
+    const outcome = crawl(src, db, control.signal, vi.fn(), {
+      watch: true,
+      concurrency: 4,
+      headIntervalMs: 100,
+    }).catch((error: unknown) => error);
+    await flush();
+    expect(read).toHaveBeenCalledOnce();
+    expect(readSaved(db, broken.key)?.status).toBe("failed");
+    expect(readSaved(db, broken.key)?.detail?.tabs[0].text).toBe("已完整读取的原文");
+    expect(db.count()).toBe(2);
+    const added = item(0, 1001);
+    pages[0] = [added, ...fresh];
+    await vi.advanceTimersByTimeAsync(100);
+    await flush();
+    expect(readSaved(db, added.key)?.status).toBe("complete");
+    expect(read).toHaveBeenCalledOnce();
     control.abort(new Error("暂停"));
     await outcome;
   });
@@ -1219,6 +1489,11 @@ describe("持续发现新号和历史详情共享采集池", () => {
         expect(await outcome).toBe(error);
         expect(db.count()).toBe(changed ? 3 : 4);
         expect(src.detail).toHaveBeenCalledTimes(4);
+        expect(readSaved(db, fresh[4].key)).toMatchObject({
+          status: "failed",
+          error: error.message,
+        });
+        expect(db.retryItems().some((row) => row.key === fresh[4].key)).toBe(true);
         expect(readSaved(db, fresh[0].key)?.status).toBe(changed ? "pending" : "complete");
         expect(db.checkpoint()).toBeUndefined();
         expect(db.backfillComplete()).toBe(false);

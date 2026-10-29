@@ -96,7 +96,8 @@ export function BrowserSettings({
   }, [active, load, saving, settings]);
 
   const save = async (next: BrowserMode) => {
-    if (pending.current || active || settings?.busy || next === mode.current) return;
+    if (pending.current || active || settings?.busy) return;
+    if (next === mode.current) return;
     ++generation.current;
     pending.current = true;
     setSaving(true);
@@ -122,31 +123,23 @@ export function BrowserSettings({
     <section className="browser-mode-settings" aria-label="浏览器运行方式">
       <fieldset disabled={loading || saving || active || settings?.busy || settings === null}>
         <legend>浏览器运行方式</legend>
+        <p className="status-note">
+          默认使用项目专用浏览器保存登录。重启服务复用本机登录，无需日常 Chrome
+          调试授权；登录过期仍需扫码。
+        </p>
         <div className="browser-mode-options">
           <label>
             <input
-              type="radio"
-              name="browser-mode"
-              value="dedicated"
-              checked={settings?.mode === "dedicated"}
-              onChange={() => void save("dedicated")}
-            />
-            <span>
-              <strong>项目专用浏览器（保存登录）</strong>
-              <small>默认方式。首次需扫码，之后复用本机保存的登录；登录过期仍需扫码。</small>
-            </span>
-          </label>
-          <label>
-            <input
-              type="radio"
-              name="browser-mode"
-              value="daily"
+              type="checkbox"
               checked={settings?.mode === "daily"}
-              onChange={() => void save("daily")}
+              onChange={(event) => void save(event.target.checked ? "daily" : "dedicated")}
             />
             <span>
-              <strong>连接日常 Chrome</strong>
-              <small>复用日常浏览器登录；重新建立调试连接时，Chrome 可能再次要求允许。</small>
+              <strong>使用日常 Chrome（CDP，需要授权）</strong>
+              <small>
+                仅勾选并点击开始查询后连接日常 Chrome。勾选不代表已获 Chrome
+                授权；新调试连接可能再次要求允许。
+              </small>
             </span>
           </label>
         </div>
@@ -157,8 +150,8 @@ export function BrowserSettings({
           : saving
             ? "正在保存并更新浏览器状态…"
             : active || settings?.busy
-              ? "查询、采集或分析正在运行，请先暂停任务再切换浏览器方式。"
-              : "切换后需重新开始查询，系统会重新核对登录和角色列表。"}
+              ? "查询、采集或分析正在运行，请先暂停任务再修改启用方式。"
+              : "一次只使用一个浏览器和一个扫码入口。切换后重新开始查询，已有浏览器登录资料会保留。"}
       </p>
       {error && (
         <p className="error-message" role="alert">

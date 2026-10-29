@@ -11,6 +11,61 @@ import {
 import type { TabSnapshot } from "./types";
 import emptyRoleInventory from "../../tests/fixtures/empty-role-inventory.json";
 
+it.each(["611", "18521", "56870", "4002", "4036"])(
+  "同一分类证据用于任意非人物物品的空库存判定：%s",
+  (modelId) => {
+    const item = itemFromAttributes(
+      {
+        data_equip_type: modelId,
+        data_equip_name: "官网物品名称",
+        data_equip_desc: "官网已读取说明",
+      },
+      0,
+    );
+    const inventory: TabSnapshot = {
+      name: "道具/法宝",
+      text: "道具和法宝",
+      fields: [],
+      tables: [],
+      elements: [],
+      tooltips: [],
+      items: [item],
+      equipmentContainers: [
+        { id: "RoleUsingEquips", present: true, visible: true, icons: [] },
+        {
+          id: "RoleStoreEquips",
+          present: true,
+          visible: true,
+          icons: [{ name: item.name, modelId }],
+        },
+      ],
+    };
+    expect(equipmentEmptyProof([inventory])).toBe("official-containers");
+    inventory.equipmentContainers![1].icons[0].name = "";
+    expect(equipmentEmptyProof([inventory])).toBe("official-containers");
+    inventory.equipmentContainers![1].icons.push({ name: item.name, modelId });
+    expect(equipmentEmptyProof([inventory])).toBeUndefined();
+    inventory.equipmentContainers![1].icons.pop();
+    delete item.description;
+    expect(equipmentEmptyProof([inventory])).toBeUndefined();
+  },
+);
+
+it("占位或属性文字不能遮蔽同一图标的其他有效名称来源", () => {
+  for (const invalid of ["图标 2", "等级 30", "", "五行 金"]) {
+    expect(
+      itemFromAttributes(
+        {
+          data_equip_name: invalid,
+          alt: "官方名称",
+          data_equip_type: "31001",
+        },
+        2,
+      ).name,
+    ).toBe("官方名称");
+  }
+});
+
 it.each([
   "confirmed",
   "missing-worn",

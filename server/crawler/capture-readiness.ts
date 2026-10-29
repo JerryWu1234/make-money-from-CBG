@@ -1,7 +1,9 @@
 import { CAPTURE_VERSION, hasUnconfirmedEmptyEquipment } from "./compact";
 import type { Listing, RoleDetail } from "./types";
-import { completeSchoolSkillsFromText } from "./school-skills";
+import { crawlAccessFailure } from "./types";
+import { completeSchoolSkillsFromText, schoolSkillsComplete } from "./school-skills";
 import { isCurrentRoleCapture, roleIdentityIssues } from "./role-identity";
+import { browserConnectionFailure } from "../browser-connection";
 
 export class IncompleteCaptureError extends Error {
   constructor(
@@ -12,6 +14,31 @@ export class IncompleteCaptureError extends Error {
     super(message, { cause });
     this.name = "IncompleteDetailError";
   }
+}
+
+export class CaptureDeadlineError extends Error {
+  readonly code = "DETAIL_TIMEOUT";
+  constructor(
+    readonly timeoutMs: number,
+    readonly stage: string,
+  ) {
+    super(`角色详情采集超过 ${timeoutMs / 1000} 秒总时限（${stage}），已停止本件读取并保留资料`);
+    this.name = "IncompleteDetailError";
+  }
+}
+
+export class DetailNavigationResetError extends Error {
+  readonly code = "DETAIL_NAVIGATION_RESET_FAILED";
+  constructor(cause: unknown) {
+    super("上次详情导航未能安全结束，已停止本件读取并保留资料待补采", { cause });
+    this.name = "IncompleteDetailError";
+  }
+}
+
+export function captureAbortMessage(reason: unknown) {
+  const message =
+    reason instanceof Error ? reason.message : typeof reason === "string" ? reason : "采集已中断";
+  return /保留.*资料/.test(message) ? message : `${message}；已保留本轮读取资料`;
 }
 
 // 同一详情重新导航可沿用本轮有界重读；其他地址可能是登录或商品身份变化。
@@ -33,6 +60,15 @@ function isSameDetailNavigationInterrupted(error: Error): boolean {
   } catch {
     return false;
   }
+}
+
+export function isRetryableDetailNavigation(error: unknown): boolean {
+  const cause = error instanceof IncompleteCaptureError ? error.cause : error;
+  return (
+    cause instanceof Error &&
+    ((cause.name === "TimeoutError" && cause.message.startsWith("page.goto:")) ||
+      isSameDetailNavigationInterrupted(cause))
+  );
 }
 
 function hasSchoolSkillContract(detail: RoleDetail) {
@@ -64,24 +100,7 @@ export function captureIssues(
   if (isCurrentRoleCapture(detail))
     issues.push(...roleIdentityIssues(detail.valuation?.source, listing));
   if (hasSchoolSkillContract(detail)) {
-    const tabs = normalizeSchoolSkillCapture(detail).tabs.filter((tab) => tab.name === "技能");
-    const school = tabs.flatMap((tab) =>
-      (tab.items || []).filter((item) => item.category === "师门技能"),
-    );
-    const names = school.map((item) => (typeof item.name === "string" ? item.name.trim() : ""));
-    if (
-      tabs.length !== 1 ||
-      school.length !== 7 ||
-      new Set(names).size !== 7 ||
-      names.some((name) => !name) ||
-      school.some(
-        (item) =>
-          item.kind !== "skill" ||
-          typeof item.level !== "string" ||
-          !/^\d+$/.test(item.level) ||
-          !Number.isSafeInteger(Number(item.level)),
-      )
-    )
+    if (!schoolSkillsComplete(detail.tabs))
       issues.push("师门技能未完整读取：须核对7项不重复技能及明确非负整数等级");
   }
   if (!includeAssets) {
@@ -123,7 +142,7 @@ export async function collectCompleteCapture(
   let partial: RoleDetail | undefined;
   const checkAborted = () => {
     if (signal.aborted && partial)
-      throw new IncompleteCaptureError("采集已暂停，已保留本轮读取资料", partial, signal.reason);
+      throw new IncompleteCaptureError(captureAbortMessage(signal.reason), partial, signal.reason);
     signal.throwIfAborted();
   };
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -139,11 +158,22 @@ export async function collectCompleteCapture(
         name: "IncompleteDetailError",
       });
     } catch (error) {
+      if (error instanceof IncompleteCaptureError) partial = error.detail;
       checkAborted();
+      if (crawlAccessFailure(error)) throw error;
+      if (browserConnectionFailure(error)) throw error;
       const cause =
         error instanceof IncompleteCaptureError && error.cause instanceof Error
           ? error.cause
           : error;
+      if (
+        cause instanceof Error &&
+        "code" in cause &&
+        cause.code === "DETAIL_NAVIGATION_RESET_FAILED"
+      ) {
+        if (partial) throw new IncompleteCaptureError(cause.message, partial, cause);
+        throw cause;
+      }
       if (
         !(cause instanceof Error) ||
         /登录|验证码|安全验证|频繁|繁忙|权限|禁止/i.test(cause.message) ||
@@ -151,18 +181,21 @@ export async function collectCompleteCapture(
           !isSameDetailNavigationInterrupted(cause))
       )
         throw cause;
-      if (error instanceof IncompleteCaptureError) partial = error.detail;
       last = error instanceof Error ? error : cause;
-      if (attempt < 3) report(`资料尚未核验完整，正在本轮内自动重读 ${attempt}/2：${last.message}`);
+      // Only retry a navigation that failed before any role data was read. Once
+      // tabs or a checked result exist, keep that evidence and report its gaps;
+      // restarting the whole role would discard work and repeat the same failure.
+      if (partial || !isRetryableDetailNavigation(cause)) break;
+      if (attempt < 3) report(`详情尚未打开，正在重新导航 ${attempt}/2：${last.message}`);
     }
   }
   if (partial)
     throw new IncompleteCaptureError(
-      "本轮采集重读后仍未完整，未进入角色分析：" + last!.message,
+      "角色资料采集未完成，未进入角色分析：" + last!.message,
       partial,
       last!,
     );
-  throw Object.assign(new Error("本轮采集重读后仍未完整，未进入角色分析：" + last!.message), {
+  throw Object.assign(new Error("角色资料采集未完成，未进入角色分析：" + last!.message), {
     name: "IncompleteDetailError",
     cause: last,
   });

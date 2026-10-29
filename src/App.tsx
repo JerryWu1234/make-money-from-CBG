@@ -4,6 +4,7 @@ import { normalizeBrowserState } from "./browser-state";
 import "./style.css";
 import { CrawlPanel } from "./CrawlPanel";
 import { BrowserSettings, type BrowserMode } from "./BrowserSettings";
+import { BrowserLogin } from "./BrowserLogin";
 
 const FLOW: [WorkflowStep, string][] = [
   ["logging_in", "扫码登录"],
@@ -61,6 +62,7 @@ export function App() {
       if (!response.ok) throw new Error(data.error || "服务请求失败");
       if (id !== sequence.current) return;
       setResult(normalizeBrowserState(data as OpenCbgResult));
+      if (data.activeBrowserMode) setBrowserMode(data.activeBrowserMode);
       setTransportError(null);
     } catch (error) {
       if (id !== sequence.current) return;
@@ -128,6 +130,7 @@ export function App() {
 
   const step = result?.workflowStep || "idle";
   const running = result?.running === true;
+  const querying = running;
   const completed = step === "completed" && !transportError;
   const stepIndex = ORDER.indexOf(step);
 
@@ -180,12 +183,12 @@ export function App() {
         <button
           id="open-cbg-btn"
           className="btn-primary"
-          disabled={browserSettingsBusy || starting || running || crawling}
+          disabled={browserSettingsBusy || starting || querying || crawling}
           onClick={() => void request(true)}
         >
           {starting
             ? "正在开始…"
-            : running
+            : querying
               ? "流程进行中"
               : step === "error"
                 ? "重新尝试"
@@ -239,15 +242,7 @@ export function App() {
                 : result.message}
             </p>
             {result.error && <p className="error-message">错误编号：{result.error.code}</p>}
-            {result.qrCodeUrl && !transportError && (
-              <div className="qr-hero-section">
-                <strong>使用网易大神或将军令扫码</strong>
-                <div className="qr-image-wrapper">
-                  <img src={result.qrCodeUrl} alt="藏宝阁登录二维码" className="qr-image-main" />
-                </div>
-                <p className="status-note">手机确认后，请在本页等待角色列表加载。</p>
-              </div>
-            )}
+            <BrowserLogin result={result} unavailable={!!transportError} />
             {result.isLoggedIn && !transportError && (
               <div className="account-summary">
                 {result.serverName !== "未指定服务器" && <span>服务器：{result.serverName}</span>}

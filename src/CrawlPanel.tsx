@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { pollingError } from "./request-error";
 import { DEFAULT_CRAWL_CONCURRENCY, type CrawlStatus } from "../server/crawler/types";
 import { RoleDetailDrawer } from "./RoleDetailDrawer";
 import { SavedRoleList, displayTime } from "./SavedRoleList";
@@ -85,7 +86,7 @@ export function CrawlPanel({
           onRunning(data.running);
         }
       } catch (e) {
-        if (!closed) setTransportError(e instanceof Error ? e.message : "采集服务不可用");
+        if (!closed) setTransportError(pollingError(e, "读取采集进度"));
       } finally {
         if (!closed) timer = setTimeout(() => void poll(), 1500);
       }
@@ -261,7 +262,7 @@ export function CrawlPanel({
               {` · 新号排队 ${status.newQueued ?? 0} · 老号排队 ${status.oldQueued ?? 0}`}
             </p>
           )}
-          {status.phase !== "retrying" && status.nextHeadCheckAt && (
+          {status.running && status.phase !== "retrying" && status.nextHeadCheckAt && (
             <p className="status-note">
               首页下次检查：{displayTime(status.nextHeadCheckAt)}
               {status.headCheckedAt ? ` · 上次检查：${displayTime(status.headCheckedAt)}` : ""}
@@ -288,9 +289,15 @@ export function CrawlPanel({
             <p className="crawl-progress">{status.detailProgress}</p>
           )}
           {status.strategy && <p className="status-note">{status.strategy}</p>}
+          {status.latestComplete && (
+            <p className="status-note">
+              最近完整采集：{displayTime(status.latestComplete.collectedAt)} · 商品{" "}
+              {status.latestComplete.key}
+            </p>
+          )}
           {status.checkpoint && (
             <p className="status-note">
-              上次成功入库：{displayTime(status.checkpoint.savedAt)} · 商品 {status.checkpoint.key}{" "}
+              历史扫描断点：{displayTime(status.checkpoint.savedAt)} · 商品 {status.checkpoint.key}{" "}
               · 第 {status.checkpoint.page} 页
             </p>
           )}

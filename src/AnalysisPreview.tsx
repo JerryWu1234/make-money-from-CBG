@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { pollingError } from "./request-error";
 import type { AiProvider } from "../server/ai/types";
 import {
   analysisConcurrency,
   DEFAULT_ANALYSIS_CONCURRENCY,
   type AnalysisItem,
   type AnalysisOverview,
+  type AnalysisProgress,
   type AnalysisRun,
 } from "../server/analysis/types";
 import { AiConnectionControl } from "./AiConnectionControl";
@@ -73,17 +75,35 @@ export function AnalysisPreview() {
     setDefaultModels((previous) => ({ ...previous, [source]: model }));
   }, []);
   const [tab, setTab] = useState<"ranking" | "all" | "history">("history");
-  const [data, setData] = useState<AnalysisOverview | null>(null);
+  const [snapshot, setData] = useState<AnalysisOverview | null>(null);
+  const [progress, setProgress] = useState<AnalysisProgress | null>(null);
+  const data: AnalysisOverview | null = progress
+    ? {
+        runs: [],
+        ranking: [],
+        rankingPagination: { page: 1, totalPages: 1, total: 0 },
+        records: { page: 1, totalPages: 1, total: 0, items: [] },
+        results: { page: 1, totalPages: 1, total: 0, items: [] },
+        history: [],
+        ...snapshot,
+        ...progress,
+      }
+    : snapshot;
   const [page, setPage] = useState(1);
+  const [rankingPage, setRankingPage] = useState(1);
   const [resultsPage, setResultsPage] = useState(1);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [showViewed, setShowViewed] = useState(false);
+  const [copyNotice, setCopyNotice] = useState<{ message: string; error: boolean } | null>(null);
+  const [copying, setCopying] = useState(false);
+  const copyOperation = useRef(false);
   const [revision, setRevision] = useState(0);
   const [busy, setBusy] = useState(false);
   const [concurrency, setConcurrency] = useState(String(DEFAULT_ANALYSIS_CONCURRENCY));
   const [error, setError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [progressError, setProgressError] = useState<string | null>(null);
   const [taskId, setTaskId] = useState<string | null>(null);
   const [roleKey, setRoleKey] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -92,9 +112,9 @@ export function AnalysisPreview() {
   const operation = useRef(false);
   const run = data?.run;
   const active = data?.activeRun;
-  const preparation = data?.capturePreparation;
-  const running = !!active || !!preparation;
+  const running = !!active;
   const waitingForRoles = active?.phase === "waiting_capture";
+  const cooling = !!active?.rateLimit && active.rateLimit.retryAt > Date.now();
   const waitingDetail = data?.captureTasks?.total ?? data?.counts.waitingDetail ?? 0;
   const pendingDetail = data?.captureTasks?.pending ?? data?.counts.pendingDetail ?? waitingDetail;
   const failedDetail = data?.captureTasks?.failed ?? data?.counts.failedDetail ?? 0;
@@ -140,37 +160,36 @@ export function AnalysisPreview() {
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
       try {
-        const params = new URLSearchParams({
-          provider,
-          page: String(page),
-          resultsPage: String(resultsPage),
-          search,
-          filter,
-          showViewed: String(showViewed),
-          scope: "complete",
-        });
-        const next = await request<AnalysisOverview>(
-          `/api/analysis/status?${params}`,
+        const params = new URLSearchParams({ provider, scope: "complete" });
+        const next = await request<AnalysisProgress>(
+          `/api/analysis/progress?${params}`,
           undefined,
           AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
         );
         if (controller.signal.aborted) return;
         if (firstLoad.current) {
           const saved = next.activeRun || next.run;
-          if (saved) setProvider(saved.provider);
-          if (saved && saved.status !== "completed") {
-            setSelectedModels((previous) => ({ ...previous, [saved.provider]: saved.model }));
+          if (saved) {
+            setProvider(saved.provider);
+            if (saved.status !== "completed")
+              setSelectedModels((previous) => ({ ...previous, [saved.provider]: saved.model }));
           }
+          firstLoad.current = false;
         }
-        firstLoad.current = false;
-        setData(next);
-        setLoadError(null);
-        if (next.records.page !== page) setPage(next.records.page);
-        if (next.results && next.results.page !== resultsPage) setResultsPage(next.results.page);
-        timer = setTimeout(refresh, next.activeRun || next.capturePreparation ? 1500 : 5000);
+        const { run, activeRun, counts, captureTasks, captureActivity, profile } = next;
+        setProgress({
+          run,
+          activeRun,
+          counts,
+          captureTasks,
+          captureActivity,
+          profile,
+        });
+        setProgressError(null);
+        timer = setTimeout(refresh, next.activeRun ? 1500 : 5000);
       } catch (failure) {
         if (controller.signal.aborted) return;
-        setLoadError(failure instanceof Error ? failure.message : "无法加载分析记录");
+        setProgressError(pollingError(failure, "读取分析进度"));
         timer = setTimeout(refresh, 5000);
       }
     }
@@ -179,7 +198,52 @@ export function AnalysisPreview() {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [provider, page, resultsPage, search, filter, showViewed, revision]);
+  }, [provider, revision]);
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout>;
+    async function refresh() {
+      try {
+        const params = new URLSearchParams({
+          provider,
+          page: String(page),
+          rankingPage: String(rankingPage),
+          resultsPage: String(resultsPage),
+          search,
+          filter,
+          showViewed: String(showViewed),
+          includeRanking: String(tab === "ranking"),
+          scope: "complete",
+        });
+        const next = await request<AnalysisOverview>(
+          `/api/analysis/status?${params}`,
+          undefined,
+          AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
+        );
+        if (controller.signal.aborted) return;
+        setData(next);
+        setLoadError(null);
+        if (next.records.page !== page) setPage(next.records.page);
+        if (
+          tab === "ranking" &&
+          next.rankingPagination &&
+          next.rankingPagination.page !== rankingPage
+        )
+          setRankingPage(next.rankingPagination.page);
+        if (next.results && next.results.page !== resultsPage) setResultsPage(next.results.page);
+        timer = setTimeout(refresh, 5000);
+      } catch (failure) {
+        if (controller.signal.aborted) return;
+        setLoadError(pollingError(failure, "读取商品记录"));
+        timer = setTimeout(refresh, 5000);
+      }
+    }
+    void refresh();
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [provider, page, rankingPage, resultsPage, search, filter, showViewed, tab, revision]);
 
   const mutate = useCallback(
     async (path: string, body: Record<string, unknown>) => {
@@ -205,7 +269,7 @@ export function AnalysisPreview() {
         setRevision((value) => value + 1);
       } catch (failure) {
         const message = failure instanceof Error ? failure.message : "操作失败，请重试";
-        setError(message === "已暂停完整资料采集准备" ? null : message);
+        setError(message);
       } finally {
         operation.current = false;
         setBusy(false);
@@ -242,6 +306,7 @@ export function AnalysisPreview() {
     setProvider(selected);
     setModelChanged(!!selectedModels[selected]);
     setData(null);
+    setProgress(null);
     setPage(1);
     setResultsPage(1);
     setError(null);
@@ -259,29 +324,68 @@ export function AnalysisPreview() {
       setError(failure instanceof Error ? failure.message : "无法保存查看记录");
     }
   };
-  const startLabel = preparation
-    ? "正在完整采集…"
-    : busy
-      ? "正在处理…"
-      : running
-        ? waitingForRoles
-          ? "等待新角色…"
-          : searchingEquipment
-            ? "正在查价…"
-            : "正在分析…"
-        : run && !sameModel
-          ? "按新模型开始分析"
-          : run && !sameMarket
-            ? "刷新行情并重新分析"
-            : run && !sameCalculation
-              ? "按新规则开始分析"
-              : run?.status === "paused"
-                ? "继续分析"
-                : run?.status === "completed"
-                  ? "分析新增或已更新商品"
-                  : data?.counts.complete === 0
-                    ? "开始分析并等待采集"
-                    : "开始分析已有商品";
+  const copyRecommendation = async (item: AnalysisItem) => {
+    if (copyOperation.current) return;
+    if (!item.url?.trim()) {
+      setCopyNotice({ message: "商品链接缺失，无法复制，请重新采集后重试。", error: true });
+      return;
+    }
+    copyOperation.current = true;
+    setCopying(true);
+    setCopyNotice(null);
+    const content = [
+      `角色：${item.name}`,
+      `区服：${item.server}`,
+      `挂牌价格：${price(item.price)}`,
+      ...(item.valuation ? [`裸号预估价：${valuationMoney(item.valuation.bare_role_value)}`] : []),
+      ...(item.recommendation ? [`差额：${valuationMoney(item.recommendation.gap)}`] : []),
+      item.assetSummary?.equipment || "装备资料未采齐",
+      item.assetSummary?.pets || "宝宝资料未采齐",
+      `商品链接：${item.url}`,
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      setCopyNotice({ message: "复制失败，请检查浏览器剪贴板权限后重试。", error: true });
+      copyOperation.current = false;
+      setCopying(false);
+      return;
+    }
+    try {
+      await request("/api/analysis/recommendation/view", { key: item.key });
+      setRevision((value) => value + 1);
+      setCopyNotice({ message: `${item.name} 已复制，并标记为已查看。`, error: false });
+    } catch {
+      setCopyNotice({
+        message: `${item.name} 已复制，但未能保存已查看状态，请重试。`,
+        error: true,
+      });
+    } finally {
+      copyOperation.current = false;
+      setCopying(false);
+    }
+  };
+  const startLabel = busy
+    ? "正在处理…"
+    : running
+      ? waitingForRoles
+        ? "等待新角色…"
+        : searchingEquipment
+          ? "正在查价…"
+          : "正在分析…"
+      : run && !sameModel
+        ? "按新模型开始分析"
+        : run && !sameMarket
+          ? "刷新行情并重新分析"
+          : run && !sameCalculation
+            ? "按新规则开始分析"
+            : run?.status === "paused"
+              ? "继续分析"
+              : run?.status === "completed"
+                ? "分析新增或已更新商品"
+                : data?.counts.complete === 0
+                  ? "开始分析并等待采集"
+                  : "开始分析已有商品";
 
   return (
     <div className="analysis-page">
@@ -343,13 +447,13 @@ export function AnalysisPreview() {
               >
                 分析设置
               </button>
-              {(active || preparation) && (
+              {active && (
                 <button
                   className="analysis-button analysis-button-stop"
-                  disabled={busy && !preparation}
+                  disabled={busy}
                   onClick={() => void mutate("/api/analysis/pause", { runId: active?.id })}
                 >
-                  {preparation ? "暂停资料采集" : "暂停分析"}
+                  暂停分析
                 </button>
               )}
               {!running &&
@@ -371,6 +475,19 @@ export function AnalysisPreview() {
               个角色；修改后在下次开始、继续或重试时生效。
             </p>
             <p className="analysis-start-hint">默认新号配额 7、老号配额 3；空闲名额可互相借用。</p>
+            <p className="analysis-start-hint">
+              遇到 AI 限流时统一冷却、降低请求并发，成功后逐步恢复。
+            </p>
+            {run?.rateLimit && (
+              <p className="analysis-pending-note" role="status" aria-label="AI限流恢复状态">
+                {run.rateLimit.retryAt > Date.now()
+                  ? `AI 服务限流冷却中，最早 ${displayTime(new Date(run.rateLimit.retryAt).toISOString())} 后尝试恢复。`
+                  : active
+                    ? "AI 服务正在降速恢复。"
+                    : "下次继续时先以较低并发恢复。"}
+                模型请求恢复并发上限：{run.rateLimit.concurrency}；角色分析并发设置保持不变。
+              </p>
+            )}
             {active && (
               <p className="analysis-start-hint" role="status">
                 分析并发上限：{active.concurrency ?? 1} · 当前在途：
@@ -406,10 +523,10 @@ export function AnalysisPreview() {
             <p className="analysis-start-hint" role="status">
               {!data
                 ? "正在读取已采集商品…"
-                : preparation
-                  ? `正在采集并核验角色资料：${preparation.completed}/${preparation.total} 个 · ${preparation.current || "准备下一角色"} · ${preparation.message}`
-                  : active
-                    ? waitingForRoles
+                : active
+                  ? cooling
+                    ? "AI 服务请求受限，正在等待冷却；已完成结果保留，已发出请求继续保存。"
+                    : waitingForRoles
                       ? active.total === 0
                         ? "正在等待首个角色资料采集完整，完成后自动开始分析，无需再次点击。"
                         : `资料完整的现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
@@ -418,19 +535,19 @@ export function AnalysisPreview() {
                         : searchingEquipment
                           ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
                           : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
-                    : data.counts.total === 0
-                      ? "尚未采集商品；可以先开始分析并等待，角色资料采集完整后会自动分析。"
-                      : run && !sameModel
-                        ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
-                        : run && !sameMarket
-                          ? "本批次区服行情已过期。重新分析将刷新行情并使用新批次，已有结果保留。"
-                          : run && !sameCalculation
-                            ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
-                            : run?.status === "paused"
-                              ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续时沿用原计价设置，并发数使用当前输入。`
-                              : run?.status === "completed"
-                                ? `本批次已处理：${run.completed} 件成功，${run.failed} 件失败，${waitingPricing} 件价格待补齐。待补齐项保留进度，需单独重试。`
-                                : `${data.counts.complete} 件资料完整，可以开始分析；${captureSummary}。`}
+                  : data.counts.total === 0
+                    ? "尚未采集商品；可以先开始分析并等待，角色资料采集完整后会自动分析。"
+                    : run && !sameModel
+                      ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
+                      : run && !sameMarket
+                        ? "本批次区服行情已过期。重新分析将刷新行情并使用新批次，已有结果保留。"
+                        : run && !sameCalculation
+                          ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
+                          : run?.status === "paused"
+                            ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续时沿用原计价设置，并发数使用当前输入。`
+                            : run?.status === "completed"
+                              ? `本批次已处理：${run.completed} 件成功，${run.failed} 件失败，${waitingPricing} 件价格待补齐。待补齐项保留进度，需单独重试。`
+                              : `${data.counts.complete} 件资料完整，可以开始分析；${captureSummary}。`}
             </p>
             {waitingForRoles && (
               <div className="analysis-pending-note" role="status" aria-label="采集续采提示">
@@ -474,9 +591,9 @@ export function AnalysisPreview() {
               </p>
             )}
             {active?.assetCounts && <EquipmentSummary counts={active.assetCounts} />}
-            {(error || loadError || run?.error) && (
+            {(error || progressError || loadError || run?.error) && (
               <p className="analysis-auth-notice" role="alert">
-                {error || loadError || run?.error}
+                {error || progressError || loadError || run?.error}
               </p>
             )}
           </div>
@@ -494,21 +611,23 @@ export function AnalysisPreview() {
             <div className="analysis-visual-focus">
               <small>当前状态</small>
               <strong>
-                {preparation
-                  ? "完整采集中"
-                  : running
-                    ? waitingForRoles
-                      ? "等待新角色"
-                      : searchingEquipment
-                        ? "联网查价中"
-                        : "分析中"
-                    : run?.status === "paused"
-                      ? "已暂停"
-                      : run?.status === "completed"
-                        ? waitingPricing
-                          ? "有价格待补齐"
-                          : "已处理"
-                        : "待开始"}
+                {running
+                  ? cooling
+                    ? "限流冷却中"
+                    : active?.rateLimit
+                      ? "降速恢复中"
+                      : waitingForRoles
+                        ? "等待新角色"
+                        : searchingEquipment
+                          ? "联网查价中"
+                          : "分析中"
+                  : run?.status === "paused"
+                    ? "已暂停"
+                    : run?.status === "completed"
+                      ? waitingPricing
+                        ? "有价格待补齐"
+                        : "已处理"
+                      : "待开始"}
               </strong>
               <span>
                 {run
@@ -539,7 +658,7 @@ export function AnalysisPreview() {
           <div>
             <span className="analysis-overview-icon">02</span>
             <small>已完成分析</small>
-            <strong>{data?.results?.total || 0} 件已有结果</strong>
+            <strong>{snapshot ? `${snapshot.results?.total || 0} 件已有结果` : "正在加载…"}</strong>
             <p>
               {run
                 ? `${waitingPricing} 件价格待补齐 · ${run.failed} 件失败 · ${run.queued} 件排队中`
@@ -555,13 +674,17 @@ export function AnalysisPreview() {
         </div>
         <div className="analysis-workspace">
           <section className="analysis-results" aria-label="商品分析结果">
+            {!snapshot && <p role="status">正在加载商品记录…</p>}
             <div className="analysis-tabbar" role="tablist" aria-label="分析结果视图">
               <button
                 role="tab"
                 aria-selected={tab === "ranking"}
                 onClick={() => setTab("ranking")}
               >
-                推荐榜 <span>{data?.ranking.length || 0}</span>
+                推荐榜{" "}
+                {snapshot && !snapshot.rankingDeferred && (
+                  <span>{data?.rankingPagination?.total || 0}</span>
+                )}
               </button>
               <button role="tab" aria-selected={tab === "all"} onClick={() => setTab("all")}>
                 全部商品 <span>{data?.counts.total || 0}</span>
@@ -576,17 +699,26 @@ export function AnalysisPreview() {
             </div>
             {tab === "ranking" ? (
               <div className="analysis-rank-list" role="tabpanel" aria-label="推荐榜">
+                {snapshot?.rankingDeferred && <p role="status">正在加载推荐榜…</p>}
                 <label>
                   <input
                     type="checkbox"
                     checked={showViewed}
-                    onChange={(event) => setShowViewed(event.target.checked)}
+                    onChange={(event) => {
+                      setShowViewed(event.target.checked);
+                      setRankingPage(1);
+                      setData(null);
+                    }}
                   />
                   显示已查看的推荐
                 </label>
+                {!snapshot && <p role="status">正在加载推荐榜…</p>}
+                {copyNotice && (
+                  <p role={copyNotice.error ? "alert" : "status"}>{copyNotice.message}</p>
+                )}
                 <div className="analysis-list-intro">
                   <span>
-                    挂牌价低于裸号预估价直接入榜，无需装备或宝宝配置门槛；其他商品沿用金额阶梯和配置条件，不限制差额百分比，最多展示10个
+                    挂牌价低于裸号预估价直接入榜，无需装备或宝宝配置门槛；其他商品沿用金额阶梯和配置条件，不限制差额百分比
                   </span>
                   <span>差额 = 挂牌价 − 裸号估值</span>
                   <span>
@@ -610,7 +742,7 @@ export function AnalysisPreview() {
                     <p>这些是筛选条件，不代表装备或宝宝已估价，也不证明资产能够补足差额。</p>
                   </details>
                 </div>
-                {!data?.ranking.length && (
+                {!!snapshot && !snapshot.rankingDeferred && !data?.ranking.length && (
                   <div className="analysis-start-empty">
                     <strong>
                       {run?.completed
@@ -626,76 +758,110 @@ export function AnalysisPreview() {
                     </p>
                   </div>
                 )}
-                {data?.ranking.map((item, index) => (
-                  <article
-                    className={`analysis-rank-card ${index === 0 ? "analysis-rank-first" : ""}`}
-                    key={item.key}
-                  >
-                    <div className="analysis-rank-number">
-                      {String(index + 1).padStart(2, "0")}
-                      <small>
-                        {item.valuation
-                          ? item.valuation.comparison_mode === "listing-only"
-                            ? "价格比较"
-                            : "购买参考"
-                          : "配置参考"}
-                      </small>
-                    </div>
-                    <div className="analysis-rank-main">
-                      <div className="analysis-rank-title">
-                        <h3>{item.name}</h3>
-                        <span>{item.server}</span>
+                {snapshot &&
+                  data?.ranking.map((item, index) => (
+                    <article
+                      className={`analysis-rank-card ${rankingPage === 1 && index === 0 ? "analysis-rank-first" : ""}`}
+                      key={item.key}
+                    >
+                      <div className="analysis-rank-number">
+                        {String((rankingPage - 1) * 20 + index + 1).padStart(2, "0")}
+                        <small>
+                          {item.valuation
+                            ? item.valuation.comparison_mode === "listing-only"
+                              ? "价格比较"
+                              : "购买参考"
+                            : "配置参考"}
+                        </small>
                       </div>
-                      <p>{item.summary}</p>
-                      <p>
-                        列表核对：{displayTime(item.lastSeenAt)} · 资料采集：
-                        {displayTime(item.collectedAt)}
-                      </p>
-                      {item.recommendation && (
+                      <div className="analysis-rank-main">
+                        <div className="analysis-rank-title">
+                          <h3>{item.name}</h3>
+                          <span>{item.server}</span>
+                        </div>
+                        <p>{item.summary}</p>
                         <p>
-                          差额 {valuationMoney(item.recommendation.gap)} ·{" "}
-                          {item.recommendation.factors.length} 类配置，
-                          {item.recommendation.strongerFactors.length} 类较强
+                          列表核对：{displayTime(item.lastSeenAt)} · 资料采集：
+                          {displayTime(item.collectedAt)}
                         </p>
-                      )}
-                      {item.recommendation?.basis === "bare-role-discount" && (
-                        <p>入榜依据：挂牌低于裸号预估价</p>
-                      )}
-                      <div className="analysis-rank-assets" aria-label="装备和宝宝简要信息">
-                        {item.assetSummary ? (
-                          <>
-                            <p>{item.assetSummary.equipment}</p>
-                            <p>{item.assetSummary.pets}</p>
-                          </>
-                        ) : (
-                          <p>装备和宝宝资料未采齐</p>
+                        {item.recommendation && (
+                          <p>
+                            差额 {valuationMoney(item.recommendation.gap)} ·{" "}
+                            {item.recommendation.factors.length} 类配置，
+                            {item.recommendation.strongerFactors.length} 类较强
+                          </p>
                         )}
+                        {item.recommendation?.basis === "bare-role-discount" && (
+                          <p>入榜依据：挂牌低于裸号预估价</p>
+                        )}
+                        <div className="analysis-rank-assets" aria-label="装备和宝宝简要信息">
+                          {item.assetSummary ? (
+                            <>
+                              <p>{item.assetSummary.equipment}</p>
+                              <p>{item.assetSummary.pets}</p>
+                            </>
+                          ) : (
+                            <p>装备和宝宝资料未采齐</p>
+                          )}
+                        </div>
+                        <div className="analysis-tags">
+                          {item.recommendationViewed && <span>已查看</span>}
+                          {item.highlights.map((item, index) => (
+                            <span key={index}>{item}</span>
+                          ))}
+                        </div>
                       </div>
-                      <div className="analysis-tags">
-                        {item.recommendationViewed && <span>已查看</span>}
-                        {item.highlights.map((item, index) => (
-                          <span key={index}>{item}</span>
-                        ))}
+                      <div className="analysis-rank-side">
+                        <small>挂牌价格</small>
+                        <strong>{price(item.price)}</strong>
+                        {item.valuation && (
+                          <span>裸号预估价 {valuationMoney(item.valuation.bare_role_value)}</span>
+                        )}
+                        <span>
+                          {item.valuation
+                            ? item.valuation.comparison_mode === "listing-only"
+                              ? valuationPriceDifferenceText(item.valuation) ||
+                                valuationDecisionLabel(item.valuation)
+                              : `最高买入 ${valuationMoney(item.valuation.max_listing_price)}`
+                            : `配置参考分 ${item.score}`}
+                        </span>
+                        <button onClick={() => void viewRecommendation(item)}>
+                          查看分析依据 →
+                        </button>
+                        <button disabled={copying} onClick={() => void copyRecommendation(item)}>
+                          一键复制
+                        </button>
                       </div>
-                    </div>
-                    <div className="analysis-rank-side">
-                      <small>挂牌价格</small>
-                      <strong>{price(item.price)}</strong>
-                      {item.valuation && (
-                        <span>裸号预估价 {valuationMoney(item.valuation.bare_role_value)}</span>
-                      )}
-                      <span>
-                        {item.valuation
-                          ? item.valuation.comparison_mode === "listing-only"
-                            ? valuationPriceDifferenceText(item.valuation) ||
-                              valuationDecisionLabel(item.valuation)
-                            : `最高买入 ${valuationMoney(item.valuation.max_listing_price)}`
-                          : `配置参考分 ${item.score}`}
-                      </span>
-                      <button onClick={() => void viewRecommendation(item)}>查看分析依据 →</button>
-                    </div>
-                  </article>
-                ))}
+                    </article>
+                  ))}
+                {!snapshot?.rankingDeferred && (
+                  <div className="analysis-pagination">
+                    <span>
+                      共 {data?.rankingPagination?.total || 0} 件 · 第 {rankingPage} /{" "}
+                      {data?.rankingPagination?.totalPages || 1} 页
+                    </span>
+                    <button
+                      disabled={!snapshot || rankingPage <= 1}
+                      onClick={() => {
+                        setData(null);
+                        setRankingPage((value) => value - 1);
+                      }}
+                    >
+                      上一页
+                    </button>
+                    <button
+                      disabled={
+                        !snapshot || rankingPage >= (data?.rankingPagination?.totalPages || 1)
+                      }
+                      onClick={() => {
+                        setData(null);
+                        setRankingPage((value) => value + 1);
+                      }}
+                    >
+                      下一页
+                    </button>
+                  </div>
+                )}
               </div>
             ) : tab === "all" ? (
               <div role="tabpanel" aria-label="全部商品">
@@ -834,7 +1000,7 @@ export function AnalysisPreview() {
                     </tbody>
                   </table>
                 </div>
-                {!data?.records.items.length && (
+                {!!snapshot && !data?.records.items.length && (
                   <p className="analysis-empty">没有符合条件的商品</p>
                 )}
                 <div className="analysis-pagination">
@@ -858,7 +1024,7 @@ export function AnalysisPreview() {
                 <p className="analysis-list-intro">
                   每件商品一条记录，点击查看完整分析、原文与调用记录。
                 </p>
-                {!data?.results?.total && (
+                {!!snapshot && !data?.results?.total && (
                   <p className="analysis-empty">
                     暂无已完成结果。每完成一件，结果就会自动显示在这里。
                   </p>

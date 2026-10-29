@@ -87,6 +87,7 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
             verified = true;
             body = { state: "connected", model: "deepseek-flash", response: "READY" };
             break;
+          case "/api/analysis/progress":
           case "/api/analysis/status":
             body = {
               ...store.overview({
@@ -234,6 +235,7 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
     await page.getByRole("tab", { name: "分析记录" }).click();
     await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
       2,
+      { timeout: 10_000 },
     );
     await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
     await expect(
@@ -417,6 +419,7 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
                 models: [{ id: "test-model", name: "测试模型" }],
               };
               break;
+            case "/api/analysis/progress":
             case "/api/analysis/status":
               body = {
                 ...store.overview({
@@ -560,6 +563,7 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
               models: [{ id: "waiting-fixture-model", name: "等待状态测试模型" }],
             };
             break;
+          case "/api/analysis/progress":
           case "/api/analysis/status":
             body = {
               ...store.overview({ scope: url.searchParams.get("scope") as "complete" }),
@@ -619,6 +623,7 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
     crawl.save(first.listing, first.detail!);
     await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
       1,
+      { timeout: 10_000 },
     );
     await expect(page.getByText(/现有角色已处理完，等待新角色/)).toBeVisible();
     await expect(page.getByText("等待新角色资料采集完整", { exact: true })).toBeVisible();

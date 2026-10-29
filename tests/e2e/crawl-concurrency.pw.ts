@@ -5,7 +5,11 @@ import { crawl, validateCrawlOptions } from "../../server/crawler/runner";
 import { createCrawlSource } from "../../server/crawler/source";
 import { CrawlStore } from "../../server/crawler/store";
 import { MAIN_TABS } from "../../server/crawler/detail";
-import type { CrawlStatus, SavedRoleRecord } from "../../server/crawler/types";
+import {
+  CrawlAccessError,
+  type CrawlStatus,
+  type SavedRoleRecord,
+} from "../../server/crawler/types";
 import { browserStatus } from "../fixtures/saved-role";
 
 const pages: Record<number, string[]> = { 1: ["a", "b", "c", "d"], 2: ["d", "e"] };
@@ -19,6 +23,14 @@ test("新号优先状态显示实际在途，10并发上限不会显示成已满
     running: true,
     phase: "collecting",
     message: "本地模拟采集状态",
+    latestComplete: { key: "fixture:new", collectedAt: "2026-10-25T05:00:20.000Z" },
+    checkpoint: {
+      key: "fixture:history",
+      savedAt: "2026-10-25T04:21:14.000Z",
+      time: null,
+      order: "expire_time DESC",
+      page: 4,
+    },
     captureStrategy: "new-first",
     concurrency: 10,
     newRunning: 0,
@@ -94,6 +106,9 @@ test("新号优先状态显示实际在途，10并发上限不会显示成已满
   await expect(queues).toContainText("新号排队 0 · 老号排队 6");
   await expect(queues).not.toContainText("/5");
   await expect(panel).not.toContainText("借用");
+  await expect(panel.getByText(/最近完整采集：/)).toContainText("13:00:20");
+  await expect(panel.getByText(/历史扫描断点：/)).toContainText("12:21:14");
+  await expect(panel).not.toContainText("上次成功入库");
   await panel.screenshot({ path: testInfo.outputPath("old-four-of-ten.png") });
   status = {
     ...status,
@@ -116,6 +131,21 @@ test("新号优先状态显示实际在途，10并发上限不会显示成已满
   await expect(queues).not.toContainText("已保存任务优先补采");
   await expect(queues).not.toContainText("新号优先");
   await expect(queues).toContainText("当前在途 5 个");
+  status = {
+    ...status,
+    running: false,
+    phase: "paused",
+    accessIssue: "login",
+    message: new CrawlAccessError("login").message,
+    nextHeadCheckAt: "2026-10-25T05:01:00.000Z",
+    newRunning: 0,
+    oldRunning: 0,
+  };
+  await expect(panel).toContainText("网站详情要求重新登录，采集已暂停");
+  await expect(queues).toContainText("当前在途 0 个");
+  await expect(panel).not.toContainText("首页下次检查");
+  await expect(panel).not.toContainText("本轮并发上限");
+  await panel.screenshot({ path: testInfo.outputPath("paused-for-login.png") });
 });
 const listHtml = (number: number) =>
   `<table id="soldList"><tr id="order_menu"><th><a data_attr_name="expire_time">剩余时间</a></th></tr>${pages[number].map((id) => `<tr><td><a class="soldImg" href="https://xyq.cbg.163.com/equip?s=367&eid=${id}"><img width="40" height="40" data_serverid="367" data_ordersn="order-${id}" data_equip_name="角色${id}" data_price="222" data_selling_time="2026-09-07 12:00:00"></a></td></tr>`).join("")}</table><div id="pager_bar">第${number}页, 共2页 <a href="javascript:goto(${number === 1 ? 2 : 1})">翻页</a></div>`;
@@ -299,7 +329,7 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
     await listPage.goto("https://xyq.cbg.163.com/list");
     await page.goto("http://cbg-ui.test/");
     const count = page.getByRole("spinbutton", { name: "并发抓取数" });
-    await expect(count).toHaveValue("10");
+    await expect(count).toHaveValue("6");
     await expect(count).toHaveAttribute("min", "2");
     await expect(count).toHaveAttribute("step", "2");
     const start = page.getByRole("button", { name: /开始采集详情|继续采集 \/ 检查新增/ });

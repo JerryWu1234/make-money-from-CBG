@@ -1,4 +1,4 @@
-export const DEFAULT_CRAWL_CONCURRENCY = 10;
+export const DEFAULT_CRAWL_CONCURRENCY = 6;
 export type CrawlLane = "new" | "old";
 export interface HeadCheckpoint {
   time: string;
@@ -41,6 +41,34 @@ export class ListingUnavailableError extends Error {
     this.name = "ListingUnavailableError";
   }
 }
+export type CrawlAccessKind = "login" | "verification" | "busy";
+export class CrawlAccessError extends Error {
+  constructor(
+    readonly kind: CrawlAccessKind,
+    cause?: unknown,
+  ) {
+    super(
+      {
+        login: "网站详情要求重新登录，采集已暂停；请重新查询角色列表并完成登录后继续。",
+        verification: "网站要求安全验证，采集已暂停；请完成验证后继续。",
+        busy: "网站繁忙或要求降低频率，采集已暂停。",
+      }[kind],
+      { cause },
+    );
+    this.name = "CrawlAccessError";
+  }
+}
+export function crawlAccessFailure(error: unknown): CrawlAccessError | undefined {
+  for (let depth = 0; depth < 4 && error instanceof Error; depth++, error = error.cause) {
+    if (
+      error.name === "CrawlAccessError" &&
+      "kind" in error &&
+      ["login", "verification", "busy"].includes(String(error.kind))
+    )
+      return error as CrawlAccessError;
+  }
+  return undefined;
+}
 export class SellingOrderUnavailableError extends Error {
   constructor() {
     super("网站未提供上架时间倒序，无法持续检查新上架角色");
@@ -59,6 +87,7 @@ export interface CrawlSource {
   onShelf: (item: Listing) => Promise<boolean>;
   hover: (item: Listing) => Promise<Listing>;
   detail: (item: Listing) => Promise<RoleDetail>;
+  cancelDetails?: (reason: Error) => Promise<void>;
 }
 export interface TabSnapshot {
   collectedAt?: string;
@@ -89,6 +118,10 @@ export interface PetSnapshot {
   innerSkills: DetailItem[];
 }
 export interface DetailItem {
+  /** Metadata returned for this exact model by the official page, never inferred from a name. */
+  officialModel?: { modelId: string; name?: string; description?: string; category?: string };
+  nameSource?: "element" | "official-model" | "tooltip";
+  categorySource?: "element" | "official-model" | "official-slot" | "description";
   index: number;
   name: string;
   description?: string;
@@ -198,8 +231,11 @@ export interface CrawlStatus {
   itemsOnPage?: number;
   detailProgress?: string;
   checkpoint?: Checkpoint;
+  latestComplete?: { key: string; collectedAt: string };
   strategy?: string;
   error?: string;
+  accessIssue?: CrawlAccessKind;
+  browserIssue?: import("../browser-connection").BrowserIssue;
   database: string;
 }
 

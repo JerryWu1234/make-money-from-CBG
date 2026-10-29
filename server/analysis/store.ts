@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { setImmediate as yieldThread } from "node:timers/promises";
 import type { DatabaseSync, SQLOutputValue } from "node:sqlite";
 import type { AiProvider } from "../ai/types";
+import { aiRequestMessage } from "../ai/request-error";
+import type { AnalysisBackoff } from "./rate-limit";
 import type { Listing, SavedRoleRecord } from "../crawler/types";
 import { analysisPrompt, RULE_VERSION, textHash } from "./contract";
 import { buildProductDocument } from "./product-document";
@@ -19,11 +22,14 @@ import { capturedAssetCounts, capturedAssetSummary } from "./asset-counts";
 import { recommendationFor } from "./recommendation";
 import { analysisConcurrency, analysisLaneLimits, DEFAULT_ANALYSIS_CONCURRENCY } from "./types";
 import { automaticMarketExpired } from "./market";
+import { trackRecordVersions } from "../record-versions";
+import { installSourceMatches } from "./source-matches";
 import type {
   AnalysisLane,
   AnalysisDetail,
   AnalysisItem,
   AnalysisOverview,
+  AnalysisProgress,
   AnalysisRun,
   ProductAnalysis,
 } from "./types";
@@ -55,9 +61,11 @@ const expiredPricingSql = ["equipment_pricing", "pet_pricing", "pet_pricing.gear
     return `(json_type(t.result_json,'$.valuation.${key}')='object' AND ${expiredPricingTimeSql("t.result_json", "$.valuation." + key)})`;
   })
   .join(" OR ");
+const matchingSourceSql =
+  "coalesce((SELECT m.matches FROM analysis_source_matches m WHERE m.task_id=t.id AND m.listing_key=l.key),0)=1";
 const stateSql = `CASE WHEN l.status!='complete' OR l.detail_json IS NULL THEN 'waiting_detail'
   WHEN t.id IS NULL THEN 'ready'
-  WHEN t.source_listing_json!=l.listing_json OR t.source_detail_json!=l.detail_json THEN 'stale'
+  WHEN NOT (${matchingSourceSql}) THEN 'stale'
   WHEN t.status='completed' AND (${expiredPricingSql}) THEN 'stale'
   ELSE t.status END`;
 
@@ -125,8 +133,27 @@ function profileScope(
 }
 
 export class AnalysisStore {
-  private idleAppendSnapshot?: { runId: string; changes: number; version: number };
-  constructor(readonly db: DatabaseSync) {
+  private recommendationCache = new Map<
+    string,
+    {
+      signature: string;
+      recommendation?: AnalysisItem["recommendation"];
+      assetSummary?: AnalysisItem["assetSummary"];
+    }
+  >();
+  private overviewRequests = new Map<
+    string,
+    {
+      promise: Promise<AnalysisOverview>;
+      controller: AbortController;
+      readers: number;
+    }
+  >();
+  constructor(
+    readonly db: DatabaseSync,
+    options: { readOnly?: boolean } = {},
+  ) {
+    if (options.readOnly) return;
     db.exec(`CREATE TABLE IF NOT EXISTS analysis_runs (
       id TEXT PRIMARY KEY, provider TEXT NOT NULL, model TEXT NOT NULL, rule_version TEXT NOT NULL,
       status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, error TEXT
@@ -142,13 +169,16 @@ export class AnalysisStore {
     CREATE INDEX IF NOT EXISTS analysis_tasks_run ON analysis_tasks(run_id,ordinal);
     CREATE INDEX IF NOT EXISTS analysis_tasks_input ON analysis_tasks(input_hash,status);
     CREATE INDEX IF NOT EXISTS analysis_tasks_listing ON analysis_tasks(listing_key,status,completed_at DESC);
+    CREATE INDEX IF NOT EXISTS analysis_completed_listings ON analysis_tasks(listing_key,completed_at DESC,id DESC,run_id)
+      WHERE status='completed' AND result_json IS NOT NULL;
     CREATE TABLE IF NOT EXISTS recommendation_views (listing_key TEXT PRIMARY KEY, viewed_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS analysis_attempts (
       id TEXT PRIMARY KEY, task_id TEXT NOT NULL, state TEXT NOT NULL, created_at TEXT NOT NULL,
       finished_at TEXT, raw_response TEXT, usage_json TEXT, error TEXT
     );
     CREATE INDEX IF NOT EXISTS analysis_attempts_task ON analysis_attempts(task_id,created_at DESC,id DESC);
-    CREATE TABLE IF NOT EXISTS analysis_lock (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL);`);
+    CREATE TABLE IF NOT EXISTS analysis_lock (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS analysis_provider_backoff (provider TEXT PRIMARY KEY, state_json TEXT NOT NULL);`);
     if (
       !db
         .prepare("PRAGMA table_info(analysis_tasks)")
@@ -168,6 +198,7 @@ export class AnalysisStore {
       ["analysis_runs", "follow_capture"],
       ["analysis_runs", "concurrency"],
       ["analysis_tasks", "pricing_progress_json"],
+      ["analysis_tasks", "asset_counts_json"],
       ["analysis_attempts", "request_text"],
       ["analysis_attempts", "request_hash"],
       ["analysis_tasks", "equipment_pricing_json"],
@@ -184,6 +215,22 @@ export class AnalysisStore {
     db.exec(
       "CREATE INDEX IF NOT EXISTS analysis_tasks_run_status ON analysis_tasks(run_id,status,queue_lane,reused,id)",
     );
+    trackRecordVersions(db, "analysis_tasks");
+    trackRecordVersions(db, "analysis_attempts");
+    installSourceMatches(db);
+    db.exec(`CREATE TABLE IF NOT EXISTS analysis_capture_checks (
+      run_id TEXT NOT NULL, listing_key TEXT NOT NULL, listing_revision INTEGER NOT NULL,
+      result_task_id TEXT, result_revision INTEGER, proof_id TEXT, proof_revision INTEGER,
+      valid_until INTEGER NOT NULL, PRIMARY KEY(run_id,listing_key)
+    );
+    CREATE TRIGGER IF NOT EXISTS analysis_capture_checks_delete AFTER DELETE ON analysis_runs BEGIN
+      DELETE FROM analysis_capture_checks WHERE run_id=OLD.id;
+    END;`);
+    db.exec(`CREATE TRIGGER IF NOT EXISTS analysis_asset_counts_invalidate
+      AFTER UPDATE OF source_listing_json,source_detail_json ON analysis_tasks
+      WHEN OLD.source_listing_json IS NOT NEW.source_listing_json OR OLD.source_detail_json IS NOT NEW.source_detail_json BEGIN
+        UPDATE analysis_tasks SET asset_counts_json=NULL WHERE id=NEW.id;
+      END;`);
     this.recover();
   }
   acquire(owner: string) {
@@ -235,7 +282,10 @@ export class AnalysisStore {
   counts() {
     const row = this.db
       .prepare(
-        "SELECT count(*) total,sum(CASE WHEN status='complete' AND detail_json IS NOT NULL THEN 1 ELSE 0 END) complete,sum(CASE WHEN status='failed' THEN 1 ELSE 0 END) failed,sum(CASE WHEN status='unavailable' THEN 1 ELSE 0 END) unavailable FROM listings",
+        `SELECT (SELECT count(*) FROM listings) total,
+        (SELECT count(*) FROM listings WHERE status='complete' AND detail_json IS NOT NULL) complete,
+        (SELECT count(*) FROM listings WHERE status='failed') failed,
+        (SELECT count(*) FROM listings WHERE status='unavailable') unavailable`,
       )
       .get()!;
     const total = Number(row.total),
@@ -250,20 +300,24 @@ export class AnalysisStore {
       failedDetail,
     };
   }
-  run(id: string): AnalysisRun | null {
+  run(id: string, includeAssets = true): AnalysisRun | null {
     const row = this.db
       .prepare(`SELECT r.*,count(CASE WHEN t.status!='skipped' THEN t.id END) total,
       coalesce(sum(t.status='completed'),0) completed,coalesce(sum(t.status='failed'),0) failed,
       coalesce(sum(t.status='queued'),0) queued,coalesce(sum(t.reused),0) reused,
+      EXISTS(SELECT 1 FROM analysis_tasks ready JOIN listings l ON l.key=ready.listing_key
+        WHERE ready.run_id=r.id AND ready.status='queued' AND l.status='complete'
+        AND l.detail_json IS NOT NULL) ready_queued,
       coalesce(sum(t.status='running'),0) running_count,
       coalesce(sum(t.status='running' AND t.queue_lane='new'),0) new_running,
       coalesce(sum(t.status='running' AND t.queue_lane='old'),0) old_running,
       (SELECT json_group_array(json_extract(source_listing_json,'$.name')) FROM analysis_tasks WHERE run_id=r.id AND status='running') current_names,
       coalesce(sum(t.status='waiting_pricing'),0) waiting_pricing,
       (SELECT pricing_progress_json FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) pricing_progress_json,
+      (SELECT asset_counts_json FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) asset_counts_json,
       (SELECT json_extract(source_listing_json,'$.name') FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current,
-      (SELECT source_listing_json FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current_listing_json,
-      (SELECT source_detail_json FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1) current_detail_json,
+      ${includeAssets ? `(SELECT source_listing_json FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1)` : "NULL"} current_listing_json,
+      ${includeAssets ? `(SELECT source_detail_json FROM analysis_tasks WHERE run_id=r.id AND status='running' LIMIT 1)` : "NULL"} current_detail_json,
       (SELECT CASE
         WHEN (equipment_pricing_json IS NULL OR json_type(equipment_pricing_json,'$.searchComplete')='false' OR ${expiredPricingTimeSql("equipment_pricing_json", "$")}) AND json_extract(r.profile_json,'$.equipmentSearch')=1 THEN 'equipment_search'
         WHEN (pet_pricing_json IS NULL OR json_type(pet_pricing_json,'$.searchComplete')='false' OR ${expiredPricingTimeSql("pet_pricing_json", "$")}) AND json_extract(r.profile_json,'$.petSearch')=1 THEN 'pet_search'
@@ -306,8 +360,9 @@ export class AnalysisStore {
           status: String(row.status) as AnalysisRun["status"],
           createdAt: String(row.created_at),
           updatedAt: String(row.updated_at),
-          error: pauseNotice ? null : storedError,
+          error: pauseNotice || !storedError ? null : aiRequestMessage(storedError),
           pauseNotice,
+          rateLimit: this.providerBackoff(String(row.provider) as AiProvider),
           total: Number(row.total),
           completed: Number(row.completed),
           failed: Number(row.failed),
@@ -318,8 +373,9 @@ export class AnalysisStore {
             : null,
           reused: Number(row.reused),
           current: nullable(row.current),
-          assetCounts:
-            row.current_listing_json && row.current_detail_json
+          assetCounts: row.asset_counts_json
+            ? JSON.parse(String(row.asset_counts_json))
+            : row.current_listing_json && row.current_detail_json
               ? capturedAssetCounts({
                   listing: JSON.parse(String(row.current_listing_json)),
                   detail: JSON.parse(String(row.current_detail_json)),
@@ -331,7 +387,7 @@ export class AnalysisStore {
             row.status === "running" &&
             row.follow_capture === "1" &&
             !row.phase &&
-            !Number(row.queued)
+            !row.ready_queued
               ? "waiting_capture"
               : (nullable(row.phase) as AnalysisRun["phase"]),
           ...(profile
@@ -361,8 +417,62 @@ export class AnalysisStore {
       .get();
     return row ? this.run(String(row.id)) : null;
   }
+  progress(
+    options: {
+      provider?: AiProvider;
+      runId?: string;
+      scope?: import("../crawler/types").SavedListingScope;
+    } = {},
+  ): AnalysisProgress {
+    const active = this.db
+      .prepare(
+        "SELECT id FROM analysis_runs WHERE status='running' ORDER BY created_at DESC LIMIT 1",
+      )
+      .get();
+    const activeRun = active ? this.run(String(active.id), false) : null;
+    const selected =
+      options.runId ||
+      activeRun?.id ||
+      this.db
+        .prepare(
+          `SELECT id FROM analysis_runs ${options.provider ? "WHERE provider=?" : ""} ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(...(options.provider ? [options.provider] : []))?.id;
+    return {
+      ...this.collectionCounts(options.scope),
+      run:
+        selected === activeRun?.id
+          ? activeRun
+          : selected
+            ? this.run(String(selected), false)
+            : null,
+      activeRun,
+    };
+  }
+  private collectionCounts(scope?: import("../crawler/types").SavedListingScope) {
+    const counts = this.counts();
+    return {
+      captureTasks: {
+        total: counts.waitingDetail,
+        pending: counts.pendingDetail,
+        failed: counts.failedDetail,
+      },
+      counts:
+        scope === "complete"
+          ? {
+              total: counts.complete,
+              complete: counts.complete,
+              waitingDetail: 0,
+              pendingDetail: 0,
+              failedDetail: 0,
+            }
+          : scope === "tasks"
+            ? { ...counts, total: counts.waitingDetail, complete: 0 }
+            : counts,
+    };
+  }
   /** Refresh unfinished inputs after collection, retaining the run's original settings. */
-  refreshPendingCaptures(id: string) {
+  refreshPendingCaptures(id: string, listingKey?: string) {
     const run = this.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?").get(id);
     if (!run) throw new Error("分析批次不存在");
     const profile = run.profile_json
@@ -371,8 +481,9 @@ export class AnalysisStore {
     const rows = this.db
       .prepare(`SELECT t.id,t.source_listing_json,t.source_detail_json,l.listing_json,l.detail_json
       FROM analysis_tasks t JOIN listings l ON l.key=t.listing_key
-      WHERE t.run_id=? AND t.status IN ('queued','waiting_pricing','failed') AND l.status='complete' AND l.detail_json IS NOT NULL`)
-      .all(id);
+      WHERE t.run_id=? AND t.status IN ('queued','waiting_pricing','failed') AND l.status='complete' AND l.detail_json IS NOT NULL
+      ${listingKey === undefined ? "" : "AND t.listing_key=?"}`)
+      .all(id, ...(listingKey === undefined ? [] : [listingKey]));
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const row of rows) {
@@ -448,6 +559,22 @@ export class AnalysisStore {
       .prepare("UPDATE analysis_runs SET concurrency=? WHERE id=?")
       .run(String(concurrency), id);
   }
+  providerBackoff(provider: AiProvider): AnalysisBackoff | null {
+    const row = this.db
+      .prepare("SELECT state_json FROM analysis_provider_backoff WHERE provider=?")
+      .get(provider);
+    return row ? (JSON.parse(String(row.state_json)) as AnalysisBackoff) : null;
+  }
+  saveProviderBackoff(provider: AiProvider, state: AnalysisBackoff | null, owner: string) {
+    if (!this.owns(owner)) throw new Error("分析锁已失效");
+    if (state)
+      this.db
+        .prepare(
+          "INSERT INTO analysis_provider_backoff(provider,state_json) VALUES(?,?) ON CONFLICT(provider) DO UPDATE SET state_json=excluded.state_json",
+        )
+        .run(provider, JSON.stringify(state));
+    else this.db.prepare("DELETE FROM analysis_provider_backoff WHERE provider=?").run(provider);
+  }
   private reusableResult(
     provider: AiProvider,
     model: string,
@@ -518,7 +645,7 @@ export class AnalysisStore {
             continue;
         }
         const attempt = this.db
-          .prepare(`SELECT raw_response FROM analysis_attempts
+          .prepare(`SELECT id,raw_response FROM analysis_attempts
           WHERE task_id=? AND state='completed' ORDER BY finished_at DESC LIMIT 1`)
           .get(row.source_task_id || row.id);
         if (!attempt?.raw_response) continue;
@@ -536,12 +663,44 @@ export class AnalysisStore {
             JSON.parse(String(row.result_json)),
           )
         )
-          return row;
+          return { ...row, proof_id: attempt.id };
       } catch {
         // Missing or incompatible saved evidence requires a fresh analysis.
       }
     }
     return undefined;
+  }
+  private rememberCapture(id: string, row: Row, previous?: Row) {
+    const valuation = previous?.result_json
+      ? (JSON.parse(String(previous.result_json)) as ProductAnalysis).valuation
+      : undefined;
+    const expiry = [
+      valuation?.equipment_pricing,
+      valuation?.pet_pricing,
+      valuation?.pet_pricing?.gearPricing,
+    ]
+      .filter((pricing) => !!pricing)
+      .map((pricing) => Date.parse(pricing!.searchedAt) + 24 * 60 * 60 * 1000);
+    const until = Math.min(Number.MAX_SAFE_INTEGER, ...expiry);
+    this.db
+      .prepare(`INSERT INTO analysis_capture_checks
+      (run_id,listing_key,listing_revision,result_task_id,result_revision,proof_id,proof_revision,valid_until)
+      VALUES(?,?,(SELECT revision FROM record_versions WHERE entity='listings' AND record_key=?),?,
+        (SELECT revision FROM record_versions WHERE entity='analysis_tasks' AND record_key=?),?,
+        (SELECT revision FROM record_versions WHERE entity='analysis_attempts' AND record_key=?),?)
+      ON CONFLICT(run_id,listing_key) DO UPDATE SET listing_revision=excluded.listing_revision,
+      result_task_id=excluded.result_task_id,result_revision=excluded.result_revision,
+      proof_id=excluded.proof_id,proof_revision=excluded.proof_revision,valid_until=excluded.valid_until`)
+      .run(
+        id,
+        row.key,
+        row.key,
+        previous?.id ?? null,
+        previous?.id ?? null,
+        previous?.proof_id ?? null,
+        previous?.proof_id ?? null,
+        Number.isFinite(until) ? until : 0,
+      );
   }
   createRun(
     provider: AiProvider,
@@ -619,7 +778,10 @@ export class AnalysisStore {
         const previous = force
           ? undefined
           : this.reusableResult(provider, model, record, document, prompt, profile);
-        if (previous && !sample) return;
+        if (previous && !sample) {
+          this.rememberCapture(id, row, previous);
+          return;
+        }
         inserted++;
         insert.run(
           randomUUID(),
@@ -697,24 +859,18 @@ export class AnalysisStore {
     const profile = run.profile_json
       ? (JSON.parse(String(run.profile_json)) as AnalysisProfile)
       : undefined;
-    // Bare-role reuse has no expiring asset quotes. An unchanged database needs
-    // no repeated document construction/replay while waiting for new captures.
-    // total_changes covers this connection; data_version covers other writers.
-    const snapshot =
-      profile && !profile.equipmentSearch && !profile.petSearch && !profile.petGearSearch
-        ? {
-            runId: id,
-            changes: Number(this.db.prepare("SELECT total_changes() n").get()!.n),
-            version: Number(this.db.prepare("PRAGMA data_version").get()!.data_version),
-          }
-        : undefined;
-    if (snapshot && isDeepStrictEqual(snapshot, this.idleAppendSnapshot)) return 0;
     const rows = this.db
-      .prepare(`SELECT l.key,l.listing_json,l.detail_json,l.capture_lane FROM listings l
+      .prepare(`SELECT l.key,l.listing_json,l.detail_json,l.capture_lane,input.revision input_revision FROM listings l
+      JOIN record_versions input ON input.entity='listings' AND input.record_key=l.key
       WHERE l.status='complete' AND l.detail_json IS NOT NULL
       AND NOT EXISTS(SELECT 1 FROM analysis_tasks t WHERE t.run_id=? AND t.listing_key=l.key)
+      AND NOT EXISTS(SELECT 1 FROM analysis_capture_checks c
+        JOIN record_versions v ON v.entity='listings' AND v.record_key=l.key
+        WHERE c.run_id=? AND c.listing_key=l.key AND c.listing_revision=v.revision AND c.valid_until>?
+        AND (c.result_task_id IS NULL OR c.result_revision=(SELECT revision FROM record_versions WHERE entity='analysis_tasks' AND record_key=c.result_task_id))
+        AND (c.proof_id IS NULL OR c.proof_revision=(SELECT revision FROM record_versions WHERE entity='analysis_attempts' AND record_key=c.proof_id)))
       ORDER BY l.first_seen_at ASC,l.key ASC`)
-      .all(id);
+      .all(id, id, Date.now());
     let ordinal = Number(
       this.db
         .prepare("SELECT coalesce(max(ordinal),-1)+1 n FROM analysis_tasks WHERE run_id=?")
@@ -724,6 +880,16 @@ export class AnalysisStore {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const row of rows) {
+        // The discovery SELECT precedes the write transaction; another connection may
+        // have replaced an input meanwhile. Never memoize or enqueue its old version.
+        if (
+          !this.db
+            .prepare(
+              "SELECT 1 FROM record_versions WHERE entity='listings' AND record_key=? AND revision=?",
+            )
+            .get(row.key, row.input_revision)
+        )
+          continue;
         const record: SavedRoleRecord = {
           listing: JSON.parse(String(row.listing_json)),
           detail: JSON.parse(String(row.detail_json)),
@@ -734,23 +900,26 @@ export class AnalysisStore {
         if (
           (profile || isCurrentRoleCapture(record.detail)) &&
           captureIssues(record.detail!, false, true, record.listing).length
-        )
+        ) {
+          this.rememberCapture(id, row);
           continue;
+        }
         const document = buildProductDocument(record);
         const prompt = profile
           ? valuationPrompt(document, record, profile)
           : analysisPrompt(document);
-        if (
-          this.reusableResult(
-            String(run.provider) as AiProvider,
-            String(run.model),
-            record,
-            document,
-            prompt,
-            profile,
-          )
-        )
+        const previous = this.reusableResult(
+          String(run.provider) as AiProvider,
+          String(run.model),
+          record,
+          document,
+          prompt,
+          profile,
+        );
+        if (previous) {
+          this.rememberCapture(id, row, previous);
           continue;
+        }
         this.db
           .prepare(`INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,queue_lane)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?)`)
@@ -772,7 +941,6 @@ export class AnalysisStore {
       }
       if (added) this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), id);
       this.db.exec("COMMIT");
-      this.idleAppendSnapshot = added ? undefined : snapshot;
       return added;
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -805,18 +973,25 @@ export class AnalysisStore {
   }
   next(runId: string, preferredLane?: AnalysisLane): AnalysisTask | null {
     this.skipUnavailableQueued(runId);
-    const row = this.db
-      .prepare(
-        `SELECT t.*,r.profile_json,
+    const next = this.db.prepare(
+      `SELECT t.*,r.profile_json,${matchingSourceSql} AS source_matches,
           (SELECT length(trim(coalesce(a.raw_response,'')))>0 FROM analysis_attempts a
            WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1) last_attempt_had_response
          FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id JOIN listings l ON l.key=t.listing_key
          WHERE t.run_id=? AND t.status='queued' AND l.status='complete' AND l.detail_json IS NOT NULL
          ORDER BY CASE WHEN t.queue_lane=? THEN 0 ELSE 1 END,t.ordinal ASC LIMIT 1`,
-      )
-      .get(runId, preferredLane ?? null);
+    );
+    let row = next.get(runId, preferredLane ?? null);
     if (!row) return null;
-    return {
+    if (row.source_matches !== 1) {
+      // Collection may finish while analysis is waiting. Refresh only this input;
+      // unchanged tasks use the indexed source match rather than a queue-wide scan.
+      this.refreshPendingCaptures(runId, String(row.listing_key));
+      row = next.get(runId, preferredLane ?? null);
+      if (!row) return null;
+      if (row.source_matches !== 1) throw new Error("角色资料正在更新，请资料稳定后继续分析");
+    }
+    const task: AnalysisTask = {
       id: String(row.id),
       runId,
       lane: row.queue_lane === "new" ? "new" : "old",
@@ -844,6 +1019,10 @@ export class AnalysisStore {
         : {}),
       ...(row.pet_pricing_json ? { petPricing: JSON.parse(String(row.pet_pricing_json)) } : {}),
     };
+    this.db
+      .prepare("UPDATE analysis_tasks SET asset_counts_json=? WHERE id=?")
+      .run(JSON.stringify(capturedAssetCounts(task.record)), task.id);
+    return task;
   }
   deferPricing(task: AnalysisTask, owner: string, error: string) {
     if (!this.owns(owner)) throw new Error("分析锁已失效");
@@ -1029,6 +1208,7 @@ export class AnalysisStore {
       raw?: string;
       usage?: unknown;
       error?: string;
+      diagnosticError?: string;
       requeue?: boolean;
     },
   ) {
@@ -1044,7 +1224,7 @@ export class AnalysisStore {
           now(),
           outcome.raw ?? null,
           outcome.usage == null ? null : JSON.stringify(outcome.usage),
-          outcome.error ?? null,
+          outcome.diagnosticError ?? outcome.error ?? null,
           attempt,
         );
       this.db
@@ -1179,26 +1359,87 @@ export class AnalysisStore {
       .run(key, now());
     return { key, viewed: true };
   }
-  overview(
+  overview(options: Parameters<AnalysisStore["overviewSteps"]>[0] = {}): AnalysisOverview {
+    const steps = this.overviewSteps(options);
+    let step = steps.next();
+    while (!step.done) step = steps.next();
+    return step.value;
+  }
+  async overviewAsync(
+    options: Parameters<AnalysisStore["overviewSteps"]>[0] = {},
+    signal?: AbortSignal,
+  ): Promise<AnalysisOverview> {
+    signal?.throwIfAborted();
+    const key = JSON.stringify(options);
+    let request = this.overviewRequests.get(key);
+    if (!request) {
+      const controller = new AbortController();
+      request = {
+        controller,
+        readers: 0,
+        promise: (async () => {
+          const steps = this.overviewSteps(options);
+          try {
+            let step = steps.next();
+            while (!step.done) {
+              await yieldThread();
+              controller.signal.throwIfAborted();
+              step = steps.next();
+            }
+            return step.value;
+          } finally {
+            steps.return(undefined as never);
+          }
+        })(),
+      };
+      this.overviewRequests.set(key, request);
+    }
+    const current = request;
+    current.readers++;
+    let cancel: (() => void) | undefined;
+    try {
+      return signal
+        ? await Promise.race([
+            current.promise,
+            new Promise<never>((_resolve, reject) => {
+              cancel = () => reject(signal.reason);
+              signal.addEventListener("abort", cancel, { once: true });
+              if (signal.aborted) cancel();
+            }),
+          ])
+        : await current.promise;
+    } finally {
+      if (cancel) signal!.removeEventListener("abort", cancel);
+      if (--current.readers === 0) {
+        if (this.overviewRequests.get(key) === current) this.overviewRequests.delete(key);
+        current.controller.abort(new Error("商品记录请求已结束"));
+      }
+    }
+  }
+  private *overviewSteps(
     options: {
       provider?: AiProvider;
       runId?: string;
       page?: number;
       resultsPage?: number;
+      rankingPage?: number;
       currentProfile?: AnalysisProfile;
       search?: string;
       filter?: string;
       summary?: boolean;
       showViewed?: boolean;
+      includeRanking?: boolean;
       scope?: import("../crawler/types").SavedListingScope;
     } = {},
-  ): AnalysisOverview {
+  ): Generator<void, AnalysisOverview, void> {
+    yield;
     const ids = this.db
       .prepare(
         `SELECT id FROM analysis_runs ${options.provider ? "WHERE provider=?" : ""} ORDER BY created_at DESC LIMIT 30`,
       )
       .all(...(options.provider ? [options.provider] : []));
-    const runs = ids.map((row) => this.run(String(row.id))!);
+    const runs = ids.map((row) => this.run(String(row.id), false)!);
+    yield;
     const activeRun = this.activeRun();
     const run = options.runId ? this.run(options.runId) : activeRun || runs[0] || null;
     const sourceValues = options.runId ? [run?.id || ""] : [];
@@ -1207,8 +1448,7 @@ export class AnalysisStore {
       : `t.id=(
       SELECT candidate.id FROM analysis_tasks candidate JOIN analysis_runs r ON r.id=candidate.run_id
       WHERE candidate.listing_key=l.key ORDER BY
-        CASE WHEN candidate.status='completed' AND candidate.source_listing_json=l.listing_json
-          AND candidate.source_detail_json=l.detail_json
+        CASE WHEN candidate.status='completed' AND (${matchingSourceSql.replaceAll("t.", "candidate.")})
           AND coalesce((${expiredPricingSql.replaceAll("t.", "candidate.")}),0)=0 THEN 0 ELSE 1 END,
         r.created_at DESC,candidate.ordinal DESC,candidate.id DESC LIMIT 1)`;
     // Omit evidence before transferring/parsing a summary; detail reads retain the full result.
@@ -1227,7 +1467,7 @@ export class AnalysisStore {
       options.scope === "complete"
         ? " WHERE l.status='complete' AND l.detail_json IS NOT NULL"
         : options.scope === "tasks"
-          ? " WHERE l.status!='complete' OR l.detail_json IS NULL"
+          ? " WHERE (l.status!='complete' OR l.detail_json IS NULL)"
           : "";
     const source = `SELECT ${productColumns} FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN analysis_runs selected_run ON selected_run.id=t.run_id${scopeCondition}`;
     const conditions: string[] = [],
@@ -1241,51 +1481,216 @@ export class AnalysisStore {
       values.push(options.filter);
     }
     const query = `WITH products AS (${source}) SELECT * FROM products${conditions.length ? ` WHERE ${conditions.join(" AND ")}` : ""}`;
-    const total = Number(this.db.prepare(`SELECT count(*) n FROM (${query})`).get(...values)!.n);
+    // Default counts and page selection must not replay every historical task/source.
+    const stateFiltered = !!options.filter && options.filter !== "all";
+    const listingSearch = options.search?.trim()
+      ? `${scopeCondition ? " AND" : " WHERE"} instr(lower(l.listing_json),lower(?))>0`
+      : "";
+    const listingValues = options.search?.trim() ? [options.search.trim().slice(0, 200)] : [];
+    const listingSource = `FROM listings l${scopeCondition}${listingSearch}`;
+    const total = Number(
+      stateFiltered
+        ? this.db.prepare(`SELECT count(*) n FROM (${query})`).get(...values)!.n
+        : this.db.prepare(`SELECT count(*) n ${listingSource}`).get(...listingValues)!.n,
+    );
     const totalPages = Math.max(1, Math.ceil(total / 20));
     const page = Math.max(1, Math.min(totalPages, Math.trunc(options.page || 1)));
+    const pageKeys = stateFiltered
+      ? undefined
+      : this.db
+          .prepare(`SELECT l.key ${listingSource} ORDER BY l.key ASC LIMIT 20 OFFSET ?`)
+          .all(...listingValues, (page - 1) * 20)
+          .map((row) => row.key);
+    const recordQuery = pageKeys
+      ? `WITH products AS (${source}${scopeCondition ? " AND" : " WHERE"} l.key IN (${pageKeys.map(() => "?").join(",") || "NULL"})) SELECT * FROM products${conditions.length ? ` WHERE ${conditions.join(" AND ")}` : ""} ORDER BY key ASC`
+      : `${query} ORDER BY key ASC LIMIT 20 OFFSET ?`;
     const records = this.db
-      .prepare(`${query} ORDER BY key ASC LIMIT 20 OFFSET ?`)
-      .all(...values, (page - 1) * 20)
-      .map((row) => this.item(row, options.currentProfile, options.summary));
-    const ranking: AnalysisItem[] = [];
-    const manualReview: AnalysisItem[] = [];
-    // Sort only identity and numeric keys; hydrate evidence in that order afterward.
-    // The removed summary fields do not affect eligibility or the ranking values.
-    const rankedRows = this.db
-      .prepare(
-        `SELECT l.key,t.id task_id,views.viewed_at FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN recommendation_views views ON views.listing_key=l.key WHERE (${stateSql})='completed' AND json_type(t.result_json,'$.valuation.bare_role_value') IN ('integer','real')${options.showViewed ? "" : " AND views.listing_key IS NULL"} ORDER BY coalesce(json_extract(t.result_json,'$.valuation.price_difference_ratio'),json_extract(t.result_json,'$.valuation.margin_of_safety')) DESC,json_extract(t.result_json,'$.score') DESC,l.key ASC`,
+      .prepare(recordQuery)
+      .all(
+        ...(pageKeys
+          ? [...sourceValues, ...pageKeys, ...listingValues]
+          : [...values, (page - 1) * 20]),
       )
-      .iterate(...sourceValues);
-    const rankedProduct = this.db.prepare(
-      `SELECT ${productColumns},l.detail_json FROM listings l JOIN analysis_tasks t ON t.listing_key=l.key JOIN analysis_runs selected_run ON selected_run.id=t.run_id WHERE l.key=? AND t.id=?`,
-    );
-    for (const candidate of rankedRows) {
-      const row = rankedProduct.get(candidate.key, candidate.task_id)!;
-      const item = this.item(row, options.currentProfile, options.summary);
-      item.recommendationViewed = !!candidate.viewed_at;
-      if (!item.profileChanged) {
-        const record: SavedRoleRecord = {
+      .map((row) => this.item(row, options.currentProfile, options.summary));
+    yield;
+    let currentRanking: AnalysisItem[] = [],
+      currentManual: AnalysisItem[] = [],
+      rankingPagination: AnalysisOverview["rankingPagination"];
+    if (options.includeRanking !== false) {
+      const ranking: {
+        key: string;
+        taskId: SQLOutputValue;
+        signature: string;
+        cached: {
+          recommendation?: AnalysisItem["recommendation"];
+          assetSummary?: AnalysisItem["assetSummary"];
+        };
+      }[] = [];
+      const manualReview: AnalysisItem[] = [];
+      const profileKey = textHash(JSON.stringify(options.currentProfile || null));
+      const signature = (row: Row) =>
+        textHash(
+          JSON.stringify([row.listing_revision, row.task_revision, row.profile_json, profileKey]),
+        );
+      // Materialize only keys before yielding: never leave a SQLite iterator open
+      // while collection can update the same connection's tables.
+      const rankedRows = this.db
+        .prepare(
+          `SELECT l.key,t.id task_id,views.viewed_at FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN recommendation_views views ON views.listing_key=l.key WHERE (${stateSql})='completed' AND json_type(t.result_json,'$.valuation.bare_role_value') IN ('integer','real')${options.showViewed ? "" : " AND views.listing_key IS NULL"} ORDER BY coalesce(json_extract(t.result_json,'$.valuation.price_difference_ratio'),json_extract(t.result_json,'$.valuation.margin_of_safety')) DESC,json_extract(t.result_json,'$.score') DESC,l.key ASC`,
+        )
+        .all(...sourceValues);
+      const candidateKeys = new Set(rankedRows.map((row) => String(row.key)));
+      for (const key of this.recommendationCache.keys())
+        if (!candidateKeys.has(key)) this.recommendationCache.delete(key);
+      yield;
+      const revisions = "lv.revision listing_revision,tv.revision task_revision";
+      // Sorting carries keys only. Batch small version identities afterwards instead
+      // of rerunning source comparisons and historical-task selection for each key.
+      const metadata = new Map<SQLOutputValue, Row>();
+      const profiles = new Map<string, SQLOutputValue>();
+      const readProfile = this.db.prepare("SELECT profile_json FROM analysis_runs WHERE id=?");
+      for (let offset = 0; offset < rankedRows.length; offset += 128) {
+        const batch = rankedRows.slice(offset, offset + 128);
+        const rows = this.db
+          .prepare(`SELECT l.key,t.id task_id,t.run_id,${revisions}
+        FROM analysis_tasks t JOIN listings l ON l.key=t.listing_key
+        JOIN record_versions lv ON lv.entity='listings' AND lv.record_key=l.key
+        JOIN record_versions tv ON tv.entity='analysis_tasks' AND tv.record_key=t.id
+        WHERE t.id IN (${batch.map(() => "?").join(",")})`)
+          .all(...batch.map((row) => row.task_id));
+        for (const row of rows) {
+          const id = String(row.run_id);
+          if (!profiles.has(id)) profiles.set(id, readProfile.get(id)?.profile_json ?? null);
+          metadata.set(row.task_id, {
+            ...row,
+            state: "completed",
+            profile_json: profiles.get(id)!,
+          });
+        }
+        yield;
+      }
+      const rankedSource = `FROM listings l JOIN analysis_tasks t ON t.listing_key=l.key
+      JOIN analysis_runs selected_run ON selected_run.id=t.run_id
+      JOIN record_versions lv ON lv.entity='listings' AND lv.record_key=l.key
+      JOIN record_versions tv ON tv.entity='analysis_tasks' AND tv.record_key=t.id
+      LEFT JOIN recommendation_views views ON views.listing_key=l.key
+      WHERE l.key=? AND t.id=? AND (${taskSelection})`;
+      const rankedMetadata = this.db.prepare(
+        `SELECT l.key,${revisions},selected_run.profile_json,views.viewed_at,${stateSql} state ${rankedSource}`,
+      );
+      const rankedProduct = this.db.prepare(
+        `SELECT ${productColumns},l.detail_json,views.viewed_at,${revisions} ${rankedSource}`,
+      );
+      const selected = new Map<string, { taskId: SQLOutputValue; signature: string }>();
+      let deadline = performance.now() + 8;
+      for (const candidate of rankedRows) {
+        if (performance.now() >= deadline) {
+          yield;
+          deadline = performance.now() + 8;
+        }
+        const observed = metadata.get(candidate.task_id);
+        let row: Row | undefined = observed
+          ? { ...observed, viewed_at: candidate.viewed_at }
+          : undefined;
+        if (!row || row.state !== "completed" || (!options.showViewed && row.viewed_at)) continue;
+        const key = String(row.key),
+          fingerprint = signature(row);
+        let cached = this.recommendationCache.get(key);
+        let item: AnalysisItem | undefined;
+        let record: SavedRoleRecord | undefined;
+        if (!cached || cached.signature !== fingerprint) {
+          row = rankedProduct.get(candidate.key, candidate.task_id, ...sourceValues);
+          if (!row || row.state !== "completed" || signature(row) !== fingerprint) continue;
+          item = this.item(row, options.currentProfile, options.summary);
+          record = {
+            listing: JSON.parse(String(row.listing_json)),
+            detail: JSON.parse(String(row.detail_json)),
+            status: "complete",
+            error: null,
+          };
+          cached = {
+            signature: fingerprint,
+            ...(!item.profileChanged
+              ? { recommendation: recommendationFor(record, item.valuation) }
+              : {}),
+          };
+        }
+        // One small decision per current candidate; source documents are never cached.
+        this.recommendationCache.set(key, cached);
+        const status = cached.recommendation?.status;
+        if (status === "recommended") {
+          ranking.push({ key, taskId: candidate.task_id, signature: fingerprint, cached });
+        } else if (status === "manual" && manualReview.length < 10) {
+          if (!item) {
+            row = rankedProduct.get(candidate.key, candidate.task_id, ...sourceValues);
+            if (!row || row.state !== "completed" || signature(row) !== fingerprint) continue;
+          }
+          item ||= this.item(row, options.currentProfile, options.summary);
+          item.recommendationViewed = !!row.viewed_at;
+          item.recommendation = structuredClone(cached.recommendation);
+          manualReview.push(item);
+          selected.set(key, { taskId: candidate.task_id, signature: fingerprint });
+        }
+      }
+      // A yielding overview may overlap capture, deletion, quote expiry or a view action.
+      // Revalidate displayed rows synchronously before publishing; do not resurrect stale results.
+      const stillCurrent = (item: AnalysisItem) => {
+        const chosen = selected.get(item.key)!;
+        const row = rankedMetadata.get(item.key, chosen.taskId, ...sourceValues);
+        return (
+          !!row &&
+          row.state === "completed" &&
+          (options.showViewed || !row.viewed_at) &&
+          signature(row) === chosen.signature
+        );
+      };
+      currentManual = manualReview.filter(stillCurrent);
+      // Recheck every eligible key after the yielding scan so removed or viewed items
+      // do not inflate totals or leave an empty page.
+      const validRanking = ranking.filter((entry) => {
+        const row = rankedMetadata.get(entry.key, entry.taskId, ...sourceValues);
+        return (
+          !!row &&
+          row.state === "completed" &&
+          (options.showViewed || !row.viewed_at) &&
+          signature(row) === entry.signature
+        );
+      });
+      const rankingTotal = validRanking.length;
+      const rankingTotalPages = Math.max(1, Math.ceil(rankingTotal / 20));
+      const requestedPage = Number.isFinite(options.rankingPage)
+        ? Math.trunc(options.rankingPage!)
+        : 1;
+      const rankingPage = Math.max(1, Math.min(rankingTotalPages, requestedPage));
+      rankingPagination = { page: rankingPage, totalPages: rankingTotalPages, total: rankingTotal };
+      for (const entry of validRanking.slice((rankingPage - 1) * 20, rankingPage * 20)) {
+        const row = rankedProduct.get(entry.key, entry.taskId, ...sourceValues);
+        const { cached } = entry;
+        if (!row || row.state !== "completed" || signature(row) !== entry.signature) continue;
+        const item = this.item(row, options.currentProfile, options.summary);
+        item.recommendationViewed = !!row.viewed_at;
+        item.recommendation = structuredClone(cached.recommendation);
+        cached.assetSummary ??= capturedAssetSummary({
           listing: JSON.parse(String(row.listing_json)),
           detail: JSON.parse(String(row.detail_json)),
           status: "complete",
           error: null,
-        };
-        item.recommendation = recommendationFor(record, item.valuation);
-        if (item.recommendation.status === "recommended" && ranking.length < 10) {
-          item.assetSummary = capturedAssetSummary(record);
-          ranking.push(item);
-        }
-        if (item.recommendation.status === "manual" && manualReview.length < 10)
-          manualReview.push(item);
+        });
+        item.assetSummary = structuredClone(cached.assetSummary);
+        currentRanking.push(item);
       }
-      if (ranking.length === 10 && manualReview.length === 10) break;
     }
-    const history = this.db
+    const historyKeys = this.db
       .prepare(
-        `SELECT a.id,a.state,a.created_at,a.finished_at,a.error,t.id task_id,json_extract(t.source_listing_json,'$.name') name FROM analysis_attempts a JOIN analysis_tasks t ON a.task_id=t.id WHERE t.run_id=? ORDER BY a.created_at DESC,a.id ASC LIMIT 30`,
+        `SELECT a.id FROM analysis_attempts a JOIN analysis_tasks t ON a.task_id=t.id WHERE t.run_id=? ORDER BY a.created_at DESC,a.id ASC LIMIT 30`,
       )
       .all(run?.id || "")
+      .map((row) => row.id);
+    const history = this.db
+      .prepare(
+        `SELECT a.id,a.state,a.created_at,a.finished_at,a.error,t.id task_id,json_extract(t.source_listing_json,'$.name') name FROM analysis_attempts a JOIN analysis_tasks t ON a.task_id=t.id WHERE a.id IN (${historyKeys.map(() => "?").join(",") || "NULL"}) ORDER BY a.created_at DESC,a.id ASC`,
+      )
+      .all(...historyKeys)
       .map((row) => ({
         id: String(row.id),
         taskId: String(row.task_id),
@@ -1302,18 +1707,30 @@ export class AnalysisStore {
       ORDER BY completed.completed_at DESC,r.created_at DESC,completed.id DESC LIMIT 1)
       JOIN analysis_runs r ON r.id=t.run_id`;
     const resultTotal = Number(
-      this.db.prepare(`SELECT count(*) n ${resultsSource}`).get(...sourceValues)!.n,
+      this.db
+        .prepare(`SELECT count(*) n FROM listings l WHERE EXISTS(
+      SELECT 1 FROM analysis_tasks completed JOIN analysis_runs r ON r.id=completed.run_id
+      WHERE completed.listing_key=l.key AND completed.status='completed' AND completed.result_json IS NOT NULL
+      ${options.runId ? "AND completed.run_id=?" : ""})`)
+        .get(...sourceValues)!.n,
     );
     const resultTotalPages = Math.max(1, Math.ceil(resultTotal / 20));
     const resultPage = Math.max(
       1,
       Math.min(resultTotalPages, Math.trunc(options.resultsPage || 1)),
     );
+    const resultKeys = this.db
+      .prepare(
+        `SELECT t.id ${resultsSource} ORDER BY t.completed_at DESC,t.id DESC LIMIT 20 OFFSET ?`,
+      )
+      .all(...sourceValues, (resultPage - 1) * 20)
+      .map((row) => row.id);
     const results = this.db
       .prepare(`SELECT t.id task_id,t.source_listing_json,${resultColumn} result_json,t.completed_at,
       r.provider,r.model,r.profile_json,${stateSql} state ${resultsSource}
-      ORDER BY t.completed_at DESC,t.id DESC LIMIT 20 OFFSET ?`)
-      .all(...sourceValues, (resultPage - 1) * 20)
+      WHERE t.id IN (${resultKeys.map(() => "?").join(",") || "NULL"})
+      ORDER BY t.completed_at DESC,t.id DESC`)
+      .all(...sourceValues, ...resultKeys)
       .map((row) => {
         const listing = JSON.parse(String(row.source_listing_json)) as Listing;
         const savedProfile = row.profile_json
@@ -1341,32 +1758,16 @@ export class AnalysisStore {
           )!,
         };
       });
-    const counts = this.counts();
-    const captureTasks = {
-      total: counts.waitingDetail,
-      pending: counts.pendingDetail,
-      failed: counts.failedDetail,
-    };
-    const scopedCounts =
-      options.scope === "complete"
-        ? {
-            total: counts.complete,
-            complete: counts.complete,
-            waitingDetail: 0,
-            pendingDetail: 0,
-            failedDetail: 0,
-          }
-        : options.scope === "tasks"
-          ? { ...counts, total: counts.waitingDetail, complete: 0 }
-          : counts;
     return {
-      counts: scopedCounts,
-      captureTasks,
-      run,
-      activeRun,
+      ...(options.includeRanking === false ? { rankingDeferred: true } : {}),
+      ...this.collectionCounts(options.scope),
+      // A yielding records/ranking request must not publish the old progress snapshot.
+      run: run ? this.run(run.id) : null,
+      activeRun: this.activeRun(),
       runs,
-      ranking,
-      manualReview,
+      ranking: currentRanking,
+      ...(rankingPagination ? { rankingPagination } : {}),
+      manualReview: currentManual,
       records: { page, totalPages, total, items: records },
       history,
       results: {

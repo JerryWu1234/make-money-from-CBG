@@ -24,76 +24,58 @@ const complete = () => ({
   },
   petCapture: { version: 1 as const, collectedAt: "now", complete: true, issues: [] as string[] },
 });
-it("采集本轮自动重读缺项，核验通过才返回完整资料", async () => {
+
+it("读取返回时单件预算到期保留真实超时原因，不显示整轮暂停", async () => {
+  const control = new AbortController();
+  const reason = Object.assign(new Error("角色详情采集超过 180 秒总时限"), {
+    name: "IncompleteDetailError",
+  });
   const partial = complete();
   partial.equipmentCapture.complete = false;
-  partial.equipmentCapture.issues = ["武器属性尚未读取"];
-  const read = vi.fn().mockResolvedValueOnce(partial).mockResolvedValueOnce(complete());
-  const report = vi.fn();
-  const captured = await collectCompleteCapture(read, new AbortController().signal, report);
-  expect(captureIssues(captured, true)).toEqual([]);
-  expect(read).toHaveBeenCalledTimes(2);
-  expect(report).toHaveBeenCalledWith(expect.stringContaining("本轮内自动重读"));
+  partial.equipmentCapture.issues = ["装备名称缺失"];
+  const read = vi.fn(async () => {
+    control.abort(reason);
+    return partial;
+  });
+  const error = (await collectCompleteCapture(read, control.signal, vi.fn()).catch(
+    (error: unknown) => error,
+  )) as IncompleteCaptureError;
+  expect(error.message).toContain(reason.message);
+  expect(error.message).not.toContain("采集已暂停");
+  expect(error.cause).toBe(reason);
+  expect(error.detail).toBe(partial);
+  expect(read).toHaveBeenCalledOnce();
 });
-it("三次仍缺项时在采集阶段失败，不返回可分析的半成品", async () => {
+it("缺项只读取一次，保留部分资料而不返回可分析半成品", async () => {
   const partial = complete();
   partial.petCapture.complete = false;
   partial.petCapture.issues = ["宝宝装备图标未完整读取"];
-  const read = vi.fn().mockResolvedValue(partial);
+  const read = vi.fn().mockResolvedValueOnce(partial).mockResolvedValueOnce(complete());
+  const report = vi.fn();
   await expect(
-    collectCompleteCapture(read, new AbortController().signal, vi.fn()),
+    collectCompleteCapture(read, new AbortController().signal, report),
   ).rejects.toMatchObject({
     name: "IncompleteDetailError",
+    detail: partial,
     message: expect.stringContaining("未进入角色分析"),
   });
-  expect(read).toHaveBeenCalledTimes(3);
+  expect(read).toHaveBeenCalledOnce();
+  expect(report).not.toHaveBeenCalled();
 });
-it("连续重读失败保留最后一次部分资料，供本地详情定位缺项", async () => {
-  const partial = complete();
-  partial.equipmentCapture.complete = false;
-  partial.equipmentCapture.issues = ["装备库存未核验"];
-  const error = await collectCompleteCapture(
-    vi.fn().mockResolvedValue(partial),
-    new AbortController().signal,
-    vi.fn(),
-  ).catch((error) => error);
-  expect(error).toBeInstanceOf(IncompleteCaptureError);
-  expect(error.detail).toBe(partial);
-  expect(captureIssues(error.detail, true)).toContain("装备库存未核验");
-});
-it("中途超时携带已读资料，三次耗尽仍保留快照与原始错误", async () => {
+it("中途超时携带已读资料，不再重开整件并保留快照与原始错误", async () => {
   const partial = complete();
   delete (partial as RoleDetail).valuation;
   const timeout = Object.assign(new Error("坐骑标签读取超时"), { name: "TimeoutError" });
   const interrupted = new IncompleteCaptureError("详情读取中断（坐骑）", partial, timeout);
-  const read = vi.fn().mockRejectedValue(interrupted);
-  const error = await collectCompleteCapture(read, new AbortController().signal, vi.fn()).catch(
+  const read = vi.fn().mockRejectedValueOnce(interrupted).mockResolvedValueOnce(complete());
+  const error = (await collectCompleteCapture(read, new AbortController().signal, vi.fn()).catch(
     (error: unknown) => error,
-  );
+  )) as IncompleteCaptureError;
   expect(error).toBeInstanceOf(IncompleteCaptureError);
-  expect((error as IncompleteCaptureError).detail).toBe(partial);
-  expect((error as IncompleteCaptureError).cause).toBe(interrupted);
-  expect(read).toHaveBeenCalledTimes(3);
+  expect(error.detail).toBe(partial);
+  expect(error.cause).toBe(interrupted);
+  expect(read).toHaveBeenCalledOnce();
   expect(captureIssues(partial, true)).toContain("角色本体资料未核验");
-});
-it("携带部分资料的超时重读成功后只返回新一轮完整资料", async () => {
-  const partial = complete();
-  delete (partial as RoleDetail).valuation;
-  const full = complete();
-  const read = vi
-    .fn()
-    .mockRejectedValueOnce(
-      new IncompleteCaptureError(
-        "详情读取中断",
-        partial,
-        Object.assign(new Error("超时"), { name: "TimeoutError" }),
-      ),
-    )
-    .mockResolvedValueOnce(full);
-  await expect(collectCompleteCapture(read, new AbortController().signal, vi.fn())).resolves.toBe(
-    full,
-  );
-  expect(read).toHaveBeenCalledTimes(2);
 });
 it.each(["网站要求安全验证", "page.goto: net::ERR_CONNECTION_CLOSED"])(
   "部分资料包装不能吞掉不可重试原因：%s",
@@ -108,46 +90,32 @@ it.each(["网站要求安全验证", "page.goto: net::ERR_CONNECTION_CLOSED"])(
     expect(read).toHaveBeenCalledOnce();
   },
 );
-it("中途携带快照时收到暂停立即退出，不保存为采集失败或继续重读", async () => {
+it("中途携带快照时收到暂停立即退出，保留快照及暂停原因", async () => {
   const control = new AbortController();
   const reason = new Error("用户暂停采集");
+  const partial = complete();
   const read = vi.fn(async () => {
     control.abort(reason);
     throw new IncompleteCaptureError(
       "部分资料",
-      complete(),
+      partial,
       Object.assign(new Error("超时"), { name: "TimeoutError" }),
     );
   });
-  await expect(collectCompleteCapture(read, control.signal, vi.fn())).rejects.toBe(reason);
+  await expect(collectCompleteCapture(read, control.signal, vi.fn())).rejects.toMatchObject({
+    detail: partial,
+    cause: reason,
+  });
   expect(read).toHaveBeenCalledOnce();
 });
-it.each(["读取返回时", "下一轮开始前", "第二轮等待时"])(
-  "已返回的部分资料在%s暂停仍随异常保留，cause为原暂停原因",
-  async (stage) => {
-    const control = new AbortController();
-    const reason = new Error("用户暂停采集");
-    const partial = complete();
-    partial.equipmentCapture.complete = false;
-    partial.equipmentCapture.issues = ["装备库存未核验"];
-    const read = vi.fn(async () => {
-      if (read.mock.calls.length === 1) {
-        if (stage === "读取返回时") control.abort(reason);
-        return partial;
-      }
-      control.abort(reason);
-      control.signal.throwIfAborted();
-      return complete();
-    });
-    const error = await collectCompleteCapture(read, control.signal, () => {
-      if (stage === "下一轮开始前") control.abort(reason);
-    }).catch((error: unknown) => error);
-    expect(error).toBeInstanceOf(IncompleteCaptureError);
-    expect((error as IncompleteCaptureError).detail).toBe(partial);
-    expect((error as IncompleteCaptureError).cause).toBe(reason);
-    expect(read).toHaveBeenCalledTimes(stage === "第二轮等待时" ? 2 : 1);
-  },
-);
+it("已经暂停时不启动新读取", async () => {
+  const control = new AbortController();
+  const reason = new Error("用户暂停采集");
+  control.abort(reason);
+  const read = vi.fn().mockResolvedValue(complete());
+  await expect(collectCompleteCapture(read, control.signal, vi.fn())).rejects.toBe(reason);
+  expect(read).not.toHaveBeenCalled();
+});
 it("登录或安全验证不自动重试，停止采集而不越过访问限制", async () => {
   const read = vi
     .fn()
@@ -189,7 +157,7 @@ it("同URL导航中断最多重读三次，耗尽后仅标记该商品详情未�
   expect(read).toHaveBeenCalledTimes(3);
   expect(report).toHaveBeenCalledTimes(2);
 });
-it("同URL中断耗尽时仍保留已经读到的部分资料", async () => {
+it("已返回缺项资料后不再进行下一轮导航，保留该次资料", async () => {
   const partial = complete();
   partial.petCapture.complete = false;
   partial.petCapture.issues = ["宝宝资料缺项"];
@@ -199,7 +167,7 @@ it("同URL中断耗尽时仍保留已经读到的部分资料", async () => {
   );
   expect(error).toBeInstanceOf(IncompleteCaptureError);
   expect((error as IncompleteCaptureError).detail).toBe(partial);
-  expect(read).toHaveBeenCalledTimes(3);
+  expect(read).toHaveBeenCalledOnce();
 });
 it.each([
   ["其他角色", detailUrl, detailUrl.replace("FKBHP23OIEVM", "ANOTHERROLE")],
@@ -339,14 +307,14 @@ it.each(["all", "body"] as const)("当前%s采集合同不把六项师门资料�
     expect.arrayContaining([expect.stringContaining("师门技能")]),
   );
 });
-it("六项原文三次仍缺失时隔离该商品并保留原始部分资料", async () => {
+it("六项原文缺失时单次失败并保留原始部分资料", async () => {
   const detail = schoolCapture(6, 6);
   const read = vi.fn().mockResolvedValue(detail);
   const error = await collectCompleteCapture(read, new AbortController().signal, vi.fn()).catch(
     (error: unknown) => error,
   );
   expect(error).toBeInstanceOf(IncompleteCaptureError);
-  expect(read).toHaveBeenCalledTimes(3);
+  expect(read).toHaveBeenCalledOnce();
   expect((error as IncompleteCaptureError).detail.raw).toEqual(detail.raw);
   expect(schoolTab((error as IncompleteCaptureError).detail).items).toHaveLength(6);
 });
@@ -449,4 +417,18 @@ it("六项师门不得入完整库，补全后才推进断点并保留归档源�
   } finally {
     store.close();
   }
+});
+
+it("一次采集返回缺项时只保存缺项，不自动重新打开整件商品", async () => {
+  const partial = complete();
+  partial.equipmentCapture.complete = false;
+  partial.equipmentCapture.issues = ["武器属性尚未读取"];
+  const read = vi.fn().mockResolvedValueOnce(partial).mockResolvedValueOnce(complete());
+  await expect(
+    collectCompleteCapture(read, new AbortController().signal, vi.fn()),
+  ).rejects.toMatchObject({
+    name: "IncompleteDetailError",
+    detail: partial,
+  });
+  expect(read).toHaveBeenCalledOnce();
 });

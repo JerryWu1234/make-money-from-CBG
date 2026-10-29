@@ -1,13 +1,15 @@
 import type { Page } from "playwright-core";
-import { ensureWorkViewport, hoverForInspection } from "../viewport";
+import { clickForInspection, ensureWorkViewport, hoverForInspection } from "../viewport";
 import { parseListing } from "./listing";
 import {
   ListingChangedError,
+  CrawlAccessError,
   ListingDisappearedError,
   SellingOrderUnavailableError,
   type Listing,
   type ListingPage,
 } from "./types";
+import { accessNavigationFailure } from "./access-navigation";
 
 export interface ListingHoverDiagnostic {
   event: "timeout" | "retry_recovered";
@@ -76,30 +78,40 @@ export async function pace(signal: AbortSignal, minimum = 1200, spread = 900) {
 }
 export async function assertAvailable(page: Page) {
   if (page.isClosed()) throw new Error("工作页已关闭，请重新连接后续采");
-  const error = await page.evaluate(() => {
-    const globals = window as Window & {
-      CaptchaCheck?: { need_captcha?: boolean };
-      IsLogin?: number;
-      LoginInfo?: { login?: number };
-    };
-    const visible = (selector: string) =>
-      Array.from(document.querySelectorAll(selector)).some((el) => el.checkVisibility());
-    if (
-      globals.CaptchaCheck?.need_captcha ||
-      visible(".yidun_popup, .geetest_panel, #captcha_container")
-    )
-      return "网站要求安全验证，已暂停采集";
-    if (
-      globals.IsLogin === 0 ||
-      globals.LoginInfo?.login === 0 ||
-      /show_login\.py/.test(location.pathname)
-    )
-      return "网站登录已失效，已暂停采集";
-    if (/系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText))
-      return "网站繁忙或要求降低频率，已暂停采集";
-    return "";
-  });
-  if (error) throw new Error(error);
+  const navigation = await accessNavigationFailure(page, undefined);
+  if (navigation) throw navigation;
+  let issue: "login" | "verification" | "busy" | "";
+  try {
+    issue = await page.evaluate(() => {
+      const globals = window as Window & {
+        CaptchaCheck?: { need_captcha?: boolean };
+        IsLogin?: number | boolean;
+        LoginInfo?: { login?: number | boolean };
+      };
+      const visible = (selector: string) =>
+        Array.from(document.querySelectorAll(selector)).some((el) => el.checkVisibility());
+      if (
+        globals.CaptchaCheck?.need_captcha ||
+        visible(".yidun_popup, .geetest_panel, #captcha_container")
+      )
+        return "verification" as const;
+      if (
+        globals.IsLogin === 0 ||
+        globals.IsLogin === false ||
+        globals.LoginInfo?.login === 0 ||
+        globals.LoginInfo?.login === false ||
+        visible("#loginContainer,#qrcode,input[type=password]") ||
+        /show_login\.py/.test(location.pathname)
+      )
+        return "login" as const;
+      if (/系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText))
+        return "busy" as const;
+      return "" as const;
+    });
+  } catch (error) {
+    throw (await accessNavigationFailure(page, error)) || error;
+  }
+  if (issue) throw new CrawlAccessError(issue);
 }
 export async function readListings(page: Page): Promise<ListingPage> {
   await assertAvailable(page);
@@ -195,7 +207,7 @@ export async function gotoPage(
   await pace(signal);
   // 优先点击网站现有分页链接；远距离定位使用网站自己的跳页函数。
   const link = page.locator(`#pager_bar a[href="javascript:goto(${wanted})"]`).first();
-  if (await link.count()) await link.evaluate((el) => (el as HTMLElement).click());
+  if (await link.count()) await clickForInspection(link);
   else
     await page.evaluate((number) => {
       const goto = (window as Window & { goto?: (page: number) => void }).goto;
@@ -236,9 +248,7 @@ export async function prepareList(
       const current = await readListings(page);
       if (current.order === `${field} DESC`) break;
       await pace(signal);
-      await page
-        .locator(`#order_menu a[data_attr_name="${field}"]`)
-        .evaluate((el) => (el as HTMLElement).click());
+      await clickForInspection(page.locator(`#order_menu a[data_attr_name="${field}"]`));
       await waitList(page, 1);
     }
   }
@@ -251,7 +261,7 @@ export async function hoverListing(
   page: Page,
   item: Listing,
   signal: AbortSignal,
-  recoveredActionability?: (stage: "scroll" | "visibility") => void,
+  recoveredActionability?: (stage: "scroll" | "visibility" | "handle") => void,
   onDiagnostic?: (diagnostic: ListingHoverDiagnostic) => void,
 ): Promise<Listing> {
   checkAborted(signal);
@@ -271,13 +281,19 @@ export async function hoverListing(
   const sameVersion = (value: Listing) =>
     value.key === item.key && value.price === item.price && value.sellingTime === item.sellingTime;
   let diagnostic: ListingHoverDiagnostic | undefined;
+  let recovered = false;
   for (let attempt = 1; attempt <= 2; attempt++) {
     checkAborted(signal);
     const targets = page.locator(selector);
-    const target = targets.first();
-    if (!(await target.count())) throw new ListingDisappearedError();
+    const target = targets;
+    const count = await targets.count();
+    if (!count) throw new ListingDisappearedError();
+    if (count !== 1) throw new ListingChangedError();
     try {
-      await hoverForInspection(page, target, recoveredActionability);
+      await hoverForInspection(page, target, (stage) => {
+        recovered = true;
+        recoveredActionability?.(stage);
+      });
       break;
     } catch (error) {
       checkAborted(signal);
@@ -322,10 +338,12 @@ export async function hoverListing(
   const current = await readListings(page);
   const refreshed = current.items.find((value) => value.key === item.key);
   if (!refreshed) throw new ListingDisappearedError();
-  if (diagnostic) {
-    if (!sameVersion(refreshed) || current.page !== before.page || current.order !== before.order)
-      throw new ListingChangedError();
+  if (
+    (diagnostic || recovered) &&
+    (!sameVersion(refreshed) || current.page !== before.page || current.order !== before.order)
+  )
+    throw new ListingChangedError();
+  if (diagnostic)
     onDiagnostic?.({ ...diagnostic, event: "retry_recovered", attempt: 2, retrying: false });
-  }
   return refreshed;
 }
