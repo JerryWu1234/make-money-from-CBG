@@ -60,7 +60,7 @@ function overviewStatus(profile: ReturnType<typeof loadProfile>) {
 }
 export function analysisOverview(options: Parameters<AnalysisStore["overview"]>[0]) {
   service().store.recover();
-  const profile = loadProfile(service().store.db);
+  const profile = loadProfile(service().store.db, PROMPT_FILE, { allowExpiredMarket: true });
   return {
     ...service().store.overview({ ...options, currentProfile: profile }),
     ...overviewStatus(profile),
@@ -71,7 +71,7 @@ export async function analysisOverviewAsync(
   signal?: AbortSignal,
 ) {
   service().store.recover();
-  const profile = loadProfile(service().store.db);
+  const profile = loadProfile(service().store.db, PROMPT_FILE, { allowExpiredMarket: true });
   const store = service().store;
   const file = String(store.db.prepare("PRAGMA database_list").get()?.file || "");
   const overview = file
@@ -82,7 +82,7 @@ export async function analysisOverviewAsync(
 export function analysisProgress(options: Parameters<AnalysisStore["progress"]>[0]) {
   const current = service();
   current.store.recover();
-  const profile = loadProfile(current.store.db);
+  const profile = loadProfile(current.store.db, PROMPT_FILE, { allowExpiredMarket: true });
   return { ...current.store.progress(options), ...overviewStatus(profile) };
 }
 
@@ -208,7 +208,10 @@ export async function pauseAnalysis(id?: string) {
   return id ? service().store.run(id) : service().store.activeRun();
 }
 export function analysisDetail(id: string) {
-  const detail = service().store.detail(id, loadProfile(service().store.db));
+  const detail = service().store.detail(
+    id,
+    loadProfile(service().store.db, PROMPT_FILE, { allowExpiredMarket: true }),
+  );
   if (!detail) throw new Error("商品分析记录不存在");
   return detail;
 }

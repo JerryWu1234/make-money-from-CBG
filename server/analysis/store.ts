@@ -1339,6 +1339,14 @@ export class AnalysisStore {
       summary: result?.summary ?? null,
       highlights: row.state === "completed" ? result?.highlights || [] : listing.highlights || [],
       error: nullable(row.task_error),
+      marketExpired: savedProfile
+        ? automaticMarketExpired({
+            ...savedProfile,
+            marketSources: savedProfile.marketSources?.filter(
+              (source) => source.serverId === listing.serverId,
+            ),
+          })
+        : false,
       profileChanged:
         !!row.task_id &&
         !!currentProfile &&
