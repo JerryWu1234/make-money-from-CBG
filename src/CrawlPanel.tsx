@@ -5,7 +5,8 @@ import { RoleDetailDrawer } from "./RoleDetailDrawer";
 import { SavedRoleList, displayTime } from "./SavedRoleList";
 import { ScanSchedulePanel } from "./ScanSchedulePanel";
 import { RunRecordSettings } from "./RunRecordSettings";
-import { replaceSavedRecordKey, savedRecordKey } from "./saved-view-state";
+import { SqliteDataCleanup } from "./SqliteDataCleanup";
+import { replaceSavedRecordKey, replaceSavedRecordsPage, savedRecordKey } from "./saved-view-state";
 
 type Status = CrawlStatus & {
   recent?: { key: string; name: string; price: string; status: string; error?: string }[];
@@ -30,6 +31,9 @@ export function CrawlPanel({
   const [concurrency, setConcurrency] = useState(String(DEFAULT_CRAWL_CONCURRENCY));
   const [analyzeEquipment, setAnalyzeEquipment] = useState<boolean | null>(null);
   const [savingMode, setSavingMode] = useState(false);
+  const [scheduleBusy, setScheduleBusy] = useState(true);
+  const [dataRevision, setDataRevision] = useState(0);
+  const clearedVersion = useRef(0);
   useEffect(() => {
     const control = new AbortController();
     void fetch("/api/crawl/settings", { signal: control.signal, cache: "no-store" })
@@ -68,8 +72,19 @@ export function CrawlPanel({
     setSelectedKey(key);
     replaceSavedRecordKey(key);
   }, []);
+  const dataCleared = (next: CrawlStatus) => {
+    clearedVersion.current++;
+    setStatus(next);
+    onRunning(false);
+    setError("");
+    setTransportError("");
+    selectRecord(null);
+    replaceSavedRecordsPage(1);
+    setDataRevision((value) => value + 1);
+  };
   useEffect(() => {
     let closed = false;
+    const version = clearedVersion.current;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
@@ -79,16 +94,18 @@ export function CrawlPanel({
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "无法读取采集进度");
-        if (!closed) {
+        if (!closed && version === clearedVersion.current) {
           setStatus(data);
           if (!data.running && data.totalSaved === 0 && !data.recent?.length) selectRecord(null);
           setTransportError("");
           onRunning(data.running);
         }
       } catch (e) {
-        if (!closed) setTransportError(pollingError(e, "读取采集进度"));
+        if (!closed && version === clearedVersion.current)
+          setTransportError(pollingError(e, "读取采集进度"));
       } finally {
-        if (!closed) timer = setTimeout(() => void poll(), 1500);
+        if (!closed && version === clearedVersion.current)
+          timer = setTimeout(() => void poll(), 1500);
       }
     };
     void poll();
@@ -96,7 +113,7 @@ export function CrawlPanel({
       closed = true;
       clearTimeout(timer);
     };
-  }, [onRunning, selectRecord]);
+  }, [dataRevision, onRunning, selectRecord]);
   const action = useCallback(
     async (command: "start" | "stop") => {
       const count = Number(concurrency);
@@ -177,6 +194,12 @@ export function CrawlPanel({
         开关只影响新分析任务；已开始的分析沿用原设置。
       </p>
       <RunRecordSettings />
+      <SqliteDataCleanup
+        disabled={
+          !status || !!status.running || busy || waitingForReady || savingMode || scheduleBusy
+        }
+        onCleared={dataCleared}
+      />
       <label className="crawl-concurrency">
         并发抓取数
         <input
@@ -226,7 +249,12 @@ export function CrawlPanel({
         秒检查一次，同时逐页核对历史列表。修改后在下次开始或继续采集时生效。
       </p>
       <p className="status-note">手动开始采集会关闭已启用的定时计划。</p>
-      <ScanSchedulePanel ready={ready} running={!!status?.running} />
+      <ScanSchedulePanel
+        key={`schedule-${dataRevision}`}
+        ready={ready}
+        running={!!status?.running}
+        onBusy={setScheduleBusy}
+      />
       {error && (
         <p role="alert" className="error-message">
           {error}
@@ -311,6 +339,7 @@ export function CrawlPanel({
         </div>
       )}
       <SavedRoleList
+        key={`records-${dataRevision}`}
         running={!!status?.running}
         selectedKey={selectedKey}
         onSelect={selectRecord}

@@ -475,20 +475,21 @@ export class CrawlStore {
     this.db.close();
   }
   clear() {
-    const hasAnalysis = this.db
-      .prepare("SELECT 1 FROM sqlite_master WHERE name='analysis_lock'")
-      .get();
-    if (
-      hasAnalysis &&
-      this.db.prepare("SELECT 1 FROM analysis_lock WHERE expires_at>? LIMIT 1").get(Date.now())
-    )
-      throw new Error("分析任务仍在执行，请先暂停分析再清空数据");
-    if (this.db.prepare("SELECT 1 FROM crawl_lock WHERE expires_at>? LIMIT 1").get(Date.now()))
-      throw new Error("采集任务仍持有锁，请先暂停再清空数据");
     this.db.exec("PRAGMA secure_delete=ON; BEGIN IMMEDIATE");
     try {
+      const hasAnalysis = this.db
+        .prepare("SELECT 1 FROM sqlite_master WHERE name='analysis_lock'")
+        .get();
+      if (
+        hasAnalysis &&
+        this.db.prepare("SELECT 1 FROM analysis_lock WHERE expires_at>? LIMIT 1").get(Date.now())
+      )
+        throw new Error("分析任务仍在执行，请先暂停分析再清空数据");
+      if (this.db.prepare("SELECT 1 FROM crawl_lock WHERE expires_at>? LIMIT 1").get(Date.now()))
+        throw new Error("采集任务仍持有锁，请先暂停再清空数据");
       for (const table of [
         "recommendation_views",
+        "analysis_school_formula_confirmations",
         "analysis_attempts",
         "analysis_tasks",
         "analysis_runs",

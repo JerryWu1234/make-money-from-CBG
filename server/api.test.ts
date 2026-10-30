@@ -590,6 +590,26 @@ describe("采集接口与定时计划", () => {
     expect(mocks.disableScanSchedule).not.toHaveBeenCalled();
   });
 
+  // A second SQLite connection can still hold a lock after the in-process checks.
+  it("底层清理拒绝或失败时不关闭计划，成功后才关闭", async () => {
+    const { apiMiddleware } = await import("./api");
+    mocks.clearCrawl.mockImplementationOnce(() => {
+      throw new Error("采集任务仍持有锁，请先暂停再清空数据");
+    });
+    const refused = response();
+    await apiMiddleware(request("/api/crawl/clear"), refused, vi.fn());
+    expect(refused.statusCode).toBe(500);
+    expect(mocks.disableScanSchedule).not.toHaveBeenCalled();
+    mocks.clearCrawl.mockReturnValueOnce({ running: false, totalSaved: 0 });
+    const cleared = response();
+    await apiMiddleware(request("/api/crawl/clear"), cleared, vi.fn());
+    expect(cleared.statusCode).toBe(200);
+    expect(mocks.disableScanSchedule).toHaveBeenCalledOnce();
+    expect(mocks.clearCrawl.mock.invocationCallOrder[1]).toBeLessThan(
+      mocks.disableScanSchedule.mock.invocationCallOrder[0],
+    );
+  });
+
   it("手动采集真正启动后才关闭计划", async () => {
     const { apiMiddleware } = await import("./api");
     mocks.startCrawl.mockResolvedValueOnce({ status: { running: true }, started: false });
