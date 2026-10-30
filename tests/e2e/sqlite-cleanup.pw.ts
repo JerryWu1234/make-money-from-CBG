@@ -17,7 +17,8 @@ import { browserStatus } from "../fixtures/saved-role";
 // disables the schedule; repeated confirmation submits twice; stale second-page
 // responses restore deleted rows; browser storage/settings/files are removed;
 // reopening SQLite restores old records; a new capture cannot be saved afterward;
-// or a delayed configure/enable chain can overlap clearing and re-enable a plan.
+// or a delayed configure/enable chain can overlap clearing and re-enable a plan;
+// the search input or its debounce can restore an old filter after clearing.
 // The browser, file SQLite and production stores/clear() are real. The HTTP adapter,
 // captured roles, AI responses and displayed activity are fixtures, not the live API.
 const origin = "http://cbg-sqlite-cleanup.test";
@@ -227,6 +228,10 @@ async function fixture(page: Page, testInfo: TestInfo) {
               resultsPage: Number(url.searchParams.get("resultsPage") || 1),
               rankingPage: Number(url.searchParams.get("rankingPage") || 1),
               includeRanking: url.searchParams.get("includeRanking") !== "false",
+              includeRecords: url.searchParams.get("includeRecords") !== "false",
+              includeResults: url.searchParams.get("includeResults") !== "false",
+              search: url.searchParams.get("search") || undefined,
+              filter: url.searchParams.get("filter") || undefined,
               showViewed: url.searchParams.get("showViewed") === "true",
             }),
             captureActivity: { running, phase: running ? "collecting" : "idle" },
@@ -668,6 +673,69 @@ test("分析页SQLite清理：第二页分析详情→清空→榜单/商品/历
             "all products",
             "history",
           ],
+          repeat:
+            "vp run build && vp exec playwright test tests/e2e/sqlite-cleanup.pw.ts --workers=1 --trace=on",
+        },
+        null,
+        2,
+      ),
+    );
+  } finally {
+    await page.close();
+    backend.close();
+  }
+});
+
+test("分析页清空重置搜索，防抖结束后重新采集的不同角色仍可见", async ({ page }, testInfo) => {
+  const backend = await fixture(page, testInfo);
+  const queries: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname === "/api/analysis/status") queries.push(url.searchParams.get("search") || "");
+  });
+  try {
+    await page.goto(origin + "/analysis-preview");
+    await page.getByRole("tab", { name: "全部商品" }).click();
+    const search = page.getByRole("searchbox", { name: "搜索商品" });
+    await search.fill("sqlite-role-1");
+    await expect.poll(() => queries.at(-1)).toBe("sqlite-role-1");
+    const products = page.getByRole("tabpanel", { name: "全部商品" });
+    await expect(products).toContainText("角色sqlite-role-1");
+    const beforeClear = queries.length;
+    await page.getByRole("button", { name: "清空 SQLite 数据", exact: true }).click();
+    await page
+      .getByRole("dialog", { name: "确认清空 SQLite 数据" })
+      .getByRole("button", { name: "确认清空", exact: true })
+      .click();
+    await expect(
+      page.getByRole("status").filter({ hasText: "SQLite 业务数据已清空。" }),
+    ).toBeVisible();
+    await expect(search).toHaveValue("");
+    await expect(products.locator("tbody tr")).toHaveCount(0);
+    // Cross both the 250ms debounce and the 5s overview polling interval.
+    backend.addRecord("new-after-search-clear");
+    await expect(products).toContainText("角色new-after-search-clear", { timeout: 10000 });
+    expect(queries.slice(beforeClear).every((query) => query === "")).toBe(true);
+    expect(backend.clearRequests).toBe(1);
+    await page.screenshot({ path: testInfo.outputPath("sqlite-search-reset.png"), fullPage: true });
+    await page.reload();
+    await page.getByRole("tab", { name: "全部商品" }).click();
+    await expect(search).toHaveValue("");
+    await expect(products).toContainText("角色new-after-search-clear");
+    await writeFile(
+      testInfo.outputPath("evidence.json"),
+      JSON.stringify(
+        {
+          fixture: true,
+          scope:
+            "Real file SQLite, production stores and isolated Chrome; fixture HTTP, role and analysis data",
+          searchBeforeClear: "sqlite-role-1",
+          searchAfterClear: await search.inputValue(),
+          queries,
+          queriesAfterClear: queries.slice(beforeClear),
+          newRoleVisibleAfterPollingAndReload: true,
+          clearRequests: backend.clearRequests,
+          database: backend.database,
           repeat:
             "vp run build && vp exec playwright test tests/e2e/sqlite-cleanup.pw.ts --workers=1 --trace=on",
         },

@@ -663,6 +663,7 @@ export function AnalysisPreview() {
             setPage(1);
             setRankingPage(1);
             setResultsPage(1);
+            setSearchInput("");
             setSearch("");
             setFilter("all");
             setShowViewed(false);
