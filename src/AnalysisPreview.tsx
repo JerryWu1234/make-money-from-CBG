@@ -77,6 +77,8 @@ export function AnalysisPreview() {
   }, []);
   const [tab, setTab] = useState<"ranking" | "all" | "history">("history");
   const [snapshot, setData] = useState<AnalysisOverview | null>(null);
+  const [loadedTab, setLoadedTab] = useState<typeof tab | null>(null);
+  const listReady = !!snapshot && loadedTab === tab;
   const [progress, setProgress] = useState<AnalysisProgress | null>(null);
   const data: AnalysisOverview | null = progress
     ? {
@@ -93,6 +95,7 @@ export function AnalysisPreview() {
   const [page, setPage] = useState(1);
   const [rankingPage, setRankingPage] = useState(1);
   const [resultsPage, setResultsPage] = useState(1);
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [showViewed, setShowViewed] = useState(false);
@@ -158,6 +161,14 @@ export function AnalysisPreview() {
     }
   }, [provider]);
   useEffect(() => {
+    if (searchInput === search) return;
+    const timer = setTimeout(() => {
+      setSearch(searchInput);
+      setPage(1);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchInput, search]);
+  useEffect(() => {
     const controller = new AbortController();
     const version = clearedVersion.current;
     let timer: ReturnType<typeof setTimeout>;
@@ -213,10 +224,12 @@ export function AnalysisPreview() {
           page: String(page),
           rankingPage: String(rankingPage),
           resultsPage: String(resultsPage),
-          search,
-          filter,
+          search: tab === "all" ? search : "",
+          filter: tab === "all" ? filter : "all",
           showViewed: String(showViewed),
           includeRanking: String(tab === "ranking"),
+          includeRecords: String(tab === "all"),
+          includeResults: String(tab === "history"),
           scope: "complete",
         });
         const next = await request<AnalysisOverview>(
@@ -226,6 +239,7 @@ export function AnalysisPreview() {
         );
         if (controller.signal.aborted || version !== clearedVersion.current) return;
         setData(next);
+        setLoadedTab(tab);
         setLoadError(null);
         if (next.records.page !== page) setPage(next.records.page);
         if (
@@ -395,7 +409,10 @@ export function AnalysisPreview() {
     <div className="analysis-page">
       <header className="analysis-topbar">
         <a className="analysis-brand" href="/">
-          <span className="analysis-brand-mark">◇</span> 藏宝阁助手
+          <span className="analysis-brand-mark" aria-hidden="true">
+            藏
+          </span>{" "}
+          藏宝阁助手
         </a>
         <nav className="analysis-nav" aria-label="主导航">
           <a href="/">采集工作台</a>
@@ -406,12 +423,7 @@ export function AnalysisPreview() {
       <main className="analysis-shell">
         <section className="analysis-hero">
           <div className="analysis-hero-copy">
-            <span className="analysis-eyebrow">PRODUCT ANALYSIS / 商品分析</span>
-            <h1>
-              每件商品一条，
-              <br />
-              <em>点开查看详情</em>
-            </h1>
+            <h1>商品分析</h1>
             <p>
               {data?.profile?.equipmentSearch || data?.profile?.petSearch
                 ? "装备分析已开启：按设置核对资产并查价，比较参考估值与挂牌价。"
@@ -478,10 +490,15 @@ export function AnalysisPreview() {
               默认同时分析 {DEFAULT_ANALYSIS_CONCURRENCY}{" "}
               个角色；修改后在下次开始、继续或重试时生效。
             </p>
-            <p className="analysis-start-hint">默认新号配额 7、老号配额 3；空闲名额可互相借用。</p>
-            <p className="analysis-start-hint">
-              遇到 AI 限流时统一冷却、降低请求并发，成功后逐步恢复。
-            </p>
+            <details className="analysis-usage-note">
+              <summary>队列与限流说明</summary>
+              <p className="analysis-start-hint">
+                默认新号配额 7、老号配额 3；空闲名额可互相借用。
+              </p>
+              <p className="analysis-start-hint">
+                遇到 AI 限流时统一冷却、降低请求并发，成功后逐步恢复。
+              </p>
+            </details>
             {run?.rateLimit && (
               <p className="analysis-pending-note" role="status" aria-label="AI限流恢复状态">
                 {run.rateLimit.retryAt > Date.now()
@@ -601,16 +618,10 @@ export function AnalysisPreview() {
               </p>
             )}
           </div>
-          <div className="analysis-hero-visual" aria-hidden="true">
+          <div className="analysis-hero-visual">
             <div className="analysis-visual-top">
               <span>逐件分析</span>
               <span>{providerNames[provider]}</span>
-            </div>
-            <div className="analysis-visual-orbit">
-              <span>底子</span>
-              <span>装备</span>
-              <span>召唤兽</span>
-              <span>完整原文</span>
             </div>
             <div className="analysis-visual-focus">
               <small>当前状态</small>
@@ -639,15 +650,6 @@ export function AnalysisPreview() {
                   : `${data?.counts.complete || 0} 件可分析`}
               </span>
             </div>
-            <div className="analysis-visual-bars">
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-              <i />
-            </div>
           </div>
         </section>
         <SqliteDataCleanup
@@ -674,7 +676,6 @@ export function AnalysisPreview() {
         />
         <div className="analysis-overview" aria-label="分析页面概览">
           <div>
-            <span className="analysis-overview-icon">01</span>
             <small>完整商品</small>
             <strong>{data?.counts.total || 0} 件</strong>
             <p>
@@ -682,7 +683,6 @@ export function AnalysisPreview() {
             </p>
           </div>
           <div>
-            <span className="analysis-overview-icon">02</span>
             <small>已完成分析</small>
             <strong>{snapshot ? `${snapshot.results?.total || 0} 件已有结果` : "正在加载…"}</strong>
             <p>
@@ -692,7 +692,6 @@ export function AnalysisPreview() {
             </p>
           </div>
           <div>
-            <span className="analysis-overview-icon">03</span>
             <small>原文留档</small>
             <strong>一件商品，一份原文</strong>
             <p>保留输入、完整请求与每次调用回复</p>
@@ -700,7 +699,6 @@ export function AnalysisPreview() {
         </div>
         <div className="analysis-workspace">
           <section className="analysis-results" aria-label="商品分析结果">
-            {!snapshot && <p role="status">正在加载商品记录…</p>}
             <div className="analysis-tabbar" role="tablist" aria-label="分析结果视图">
               <button
                 role="tab"
@@ -725,7 +723,7 @@ export function AnalysisPreview() {
             </div>
             {tab === "ranking" ? (
               <div className="analysis-rank-list" role="tabpanel" aria-label="推荐榜">
-                {snapshot?.rankingDeferred && <p role="status">正在加载推荐榜…</p>}
+                {!listReady && <p role="status">正在加载推荐榜…</p>}
                 <label>
                   <input
                     type="checkbox"
@@ -738,7 +736,6 @@ export function AnalysisPreview() {
                   />
                   显示已查看的推荐
                 </label>
-                {!snapshot && <p role="status">正在加载推荐榜…</p>}
                 {copyNotice && (
                   <p role={copyNotice.error ? "alert" : "status"}>{copyNotice.message}</p>
                 )}
@@ -768,7 +765,7 @@ export function AnalysisPreview() {
                     <p>这些是筛选条件，不代表装备或宝宝已估价，也不证明资产能够补足差额。</p>
                   </details>
                 </div>
-                {!!snapshot && !snapshot.rankingDeferred && !data?.ranking.length && (
+                {listReady && !!snapshot && !snapshot.rankingDeferred && !data?.ranking.length && (
                   <div className="analysis-start-empty">
                     <strong>
                       {run?.completed
@@ -784,7 +781,7 @@ export function AnalysisPreview() {
                     </p>
                   </div>
                 )}
-                {snapshot &&
+                {listReady &&
                   data?.ranking.map((item, index) => (
                     <article
                       className={`analysis-rank-card ${rankingPage === 1 && index === 0 ? "analysis-rank-first" : ""}`}
@@ -806,6 +803,11 @@ export function AnalysisPreview() {
                           <span>{item.server}</span>
                         </div>
                         <p>{item.summary}</p>
+                        {item.marketExpired && (
+                          <p className="analysis-pending-note">
+                            历史结果 · 行情已过期，请刷新后重新分析
+                          </p>
+                        )}
                         <p>
                           列表核对：{displayTime(item.lastSeenAt)} · 资料采集：
                           {displayTime(item.collectedAt)}
@@ -860,37 +862,37 @@ export function AnalysisPreview() {
                       </div>
                     </article>
                   ))}
-                {!snapshot?.rankingDeferred && (
-                  <div className="analysis-pagination">
-                    <span>
-                      共 {data?.rankingPagination?.total || 0} 件 · 第 {rankingPage} /{" "}
-                      {data?.rankingPagination?.totalPages || 1} 页
-                    </span>
-                    <button
-                      disabled={!snapshot || rankingPage <= 1}
-                      onClick={() => {
-                        setData(null);
-                        setRankingPage((value) => value - 1);
-                      }}
-                    >
-                      上一页
-                    </button>
-                    <button
-                      disabled={
-                        !snapshot || rankingPage >= (data?.rankingPagination?.totalPages || 1)
-                      }
-                      onClick={() => {
-                        setData(null);
-                        setRankingPage((value) => value + 1);
-                      }}
-                    >
-                      下一页
-                    </button>
-                  </div>
-                )}
+                <div className="analysis-pagination">
+                  <span>
+                    {listReady
+                      ? `共 ${data?.rankingPagination?.total || 0} 件 · 第 ${rankingPage} / ${data?.rankingPagination?.totalPages || 1} 页`
+                      : "正在加载…"}
+                  </span>
+                  <button
+                    disabled={!listReady || rankingPage <= 1}
+                    onClick={() => {
+                      setData(null);
+                      setRankingPage((value) => value - 1);
+                    }}
+                  >
+                    上一页
+                  </button>
+                  <button
+                    disabled={
+                      !listReady || rankingPage >= (data?.rankingPagination?.totalPages || 1)
+                    }
+                    onClick={() => {
+                      setData(null);
+                      setRankingPage((value) => value + 1);
+                    }}
+                  >
+                    下一页
+                  </button>
+                </div>
               </div>
             ) : tab === "all" ? (
               <div role="tabpanel" aria-label="全部商品">
+                {!listReady && <p role="status">正在加载商品记录…</p>}
                 <div className="analysis-filterbar">
                   <label className="analysis-search">
                     <span aria-hidden="true">⌕</span>
@@ -898,11 +900,8 @@ export function AnalysisPreview() {
                       type="search"
                       aria-label="搜索商品"
                       placeholder="搜索角色、服务器、资料"
-                      value={search}
-                      onChange={(event) => {
-                        setSearch(event.target.value);
-                        setPage(1);
-                      }}
+                      value={searchInput}
+                      onChange={(event) => setSearchInput(event.target.value)}
                     />
                   </label>
                   <label className="analysis-filter">
@@ -943,183 +942,190 @@ export function AnalysisPreview() {
                       </tr>
                     </thead>
                     <tbody>
-                      {data?.records.items.map((item) => (
-                        <tr key={item.key}>
-                          <td>
-                            <strong>{item.name}</strong>
-                            <small>{item.server}</small>
-                          </td>
-                          <td className="analysis-table-price">{price(item.price)}</td>
-                          <td>
-                            <span
-                              className={`analysis-status ${item.collectionStatus === "complete" ? "is-complete" : "is-pending"}`}
-                            >
-                              {item.collectionStatus === "complete" ? "详情完整" : "待补采"}
-                            </span>
-                          </td>
-                          <td>
-                            <span className={`analysis-state analysis-state-${item.state}`}>
-                              {item.state === "completed" && item.profileChanged
-                                ? "上次分析"
-                                : item.state === "completed" &&
-                                    item.valuation?.estimated_value_range
-                                  ? "分析完成 · 参考区间"
+                      {listReady &&
+                        data?.records.items.map((item) => (
+                          <tr key={item.key}>
+                            <td>
+                              <strong>{item.name}</strong>
+                              <small>{item.server}</small>
+                            </td>
+                            <td className="analysis-table-price">{price(item.price)}</td>
+                            <td>
+                              <span
+                                className={`analysis-status ${item.collectionStatus === "complete" ? "is-complete" : "is-pending"}`}
+                              >
+                                {item.collectionStatus === "complete" ? "详情完整" : "待补采"}
+                              </span>
+                            </td>
+                            <td>
+                              <span className={`analysis-state analysis-state-${item.state}`}>
+                                {item.state === "completed" && item.profileChanged
+                                  ? "上次分析"
                                   : item.state === "completed" &&
-                                      item.valuation?.decision === "NEED_INFO"
-                                    ? "分析完成 · 待补齐"
-                                    : item.state === "ready" && run
-                                      ? "待分析"
-                                      : labels[item.state]}
-                            </span>
-                            {item.error && <small>{item.error}</small>}
-                          </td>
-                          <td>
-                            {item.valuation ? (
-                              <>
-                                {item.profileChanged && <small>上次结果</small>}
-                                <strong>{valuationDecisionLabel(item.valuation)}</strong>
-                                <small>
-                                  {valuationPriceSummary(item.valuation).label}{" "}
-                                  {valuationSummaryText(item.valuation)}
-                                </small>
-                                {item.valuation.comparison_mode === "listing-only" &&
-                                  item.valuation.price_difference != null && (
-                                    <small>{valuationPriceDifferenceText(item.valuation)}</small>
-                                  )}
-                                {item.valuation.comparison_mode !== "listing-only" &&
-                                  item.valuation.estimated_price_difference && (
-                                    <small>
-                                      差额区间{" "}
-                                      {valuationMoney(
-                                        item.valuation.estimated_price_difference.min,
-                                      )}
-                                      —
-                                      {valuationMoney(
-                                        item.valuation.estimated_price_difference.max,
-                                      )}
-                                    </small>
-                                  )}
-                                {item.valuation.comparison_mode !== "listing-only" &&
-                                  item.valuation.max_listing_price !== null && (
-                                    <small>
-                                      最高买入 {valuationMoney(item.valuation.max_listing_price)}
-                                    </small>
-                                  )}
-                                {item.valuation.decision === "NEED_INFO" &&
-                                  !item.valuation.estimated_value_range && (
-                                    <small>查看分析里的补齐建议</small>
-                                  )}
-                              </>
-                            ) : item.state === "completed" ? (
-                              (item.score ?? "资料不足")
-                            ) : (
-                              "—"
-                            )}
-                          </td>
-                          <td>
-                            <button onClick={() => viewItem(item)}>
-                              {item.taskId ? "查看分析" : "查看资料"}
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
+                                      item.valuation?.estimated_value_range
+                                    ? "分析完成 · 参考区间"
+                                    : item.state === "completed" &&
+                                        item.valuation?.decision === "NEED_INFO"
+                                      ? "分析完成 · 待补齐"
+                                      : item.state === "ready" && run
+                                        ? "待分析"
+                                        : labels[item.state]}
+                              </span>
+                              {item.error && <small>{item.error}</small>}
+                            </td>
+                            <td>
+                              {item.valuation ? (
+                                <>
+                                  {item.profileChanged && <small>上次结果</small>}
+                                  <strong>{valuationDecisionLabel(item.valuation)}</strong>
+                                  <small>
+                                    {valuationPriceSummary(item.valuation).label}{" "}
+                                    {valuationSummaryText(item.valuation)}
+                                  </small>
+                                  {item.valuation.comparison_mode === "listing-only" &&
+                                    item.valuation.price_difference != null && (
+                                      <small>{valuationPriceDifferenceText(item.valuation)}</small>
+                                    )}
+                                  {item.valuation.comparison_mode !== "listing-only" &&
+                                    item.valuation.estimated_price_difference && (
+                                      <small>
+                                        差额区间{" "}
+                                        {valuationMoney(
+                                          item.valuation.estimated_price_difference.min,
+                                        )}
+                                        —
+                                        {valuationMoney(
+                                          item.valuation.estimated_price_difference.max,
+                                        )}
+                                      </small>
+                                    )}
+                                  {item.valuation.comparison_mode !== "listing-only" &&
+                                    item.valuation.max_listing_price !== null && (
+                                      <small>
+                                        最高买入 {valuationMoney(item.valuation.max_listing_price)}
+                                      </small>
+                                    )}
+                                  {item.valuation.decision === "NEED_INFO" &&
+                                    !item.valuation.estimated_value_range && (
+                                      <small>查看分析里的补齐建议</small>
+                                    )}
+                                </>
+                              ) : item.state === "completed" ? (
+                                (item.score ?? "资料不足")
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                            <td>
+                              <button onClick={() => viewItem(item)}>
+                                {item.taskId ? "查看分析" : "查看资料"}
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
                     </tbody>
                   </table>
                 </div>
-                {!!snapshot && !data?.records.items.length && (
+                {listReady && !!snapshot && !data?.records.items.length && (
                   <p className="analysis-empty">没有符合条件的商品</p>
                 )}
-                <div className="analysis-pagination">
-                  <span>
-                    共 {data?.records.total || 0} 件 · 第 {page} / {data?.records.totalPages || 1}{" "}
-                    页
-                  </span>
-                  <button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>
-                    上一页
-                  </button>
-                  <button
-                    disabled={page >= (data?.records.totalPages || 1)}
-                    onClick={() => setPage((value) => value + 1)}
-                  >
-                    下一页
-                  </button>
-                </div>
+                {listReady && (
+                  <div className="analysis-pagination">
+                    <span>
+                      共 {data?.records.total || 0} 件 · 第 {page} / {data?.records.totalPages || 1}{" "}
+                      页
+                    </span>
+                    <button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>
+                      上一页
+                    </button>
+                    <button
+                      disabled={page >= (data?.records.totalPages || 1)}
+                      onClick={() => setPage((value) => value + 1)}
+                    >
+                      下一页
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="analysis-history" role="tabpanel" aria-label="分析记录">
+                {!listReady && <p role="status">正在加载商品记录…</p>}
                 <p className="analysis-list-intro">
                   每件商品一条记录，点击查看完整分析、原文与调用记录。
                 </p>
-                {!!snapshot && !data?.results?.total && (
+                {listReady && !!snapshot && !data?.results?.total && (
                   <p className="analysis-empty">
                     暂无已完成结果。每完成一件，结果就会自动显示在这里。
                   </p>
                 )}
                 <ol className="analysis-result-list" start={(resultsPage - 1) * 20 + 1}>
-                  {data?.results?.items.map((entry, index) => {
-                    const valuation = entry.result.valuation;
-                    const previousSettings =
-                      entry.profileChanged ||
-                      (!!valuation &&
-                        !!data?.profile?.calculationVersion &&
-                        valuation.calculation_version !== data.profile.calculationVersion);
-                    return (
-                      <li key={entry.taskId}>
-                        <article
-                          className="analysis-result-card"
-                          aria-label={`${(resultsPage - 1) * 20 + index + 1} ${entry.name}`}
-                        >
-                          <button
-                            className="analysis-result-row"
-                            aria-label={`查看分析详情：${entry.name}`}
-                            aria-haspopup="dialog"
-                            onClick={() => setTaskId(entry.taskId)}
+                  {listReady &&
+                    data?.results?.items.map((entry, index) => {
+                      const valuation = entry.result.valuation;
+                      const previousSettings =
+                        entry.profileChanged ||
+                        (!!valuation &&
+                          !!data?.profile?.calculationVersion &&
+                          valuation.calculation_version !== data.profile.calculationVersion);
+                      return (
+                        <li key={entry.taskId}>
+                          <article
+                            className="analysis-result-card"
+                            aria-label={`${(resultsPage - 1) * 20 + index + 1} ${entry.name}`}
                           >
-                            <span className="analysis-result-number">
-                              {(resultsPage - 1) * 20 + index + 1}
-                            </span>
-                            <span className="analysis-result-identity">
-                              <strong className="analysis-result-name">{entry.name}</strong>
-                              <span className="analysis-result-meta">
-                                {entry.server} · {providerNames[entry.provider]} · {entry.model} ·{" "}
-                                {displayTime(entry.completedAt)}
+                            <button
+                              className="analysis-result-row"
+                              aria-label={`查看分析详情：${entry.name}`}
+                              aria-haspopup="dialog"
+                              onClick={() => setTaskId(entry.taskId)}
+                            >
+                              <span className="analysis-result-number">
+                                {(resultsPage - 1) * 20 + index + 1}
                               </span>
-                              <span
-                                className="analysis-result-summary"
-                                title={entry.result.summary}
-                              >
-                                {entry.result.summary}
-                              </span>
-                            </span>
-                            <span className="analysis-result-price">
-                              <small>
-                                {valuation ? valuationPriceSummary(valuation).label : "配置参考分"}
-                              </small>
-                              <strong>
-                                {valuation
-                                  ? valuationSummaryText(valuation)
-                                  : (entry.result.score ?? "资料不足")}
-                              </strong>
-                              <small>挂牌 {price(entry.price)}</small>
-                            </span>
-                            <span className="analysis-result-action">
-                              <span className="analysis-result-decision">
-                                {valuation ? valuationDecisionLabel(valuation) : "已分析"}
-                              </span>
-                              {(entry.stale || previousSettings) && (
-                                <span className="analysis-result-outdated">
-                                  {entry.stale ? "资料或报价已更新" : "上次设置的结果"}
+                              <span className="analysis-result-identity">
+                                <strong className="analysis-result-name">{entry.name}</strong>
+                                <span className="analysis-result-meta">
+                                  {entry.server} · {providerNames[entry.provider]} · {entry.model} ·{" "}
+                                  {displayTime(entry.completedAt)}
                                 </span>
-                              )}
-                              <span className="analysis-result-open">查看详情 →</span>
-                            </span>
-                          </button>
-                        </article>
-                      </li>
-                    );
-                  })}
+                                <span
+                                  className="analysis-result-summary"
+                                  title={entry.result.summary}
+                                >
+                                  {entry.result.summary}
+                                </span>
+                              </span>
+                              <span className="analysis-result-price">
+                                <small>
+                                  {valuation
+                                    ? valuationPriceSummary(valuation).label
+                                    : "配置参考分"}
+                                </small>
+                                <strong>
+                                  {valuation
+                                    ? valuationSummaryText(valuation)
+                                    : (entry.result.score ?? "资料不足")}
+                                </strong>
+                                <small>挂牌 {price(entry.price)}</small>
+                              </span>
+                              <span className="analysis-result-action">
+                                <span className="analysis-result-decision">
+                                  {valuation ? valuationDecisionLabel(valuation) : "已分析"}
+                                </span>
+                                {(entry.stale || previousSettings) && (
+                                  <span className="analysis-result-outdated">
+                                    {entry.stale ? "资料或报价已更新" : "上次设置的结果"}
+                                  </span>
+                                )}
+                                <span className="analysis-result-open">查看详情 →</span>
+                              </span>
+                            </button>
+                          </article>
+                        </li>
+                      );
+                    })}
                 </ol>
-                {(data?.results?.total || 0) > 20 && (
+                {listReady && (data?.results?.total || 0) > 20 && (
                   <div className="analysis-pagination">
                     <span>
                       共 {data?.results.total} 件 · 第 {resultsPage} / {data?.results.totalPages} 页
@@ -1143,7 +1149,6 @@ export function AnalysisPreview() {
           </section>
           <aside className="analysis-aside">
             <section className="analysis-plan-card">
-              <span className="analysis-kicker">QUEUE / 分析队列</span>
               <h2>当前分析队列</h2>
               <p>
                 {run
@@ -1179,7 +1184,6 @@ export function AnalysisPreview() {
               </p>
             </section>
             <section className="analysis-flow-card">
-              <span className="analysis-kicker">RULES / 分析依据</span>
               <h2>{valuationMode ? "估值与挂牌差异" : "历史配置参考分"}</h2>
               {valuationMode ? (
                 <ol>
@@ -1269,7 +1273,6 @@ export function AnalysisPreview() {
             setSettingsOpen(true);
           }}
           onShowRole={(key) => {
-            setTaskId(null);
             setRoleKey(key);
           }}
         />

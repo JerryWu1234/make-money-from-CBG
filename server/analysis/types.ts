@@ -115,6 +115,7 @@ export type AnalysisItem = {
   highlights: string[];
   error: string | null;
   profileChanged?: boolean;
+  marketExpired?: boolean;
   valuation?: ValuationResult;
   recommendation?: import("./recommendation").Recommendation;
   recommendationViewed?: boolean;

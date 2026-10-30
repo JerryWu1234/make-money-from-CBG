@@ -310,64 +310,69 @@ export function AiConnectionControl({
   return (
     <>
       <div className="analysis-agent-control">
-        <div className="analysis-agent-heading">
-          <label htmlFor="analysis-agent-select">分析 Agent</label>
-          <span>选择本次使用的 AI</span>
+        <div className="analysis-agent-field">
+          <div className="analysis-agent-heading">
+            <label htmlFor="analysis-agent-select">分析 Agent</label>
+            <span>选择本次使用的 AI</span>
+          </div>
+          <select
+            id="analysis-agent-select"
+            value={provider}
+            disabled={busy || locked}
+            onChange={(event) => {
+              onProviderChange(event.target.value as AiProvider);
+              setNotice(null);
+              setError(null);
+              setStep(null);
+              setApiKey("");
+            }}
+          >
+            <option value="codex">Codex · ChatGPT 订阅</option>
+            <option value="deepseek">DeepSeek · API</option>
+          </select>
+          <small>
+            {provider === "codex"
+              ? "使用你的 ChatGPT 账号和 Codex 订阅额度。"
+              : "使用你的 DeepSeek API Key，按 DeepSeek API 用量计费。"}
+          </small>
         </div>
-        <select
-          id="analysis-agent-select"
-          value={provider}
-          disabled={busy || locked}
-          onChange={(event) => {
-            onProviderChange(event.target.value as AiProvider);
-            setNotice(null);
-            setError(null);
-            setStep(null);
-            setApiKey("");
-          }}
-        >
-          <option value="codex">Codex · ChatGPT 订阅</option>
-          <option value="deepseek">DeepSeek · API</option>
-        </select>
-        <small>
-          {provider === "codex"
-            ? "使用你的 ChatGPT 账号和 Codex 订阅额度。"
-            : "使用你的 DeepSeek API Key，按 DeepSeek API 用量计费。"}
-        </small>
-        <div className="analysis-agent-heading">
-          <label htmlFor="analysis-model-select">分析模型</label>
-          <span>默认或手动选择</span>
-        </div>
-        <select
-          id="analysis-model-select"
-          value={selectedModel}
-          disabled={loading || modelsLoading || busy || locked}
-          onChange={(event) => onModelChange(event.target.value)}
-        >
-          <option value="">
-            默认模型
-            {modelsLoading
-              ? " · 正在读取…"
-              : availableModels?.defaultModel
-                ? ` · ${defaultModel?.name || availableModels.defaultModel}`
-                : provider === "codex" && current.state === "login_required"
-                  ? " · 登录后读取"
-                  : " · 跟随当前配置"}
-          </option>
-          {selectedModel && !availableModels?.models.some((item) => item.id === selectedModel) && (
-            <option value={selectedModel}>{selectedModel}</option>
-          )}
-          {availableModels?.models.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.name}
+        <div className="analysis-agent-field">
+          <div className="analysis-agent-heading">
+            <label htmlFor="analysis-model-select">分析模型</label>
+            <span>默认或手动选择</span>
+          </div>
+          <select
+            id="analysis-model-select"
+            value={selectedModel}
+            disabled={loading || modelsLoading || busy || locked}
+            onChange={(event) => onModelChange(event.target.value)}
+          >
+            <option value="">
+              默认模型
+              {modelsLoading
+                ? " · 正在读取…"
+                : availableModels?.defaultModel
+                  ? ` · ${defaultModel?.name || availableModels.defaultModel}`
+                  : provider === "codex" && current.state === "login_required"
+                    ? " · 登录后读取"
+                    : " · 跟随当前配置"}
             </option>
-          ))}
-        </select>
-        <small>
-          {provider === "codex"
-            ? "默认使用 Luna · Fast；裸号核对使用低推理强度，含资产分析使用 Max。手动选择的模型用于下次分析。"
-            : "默认沿用当前配置；手动选择的模型用于下次分析。"}
-        </small>
+            {selectedModel &&
+              !availableModels?.models.some((item) => item.id === selectedModel) && (
+                <option value={selectedModel}>{selectedModel}</option>
+              )}
+            {availableModels?.models.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+          <small>
+            {provider === "codex"
+              ? "默认使用 Luna · Fast；裸号核对使用低推理强度，含资产分析使用 Max。手动选择的模型用于下次分析。"
+              : "默认沿用当前配置；手动选择的模型用于下次分析。"}
+          </small>
+        </div>
         {modelsError && (
           <small className="analysis-auth-notice" role="status">
             {modelsError}。可以使用默认模型，或在连接设置中重新连接。
