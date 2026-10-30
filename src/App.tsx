@@ -158,108 +158,116 @@ export function App() {
           <h1 className="title">藏宝阁角色查询</h1>
           <p className="subtitle">扫码登录后，自动进入跨服购买，选择3年以上服并加载角色列表。</p>
         </header>
-        <BrowserSettings
-          active={starting || running || crawling}
-          onBusy={setSettingsBusy}
-          onMode={setBrowserMode}
-          onSaved={browserModeSaved}
-        />
-        <section className="workflow-stepper" aria-label="角色查询流程">
-          {FLOW.map(([key, label]) => {
-            const done = completed || stepIndex > ORDER.indexOf(key);
-            const selected =
-              key === step ||
-              (key === "logging_in" && step === "connecting") ||
-              (key === "role_list" && step === "role_search");
-            return (
-              <div
-                key={key}
-                className={`step-item ${done ? "step-completed" : selected ? "step-active" : "step-pending"}`}
-              >
-                <div className="step-badge">
-                  {done ? "✓" : FLOW.findIndex(([value]) => value === key) + 1}
-                </div>
-                <div className="step-info">
-                  <span className="step-title">{label}</span>
-                  <span className="step-desc">
-                    {done ? "已完成" : selected ? "进行中" : "等待"}
-                  </span>
-                </div>
-              </div>
-            );
-          })}
-        </section>
-        <button
-          id="open-cbg-btn"
-          className="btn-primary"
-          disabled={browserSettingsBusy || starting || querying || crawling}
-          onClick={() => void request(true)}
-        >
-          {starting
-            ? "正在开始…"
-            : querying
-              ? "流程进行中"
-              : step === "error"
-                ? "重新尝试"
-                : completed
-                  ? "重新查询角色列表"
-                  : "开始查询角色"}
-        </button>
-        <p className="status-note">
-          {browserMode === "dedicated"
-            ? "查询在项目专用浏览器中运行，本页显示二维码、进度与查询结果。"
-            : result?.workPagesVisible
-              ? "已开启原始工作页显示，可在 Chrome 窗口查看列表和详情；停止后保留页面供检查。"
-              : "藏宝阁在隐藏工作页中运行，本页显示二维码、进度与查询结果。"}
-          {browserMode === "dedicated"
-            ? "使用项目专用浏览器保存登录；首次使用或登录过期时仍需扫码。"
-            : "连接日常 Chrome 时，如有调试授权提示请允许；连接断开后重新连接可能再次提示。"}{" "}
-          <a href="/api/logs/export" download="cbg-run-log.json">
-            下载运行日志
-          </a>
-        </p>
-
-        {transportError && (
-          <div className="workflow-alert alert-info" role="status">
-            {transportError}
-          </div>
-        )}
-        {result && (
-          <section
-            className={`status-box ${result.error ? "status-error" : completed ? "status-success" : "status-loading"}`}
-            aria-live="polite"
-          >
-            <div className="status-header-row">
-              <strong>
-                {result.error
-                  ? "流程已暂停"
-                  : completed
-                    ? "角色列表已就绪"
-                    : running
-                      ? "正在处理"
-                      : "准备就绪"}
-              </strong>
-              {result.isLoggedIn && !transportError && (
-                <span className="login-pill pill-logged">已登录</span>
-              )}
-            </div>
-            <p>
-              {step === "connecting"
-                ? browserMode === "dedicated"
-                  ? "正在启动或连接项目专用浏览器…"
-                  : "正在连接日常 Chrome，请留意浏览器的调试授权提示…"
-                : result.message}
+        <div className="workspace-query-layout">
+          <div className="workspace-query-main">
+            <section className="workflow-stepper" aria-label="角色查询流程">
+              {FLOW.map(([key, label]) => {
+                const done = completed || stepIndex > ORDER.indexOf(key);
+                const selected =
+                  key === step ||
+                  (key === "logging_in" && step === "connecting") ||
+                  (key === "role_list" && step === "role_search");
+                return (
+                  <div
+                    key={key}
+                    className={`step-item ${done ? "step-completed" : selected ? "step-active" : "step-pending"}`}
+                  >
+                    <div className="step-badge">
+                      {done ? "✓" : FLOW.findIndex(([value]) => value === key) + 1}
+                    </div>
+                    <div className="step-info">
+                      <span className="step-title">{label}</span>
+                      <span className="step-desc">
+                        {done ? "已完成" : selected ? "进行中" : "等待"}
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </section>
+            <button
+              id="open-cbg-btn"
+              className="btn-primary"
+              disabled={browserSettingsBusy || starting || querying || crawling}
+              onClick={() => void request(true)}
+            >
+              {starting
+                ? "正在开始…"
+                : querying
+                  ? "流程进行中"
+                  : step === "error"
+                    ? "重新尝试"
+                    : completed
+                      ? "重新查询角色列表"
+                      : "开始查询角色"}
+            </button>
+            <p className="status-note">
+              {browserMode === "dedicated"
+                ? "查询在项目专用浏览器中运行，本页显示二维码、进度与查询结果。"
+                : result?.workPagesVisible
+                  ? "已开启原始工作页显示，可在 Chrome 窗口查看列表和详情；停止后保留页面供检查。"
+                  : "藏宝阁在隐藏工作页中运行，本页显示二维码、进度与查询结果。"}
+              {browserMode === "dedicated"
+                ? "使用项目专用浏览器保存登录；首次使用或登录过期时仍需扫码。"
+                : "连接日常 Chrome 时，如有调试授权提示请允许；连接断开后重新连接可能再次提示。"}{" "}
+              <a href="/api/logs/export" download="cbg-run-log.json">
+                下载运行日志
+              </a>
             </p>
-            {result.error && <p className="error-message">错误编号：{result.error.code}</p>}
-            <BrowserLogin result={result} unavailable={!!transportError} />
-            {result.isLoggedIn && !transportError && (
-              <div className="account-summary">
-                {result.serverName !== "未指定服务器" && <span>服务器：{result.serverName}</span>}
-                {result.nickname && <span>角色：{result.nickname}</span>}
+
+            {transportError && (
+              <div className="workflow-alert alert-info" role="status">
+                {transportError}
               </div>
             )}
-          </section>
-        )}
+            {result && (
+              <section
+                className={`status-box ${result.error ? "status-error" : completed ? "status-success" : "status-loading"}`}
+                aria-live="polite"
+              >
+                <div className="status-header-row">
+                  <strong>
+                    {result.error
+                      ? "流程已暂停"
+                      : completed
+                        ? "角色列表已就绪"
+                        : running
+                          ? "正在处理"
+                          : "准备就绪"}
+                  </strong>
+                  {result.isLoggedIn && !transportError && (
+                    <span className="login-pill pill-logged">已登录</span>
+                  )}
+                </div>
+                <p>
+                  {step === "connecting"
+                    ? browserMode === "dedicated"
+                      ? "正在启动或连接项目专用浏览器…"
+                      : "正在连接日常 Chrome，请留意浏览器的调试授权提示…"
+                    : result.message}
+                </p>
+                {result.error && <p className="error-message">错误编号：{result.error.code}</p>}
+                <BrowserLogin result={result} unavailable={!!transportError} />
+                {result.isLoggedIn && !transportError && (
+                  <div className="account-summary">
+                    {result.serverName !== "未指定服务器" && (
+                      <span>服务器：{result.serverName}</span>
+                    )}
+                    {result.nickname && <span>角色：{result.nickname}</span>}
+                  </div>
+                )}
+              </section>
+            )}
+          </div>
+          <aside className="workspace-browser-options" aria-label="浏览器设置">
+            <BrowserSettings
+              active={starting || running || crawling}
+              onBusy={setSettingsBusy}
+              onMode={setBrowserMode}
+              onSaved={browserModeSaved}
+            />
+          </aside>
+        </div>
 
         <CrawlPanel
           ready={!browserSettingsBusy && completed && result?.isLoggedIn === true && !running}

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import {
@@ -11,7 +11,10 @@ import {
   roleUrl,
 } from "../fixtures/saved-role";
 
+// Layout failure cases: settings push collection actions and saved roles below the first
+// screen; a narrow page overflows; moved controls break schedule, detail or refresh flows.
 test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
   let running = true;
   let ready = false;
   let detailReads = 0;
@@ -149,6 +152,17 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   await expect(page.getByRole("button", { name: "采集任务", exact: true })).toHaveCount(0);
   ready = true;
   await page.getByRole("button", { name: /角色a ·/ }).waitFor({ timeout: 6000 });
+  const desktopLayout = await page.evaluate(() => ({
+    viewport: window.innerHeight,
+    actionsTop: document.querySelector(".crawl-actions")!.getBoundingClientRect().top + scrollY,
+    recordsTop: document.querySelector(".saved-roles")!.getBoundingClientRect().top + scrollY,
+    scheduleTop: document.querySelector(".scan-schedule")!.getBoundingClientRect().top + scrollY,
+  }));
+  expect(desktopLayout.actionsTop).toBeLessThan(desktopLayout.viewport);
+  expect(desktopLayout.recordsTop).toBeLessThan(desktopLayout.viewport);
+  expect(desktopLayout.scheduleTop).toBeGreaterThan(desktopLayout.recordsTop);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({ path: testInfo.outputPath("collection-layout-desktop.png") });
   await page.getByRole("button", { name: /角色a ·/ }).click();
   await page.getByRole("tab", { name: "人物/修炼", exact: true }).waitFor({ timeout: 6000 });
   assert.ok(detailReads >= 1, "completed record should appear through list polling");
@@ -219,6 +233,19 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   assert.ok(drawer && drawer.width <= 390 && drawer.x >= 0);
   await page.screenshot({ path: testInfo.outputPath("role-drawer-mobile.png") });
   await page.keyboard.press("Escape");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  );
+  const mobileStart = await page
+    .getByRole("button", { name: "开始采集详情", exact: true })
+    .boundingBox();
+  expect(mobileStart!.width).toBeGreaterThan(180);
+  expect(mobileStart!.height).toBeLessThan(64);
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.screenshot({
+    path: testInfo.outputPath("collection-layout-mobile.png"),
+    fullPage: true,
+  });
   await page.setViewportSize({ width: 1100, height: 1000 });
 
   const results = page.getByRole("region", { name: "已采集角色" });
@@ -258,4 +285,35 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   await expect(plan.getByRole("button", { name: "启用计划" })).toBeEnabled();
   await plan.getByRole("button", { name: "启用计划" }).click();
   await expect(plan).toContainText("计划状态：等待执行");
+  await page.screenshot({
+    path: testInfo.outputPath("collection-final-state.png"),
+    fullPage: true,
+  });
+  const evidence = testInfo.outputPath("collection-layout-evidence.json");
+  await writeFile(
+    evidence,
+    JSON.stringify(
+      {
+        repeat: "vp run build && vp exec playwright test tests/e2e/saved-role.pw.ts --workers=1",
+        source: "actual built UI; synthetic role and schedule APIs; external origins blocked",
+        desktopLayout,
+        checks: [
+          "desktop actions and saved roles in first screen",
+          "390px page has no overflow",
+          "schedule save and enable",
+          "detail tabs and close",
+          "pagination and refresh recovery",
+        ],
+        finalScheduleState: schedule.state,
+        browserOpenReads,
+        limits: "No real website, AI call or user database used.",
+      },
+      null,
+      2,
+    ),
+  );
+  await testInfo.attach("collection-layout-evidence", {
+    path: evidence,
+    contentType: "application/json",
+  });
 });
