@@ -13,7 +13,7 @@ import { AiConnectionControl } from "./AiConnectionControl";
 import { AssetCounts, EquipmentSummary } from "./AssetCounts";
 import { AnalysisResultDrawer } from "./AnalysisResultDrawer";
 import { AnalysisSettings } from "./AnalysisSettings";
-import { IndexedDbCleanup } from "./IndexedDbCleanup";
+import { SqliteDataCleanup } from "./SqliteDataCleanup";
 import {
   valuationDecisionLabel,
   valuationMoney,
@@ -100,6 +100,7 @@ export function AnalysisPreview() {
   const [copying, setCopying] = useState(false);
   const copyOperation = useRef(false);
   const [revision, setRevision] = useState(0);
+  const clearedVersion = useRef(0);
   const [busy, setBusy] = useState(false);
   const [concurrency, setConcurrency] = useState(String(DEFAULT_ANALYSIS_CONCURRENCY));
   const [error, setError] = useState<string | null>(null);
@@ -158,6 +159,7 @@ export function AnalysisPreview() {
   }, [provider]);
   useEffect(() => {
     const controller = new AbortController();
+    const version = clearedVersion.current;
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
       try {
@@ -167,7 +169,7 @@ export function AnalysisPreview() {
           undefined,
           AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
         );
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || version !== clearedVersion.current) return;
         if (firstLoad.current) {
           const saved = next.activeRun || next.run;
           if (saved) {
@@ -189,7 +191,7 @@ export function AnalysisPreview() {
         setProgressError(null);
         timer = setTimeout(refresh, next.activeRun ? 1500 : 5000);
       } catch (failure) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || version !== clearedVersion.current) return;
         setProgressError(pollingError(failure, "读取分析进度"));
         timer = setTimeout(refresh, 5000);
       }
@@ -202,6 +204,7 @@ export function AnalysisPreview() {
   }, [provider, revision]);
   useEffect(() => {
     const controller = new AbortController();
+    const version = clearedVersion.current;
     let timer: ReturnType<typeof setTimeout>;
     async function refresh() {
       try {
@@ -221,7 +224,7 @@ export function AnalysisPreview() {
           undefined,
           AbortSignal.any([controller.signal, AbortSignal.timeout(15_000)]),
         );
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || version !== clearedVersion.current) return;
         setData(next);
         setLoadError(null);
         if (next.records.page !== page) setPage(next.records.page);
@@ -234,7 +237,7 @@ export function AnalysisPreview() {
         if (next.results && next.results.page !== resultsPage) setResultsPage(next.results.page);
         timer = setTimeout(refresh, 5000);
       } catch (failure) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || version !== clearedVersion.current) return;
         setLoadError(pollingError(failure, "读取商品记录"));
         timer = setTimeout(refresh, 5000);
       }
@@ -647,7 +650,28 @@ export function AnalysisPreview() {
             </div>
           </div>
         </section>
-        <IndexedDbCleanup />
+        <SqliteDataCleanup
+          disabled={!snapshot || !progress || running || !!capture?.running || busy || copying}
+          onCleared={() => {
+            clearedVersion.current++;
+            setTaskId(null);
+            setRoleKey(null);
+            setData(null);
+            setProgress(null);
+            setPage(1);
+            setRankingPage(1);
+            setResultsPage(1);
+            setSearch("");
+            setFilter("all");
+            setShowViewed(false);
+            setCopyNotice(null);
+            setError(null);
+            setLoadError(null);
+            setProgressError(null);
+            setSettingsNotice(false);
+            setRevision((value) => value + 1);
+          }}
+        />
         <div className="analysis-overview" aria-label="分析页面概览">
           <div>
             <span className="analysis-overview-icon">01</span>

@@ -127,7 +127,15 @@ function localTime(value: number | string, timezone: string) {
   return new Date(value).toLocaleString("zh-CN", { timeZone: timezone, hour12: false });
 }
 
-export function ScanSchedulePanel({ ready, running }: { ready: boolean; running: boolean }) {
+export function ScanSchedulePanel({
+  ready,
+  running,
+  onBusy,
+}: {
+  ready: boolean;
+  running: boolean;
+  onBusy?: (busy: boolean) => void;
+}) {
   const [status, setStatus] = useState<ScheduleStatus | null>(null);
   const [draft, setDraft] = useState<Draft>({
     scheduleType: "weekly",
@@ -143,6 +151,12 @@ export function ScanSchedulePanel({ ready, running }: { ready: boolean; running:
   const [error, setError] = useState("");
   const [transportError, setTransportError] = useState("");
   const dirty = useRef(false);
+  const pending = busy || status === null;
+
+  useEffect(() => {
+    onBusy?.(pending);
+    return () => onBusy?.(false);
+  }, [onBusy, pending]);
 
   useEffect(() => {
     let closed = false;
@@ -201,6 +215,7 @@ export function ScanSchedulePanel({ ready, running }: { ready: boolean; running:
   };
 
   const action = async (command: "configure" | "enable" | "disable") => {
+    onBusy?.(true);
     setBusy(true);
     setError("");
     try {

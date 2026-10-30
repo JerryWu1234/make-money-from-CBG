@@ -530,9 +530,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
               res.end(JSON.stringify({ error: "请先暂停分析，再清空数据" }));
               return;
             }
+            result = crawler.clearCrawl();
             scan.disableScanSchedule();
           }
-          result = crawler.clearCrawl();
           break;
         case "/api/crawl/records":
           result = crawler.savedRecords(
