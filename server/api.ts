@@ -309,6 +309,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
                 filter: params.get("filter") || undefined,
                 showViewed: params.get("showViewed") === "true",
                 ...(params.get("includeRanking") === "false" ? { includeRanking: false } : {}),
+                ...(params.get("includeRecords") === "false" ? { includeRecords: false } : {}),
+                ...(params.get("includeResults") === "false" ? { includeResults: false } : {}),
                 ...(scope === "all" ? {} : { scope: scope as SavedListingScope }),
               },
               controller.signal,

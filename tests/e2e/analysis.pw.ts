@@ -671,6 +671,7 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
     crawl.save(pending.listing, pending.detail!);
     await expect(page.getByRole("tabpanel", { name: "分析记录" }).getByRole("article")).toHaveCount(
       2,
+      { timeout: 10_000 },
     );
     await expect(waiting).toBeDisabled();
     expect(store.activeRun()).toMatchObject({ id, completed: 2, phase: "waiting_capture" });

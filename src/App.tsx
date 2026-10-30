@@ -136,6 +136,18 @@ export function App() {
 
   return (
     <main className="container container-results">
+      <header className="workspace-topbar">
+        <a className="workspace-brand" href="/">
+          <span className="workspace-brand-mark" aria-hidden="true">
+            藏
+          </span>
+          藏宝阁助手
+        </a>
+        <nav className="workspace-nav" aria-label="主导航">
+          <span aria-current="page">采集工作台</span>
+          <a href="/analysis-preview">商品分析</a>
+        </nav>
+      </header>
       <div className="card">
         <header className="card-header">
           <div className="badge">
@@ -145,9 +157,6 @@ export function App() {
           </div>
           <h1 className="title">藏宝阁角色查询</h1>
           <p className="subtitle">扫码登录后，自动进入跨服购买，选择3年以上服并加载角色列表。</p>
-          <a className="analysis-preview-entry" href="/analysis-preview">
-            进入商品分析 <span aria-hidden="true">↗</span>
-          </a>
         </header>
         <BrowserSettings
           active={starting || running || crawling}
