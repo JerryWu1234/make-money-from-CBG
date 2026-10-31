@@ -74,7 +74,7 @@ step() { STEP="$*"; printf '\n%s\n' "$STEP"; }
 export PATH="$SETUP_HOME/node-current/bin:$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.volta/bin:$HOME/.vite-plus/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 cd "$SETUP_HOME"
 
-step "[1/7] 检查 Git"
+step "[1/8] 检查 Git"
 git_ready() {
   local executable
   executable="$(command -v git || true)"
@@ -93,7 +93,7 @@ if ! git_ready; then
 fi
 git --version
 
-step "[2/7] 检查 Node 和 npm"
+step "[2/8] 检查 Node 和 npm"
 node_ready() {
   command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 || return 1
   node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit((major === 22 && minor >= 19) || (major === 24 && minor >= 11) || major > 24 ? 0 : 1)' >/dev/null 2>&1 && npm --version >/dev/null 2>&1
@@ -131,7 +131,7 @@ NODE="$(node -p 'process.execPath')"
 export PATH="$(dirname "$NODE"):$PATH"
 echo "Node $("$NODE" --version) / npm $(npm --version)"
 
-step "[3/7] 定位项目"
+step "[3/8] 定位项目"
 project_valid() {
   [ -f "$1/scripts/serve-local.mjs" ] && [ -f "$1/pnpm-lock.yaml" ] &&
     "$NODE" -e 'const fs = require("node:fs"); try { process.exit(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).name === "make-money-from-cbg" ? 0 : 1); } catch { process.exit(1); }' "$1/package.json"
@@ -157,7 +157,7 @@ PROJECT="$(cd "$PROJECT" && pwd -P)"
 echo "项目：$PROJECT"
 echo "使用现有代码；本次启动不自动拉取更新。"
 
-step "[4/7] 检查 Chrome 和已有服务"
+step "[4/8] 检查 Chrome 和已有服务"
 if [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
   echo "已检测到 Google Chrome。"
 elif [ -x "$HOME/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
@@ -177,6 +177,38 @@ open_page() {
   fi
   printf '\n已就绪：%s/analysis-preview\n安装日志：%s\n' "$SERVICE_URL" "$LOG_FILE"
 }
+check_codex() (
+  cd "$PROJECT" || return 1
+  # 和后台使用同一份 SDK 配套 CLI；全局 codex 不能替代项目依赖。
+  "$NODE" --input-type=module <<'NODE'
+import { createRequire } from 'node:module';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+let checkHome;
+try {
+  const sdkRequire = createRequire(import.meta.resolve('@openai/codex-sdk'));
+  const cliDirectory = dirname(sdkRequire.resolve('@openai/codex/package.json'));
+  // 版本检查不读取或改写用户的 Codex 配置、账号及会话。
+  checkHome = mkdtempSync(join(tmpdir(), 'cbg-codex-check-'));
+  const result = spawnSync(process.execPath, [join(cliDirectory, 'bin', 'codex.js'), '--version'], {
+    encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, CODEX_HOME: checkHome, CODEX_SQLITE_HOME: checkHome },
+  });
+  if (result.error || result.status !== 0) {
+    throw new Error(result.error?.message || result.stderr.trim() || `CLI exited with ${result.signal || result.status}`);
+  }
+  if (!result.stdout.trim()) throw new Error('Codex CLI 未返回版本信息。');
+  console.log(`项目内 Codex CLI：${result.stdout.trim()}`);
+} catch (error) {
+  console.error(`Codex CLI 检查失败：${error.message}`);
+  process.exitCode = 1;
+} finally {
+  if (checkHome) rmSync(checkHome, { recursive: true, force: true });
+}
+NODE
+)
 existing_pid="$(listener_pid)"
 if [ -n "$existing_pid" ]; then
   [[ "$existing_pid" =~ ^[0-9]+$ ]] || fail "5173 端口存在多个监听进程，请先检查。"
@@ -184,12 +216,13 @@ if [ -n "$existing_pid" ]; then
   [ "$existing_cwd" = "$PROJECT" ] || fail "5173 端口被其他项目占用（PID ${existing_pid}），未停止该进程。"
   healthy || fail "本项目的服务正在启动或未响应（PID ${existing_pid}），未重启，请稍后重试或检查服务日志。"
   echo "本项目已经运行，复用服务；跳过依赖安装，保留正在执行的任务。"
+  check_codex || fail "正在运行的项目缺少可用的 Codex CLI。请停止后台服务后重新运行本脚本以安装依赖；本次未修改依赖或停止服务。"
   open_page
   COMPLETED=true
   exit 0
 fi
 
-step "[5/7] 检查项目需要的 pnpm"
+step "[5/8] 检查项目需要的 pnpm"
 PNPM_VERSION="$("$NODE" -e 'const fs=require("node:fs"); const p=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const v=p.devEngines?.packageManager?.version; if (p.devEngines?.packageManager?.name !== "pnpm" || !/^\d+\.\d+\.\d+$/.test(v)) process.exit(1); console.log(v);' "$PROJECT/package.json")"
 pnpm_prefix="$SETUP_HOME/pnpm/$PNPM_VERSION"
 export PATH="$pnpm_prefix/bin:$PATH"
@@ -201,12 +234,15 @@ fi
 PNPM="$(command -v pnpm)"
 echo "pnpm $PNPM_VERSION"
 
-step "[6/7] 安装项目依赖"
+step "[6/8] 安装项目依赖（包含 Codex CLI）"
 cd "$PROJECT"
 # 当前后台依赖 Vite，因此也需要开发依赖；CI 避免已有 node_modules 时出现交互确认。
 CI=true "$PNPM" install --frozen-lockfile --prod=false
 
-step "[7/7] 启动后台服务"
+step "[7/8] 检查 Codex CLI"
+check_codex || fail "项目依赖中的 Codex CLI 未能运行，未启动后台。请查看上方错误并重新运行本脚本；无需单独安装全局 Codex CLI。"
+
+step "[8/8] 启动后台服务"
 [ -z "$(listener_pid)" ] || fail "安装依赖期间 5173 端口被占用，未启动第二个服务。请再次运行以检查。"
 mkdir -p "$PROJECT/data/service-runtime"
 SERVICE_LOG="$PROJECT/data/service-runtime/server-setup-$(date +%Y%m%d-%H%M%S)-$$.log"
