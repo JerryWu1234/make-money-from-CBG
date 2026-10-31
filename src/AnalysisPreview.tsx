@@ -652,29 +652,6 @@ export function AnalysisPreview() {
             </div>
           </div>
         </section>
-        <SqliteDataCleanup
-          disabled={!snapshot || !progress || running || !!capture?.running || busy || copying}
-          onCleared={() => {
-            clearedVersion.current++;
-            setTaskId(null);
-            setRoleKey(null);
-            setData(null);
-            setProgress(null);
-            setPage(1);
-            setRankingPage(1);
-            setResultsPage(1);
-            setSearchInput("");
-            setSearch("");
-            setFilter("all");
-            setShowViewed(false);
-            setCopyNotice(null);
-            setError(null);
-            setLoadError(null);
-            setProgressError(null);
-            setSettingsNotice(false);
-            setRevision((value) => value + 1);
-          }}
-        />
         <div className="analysis-overview" aria-label="分析页面概览">
           <div>
             <small>完整商品</small>
@@ -1244,6 +1221,33 @@ export function AnalysisPreview() {
                   ? "从“分析设置”调整 Prompt 和参数。修改后只更新受影响的商品，保留历史结果及其依据。"
                   : "任一维度缺少必要资料时，总分显示“资料不足”，仍保存分析说明。分数用于配置比较。"}
               </p>
+            </section>
+            <section className="analysis-flow-card" aria-label="数据维护">
+              <SqliteDataCleanup
+                disabled={
+                  !snapshot || !progress || running || !!capture?.running || busy || copying
+                }
+                onCleared={() => {
+                  clearedVersion.current++;
+                  setTaskId(null);
+                  setRoleKey(null);
+                  setData(null);
+                  setProgress(null);
+                  setPage(1);
+                  setRankingPage(1);
+                  setResultsPage(1);
+                  setSearchInput("");
+                  setSearch("");
+                  setFilter("all");
+                  setShowViewed(false);
+                  setCopyNotice(null);
+                  setError(null);
+                  setLoadError(null);
+                  setProgressError(null);
+                  setSettingsNotice(false);
+                  setRevision((value) => value + 1);
+                }}
+              />
             </section>
           </aside>
         </div>

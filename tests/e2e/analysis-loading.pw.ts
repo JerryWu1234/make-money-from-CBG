@@ -8,7 +8,8 @@ import { analysisRecord, analysisResponse } from "../fixtures/analysis";
 
 // Failure cases: hidden lists still load; a pending tab shows an empty result;
 // each keystroke issues a search; pagination changes; compact lists lose detail;
-// the light workspace or its narrow layout becomes unreadable or overflows.
+// the light workspace or its narrow layout becomes unreadable or overflows;
+// configuration and maintenance push the first result below the desktop viewport.
 test("浅色工作台按页签加载、合并搜索请求并保留分页和完整详情", async ({
   page,
   browser,
@@ -133,6 +134,12 @@ test("浅色工作台按页签加载、合并搜索请求并保留分页和完�
       records: 0,
       results: 20,
     });
+    const desktopLayout = await page.evaluate(() => ({
+      viewport: window.innerHeight,
+      firstResultTop:
+        document.querySelector(".analysis-result-row")!.getBoundingClientRect().top + scrollY,
+    }));
+    expect(desktopLayout.firstResultTop).toBeLessThan(desktopLayout.viewport - 40);
     const background = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
     expect(
       background
@@ -230,6 +237,7 @@ test("浅色工作台按页签加载、合并搜索请求并保留分页和完�
       repeat:
         "vp run build && vp exec playwright test tests/e2e/analysis-loading.pw.ts --workers=1",
       browser: browser.version(),
+      desktopLayout,
       rows: keys.length,
       source:
         "actual built UI and in-memory SQLite; fixture API transport; all other origins blocked",
