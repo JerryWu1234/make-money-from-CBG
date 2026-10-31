@@ -17,55 +17,93 @@ fi
 
 mkdir -p "$SETUP_HOME/logs"
 SETUP_HOME="$(cd "$SETUP_HOME" && pwd -P)"
-# 系统锁随进程退出释放，避免安装中断留下死锁，或重复双击时并行安装。
-run_locked() {
-  if [ -x "/usr/bin/lockf" ]; then
-    "/usr/bin/lockf" -k -t 0 "$SETUP_HOME/install.lock" /bin/bash "$SCRIPT_DIR/$(basename "$0")" --locked
-  elif [ -x "/usr/bin/perl" ]; then
-    # macOS 13/14 没有 lockf。保留 flock 文件描述符跨 exec 的所有权，
-    # 由安装脚本持有系统锁；不使用存在过期 PID 竞争问题的目录锁。
-    "/usr/bin/perl" -MFcntl=LOCK_EX,LOCK_NB,F_GETFD,F_SETFD,FD_CLOEXEC -e '
-      my $path = shift @ARGV;
-      open(my $lock, ">>", $path) or die "Cannot open install lock: $!\n";
-      flock($lock, LOCK_EX | LOCK_NB) or exit 75;
-      my $flags = fcntl($lock, F_GETFD, 0);
-      defined($flags) or die "Cannot inspect install lock: $!\n";
-      fcntl($lock, F_SETFD, $flags & ~FD_CLOEXEC) or die "Cannot preserve install lock: $!\n";
-      exec { $ARGV[0] } @ARGV or die "Cannot start installer: $!\n";
-    ' "$SETUP_HOME/install.lock" /bin/bash "$SCRIPT_DIR/$(basename "$0")" --locked
-  else
-    echo "未找到系统 lockf 或 Perl，无法防止并行安装。请先修复 macOS 系统工具后重试。" >&2
-    return 1
-  fi
-}
-if [ "${1:-}" != --locked ]; then
-  lock_status=0
-  run_locked || lock_status=$?
+# 加锁工具立即退出，锁由当前 Bash 的 FD 9 持有，直到窗口会话结束。
+# 不用 lockf 包装子进程：包装进程收到 TERM 时不会将信号转发给服务。
+exec 9>>"$SETUP_HOME/install.lock"
+lock_status=0
+if [ -x "/usr/bin/lockf" ]; then
+  "/usr/bin/lockf" -s -t 0 9 || lock_status=$?
+elif [ -x "/usr/bin/perl" ]; then
+  # macOS 13/14 没有 lockf；继承的 FD 指向同一个 open file description。
+  "/usr/bin/perl" -MFcntl=LOCK_EX,LOCK_NB -e '
+    open(my $lock, ">&=9") or die "Cannot open install lock: $!\n";
+    flock($lock, LOCK_EX | LOCK_NB) or exit 75;
+  ' || lock_status=$?
+else
+  echo "未找到系统 lockf 或 Perl，无法防止并行安装。请先修复 macOS 系统工具后重试。" >&2
+  lock_status=1
+fi
+if [ "$lock_status" -ne 0 ]; then
+  exec 9>&-
   if [ "$lock_status" -eq 75 ]; then
-    echo "另一个安装启动窗口正在运行，请等待它完成。"
+    echo "另一个安装启动窗口正在运行，请使用该窗口；关闭原窗口后可重新启动。"
   fi
-  if $INTERACTIVE && [ "$lock_status" -ne 0 ]; then read -r -p "按回车关闭此窗口。" ignored || true; fi
+  if $INTERACTIVE; then read -r -p "按回车关闭此窗口。" ignored || true; fi
   exit "$lock_status"
 fi
 LOG_FILE="$SETUP_HOME/logs/setup-$(date +%Y%m%d-%H%M%S)-$$.log"
 DOWNLOAD_DIR=""
 CLONE_DIR=""
 COMPLETED=false
+INTERRUPTED=false
+service_pid=""
+service_identity=""
+service_is_child=false
 STEP="准备安装"
+
+service_alive() {
+  [ -n "$service_pid" ] && [ -n "$service_identity" ] &&
+    kill -0 "$service_pid" 2>/dev/null &&
+    [ "$(ps -p "$service_pid" -o lstart= 2>/dev/null)" = "$service_identity" ] &&
+    [[ "$(ps -p "$service_pid" -o stat= 2>/dev/null)" != *Z* ]]
+}
+
+stop_service() {
+  if $service_is_child; then
+    # 关闭窗口可能发生在 fork 后、记录 $! 前。只清理本 Bash 仍拥有的任务，
+    # 不依赖尚未读到的 ps 信息，也不会向已经复用的 PID 发信号。
+    for running_pid in $(jobs -pr); do
+      if [ -z "$service_pid" ] || [ "$running_pid" = "$service_pid" ]; then
+        kill -TERM "$running_pid" 2>/dev/null || true
+        wait "$running_pid" || true
+      fi
+    done
+    # INT/HUP 可能打断主流程的 wait；已退出的子进程也需要回收。
+    if [ -n "$service_pid" ]; then wait "$service_pid" || true; fi
+  elif service_alive; then
+    if [ "$(lsof -a -p "$service_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')" = "$PROJECT" ]; then
+      kill -TERM "$service_pid" 2>/dev/null || true
+      # 接管的旧服务不是本 Bash 的子进程，端口关闭也不代表清理已完成。
+      while service_alive; do sleep 1; done
+    fi
+  fi
+  service_pid=""
+}
 
 finish() {
   result=$?
   trap - EXIT
+  trap '' INT TERM HUP PIPE
+  # 关闭终端时 tee 可能先退出；清理过程直接写日志，避免断管中断关停。
+  stop_service >>"$LOG_FILE" 2>&1
+  exec 9>&-
   if ! $COMPLETED && [ "$result" -eq 0 ]; then result=1; fi
   if [ -n "$DOWNLOAD_DIR" ]; then rm -rf "$DOWNLOAD_DIR"; fi
   if [ -n "$CLONE_DIR" ]; then rm -rf "$CLONE_DIR"; fi
-  if [ "$result" -ne 0 ]; then printf '\n未完成：%s。日志：%s\n' "$STEP" "$LOG_FILE"; fi
+  if $INTERRUPTED; then
+    printf '\n窗口会话已结束。\n' >>"$LOG_FILE"
+  elif [ "$result" -ne 0 ]; then
+    printf '\n未完成：%s。日志：%s\n' "$STEP" "$LOG_FILE" || true
+    if $INTERACTIVE; then read -r -p "按回车关闭此窗口。" ignored || true; fi
+  fi
   exit "$result"
 }
 trap finish EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-exec > >(tee -a "$LOG_FILE") 2>&1
+trap 'INTERRUPTED=true; exit 130' INT
+trap 'INTERRUPTED=true; exit 143' TERM
+trap 'INTERRUPTED=true; exit 129' HUP
+trap 'INTERRUPTED=true; exit 141' PIPE
+exec > >(tee -a "$LOG_FILE" 9>&-) 2>&1
 
 fail() { printf '\n%s\n' "$*" >&2; exit 1; }
 step() { STEP="$*"; printf '\n%s\n' "$STEP"; }
@@ -177,6 +215,20 @@ open_page() {
   fi
   printf '\n已就绪：%s/analysis-preview\n安装日志：%s\n' "$SERVICE_URL" "$LOG_FILE"
 }
+keep_window_open() {
+  echo "服务随此窗口运行。关闭窗口或按 Ctrl+C 会停止服务，并保存采集、分析的退出状态。"
+  echo "需要再次启动时，重新运行 setup-macos.command。"
+  COMPLETED=true
+  if $service_is_child; then
+    service_status=0
+    wait "$service_pid" || service_status=$?
+    service_pid=""
+    exit "$service_status"
+  fi
+  while service_alive; do sleep 1 9>&- & wait $! || true; done
+  service_pid=""
+  exit 0
+}
 check_codex() (
   cd "$PROJECT" || return 1
   # 和后台使用同一份 SDK 配套 CLI；全局 codex 不能替代项目依赖。
@@ -217,9 +269,12 @@ if [ -n "$existing_pid" ]; then
   healthy || fail "本项目的服务正在启动或未响应（PID ${existing_pid}），未重启，请稍后重试或检查服务日志。"
   echo "本项目已经运行，复用服务；跳过依赖安装，保留正在执行的任务。"
   check_codex || fail "正在运行的项目缺少可用的 Codex CLI。请停止后台服务后重新运行本脚本以安装依赖；本次未修改依赖或停止服务。"
+  service_identity="$(ps -p "$existing_pid" -o lstart=)"
+  [ -n "$service_identity" ] || fail "原服务已退出，请重新运行脚本。"
+  service_pid="$existing_pid"
+  echo "已接管本项目服务（PID ${service_pid}），关闭此窗口会停止该服务。"
   open_page
-  COMPLETED=true
-  exit 0
+  keep_window_open
 fi
 
 step "[5/8] 检查项目需要的 pnpm"
@@ -242,31 +297,19 @@ CI=true "$PNPM" install --frozen-lockfile --prod=false
 step "[7/8] 检查 Codex CLI"
 check_codex || fail "项目依赖中的 Codex CLI 未能运行，未启动后台。请查看上方错误并重新运行本脚本；无需单独安装全局 Codex CLI。"
 
-step "[8/8] 启动后台服务"
+step "[8/8] 启动服务"
 [ -z "$(listener_pid)" ] || fail "安装依赖期间 5173 端口被占用，未启动第二个服务。请再次运行以检查。"
 mkdir -p "$PROJECT/data/service-runtime"
 SERVICE_LOG="$PROJECT/data/service-runtime/server-setup-$(date +%Y%m%d-%H%M%S)-$$.log"
-service_pid="$("$NODE" --input-type=module - "$PROJECT" "$SERVICE_LOG" <<'NODE'
-import { openSync, closeSync } from 'node:fs';
-import { spawn } from 'node:child_process';
-const [cwd, log] = process.argv.slice(2);
-const fd = openSync(log, 'a', 0o600);
-const child = spawn(process.execPath, ['scripts/serve-local.mjs'], {
-  cwd, detached: true, stdio: ['ignore', fd, fd],
-});
-child.once('error', error => { console.error(error.message); process.exitCode = 1; });
-child.once('spawn', () => { console.log(child.pid); child.unref(); });
-closeSync(fd);
-NODE
-)"
+service_is_child=true
+"$NODE" scripts/serve-local.mjs </dev/null >>"$SERVICE_LOG" 2>&1 9>&- &
+service_pid=$!
 printf '后台 PID：%s；日志：%s\n' "$service_pid" "$SERVICE_LOG"
 for ((attempt=0; attempt<60; attempt++)); do
   kill -0 "$service_pid" 2>/dev/null || { tail -n 30 "$SERVICE_LOG"; fail "后台启动失败。"; }
   if [ "$(listener_pid)" = "$service_pid" ] && healthy; then
     open_page
-    echo "关闭此窗口不影响后台服务。采集、分析由页面控制，已启用的定时计划按原设置运行。"
-    COMPLETED=true
-    exit 0
+    keep_window_open
   fi
   sleep 1
 done
