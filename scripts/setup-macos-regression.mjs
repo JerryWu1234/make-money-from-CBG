@@ -19,7 +19,7 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 
 const repository = fileURLToPath(new URL("../", import.meta.url));
-const installer = path.join(repository, "安装并启动.command");
+const installer = path.join(repository, "setup-macos.command");
 const realNode = process.execPath;
 
 // Every external installation, network request and browser opening is replaced.
@@ -33,6 +33,7 @@ async function fixture(t, changes = {}) {
   const callsPath = path.join(root, "calls.jsonl");
   const startedPath = path.join(root, "service-started.json");
   const driver = path.join(root, "mock-command.mjs");
+  const processGroups = [];
   const state = {
     project,
     callsPath,
@@ -70,8 +71,19 @@ setInterval(() => {}, 1000);
   );
   const installerPath = state.installerInProject
     ? path.join(project, path.basename(installer))
-    : installer;
-  if (state.installerInProject) copyFileSync(installer, installerPath);
+    : state.withoutLockf
+      ? path.join(root, "launcher with spaces", path.basename(installer))
+      : installer;
+  if (state.withoutLockf) {
+    const source = readFileSync(installer, "utf8");
+    assert.ok(source.includes("/usr/bin/lockf"), "fixture 应准确替换系统 lockf 路径");
+    // Keep the missing executable path free of spaces so the pre-fix version
+    // fails because lockf is absent, rather than because its command was unquoted.
+    const missingLockf = path.join(tmpdir(), `cbg-missing-lockf-${process.pid}`);
+    assert.equal(existsSync(missingLockf), false);
+    mkdirSync(path.dirname(installerPath), { recursive: true });
+    writeFileSync(installerPath, source.replaceAll("/usr/bin/lockf", missingLockf));
+  } else if (state.installerInProject) copyFileSync(installer, installerPath);
   if (state.cloneProject) {
     state.cloneTemplate = path.join(root, "download source fixture");
     renameSync(project, state.cloneTemplate);
@@ -222,6 +234,10 @@ switch (command) {
     writeFileSync(statePath, JSON.stringify(state));
   }
   t.after(async () => {
+    for (const group of processGroups) {
+      group.terminate();
+      await group.completed;
+    }
     const pids = [existing?.pid];
     if (existsSync(startedPath)) pids.push(JSON.parse(readFileSync(startedPath, "utf8")).pid);
     for (const pid of pids.filter(Boolean)) {
@@ -253,6 +269,40 @@ switch (command) {
     maxBuffer: 1_000_000,
   };
   if (state.omitProjectDir) delete runOptions.env.CBG_PROJECT_DIR;
+  const start = (detached = false) => {
+    const child = spawn("/bin/bash", [installerPath], { ...runOptions, detached });
+    let stdout = "";
+    let stderr = "";
+    let error;
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.once("error", (value) => {
+      error = value;
+    });
+    const completed = new Promise((resolve) =>
+      child.once("close", (status, signal) => resolve({ status, signal, stdout, stderr, error })),
+    );
+    let terminated = false;
+    const processGroup = {
+      completed,
+      terminate: () => {
+        if (terminated || !child.pid) return;
+        assert.ok(detached, "只能终止测试自身创建的独立进程组");
+        terminated = true;
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch (value) {
+          if (value.code !== "ESRCH") throw value;
+        }
+      },
+    };
+    if (detached) processGroups.push(processGroup);
+    return processGroup;
+  };
   return {
     root,
     project,
@@ -266,24 +316,8 @@ switch (command) {
       ),
     calls: () => readFileSync(callsPath, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse),
     run: () => spawnSync("/bin/bash", [installerPath], runOptions),
-    start: () => {
-      const child = spawn("/bin/bash", [installerPath], runOptions);
-      let stdout = "";
-      let stderr = "";
-      let error;
-      child.stdout.on("data", (chunk) => {
-        stdout += chunk;
-      });
-      child.stderr.on("data", (chunk) => {
-        stderr += chunk;
-      });
-      child.once("error", (value) => {
-        error = value;
-      });
-      return new Promise((resolve) =>
-        child.once("close", (status) => resolve({ status, stdout, stderr, error })),
-      );
-    },
+    start: () => start().completed,
+    startProcessGroup: () => start(true),
   };
 }
 
@@ -483,4 +517,87 @@ test("下载 ZIP 后在无 .git 的仓库中运行，自行识别同目录项目
   );
   assert.equal(existsSync(f.startedPath), true);
   assert.equal(existsSync(path.join(f.project, ".git")), false);
+});
+
+async function waitForDependencyInstall(f) {
+  for (let attempt = 0; attempt < 400; attempt++) {
+    if (f.calls().some(({ command, args }) => command === "pnpm" && args.includes("install")))
+      return;
+    await delay(25);
+  }
+  assert.fail("安装流程应到达模拟依赖安装步骤");
+}
+
+test("缺少 lockf 时用系统 Perl 锁复用服务，并允许重复运行", async (t) => {
+  const f = await fixture(t, { withoutLockf: true, listener: "existing" });
+  successful(f.run());
+  successful(f.run());
+  noInstallationOrStart(f);
+  assert.doesNotThrow(() => process.kill(f.existing.pid, 0));
+});
+
+test("缺少 lockf 时安装失败会释放 Perl 锁，重试可启动", async (t) => {
+  const f = await fixture(t, { withoutLockf: true, installExitCode: 42 });
+  const failed = f.run();
+  assert.equal(failed.error, undefined);
+  assert.notEqual(failed.status, 0, failed.stdout + failed.stderr);
+  assert.match(failed.stdout + failed.stderr, /fixture dependency install failed/);
+  assert.equal(existsSync(f.startedPath), false);
+  f.update({ installExitCode: 0 });
+  successful(f.run());
+  assert.equal(existsSync(f.startedPath), true);
+});
+
+test("缺少 lockf 时 Perl 锁仍只允许一个并发安装流程", async (t) => {
+  const f = await fixture(t, { withoutLockf: true, installDelayMs: 1500 });
+  const first = f.start();
+  await waitForDependencyInstall(f);
+  const duplicate = f.run();
+  assert.equal(duplicate.error, undefined);
+  assert.equal(duplicate.status, 75, duplicate.stdout + duplicate.stderr);
+  assert.match(duplicate.stdout + duplicate.stderr, /另一个.*正在运行/);
+  const nativeLock = () =>
+    spawnSync(
+      "/usr/bin/lockf",
+      ["-k", "-t", "0", path.join(f.setupHome, "install.lock"), "/bin/sh", "-c", ":"],
+      { encoding: "utf8", timeout: 5000 },
+    );
+  if (existsSync("/usr/bin/lockf")) {
+    const conflict = nativeLock();
+    assert.equal(conflict.status, 75, conflict.stdout + conflict.stderr);
+  }
+  successful(await first);
+  if (existsSync("/usr/bin/lockf")) successful(nativeLock());
+  assert.equal(
+    f.calls().filter(({ command, args }) => command === "pnpm" && args.includes("install")).length,
+    1,
+  );
+});
+
+test("缺少 lockf 时后台服务不会长期继承 Perl 安装锁", async (t) => {
+  const f = await fixture(t, { withoutLockf: true });
+  successful(f.run());
+  const pid = JSON.parse(readFileSync(f.startedPath, "utf8")).pid;
+  assert.doesNotThrow(() => process.kill(pid, 0));
+  successful(f.run());
+  assert.equal(JSON.parse(readFileSync(f.startedPath, "utf8")).pid, pid);
+  assert.doesNotThrow(() => process.kill(pid, 0));
+  assert.equal(
+    f.calls().filter(({ command, args }) => command === "pnpm" && args.includes("install")).length,
+    1,
+  );
+});
+
+test("缺少 lockf 时强制结束安装进程组后，遗留锁文件仍可重新使用", async (t) => {
+  const f = await fixture(t, { withoutLockf: true, installDelayMs: 15_000 });
+  const interrupted = f.startProcessGroup();
+  await waitForDependencyInstall(f);
+  interrupted.terminate();
+  const result = await interrupted.completed;
+  assert.equal(result.signal, "SIGKILL", result.stdout + result.stderr);
+  assert.equal(existsSync(f.startedPath), false);
+  assert.equal(existsSync(path.join(f.setupHome, "install.lock")), true);
+  f.update({ installDelayMs: 0 });
+  successful(f.run());
+  assert.equal(existsSync(f.startedPath), true);
 });

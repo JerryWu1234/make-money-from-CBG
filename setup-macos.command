@@ -1,5 +1,5 @@
 #!/bin/bash
-# macOS 自带 Bash 3.2 即可运行；也可把这个文件单独下载后双击。
+# macOS 自带 Bash 3.2 即可运行；仓库安装入口：setup-macos.command。
 set -euo pipefail
 umask 077
 
@@ -18,9 +18,29 @@ fi
 mkdir -p "$SETUP_HOME/logs"
 SETUP_HOME="$(cd "$SETUP_HOME" && pwd -P)"
 # 系统锁随进程退出释放，避免安装中断留下死锁，或重复双击时并行安装。
+run_locked() {
+  if [ -x "/usr/bin/lockf" ]; then
+    "/usr/bin/lockf" -k -t 0 "$SETUP_HOME/install.lock" /bin/bash "$SCRIPT_DIR/$(basename "$0")" --locked
+  elif [ -x "/usr/bin/perl" ]; then
+    # macOS 13/14 没有 lockf。保留 flock 文件描述符跨 exec 的所有权，
+    # 由安装脚本持有系统锁；不使用存在过期 PID 竞争问题的目录锁。
+    "/usr/bin/perl" -MFcntl=LOCK_EX,LOCK_NB,F_GETFD,F_SETFD,FD_CLOEXEC -e '
+      my $path = shift @ARGV;
+      open(my $lock, ">>", $path) or die "Cannot open install lock: $!\n";
+      flock($lock, LOCK_EX | LOCK_NB) or exit 75;
+      my $flags = fcntl($lock, F_GETFD, 0);
+      defined($flags) or die "Cannot inspect install lock: $!\n";
+      fcntl($lock, F_SETFD, $flags & ~FD_CLOEXEC) or die "Cannot preserve install lock: $!\n";
+      exec { $ARGV[0] } @ARGV or die "Cannot start installer: $!\n";
+    ' "$SETUP_HOME/install.lock" /bin/bash "$SCRIPT_DIR/$(basename "$0")" --locked
+  else
+    echo "未找到系统 lockf 或 Perl，无法防止并行安装。请先修复 macOS 系统工具后重试。" >&2
+    return 1
+  fi
+}
 if [ "${1:-}" != --locked ]; then
   lock_status=0
-  /usr/bin/lockf -k -t 0 "$SETUP_HOME/install.lock" /bin/bash "$SCRIPT_DIR/$(basename "$0")" --locked || lock_status=$?
+  run_locked || lock_status=$?
   if [ "$lock_status" -eq 75 ]; then
     echo "另一个安装启动窗口正在运行，请等待它完成。"
   fi
