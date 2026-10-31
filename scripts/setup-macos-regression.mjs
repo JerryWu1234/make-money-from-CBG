@@ -22,6 +22,55 @@ const repository = fileURLToPath(new URL("../", import.meta.url));
 const installer = path.join(repository, "setup-macos.command");
 const realNode = process.execPath;
 
+function installCodexFixture(project, includeCli = true) {
+  const sdk = path.join(project, "node_modules", "@openai", "codex-sdk");
+  mkdirSync(sdk, { recursive: true });
+  writeFileSync(
+    path.join(sdk, "package.json"),
+    JSON.stringify({
+      name: "@openai/codex-sdk",
+      version: "0.159.3",
+      type: "module",
+      exports: { ".": { import: "./index.js" } },
+      dependencies: { "@openai/codex": "0.159.3" },
+    }),
+  );
+  writeFileSync(path.join(sdk, "index.js"), "export {};\n");
+  if (!includeCli) return;
+  const cli = path.join(project, "node_modules", "@openai", "codex");
+  mkdirSync(path.join(cli, "bin"), { recursive: true });
+  writeFileSync(
+    path.join(cli, "package.json"),
+    JSON.stringify({
+      name: "@openai/codex",
+      version: "0.159.3",
+      type: "module",
+      bin: { codex: "./bin/codex.js" },
+    }),
+  );
+  writeFileSync(
+    path.join(cli, "bin", "codex.js"),
+    `import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import path from "node:path";
+const state = JSON.parse(readFileSync(process.env.CBG_TEST_STATE, "utf8"));
+const codexHome = process.env.CODEX_HOME;
+const sqliteHome = process.env.CODEX_SQLITE_HOME;
+appendFileSync(state.callsPath, JSON.stringify({
+  command: "project-codex", args: process.argv.slice(2), codexHome, sqliteHome,
+  homeExists: !!codexHome && existsSync(codexHome) && statSync(codexHome).isDirectory(),
+}) + "\\n");
+if (process.argv.length !== 3 || process.argv[2] !== "--version") process.exit(99);
+if (!codexHome || !sqliteHome) process.exit(98);
+writeFileSync(path.join(codexHome, "mock-version-probe"), "only a version probe");
+if (state.codexExitCode) {
+  process.stderr.write("fixture Codex native binary cannot run\\n");
+  process.exit(state.codexExitCode);
+}
+if (!state.codexEmptyOutput) console.log("codex-cli 0.159.3");
+`,
+  );
+}
+
 // Every external installation, network request and browser opening is replaced.
 // The fixture services are plain Node processes with no network or Chrome access.
 async function fixture(t, changes = {}) {
@@ -33,6 +82,8 @@ async function fixture(t, changes = {}) {
   const callsPath = path.join(root, "calls.jsonl");
   const startedPath = path.join(root, "service-started.json");
   const driver = path.join(root, "mock-command.mjs");
+  const originalCodexHome = path.join(root, "existing codex settings");
+  const originalSqliteHome = path.join(root, "existing codex sqlite");
   const processGroups = [];
   const state = {
     project,
@@ -45,11 +96,17 @@ async function fixture(t, changes = {}) {
     pnpmAvailable: true,
     pnpmVersion: "11.25.0",
     installExitCode: 0,
+    codexMissing: false,
+    codexExitCode: 0,
     listener: "none",
     ...changes,
   };
   mkdirSync(path.join(project, "scripts"), { recursive: true });
   mkdirSync(bin, { recursive: true });
+  for (const directory of [originalCodexHome, originalSqliteHome]) {
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(path.join(directory, "keep.txt"), "original fixture settings");
+  }
   writeFileSync(callsPath, "");
   writeFileSync(
     path.join(project, "package.json"),
@@ -57,6 +114,7 @@ async function fixture(t, changes = {}) {
       name: "make-money-from-cbg",
       type: "module",
       scripts: { "dev:stable": "node scripts/serve-local.mjs" },
+      dependencies: { "@openai/codex-sdk": "0.159.3" },
       devEngines: { packageManager: { name: "pnpm", version: "11.25.0" } },
     }),
   );
@@ -64,11 +122,15 @@ async function fixture(t, changes = {}) {
   writeFileSync(path.join(project, "pnpm-workspace.yaml"), "packages: []\n");
   writeFileSync(
     path.join(project, "scripts", "serve-local.mjs"),
-    `import { writeFileSync } from "node:fs";
+    `import { appendFileSync, writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(startedPath)}, JSON.stringify({ pid: process.pid }));
+appendFileSync(${JSON.stringify(callsPath)}, JSON.stringify({ command: "service-start", args: [] }) + "\\n");
 setInterval(() => {}, 1000);
 `,
   );
+  if (state.listener === "existing" || state.listener === "foreign") {
+    installCodexFixture(project, !state.codexMissing);
+  }
   const installerPath = state.installerInProject
     ? path.join(project, path.basename(installer))
     : state.withoutLockf
@@ -115,6 +177,7 @@ appendFileSync(state.callsPath, JSON.stringify({ command, args, bundled: process
 const output = (text) => process.stdout.write(String(text) + "\\n");
 const fail = (code = 1) => process.exit(code);
 const save = () => writeFileSync(statePath, JSON.stringify(state));
+${installCodexFixture.toString()}
 switch (command) {
   case "uname": output(args.includes("-s") || !args.length ? "Darwin" : "arm64"); break;
   case "git":
@@ -162,8 +225,10 @@ switch (command) {
     else if (args.includes("install")) {
       if (state.installDelayMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, state.installDelayMs);
       if (state.installExitCode) { process.stderr.write("fixture dependency install failed\\n"); fail(state.installExitCode); }
+      installCodexFixture(state.project, !state.codexMissing);
     } else fail(95);
     break;
+  case "codex": fail(127); break;
   case "lsof": {
     let pid = state.listenerPid;
     if (!pid && existsSync(state.startedPath)) pid = JSON.parse(readFileSync(state.startedPath, "utf8")).pid;
@@ -201,6 +266,7 @@ switch (command) {
     "node",
     "npm",
     "pnpm",
+    "codex",
     "lsof",
     "curl",
     "open",
@@ -263,6 +329,8 @@ switch (command) {
       CBG_TEST_STATE: statePath,
       CBG_TEST_DRIVER: driver,
       CBG_TEST_REAL_NODE: realNode,
+      CODEX_HOME: originalCodexHome,
+      CODEX_SQLITE_HOME: originalSqliteHome,
     },
     encoding: "utf8",
     timeout: 20_000,
@@ -309,6 +377,8 @@ switch (command) {
     setupHome,
     startedPath,
     existing,
+    originalCodexHome,
+    originalSqliteHome,
     update: (changes) =>
       writeFileSync(
         statePath,
@@ -334,6 +404,30 @@ function noInstallationOrStart(f) {
     false,
   );
   assert.equal(existsSync(f.startedPath), false);
+}
+
+function codexProbesAreIsolated(f, count = 1) {
+  const probes = f.calls().filter(({ command }) => command === "project-codex");
+  assert.equal(probes.length, count);
+  for (const probe of probes) {
+    assert.deepEqual(probe.args, ["--version"]);
+    assert.equal(probe.homeExists, true);
+    assert.equal(probe.codexHome, probe.sqliteHome);
+    assert.notEqual(probe.codexHome, f.originalCodexHome);
+    assert.notEqual(probe.sqliteHome, f.originalSqliteHome);
+    assert.equal(existsSync(probe.codexHome), false, "版本检测目录应在成功或失败后清理");
+  }
+  for (const directory of [f.originalCodexHome, f.originalSqliteHome]) {
+    assert.equal(
+      readFileSync(path.join(directory, "keep.txt"), "utf8"),
+      "original fixture settings",
+    );
+    assert.equal(existsSync(path.join(directory, "mock-version-probe")), false);
+  }
+  assert.equal(
+    f.calls().some(({ command }) => command === "codex"),
+    false,
+  );
 }
 
 test("重复运行复用本项目服务，不安装依赖或启动第二个进程（路径含空格）", async (t) => {
@@ -600,4 +694,78 @@ test("缺少 lockf 时强制结束安装进程组后，遗留锁文件仍可重�
   f.update({ installDelayMs: 0 });
   successful(f.run());
   assert.equal(existsSync(f.startedPath), true);
+});
+
+test("项目依赖安装 Codex CLI，无可用全局命令也能校验后启动", async (t) => {
+  const f = await fixture(t);
+  const cliPackage = path.join(f.project, "node_modules", "@openai", "codex", "package.json");
+  assert.equal(existsSync(cliPackage), false, "CLI 应随 pnpm 安装，而非夹具预装");
+  const result = f.run();
+  successful(result);
+  assert.match(result.stdout, /项目内 Codex CLI.*codex-cli 0\.159\.3/);
+  assert.equal(existsSync(cliPackage), true);
+  const calls = f.calls();
+  const installAt = calls.findIndex(
+    ({ command, args }) => command === "pnpm" && args.includes("install"),
+  );
+  const probeAt = calls.findIndex(({ command }) => command === "project-codex");
+  const startedAt = calls.findIndex(({ command }) => command === "service-start");
+  assert.ok(installAt >= 0 && probeAt > installAt && startedAt > probeAt);
+  codexProbesAreIsolated(f);
+});
+
+test("Codex SDK 安装后缺少配套 CLI 包时报告失败，不启动后台", async (t) => {
+  const f = await fixture(t, { codexMissing: true });
+  const result = f.run();
+  assert.equal(result.error, undefined);
+  assert.notEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout + result.stderr, /Codex CLI 检查失败/);
+  assert.equal(
+    existsSync(path.join(f.project, "node_modules", "@openai", "codex-sdk", "index.js")),
+    true,
+  );
+  assert.equal(
+    existsSync(path.join(f.project, "node_modules", "@openai", "codex", "package.json")),
+    false,
+  );
+  assert.equal(existsSync(f.startedPath), false);
+  codexProbesAreIsolated(f, 0);
+});
+
+test("Codex 原生组件无法运行时停止启动，并清理版本检查的临时目录", async (t) => {
+  const f = await fixture(t, { codexExitCode: 86 });
+  const result = f.run();
+  assert.equal(result.error, undefined);
+  assert.notEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout + result.stderr, /fixture Codex native binary cannot run/);
+  assert.equal(existsSync(f.startedPath), false);
+  codexProbesAreIsolated(f);
+});
+
+for (const codexMissing of [true, false]) {
+  test(
+    codexMissing
+      ? "已有服务缺少项目 Codex CLI 时不重装依赖或重启"
+      : "已有服务的 Codex CLI 损坏时保留服务和依赖",
+    async (t) => {
+      const f = await fixture(t, { listener: "existing", codexMissing, codexExitCode: 86 });
+      const result = f.run();
+      assert.equal(result.error, undefined);
+      assert.notEqual(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stdout + result.stderr, /正在运行的项目缺少可用的 Codex CLI/);
+      noInstallationOrStart(f);
+      assert.doesNotThrow(() => process.kill(f.existing.pid, 0));
+      codexProbesAreIsolated(f, codexMissing ? 0 : 1);
+    },
+  );
+}
+
+test("Codex CLI 退出成功但没有版本输出时仍阻止启动", async (t) => {
+  const f = await fixture(t, { codexEmptyOutput: true });
+  const result = f.run();
+  assert.equal(result.error, undefined);
+  assert.notEqual(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout + result.stderr, /Codex CLI 未返回版本信息/);
+  assert.equal(existsSync(f.startedPath), false);
+  codexProbesAreIsolated(f);
 });
