@@ -83,7 +83,7 @@ export interface ListingPage {
 }
 export interface CrawlSource {
   prepare: (order?: string) => Promise<ListingPage>;
-  page: (number: number) => Promise<ListingPage>;
+  page: (number: number, refresh?: boolean) => Promise<ListingPage>;
   onShelf: (item: Listing) => Promise<boolean>;
   hover: (item: Listing) => Promise<Listing>;
   detail: (item: Listing) => Promise<RoleDetail>;
@@ -200,6 +200,12 @@ export interface Checkpoint {
   page: number;
   savedAt: string;
 }
+export interface PageReview {
+  order: string;
+  page: number;
+  signature: string;
+  detectedAt: string;
+}
 export interface CrawlStatus {
   concurrency?: number;
   captureStrategy?: "new-first";
@@ -225,6 +231,7 @@ export interface CrawlStatus {
   retryTotal?: number;
   retryCompleted?: number;
   lastItemError?: string;
+  pageReviews?: PageReview[];
   totalSaved: number;
   current?: string;
   itemIndex?: number;

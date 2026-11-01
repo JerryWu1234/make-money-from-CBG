@@ -97,7 +97,11 @@ export async function prepareCrawlPages(
     totalPages: first.totalPages,
     message: "正在核对排序和上次成功入库的断点…",
   });
-  const resume = point ? await locateCheckpoint(source, first, point, signal) : null;
+  // Unverified pages must not be left behind by a later successful item checkpoint.
+  const resume =
+    point && !store.pageReviews().length
+      ? await locateCheckpoint(source, first, point, signal)
+      : null;
   const fullScan = !point || resume === null;
   const backfillComplete = store.backfillComplete() && !fullScan;
   const end = first.totalPages;
@@ -120,5 +124,5 @@ export async function prepareCrawlPages(
         : `已找到仍上架锚点；从第 ${Math.max(1, anchorPage - 1)} 页继续补齐后段历史商品`,
     message: "逐条悬停核对商品编号，已完整入库的商品跳过详情。",
   });
-  return { numbers, backfillComplete, end, fullScan };
+  return { numbers, backfillComplete, end, fullScan, order: first.order };
 }

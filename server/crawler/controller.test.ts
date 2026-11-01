@@ -19,6 +19,7 @@ vi.mock("./store", () => ({
     }
     count = () => 42;
     checkpoint = () => undefined;
+    pageReviews = () => [];
     recent = () => [];
     latestComplete = () => ({ key: "1:latest", collectedAt: "2026-10-25T05:00:20.000Z" });
     acquire = mocks.acquire;

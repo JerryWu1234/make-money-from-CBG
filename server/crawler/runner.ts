@@ -8,6 +8,7 @@ import {
   type CrawlSource,
   type CrawlStatus,
   type Listing,
+  type PageReview,
 } from "./types";
 import type { CrawlStore } from "./store";
 import { prepareCrawlPages } from "./resume";
@@ -16,6 +17,7 @@ import { MAIN_TABS } from "./detail";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { watchCrawl } from "./watch";
 import { browserConnectionFailure } from "../browser-connection";
+import { pageSignature, readPageReview, refreshRepeatedPage } from "./repeated-pages";
 export interface CrawlOptions {
   concurrency?: number;
   watch?: boolean;
@@ -260,20 +262,62 @@ export async function crawl(
   let end = plan.end;
   let previousSignature = "";
   let previousPage = 0;
-  for (let cursor = 0; cursor < numbers.length; cursor++) {
-    const number = numbers[cursor];
-    signal.throwIfAborted();
-    const page = await source.page(number);
+  let reviewsScheduled = false;
+  const tasks: { number: number; review?: PageReview }[] = numbers.map((number) => ({ number }));
+  const queuedPages = new Set(numbers);
+  const visitedPages = new Set<number>();
+  const updateTotal = (total: number) => {
     if (!backfillComplete)
-      for (let added = end + 1; added <= page.totalPages; added++) numbers.push(added);
-    end = Math.max(end, page.totalPages);
+      for (let added = end + 1; added <= total; added++)
+        if (!queuedPages.has(added) && !visitedPages.has(added)) {
+          tasks.push({ number: added });
+          queuedPages.add(added);
+        }
+    end = total;
+  };
+  for (let cursor = 0; ; cursor++) {
+    if (cursor >= tasks.length) {
+      if (reviewsScheduled) break;
+      reviewsScheduled = true;
+      // Append one bounded review pass. Unresolved entries remain durable for the next run.
+      tasks.push(
+        ...store
+          .pageReviews(plan.order)
+          .filter((review) => review.page <= end)
+          .map((review) => ({ number: review.page, review })),
+      );
+      if (cursor >= tasks.length) break;
+    }
+    const { number, review } = tasks[cursor];
+    const reviewing = !!review;
+    signal.throwIfAborted();
+    if (!reviewing) queuedPages.delete(number);
+    // A smaller latest total does not resolve old reviews, but must not send us past the end.
+    if (number > end) continue;
+    const checked = review
+      ? await readPageReview(source, store, review, signal, publish)
+      : { page: await source.page(number), deferred: false };
+    let page = checked.page;
+    updateTotal(page.totalPages);
+    if (checked.deferred) continue;
     if (page.page !== number)
       throw new Error(`翻页未生效：请求第 ${number} 页，返回第 ${page.page} 页`);
-    const signature = page.items.map((item) => item.key).join("|");
-    if (number === previousPage + 1 && signature && signature === previousSignature)
-      throw new Error("连续两页返回相同商品，已暂停，避免循环翻页");
-    previousSignature = signature;
-    previousPage = number;
+    if (!reviewing) {
+      const refreshed = await refreshRepeatedPage(
+        source,
+        store,
+        page,
+        number === previousPage + 1 ? previousSignature : "",
+        signal,
+        publish,
+      );
+      page = refreshed.page;
+      updateTotal(page.totalPages);
+      previousSignature = pageSignature(page);
+      previousPage = number;
+      visitedPages.add(number);
+      if (refreshed.deferred) continue;
+    }
     publish({
       phase: "collecting",
       page: number,
@@ -353,7 +397,7 @@ export async function crawl(
           savedAt: detail.collectedAt,
         };
         // 所有已核对商品先登记为 pending；乱序完成也能先补采，且成功断点不倒退。
-        const advance = index > checkpointIndex;
+        const advance = !reviewing && !store.pageReviews().length && index > checkpointIndex;
         if (!store.save(item, detail, advance ? checkpoint : undefined))
           throw Object.assign(new Error("采集完整性校验未通过，未推进成功断点"), {
             name: "IncompleteDetailError",
@@ -402,14 +446,20 @@ export async function crawl(
         publish({ itemIndex: ++completed });
       }
     });
+    if (review) {
+      store.resolvePageReview(review.order, review.page);
+      publish({ pageReviews: store.pageReviews() });
+    }
   }
   store.markBackfillComplete();
+  const pageReviews = store.pageReviews();
   publish({
     phase: "completed",
     running: false,
     current: undefined,
     detailProgress: undefined,
-    message: `本轮完成：新增或更新 ${saved} 条，跳过 ${skipped} 条已采集或无法补齐商品，${failed} 条详情待重试。`,
+    message: `本轮扫描结束：新增或更新 ${saved} 条，跳过 ${skipped} 条已采集或无法补齐商品，${failed} 条详情待重试。${pageReviews.length ? `另有 ${pageReviews.length} 页待复核，已保留供下次补查。` : ""}`,
+    pageReviews,
     saved,
     skipped,
     failed,

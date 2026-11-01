@@ -1212,50 +1212,308 @@ describe("持续发现新号和历史详情共享采集池", () => {
     }
   });
 
-  it("同一次首页刷新周期内的真实重复历史页仍安全停止", async () => {
-    const db = memory(),
-      old = item(20),
-      src = source([[item(1)], [old], [old]]);
-    await expect(
-      crawl(src, db, new AbortController().signal, vi.fn(), { watch: true, concurrency: 4 }),
-    ).rejects.toThrow("连续两页返回相同商品");
-    expect(src.page).toHaveBeenCalledWith(3);
-    expect(db.backfillComplete()).toBe(false);
-  });
-
-  // 失败方式：首页没变，但慢历史读取跨过巡检周期后清空签名，重复页被误标历史补齐。
-  it("首页不变时，历史读取跨巡检周期仍识别真正重复页", async () => {
+  it("重复历史页强制重读后恢复，补采真实商品且不重复打开完整详情", async () => {
     vi.useFakeTimers();
     const db = memory(),
       old = item(20),
-      src = source([[item(1), item(2)], [old], [old]]),
+      missing = item(30),
+      tail = item(40),
+      src = source([[item(1)], [old], [missing], [tail]]),
       readPage = src.page,
       control = new AbortController();
-    src.page = vi.fn(async (number) => {
-      await new Promise<void>((resolve) => setTimeout(resolve, 110));
-      return readPage(number);
+    src.page = vi.fn(async (number, refresh) => {
+      const page = await readPage(number, refresh);
+      return number === 3 && !refresh ? { ...page, items: [old] } : page;
     });
-    let failure: unknown;
     const outcome = crawl(src, db, control.signal, vi.fn(), {
       watch: true,
       concurrency: 4,
-      headIntervalMs: 100,
-    }).catch((error: unknown) => {
-      failure = error;
-      return error;
-    });
+    }).catch((error: unknown) => error);
     try {
       await flush();
-      await vi.advanceTimersByTimeAsync(400);
-      await flush();
-      expect(failure).toMatchObject({ message: "连续两页返回相同商品，已暂停，避免循环翻页" });
-      expect(db.backfillComplete()).toBe(false);
-      expect(src.prepare).toHaveBeenCalledTimes(3);
-      expect(src.page).toHaveBeenCalledWith(3);
+      expect(src.page).toHaveBeenCalledWith(3, true);
+      expect(src.page).toHaveBeenCalledWith(4);
+      expect(db.pageReviews()).toEqual([]);
+      expect(db.count()).toBe(4);
+      expect(db.backfillComplete()).toBe(true);
+      expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old.key)).toHaveLength(
+        1,
+      );
+      expect(readSaved(db, missing.key)?.status).toBe("complete");
     } finally {
       control.abort(new Error("暂停"));
-      await vi.runOnlyPendingTimersAsync();
-      await outcome;
+      expect(await outcome).toMatchObject({ message: "暂停" });
+    }
+  });
+
+  it.each(["selling_time DESC", "expire_time DESC"])(
+    "%s 的重复页刷新后仍相同则继续后页，每轮只补查一次且保留待复核",
+    async (order) => {
+      vi.useFakeTimers();
+      const db = memory(),
+        old = item(20),
+        tail = item(40),
+        src = source([[item(1)], [old], [old], [tail]]),
+        readPage = src.page,
+        publish = vi.fn(),
+        control = new AbortController();
+      src.prepare = vi.fn(async (requested) => {
+        if (order === "expire_time DESC" && requested === "selling_time DESC")
+          throw new SellingOrderUnavailableError();
+        return { ...(await readPage(1)), order };
+      });
+      src.page = vi.fn(async (number, refresh) => ({
+        ...(await readPage(number, refresh)),
+        order,
+      }));
+      const outcome = crawl(src, db, control.signal, publish, {
+        watch: true,
+        concurrency: 4,
+      }).catch((error: unknown) => error);
+      try {
+        await flush();
+        expect(src.page).toHaveBeenCalledWith(4);
+        expect(vi.mocked(src.page).mock.calls.filter(([number]) => number === 3)).toHaveLength(3);
+        expect(db.pageReviews()).toEqual([
+          expect.objectContaining({ order, page: 3, signature: old.key }),
+        ]);
+        expect(readSaved(db, tail.key)?.status).toBe("complete");
+        expect(db.count()).toBe(3);
+        expect(db.checkpoint()?.page ?? 0).toBeLessThan(3);
+        expect(db.backfillComplete()).toBe(false);
+        expect(publish).toHaveBeenCalledWith(
+          expect.objectContaining({ pageReviews: [expect.objectContaining({ page: 3 })] }),
+        );
+        const calls = vi.mocked(src.page).mock.calls.length;
+        await flush();
+        expect(src.page).toHaveBeenCalledTimes(calls);
+      } finally {
+        control.abort(new Error("暂停"));
+        expect(await outcome).toMatchObject({ message: "暂停" });
+      }
+    },
+  );
+
+  it("重复页本轮末补查恢复后补采缺失商品并清除待复核，不倒退成功断点", async () => {
+    vi.useFakeTimers();
+    const db = memory(),
+      old = item(20),
+      missing = item(30),
+      tail = item(40),
+      src = source([[item(1)], [old], [missing], [tail]]),
+      readPage = src.page,
+      control = new AbortController();
+    let refreshes = 0;
+    src.page = vi.fn(async (number, refresh) => {
+      const page = await readPage(number, refresh);
+      if (number === 3 && (!refresh || ++refreshes === 1)) return { ...page, items: [old] };
+      return page;
+    });
+    const outcome = crawl(src, db, control.signal, vi.fn(), {
+      watch: true,
+      concurrency: 4,
+    }).catch((error: unknown) => error);
+    try {
+      await flush();
+      expect(refreshes).toBe(2);
+      expect(db.pageReviews()).toEqual([]);
+      expect(db.count()).toBe(4);
+      expect(readSaved(db, missing.key)?.status).toBe("complete");
+      expect(db.checkpoint()?.key).not.toBe(missing.key);
+      expect(db.backfillComplete()).toBe(true);
+    } finally {
+      control.abort(new Error("暂停"));
+      expect(await outcome).toMatchObject({ message: "暂停" });
+    }
+  });
+
+  it.each([
+    ["首次刷新", 1, false],
+    ["首次刷新", 1, true],
+    ["本轮补查", 2, false],
+    ["本轮补查", 2, true],
+  ] as const)(
+    "重复页%s第 %i 次强制读取发现总页数增加时继续采集尾页，重复解除=%s",
+    async (_where, at, recovered) => {
+      vi.useFakeTimers();
+      const db = memory(),
+        old = item(20),
+        missing = item(30),
+        tail = item(40),
+        src = source([[item(1)], [old], [missing], [tail]]),
+        readPage = src.page,
+        control = new AbortController();
+      let refreshes = 0,
+        totalPages = 3;
+      src.prepare = vi.fn(async () => ({ ...(await readPage(1)), totalPages }));
+      src.page = vi.fn(async (number, refresh) => {
+        if (number === 3 && refresh && ++refreshes >= at) totalPages = 4;
+        const page = { ...(await readPage(number, refresh)), totalPages };
+        if (number === 3 && (!recovered || refreshes < at)) return { ...page, items: [old] };
+        return page;
+      });
+      const outcome = crawl(src, db, control.signal, vi.fn(), {
+        watch: true,
+        concurrency: 4,
+      }).catch((error: unknown) => error);
+      try {
+        await flush();
+        expect(src.page).toHaveBeenCalledWith(4);
+        expect(readSaved(db, tail.key)?.status).toBe("complete");
+        expect(db.pageReviews()).toHaveLength(recovered ? 0 : 1);
+        expect(db.backfillComplete()).toBe(recovered);
+      } finally {
+        control.abort(new Error("暂停"));
+        expect(await outcome).toMatchObject({ message: "暂停" });
+      }
+    },
+  );
+
+  it("持续采集总页数缩小时保留范围外待复核，不越界读取或误标补齐", async () => {
+    vi.useFakeTimers();
+    const db = memory(),
+      src = source([[item(1)], [item(20)], [item(30)]]),
+      control = new AbortController();
+    db.deferPageReview("selling_time DESC", 4, item(30).key);
+    const outcome = crawl(src, db, control.signal, vi.fn(), {
+      watch: true,
+      concurrency: 4,
+    }).catch((error: unknown) => error);
+    try {
+      await flush();
+      expect(src.page).not.toHaveBeenCalledWith(4);
+      expect(src.page).not.toHaveBeenCalledWith(4, true);
+      expect(db.pageReviews()).toEqual([expect.objectContaining({ page: 4 })]);
+      expect(db.backfillComplete()).toBe(false);
+      expect(db.count()).toBe(3);
+    } finally {
+      control.abort(new Error("暂停"));
+      expect(await outcome).toMatchObject({ message: "暂停" });
+    }
+  });
+
+  it("跳过重复页不会中止已在途的完整详情", async () => {
+    vi.useFakeTimers();
+    const db = memory(),
+      fresh = item(1),
+      old = item(20),
+      tail = item(40),
+      src = source([[fresh], [old], [old], [tail]]),
+      active = holdDetails(src),
+      control = new AbortController();
+    const outcome = crawl(src, db, control.signal, vi.fn(), {
+      watch: true,
+      concurrency: 4,
+    }).catch((error: unknown) => error);
+    try {
+      await flush();
+      expect(db.pageReviews()).toEqual([expect.objectContaining({ page: 3 })]);
+      expect([...active.keys()].sort()).toEqual([fresh.key, old.key, tail.key].sort());
+      active.forEach((release) => release());
+      await flush();
+      expect(db.count()).toBe(3);
+      expect(db.retryItems()).toEqual([]);
+      expect(db.backfillComplete()).toBe(false);
+    } finally {
+      control.abort(new Error("暂停"));
+      active.forEach((release) => release());
+      expect(await outcome).toMatchObject({ message: "暂停" });
+    }
+  });
+
+  // 失败方式：首页巡检到期时提前开启下一轮，挤掉尚未开始或尚未完成的本轮复核。
+  it.each(["selling_time DESC", "expire_time DESC"])(
+    "%s 首页不变且跨巡检周期时先完成本轮待复核，再开始下一轮",
+    async (order) => {
+      vi.useFakeTimers();
+      const db = memory(),
+        old = item(20),
+        tail = item(40),
+        src = source([[item(1), item(2)], [old], [old], [tail], [tail]]),
+        readPage = src.page,
+        control = new AbortController();
+      src.prepare = vi.fn(async (requested) => {
+        if (order === "expire_time DESC" && requested === "selling_time DESC")
+          throw new SellingOrderUnavailableError();
+        return { ...(await readPage(1)), order };
+      });
+      src.page = vi.fn(async (number, refresh) => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 110));
+        return { ...(await readPage(number, refresh)), order };
+      });
+      let failure: unknown;
+      const outcome = crawl(src, db, control.signal, vi.fn(), {
+        watch: true,
+        concurrency: 4,
+        headIntervalMs: 100,
+      }).catch((error: unknown) => {
+        failure = error;
+        return error;
+      });
+      try {
+        await flush();
+        await vi.advanceTimersByTimeAsync(1500);
+        await flush();
+        expect(failure).toBeUndefined();
+        expect(db.pageReviews()).toEqual([
+          expect.objectContaining({ page: 3 }),
+          expect.objectContaining({ page: 5 }),
+        ]);
+        expect(db.backfillComplete()).toBe(false);
+        expect(vi.mocked(src.prepare).mock.calls.length).toBeGreaterThan(1);
+        expect(src.page).toHaveBeenCalledWith(4);
+        expect(readSaved(db, tail.key)?.status).toBe("complete");
+        const calls = vi.mocked(src.page).mock.calls;
+        // 每页第一次强制读取是即时刷新，第二次才是本轮末补查。
+        const lastReviewed = Math.max(
+          ...[3, 5].map((page) => {
+            const indices = calls.flatMap(([number, refresh], index) =>
+              number === page && refresh ? [index] : [],
+            );
+            expect(indices.length).toBeGreaterThanOrEqual(2);
+            return indices[1]!;
+          }),
+        );
+        if (order === "expire_time DESC") {
+          const nextPass = calls.flatMap(([number, refresh], index) =>
+            number === 1 && !refresh ? [index] : [],
+          )[1];
+          expect(nextPass).toBeGreaterThan(lastReviewed);
+        }
+      } finally {
+        control.abort(new Error("暂停"));
+        await vi.runOnlyPendingTimersAsync();
+        await outcome;
+      }
+    },
+  );
+
+  it("首页发现跨页重复时继续发现后页，但不越过待复核页推进头水位", async () => {
+    vi.useFakeTimers();
+    const db = memory(),
+      previous = { time: item(99, 900).sellingTime!, keys: ["1:99"] },
+      fresh = item(1, 1000),
+      tail = item(20, 950),
+      src = source([[fresh], [fresh], [tail]]),
+      control = new AbortController();
+    db.setHeadCheckpoint(previous);
+    db.markBackfillComplete();
+    const outcome = crawl(src, db, control.signal, vi.fn(), {
+      watch: true,
+      concurrency: 4,
+    }).catch((error: unknown) => error);
+    try {
+      await flush();
+      expect(src.page).toHaveBeenCalledWith(2, true);
+      expect(src.page).toHaveBeenCalledWith(3);
+      expect(readSaved(db, tail.key)?.status).toBe("complete");
+      expect(db.pageReviews()).toEqual([expect.objectContaining({ page: 2 })]);
+      expect(db.headCheckpoint()).toEqual(previous);
+      expect(db.backfillComplete()).toBe(false);
+      expect(src.detail).toHaveBeenCalledTimes(2);
+    } finally {
+      control.abort(new Error("暂停"));
+      expect(await outcome).toMatchObject({ message: "暂停" });
     }
   });
 

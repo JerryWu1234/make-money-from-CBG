@@ -5,6 +5,7 @@ import { compactListing } from "./compact";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { locateCheckpoint } from "./resume";
 import { browserConnectionFailure } from "../browser-connection";
+import { pageSignature, readPageReview, refreshRepeatedPage } from "./repeated-pages";
 import {
   DEFAULT_CRAWL_CONCURRENCY,
   crawlAccessFailure,
@@ -18,6 +19,7 @@ import {
   type CrawlStatus,
   type Listing,
   type ListingPage,
+  type PageReview,
   type SavedRoleRecord,
 } from "./types";
 
@@ -75,8 +77,10 @@ export async function watchCrawl(
     historyPage = 1,
     totalPages = 1,
     nextHeadCheck = Date.now();
-  let historyDone = ordered && store.backfillComplete();
+  let historyDone = ordered && store.backfillComplete() && !store.pageReviews().length;
   let historyPass = 0;
+  let reviewsScheduled = false;
+  let reviewQueue: PageReview[] = [];
   const check = () => {
     signal.throwIfAborted();
     if (failure) throw failure.error;
@@ -109,6 +113,7 @@ export async function watchCrawl(
       !signal.aborted &&
       !failure &&
       historyDone &&
+      !store.pageReviews().length &&
       !running.old &&
       !queues.old.length &&
       ![...failedVersions.keys()].some((key) => store.captureLane(key) === "old") &&
@@ -141,6 +146,7 @@ export async function watchCrawl(
       const currentPoint = store.checkpoint();
       const advance =
         !failure &&
+        !store.pageReviews().length &&
         history &&
         history.index > savedHistoryIndex &&
         (!ordered || !currentPoint?.time || history.point.time! <= currentPoint.time);
@@ -319,14 +325,20 @@ export async function watchCrawl(
     for (let number = 1; ; number++) {
       check();
       checkPage(page, number, order);
+      const result = await refreshRepeatedPage(source, store, page, signature, signal, publish);
+      page = result.page;
+      totalPages = page.totalPages;
+      if (result.deferred) {
+        if (number >= page.totalPages) break;
+        page = await source.page(number + 1);
+        continue;
+      }
+      checkPage(page, number, order);
       const firstTime = page.items[0]?.sellingTime;
       if (previousLastTime && firstTime && firstTime > previousLastTime)
         throw new Error("相邻列表页未保持上架时间倒序，已暂停以免漏采");
       previousLastTime = page.items.at(-1)?.sellingTime ?? undefined;
-      const currentSignature = page.items.map((item) => item.key).join("|");
-      if (signature && currentSignature === signature)
-        throw new Error("连续两页返回相同商品，已暂停，避免循环翻页");
-      signature = currentSignature;
+      signature = pageSignature(page);
       publish({ headPage: number, page: number, totalPages: page.totalPages });
       for (const listed of page.items) {
         if ((previous || catchUp) && boundary && listed.sellingTime! < boundary) break;
@@ -346,7 +358,7 @@ export async function watchCrawl(
     }
     check();
     // 所有本次发现项已由 observe 持久登记，详情失败也不会丢失发现边界。
-    if (top && (!previous || top >= previous.time))
+    if (top && (!previous || top >= previous.time) && !store.pageReviews(order).length)
       store.setHeadCheckpoint({ time: top, keys: [...keys] });
     publish({ headCheckedAt: new Date().toISOString() });
   };
@@ -383,7 +395,8 @@ export async function watchCrawl(
     });
     nextHeadCheck = Date.now() + interval;
     const point = store.checkpoint();
-    if (ordered && !historyDone && point)
+    if (store.pageReviews().length) historyDone = false;
+    if (ordered && !historyDone && point && !store.pageReviews().length)
       historyPage = (await locateCheckpoint(source, first, point, signal)) ?? 1;
     let previousSignature = "",
       previousHeadSignature = first.items.map((item) => item.key).join("|");
@@ -410,21 +423,62 @@ export async function watchCrawl(
         )
           previousSignature = "";
         previousHeadSignature = headSignature;
-        if (!ordered && historyDone) {
-          historyDone = false;
-          historyPage = 1;
-          historyPass++;
-          previousSignature = "";
+        // 先完成本轮有界复核，再开始下一轮全量扫描；首页巡检不能挤掉待复核页。
+        if (historyDone && reviewsScheduled && !reviewQueue.length) {
+          if (!ordered) {
+            historyDone = false;
+            historyPage = 1;
+            historyPass++;
+            previousSignature = "";
+          }
+          reviewsScheduled = false;
         }
+      } else if (historyDone && !reviewsScheduled) {
+        // Snapshot once per pass/巡检周期; persistent duplicates cannot create an immediate retry loop.
+        reviewQueue = store.pageReviews(order).filter((review) => review.page <= totalPages);
+        reviewsScheduled = true;
+      } else if (historyDone && reviewQueue.length) {
+        const review = reviewQueue[0]!;
+        await retryDiscovery(async () => {
+          const result = await readPageReview(source, store, review, signal, publish);
+          check();
+          const page = result.page;
+          totalPages = page.totalPages;
+          if (historyPage <= totalPages) historyDone = false;
+          if (result.deferred) return;
+          checkPage(page, review.page, order);
+          for (const listed of page.items) await observe(listed, "new");
+          // Discovery has persisted all tasks; this check never advances the historical checkpoint.
+          store.resolvePageReview(order, review.page);
+          publish({ pageReviews: store.pageReviews() });
+        });
+        reviewQueue.shift();
+        pump();
+      } else if (!historyDone && historyPage > totalPages) {
+        historyDone = true;
       } else if (!historyDone && !queued().new.length && queued().old.length < concurrency) {
         const discovered = await retryDiscovery(async () => {
-          const page = await source.page(historyPage);
+          let page = await source.page(historyPage);
           check();
           checkPage(page, historyPage, order);
           totalPages = page.totalPages;
-          const signature = page.items.map((item) => item.key).join("|");
-          if (signature && signature === previousSignature)
-            throw new Error("连续两页返回相同商品，已暂停，避免循环翻页");
+          const result = await refreshRepeatedPage(
+            source,
+            store,
+            page,
+            previousSignature,
+            signal,
+            publish,
+          );
+          check();
+          page = result.page;
+          totalPages = page.totalPages;
+          if (result.deferred) {
+            publish({ historyPage, page: historyPage, totalPages });
+            return { signature: pageSignature(page), complete: true };
+          }
+          checkPage(page, historyPage, order);
+          const signature = pageSignature(page);
           publish({ historyPage, page: historyPage, totalPages });
           for (const listed of page.items) {
             const lane = !ordered && historyPass > 0 && !store.detail(listed.key) ? "new" : "old";

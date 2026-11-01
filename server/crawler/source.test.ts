@@ -208,6 +208,24 @@ it("列表业务操作报错先留现场，再抛回原错误", async () => {
   );
 });
 
+it("重复页复核显式强制刷新，并记录请求页、排序和商品身份", async () => {
+  const listing = { page: 2, totalPages: 3, order: "expire_time DESC", items: [item] };
+  vi.mocked(gotoPage).mockResolvedValue(listing);
+  const opts = options();
+  const source = createCrawlSource({ ...opts, listPage: page, detailPage: page });
+  await expect(source.page(2, true)).resolves.toBe(listing);
+  expect(gotoPage).toHaveBeenCalledWith(page, 2, opts.signal, true);
+  expect(opts.log).toHaveBeenCalledWith("list.page_ready", {
+    requestedPage: 2,
+    actualPage: 2,
+    totalPages: 3,
+    count: 1,
+    order: "expire_time DESC",
+    refresh: true,
+    keys: [item.key],
+  });
+});
+
 it("缺少上架排序仅记录现有全扫策略切换，typed信号原样交给runner且不触发错误监控", async () => {
   const fallback = new SellingOrderUnavailableError();
   const listing = { page: 1, totalPages: 2, order: "expire_time DESC", items: [item] };

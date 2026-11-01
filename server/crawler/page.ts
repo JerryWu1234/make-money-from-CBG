@@ -168,10 +168,75 @@ export async function readListings(page: Page): Promise<ListingPage> {
     })),
   };
 }
-export async function waitList(page: Page, wanted: number) {
+interface ListNavigationWindow extends Window {
+  __cbgListNavigation?: { committed: boolean; observer: MutationObserver };
+}
+
+/** 页码可能先于商品更新；同一批 ID 重绘也算新提交，不要求商品必须变化。 */
+async function observeListNavigation(page: Page) {
+  await page.evaluate(() => {
+    const globals = window as ListNavigationWindow;
+    globals.__cbgListNavigation?.observer.disconnect();
+    const resultNodes = (): Node[] => {
+      const anchors = Array.from(document.querySelectorAll("#soldList a.soldImg[href]"));
+      if (anchors.length) return anchors;
+      const result = document.querySelector("#query_result");
+      if (!result) return [];
+      const walker = document.createTreeWalker(result, NodeFilter.SHOW_TEXT);
+      const empty: Node[] = [];
+      while (walker.nextNode())
+        if (walker.currentNode.textContent?.includes("没有符合条件"))
+          empty.push(walker.currentNode);
+      return empty;
+    };
+    const before = resultNodes().map((node) => ({
+      node,
+      href: node instanceof HTMLAnchorElement ? node.href : node.textContent,
+    }));
+    const state = {
+      committed: false,
+      observer: new MutationObserver((mutations) => {
+        const nodes = resultNodes();
+        // 页码、加载提示、悬停状态等变化不表示商品列表已提交。
+        state.committed ||=
+          !!nodes.length &&
+          (nodes.length !== before.length ||
+            nodes.some((node, index) => {
+              const previous = before[index];
+              return (
+                node !== previous?.node ||
+                (node instanceof HTMLAnchorElement ? node.href : node.textContent) !==
+                  previous.href ||
+                mutations.some(
+                  (change) => change.type === "characterData" && change.target === node,
+                )
+              );
+            }));
+      }),
+    };
+    state.observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["href"],
+      characterData: true,
+    });
+    globals.__cbgListNavigation = state;
+  });
+}
+
+async function clearListNavigation(page: Page) {
+  await page.evaluate(() => {
+    const globals = window as ListNavigationWindow;
+    globals.__cbgListNavigation?.observer.disconnect();
+    delete globals.__cbgListNavigation;
+  });
+}
+
+export async function waitList(page: Page, wanted: number, requireCommit = false) {
   await page.waitForFunction(
-    (pageNumber) => {
-      const globals = window as Window & {
+    ({ pageNumber, requireCommit }) => {
+      const globals = window as ListNavigationWindow & {
         QueryArgs?: { page?: number };
         CaptchaCheck?: { need_captcha?: boolean };
       };
@@ -185,12 +250,13 @@ export async function waitList(page: Page, wanted: number) {
         .querySelector<HTMLElement>("#query_result")
         ?.innerText.includes("没有符合条件");
       return (
+        (!requireCommit || globals.__cbgListNavigation?.committed === true) &&
         !busy &&
         ((current === pageNumber && !!document.querySelector("#soldList a.soldImg")) ||
           (empty && Number(globals.QueryArgs?.page) === pageNumber))
       );
     },
-    wanted,
+    { pageNumber: wanted, requireCommit },
     { timeout: 45000, polling: 250 },
   );
   await assertAvailable(page);
@@ -205,18 +271,23 @@ export async function gotoPage(
   const current = await readListings(page);
   if (current.page === wanted && !refresh) return current;
   await pace(signal);
-  // 优先点击网站现有分页链接；远距离定位使用网站自己的跳页函数。
-  const link = page.locator(`#pager_bar a[href="javascript:goto(${wanted})"]`).first();
-  if (await link.count()) await clickForInspection(link);
-  else
-    await page.evaluate((number) => {
-      const goto = (window as Window & { goto?: (page: number) => void }).goto;
-      if (typeof goto !== "function") throw new Error("网站未提供跳页函数，无法定位断点");
-      goto(number);
-    }, wanted);
-  await waitList(page, wanted);
-  checkAborted(signal);
-  return readListings(page);
+  await observeListNavigation(page);
+  try {
+    // 优先点击网站现有分页链接；远距离定位使用网站自己的跳页函数。
+    const link = page.locator(`#pager_bar a[href="javascript:goto(${wanted})"]`).first();
+    if (await link.count()) await clickForInspection(link);
+    else
+      await page.evaluate((number) => {
+        const goto = (window as Window & { goto?: (page: number) => void }).goto;
+        if (typeof goto !== "function") throw new Error("网站未提供跳页函数，无法定位断点");
+        goto(number);
+      }, wanted);
+    await waitList(page, wanted, true);
+    checkAborted(signal);
+    return await readListings(page);
+  } finally {
+    await clearListNavigation(page).catch(() => {});
+  }
 }
 export async function prepareList(
   page: Page,
@@ -248,8 +319,13 @@ export async function prepareList(
       const current = await readListings(page);
       if (current.order === `${field} DESC`) break;
       await pace(signal);
-      await clickForInspection(page.locator(`#order_menu a[data_attr_name="${field}"]`));
-      await waitList(page, 1);
+      await observeListNavigation(page);
+      try {
+        await clickForInspection(page.locator(`#order_menu a[data_attr_name="${field}"]`));
+        await waitList(page, 1, true);
+      } finally {
+        await clearListNavigation(page).catch(() => {});
+      }
     }
   }
   const result = await gotoPage(page, 1, signal, true);

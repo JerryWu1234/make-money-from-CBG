@@ -1389,12 +1389,136 @@ describe("二分定位与动态翻页", () => {
     expect(vi.mocked(src.page).mock.calls.map(([page]) => page)).toEqual([1, 2, 3, 4]);
     expect(vi.mocked(src.detail).mock.calls.map(([row]) => row.key)).toContain(item(4).key);
   });
-  it("翻页无变化会停止，不重复循环；暂停不会继续点击", async () => {
+  it("重复页刷新仍相同则继续后页，有限补查后保留待复核而不标记历史补齐", async () => {
     const db = memory(),
-      src = source([[item(1)], [item(1)]]);
-    await expect(crawl(src, db, signal(), () => {})).rejects.toThrow("连续两页");
+      first = item(1),
+      tail = item(3),
+      src = source([[first], [first], [tail]]),
+      publish = vi.fn();
+    await crawl(src, db, signal(), publish);
+    expect(src.page).toHaveBeenCalledWith(2, true);
+    expect(src.page).toHaveBeenCalledWith(3);
+    expect(vi.mocked(src.page).mock.calls.filter(([number]) => number === 2)).toHaveLength(3);
+    expect(db.count()).toBe(2);
+    expect(readSaved(db, tail.key)?.status).toBe("complete");
+    expect(db.pageReviews()).toEqual([
+      expect.objectContaining({ order: "selling_time DESC", page: 2, signature: first.key }),
+    ]);
+    expect(db.backfillComplete()).toBe(false);
+    expect(db.checkpoint()?.key).toBe(first.key);
+    expect(publish).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        phase: "completed",
+        pageReviews: [expect.objectContaining({ page: 2 })],
+        message: expect.stringContaining("复核"),
+      }),
+    );
     const controller = new AbortController();
     controller.abort(new Error("暂停"));
+    const calls = vi.mocked(src.page).mock.calls.length;
     await expect(crawl(src, db, controller.signal, () => {})).rejects.toThrow("暂停");
+    expect(src.page).toHaveBeenCalledTimes(calls);
+  });
+
+  it.each([1, 2])("重复页在第 %s 次强制重读恢复，采集遗漏商品且不重复保存原商品", async (at) => {
+    const db = memory(),
+      first = item(1),
+      missing = item(2),
+      tail = item(3),
+      src = source([[first], [missing], [tail]]),
+      readPage = src.page;
+    let refreshes = 0;
+    src.page = vi.fn(async (number, refresh) => {
+      const page = await readPage(number, refresh);
+      if (number === 2 && (!refresh || ++refreshes < at)) return { ...page, items: [first] };
+      return page;
+    });
+    await crawl(src, db, signal(), vi.fn());
+    expect(refreshes).toBe(at);
+    expect(db.pageReviews()).toEqual([]);
+    expect(db.backfillComplete()).toBe(true);
+    expect(db.count()).toBe(3);
+    expect(readSaved(db, missing.key)?.status).toBe("complete");
+    expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === first.key)).toHaveLength(
+      1,
+    );
+    if (at === 2) expect(db.checkpoint()?.key).toBe(first.key);
+  });
+
+  it("续采有待复核页时从首页完整核对，不因较后的成功断点漏掉早页", async () => {
+    const db = memory(),
+      pages = Array.from({ length: 8 }, (_, index) => [item(index + 1)]),
+      anchor = pages[5][0],
+      src = source(pages);
+    db.observe(anchor);
+    db.save(anchor, detail(anchor), checkpoint(anchor, 6));
+    db.markBackfillComplete();
+    db.deferPageReview("selling_time DESC", 2, pages[0][0].key);
+    await crawl(src, db, signal(), vi.fn());
+    expect(src.page).toHaveBeenCalledWith(1);
+    expect(readSaved(db, pages[1][0].key)?.status).toBe("complete");
+    expect(db.pageReviews()).toEqual([]);
+    expect(db.backfillComplete()).toBe(true);
+    expect(db.count()).toBe(8);
+    expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === anchor.key)).toHaveLength(
+      0,
+    );
+  });
+
+  it("整轮全部页面重复也只推进到总页数，补查次数有界并保留全部疑点", async () => {
+    const db = memory(),
+      row = item(1),
+      src = source(Array.from({ length: 7 }, () => [row]));
+    await crawl(src, db, signal(), vi.fn());
+    expect(src.page).toHaveBeenCalledTimes(25);
+    expect(Math.max(...vi.mocked(src.page).mock.calls.map(([number]) => number))).toBe(7);
+    expect(db.pageReviews().map(({ page }) => page)).toEqual([2, 3, 4, 5, 6, 7]);
+    expect(src.detail).toHaveBeenCalledTimes(1);
+    expect(db.count()).toBe(1);
+    expect(db.backfillComplete()).toBe(false);
+  });
+
+  it.each([
+    ["首次刷新", 1, false],
+    ["首次刷新", 1, true],
+    ["本轮补查", 2, false],
+    ["本轮补查", 2, true],
+  ] as const)(
+    "重复页%s第 %i 次强制读取发现总页数增加时继续采集尾页，重复解除=%s",
+    async (_where, at, recovered) => {
+      const db = memory(),
+        first = item(1),
+        old = item(2),
+        missing = item(3),
+        tail = item(4),
+        src = source([[first], [old], [missing], [tail]]),
+        readPage = src.page;
+      let refreshes = 0,
+        totalPages = 3;
+      src.prepare = vi.fn(async () => ({ ...(await readPage(1)), totalPages }));
+      src.page = vi.fn(async (number, refresh) => {
+        if (number === 3 && refresh && ++refreshes >= at) totalPages = 4;
+        const page = { ...(await readPage(number, refresh)), totalPages };
+        if (number === 3 && (!recovered || refreshes < at)) return { ...page, items: [old] };
+        return page;
+      });
+      await crawl(src, db, signal(), vi.fn());
+      expect(src.page).toHaveBeenCalledWith(4);
+      expect(readSaved(db, tail.key)?.status).toBe("complete");
+      expect(db.pageReviews()).toHaveLength(recovered ? 0 : 1);
+      expect(db.backfillComplete()).toBe(recovered);
+    },
+  );
+
+  it("列表总页数缩小时保留范围外待复核记录，不越界翻页或误标补齐", async () => {
+    const db = memory(),
+      src = source([[item(1)], [item(2)], [item(3)]]);
+    db.deferPageReview("selling_time DESC", 4, item(3).key);
+    await crawl(src, db, signal(), vi.fn());
+    expect(src.page).not.toHaveBeenCalledWith(4);
+    expect(src.page).not.toHaveBeenCalledWith(4, true);
+    expect(db.pageReviews()).toEqual([expect.objectContaining({ page: 4 })]);
+    expect(db.count()).toBe(3);
+    expect(db.backfillComplete()).toBe(false);
   });
 });
