@@ -281,6 +281,20 @@ export function CrawlPanel({
               <p className="crawl-progress">{status.detailProgress}</p>
             )}
             {status.strategy && <p className="status-note">{status.strategy}</p>}
+            {!!status.pageReviews?.length && (
+              <p className="status-note">
+                待复核列表页：{status.pageReviews.length} 页 ·{" "}
+                {status.pageReviews
+                  .slice(0, 12)
+                  .map(
+                    (review) =>
+                      `${review.order === "selling_time DESC" ? "上架排序" : review.order === "expire_time DESC" ? "到期排序" : "其他排序"}第 ${review.page} 页`,
+                  )
+                  .join("、")}
+                {status.pageReviews.length > 12 ? "等" : ""}
+                。重复页已跳过，将在本轮结束后复核；未核实的页会保留到续采。
+              </p>
+            )}
             {status.latestComplete && (
               <p className="status-note">
                 最近完整采集：{displayTime(status.latestComplete.collectedAt)} · 商品{" "}

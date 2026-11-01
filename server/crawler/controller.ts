@@ -41,7 +41,13 @@ const cache = (runtime[runtimeKey] ??= {
   abort: null,
   activeRun: null,
 });
-const store = () => (cache.storage ||= new CrawlStore());
+const store = () => {
+  cache.storage ||= new CrawlStore();
+  // Upgrade methods after HMR without replacing the connection used by in-flight tasks.
+  if (Object.getPrototypeOf(cache.storage) !== CrawlStore.prototype)
+    Object.setPrototypeOf(cache.storage, CrawlStore.prototype);
+  return cache.storage;
+};
 export type CrawlOrigin = "manual" | "scheduled";
 export interface ActiveCrawl {
   origin: CrawlOrigin;
@@ -58,6 +64,7 @@ export function crawlStatus() {
     ...cache.status,
     totalSaved: store().count(),
     checkpoint: store().checkpoint(),
+    pageReviews: store().pageReviews(),
     latestComplete: store().latestComplete(),
     recent: store().recent(),
   };

@@ -14,6 +14,7 @@ import type {
   CrawlLane,
   HeadCheckpoint,
   Listing,
+  PageReview,
   RoleDetail,
   SavedListingPage,
   SavedListingScope,
@@ -25,6 +26,7 @@ import { trackRecordVersions } from "../record-versions";
 export class CrawlStore {
   readonly db: DatabaseSync;
   private retrySnapshot?: { changes: number; version: number; listings: string[] };
+  private pageReviewSchemaReady?: boolean;
   constructor(readonly filename = path.resolve("data/cbg.sqlite")) {
     if (filename !== ":memory:") mkdirSync(path.dirname(filename), { recursive: true });
     this.db = new DatabaseSync(filename);
@@ -55,6 +57,8 @@ export class CrawlStore {
     this.ensureListingColumn("capture_lane", "TEXT NOT NULL DEFAULT 'old'");
     this.ensureCrawlStateColumn("backfill_complete", "INTEGER NOT NULL DEFAULT 0");
     this.ensureCrawlStateColumn("head_checkpoint_json", "TEXT");
+    this.ensureCrawlStateColumn("page_reviews_json", "TEXT");
+    this.pageReviewSchemaReady = true;
     trackRecordVersions(this.db, "listings");
     this.compactExisting();
     for (const row of this.db
@@ -127,11 +131,46 @@ export class CrawlStore {
       ?.backfill_complete;
   }
   markBackfillComplete() {
+    if (this.pageReviews().length) return;
     this.db
       .prepare(
         "INSERT INTO crawl_state(id,backfill_complete) VALUES(1,1) ON CONFLICT(id) DO UPDATE SET backfill_complete=1",
       )
       .run();
+  }
+  pageReviews(order?: string): PageReview[] {
+    // The dev server retains the live store across module reloads, including pre-migration instances.
+    if (!this.pageReviewSchemaReady) {
+      this.ensureCrawlStateColumn("page_reviews_json", "TEXT");
+      this.pageReviewSchemaReady = true;
+    }
+    const row = this.db.prepare("SELECT page_reviews_json FROM crawl_state WHERE id=1").get();
+    const reviews: PageReview[] = row?.page_reviews_json
+      ? JSON.parse(String(row.page_reviews_json))
+      : [];
+    return reviews
+      .filter((review) => order === undefined || review.order === order)
+      .sort((left, right) => left.order.localeCompare(right.order) || left.page - right.page);
+  }
+  deferPageReview(order: string, page: number, signature: string) {
+    if (!order.trim() || !Number.isSafeInteger(page) || page < 1 || !signature)
+      throw new Error("待复核列表页无效");
+    const reviews = this.pageReviews();
+    const previous = reviews.find((review) => review.order === order && review.page === page);
+    if (previous) previous.signature = signature;
+    else reviews.push({ order, page, signature, detectedAt: new Date().toISOString() });
+    this.db
+      .prepare(`INSERT INTO crawl_state(id,page_reviews_json,backfill_complete) VALUES(1,?,0)
+        ON CONFLICT(id) DO UPDATE SET page_reviews_json=excluded.page_reviews_json,backfill_complete=0`)
+      .run(JSON.stringify(reviews));
+  }
+  resolvePageReview(order: string, page: number) {
+    const reviews = this.pageReviews();
+    const remaining = reviews.filter((review) => review.order !== order || review.page !== page);
+    if (remaining.length === reviews.length) return;
+    this.db
+      .prepare("UPDATE crawl_state SET page_reviews_json=? WHERE id=1")
+      .run(JSON.stringify(remaining));
   }
   observe(item: Listing, lane: CrawlLane = "old"): boolean {
     if (lane !== "new" && lane !== "old") throw new Error("采集任务来源无效");

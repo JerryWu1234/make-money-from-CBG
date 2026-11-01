@@ -225,14 +225,17 @@ export function createCrawlSource({
         });
         return result;
       }),
-    page: (number) =>
+    page: (number, refresh = false) =>
       step(listPage, `列表翻页至第 ${number} 页`, async () => {
-        const result = await gotoPage(listPage, number, signal);
+        const result = await gotoPage(listPage, number, signal, refresh);
         log("list.page_ready", {
           requestedPage: number,
           actualPage: result.page,
           totalPages: result.totalPages,
           count: result.items.length,
+          order: result.order,
+          refresh,
+          keys: result.items.map((item) => item.key),
         });
         return result;
       }),

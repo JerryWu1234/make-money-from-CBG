@@ -13,7 +13,24 @@ it.each(["selling_time DESC", "expire_time DESC"])(
   "真实 Source 显式要求上架排序：现有排序为 %s",
   async (order) => {
     vi.useFakeTimers();
-    const go = vi.fn();
+    let emptyNode = { textContent: "没有符合条件" };
+    let listChanged = () => {};
+    const go = vi.fn(() => {
+      emptyNode = { textContent: "没有符合条件" };
+      listChanged();
+    });
+    vi.stubGlobal("HTMLAnchorElement", class {});
+    vi.stubGlobal("NodeFilter", { SHOW_TEXT: 4 });
+    vi.stubGlobal(
+      "MutationObserver",
+      class {
+        constructor(callback: (changes: unknown[]) => void) {
+          listChanged = () => callback([]);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
     const globals = {
       QueryArgs: { server_type: "3", order_by: order, page: 1 },
       QueryResult: [],
@@ -23,6 +40,17 @@ it.each(["selling_time DESC", "expire_time DESC"])(
     vi.stubGlobal("location", { pathname: "/cgi-bin/role_search.py" });
     vi.stubGlobal("document", {
       body: { innerText: "" },
+      createTreeWalker: () => {
+        let visited = false;
+        return {
+          currentNode: emptyNode,
+          nextNode() {
+            if (visited) return null;
+            visited = true;
+            return emptyNode;
+          },
+        };
+      },
       querySelectorAll: () => [],
       querySelector: (selector: string) =>
         selector === "#pager_bar"
