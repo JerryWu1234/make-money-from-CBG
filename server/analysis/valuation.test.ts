@@ -266,7 +266,7 @@ describe("裸号估值的复算与可追溯输入", () => {
       result.valuation?.items.find((item) => item.name === "坐骑")?.evidence[0].path,
     ).toContain("/detail/valuation/fields/");
   });
-  it("无土豪金不误加1400，新采财产覆盖旧摘要，金额引用实际字段", () => {
+  it("无土豪金不误加800，新采财产覆盖旧摘要，金额引用实际字段", () => {
     const record = completeRecord();
     record.listing.summary = { iCash: 999999999, iSaving: 999999999, xianyu: 999999 };
     record.detail!.valuation = {

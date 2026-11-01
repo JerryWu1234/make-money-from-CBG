@@ -606,11 +606,11 @@ export function calculateValuation(
   add(
     "土豪金ID",
     golden?.raw || "未知",
-    "明确土豪金+1400；明确没有为0",
+    "明确土豪金+800；明确没有为0",
     ["否", "无土豪金", "梦幻西游"].includes(golden?.raw || "")
       ? 0
       : golden?.raw.includes("土豪金") && !/无|没有|不是|非/.test(golden.raw)
-        ? 1400
+        ? 800
         : null,
     golden?.evidence,
   );
@@ -756,7 +756,7 @@ export function calculateValuation(
       "补采全部坐骑：确认总数，每只的成长、进阶状态和主属性百分比；不要把祥瑞数量当坐骑数量。",
     );
   if (golden?.raw === "是")
-    suggestions.push("确认靓号特效的具体类型；只显示“是”不能直接按土豪金加1400元。");
+    suggestions.push("确认靓号特效的具体类型；只显示“是”不能直接按土豪金加800元。");
   if (
     !server?.age ||
     server.rank === null ||
