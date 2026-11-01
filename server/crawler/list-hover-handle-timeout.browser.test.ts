@@ -24,7 +24,18 @@ const key = "583:202605281800113-583-ZLDRYSFTFKJK";
 const html = `<!doctype html><meta charset="utf-8"><style>a{display:block;margin:40px;width:400px;height:80px;background:#ddf}</style>
 <div id="soldList"><a class="soldImg" href="https://xyq.cbg.163.com/equip?s=583&eid=202605281800113-583-ZLDRYSFTFKJK" data_equip_name="88088059" data_price="100" onmouseover="window.inspected=event.isTrusted">模拟商品88088059</a></div>
 <div id="pager_bar">第1页 共1页</div>
-<script>window.QueryArgs={server_type:'3',page:1,order_by:'expire_time DESC'};window.goto=()=>{};</script>`;
+<script>
+window.QueryArgs={server_type:'3',page:1,order_by:'expire_time DESC'};
+window.fixtureRefreshes=0;
+window.goto=(number)=>{
+  QueryArgs.page=number;
+  document.querySelector('#pager_bar').textContent='第'+number+'页 共1页';
+  // Refresh commits new nodes even when the same product remains on the page.
+  const list=document.querySelector('#soldList');
+  list.replaceWith(list.cloneNode(true));
+  window.fixtureRefreshes++;
+};
+</script>`;
 let profile: string;
 let persistent: BrowserContext | undefined;
 let connection: Browser | undefined;
@@ -150,6 +161,7 @@ it("原生hover取句柄不可用时校验DOM后执行一次可信悬停，不�
     held: held ? { method: held.method, id: held.id } : null,
     error: failure ? { name: failure.name, message: failure.message } : null,
     elapsedMs,
+    listRefreshes: await page.evaluate(() => Reflect.get(window, "fixtureRefreshes")),
     attempts,
     detailCalls: detail.mock.calls.length,
     persisted: (store.detail(key) as SavedRoleRecord | null)?.status === "complete",
@@ -165,6 +177,7 @@ it("原生hover取句柄不可用时校验DOM后执行一次可信悬停，不�
   console.log("HOVER_HANDLE_REPRO_EVIDENCE", directory);
   store.close();
   expect(held).toBeDefined();
+  expect(report.listRefreshes).toBe(1);
   expect(report.attempts).toBe(1);
   expect(report.detailCalls).toBe(1);
   expect(report.persisted).toBe(true);
