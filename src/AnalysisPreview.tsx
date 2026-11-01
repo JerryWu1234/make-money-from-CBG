@@ -99,9 +99,13 @@ export function AnalysisPreview() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
   const [showViewed, setShowViewed] = useState(false);
-  const [copyNotice, setCopyNotice] = useState<{ message: string; error: boolean } | null>(null);
+  const [rankingNotice, setRankingNotice] = useState<{ message: string; error: boolean } | null>(
+    null,
+  );
   const [copying, setCopying] = useState(false);
   const copyOperation = useRef(false);
+  const [hidingKey, setHidingKey] = useState<string | null>(null);
+  const hideOperation = useRef(false);
   const [revision, setRevision] = useState(0);
   const clearedVersion = useRef(0);
   const [busy, setBusy] = useState(false);
@@ -333,24 +337,37 @@ export function AnalysisPreview() {
     if (item.taskId) setTaskId(item.taskId);
     else setRoleKey(item.key);
   };
-  const viewRecommendation = async (item: AnalysisItem) => {
-    viewItem(item);
+  const hideRecommendation = async (item: AnalysisItem) => {
+    if (hideOperation.current || item.recommendationViewed) return;
+    hideOperation.current = true;
+    setHidingKey(item.key);
+    setRankingNotice(null);
     try {
       await request("/api/analysis/recommendation/view", { key: item.key });
       setRevision((value) => value + 1);
+      setRankingNotice({
+        message: `${item.name} 已隐藏，可勾选“显示已隐藏的推荐”查看。`,
+        error: false,
+      });
     } catch (failure) {
-      setError(failure instanceof Error ? failure.message : "无法保存查看记录");
+      setRankingNotice({
+        message: `隐藏失败：${failure instanceof Error ? failure.message : "请重试"}，商品仍保留在榜单。`,
+        error: true,
+      });
+    } finally {
+      hideOperation.current = false;
+      setHidingKey(null);
     }
   };
   const copyRecommendation = async (item: AnalysisItem) => {
     if (copyOperation.current) return;
     if (!item.url?.trim()) {
-      setCopyNotice({ message: "商品链接缺失，无法复制，请重新采集后重试。", error: true });
+      setRankingNotice({ message: "商品链接缺失，无法复制，请重新采集后重试。", error: true });
       return;
     }
     copyOperation.current = true;
     setCopying(true);
-    setCopyNotice(null);
+    setRankingNotice(null);
     const content = [
       `角色：${item.name}`,
       `区服：${item.server}`,
@@ -363,21 +380,9 @@ export function AnalysisPreview() {
     ].join("\n");
     try {
       await navigator.clipboard.writeText(content);
+      setRankingNotice({ message: `${item.name} 已复制。`, error: false });
     } catch {
-      setCopyNotice({ message: "复制失败，请检查浏览器剪贴板权限后重试。", error: true });
-      copyOperation.current = false;
-      setCopying(false);
-      return;
-    }
-    try {
-      await request("/api/analysis/recommendation/view", { key: item.key });
-      setRevision((value) => value + 1);
-      setCopyNotice({ message: `${item.name} 已复制，并标记为已查看。`, error: false });
-    } catch {
-      setCopyNotice({
-        message: `${item.name} 已复制，但未能保存已查看状态，请重试。`,
-        error: true,
-      });
+      setRankingNotice({ message: "复制失败，请检查浏览器剪贴板权限后重试。", error: true });
     } finally {
       copyOperation.current = false;
       setCopying(false);
@@ -712,12 +717,13 @@ export function AnalysisPreview() {
                       setData(null);
                     }}
                   />
-                  显示已查看的推荐
+                  显示已隐藏的推荐
                 </label>
-                {copyNotice && (
-                  <p role={copyNotice.error ? "alert" : "status"}>{copyNotice.message}</p>
+                {rankingNotice && (
+                  <p role={rankingNotice.error ? "alert" : "status"}>{rankingNotice.message}</p>
                 )}
                 <div className="analysis-list-intro">
+                  <span>查看详情和复制不会隐藏商品；点击“确认隐藏”后才移出默认榜单。</span>
                   <span>
                     挂牌价低于裸号预估价直接入榜，无需装备或宝宝配置门槛；其他商品沿用金额阶梯和配置条件，不限制差额百分比
                   </span>
@@ -811,7 +817,7 @@ export function AnalysisPreview() {
                           )}
                         </div>
                         <div className="analysis-tags">
-                          {item.recommendationViewed && <span>已查看</span>}
+                          {item.recommendationViewed && <span>已隐藏</span>}
                           {item.highlights.map((item, index) => (
                             <span key={index}>{item}</span>
                           ))}
@@ -831,11 +837,19 @@ export function AnalysisPreview() {
                               : `最高买入 ${valuationMoney(item.valuation.max_listing_price)}`
                             : `配置参考分 ${item.score}`}
                         </span>
-                        <button onClick={() => void viewRecommendation(item)}>
-                          查看分析依据 →
-                        </button>
+                        <button onClick={() => viewItem(item)}>查看分析依据 →</button>
                         <button disabled={copying} onClick={() => void copyRecommendation(item)}>
                           一键复制
+                        </button>
+                        <button
+                          disabled={hidingKey !== null || item.recommendationViewed}
+                          onClick={() => void hideRecommendation(item)}
+                        >
+                          {hidingKey === item.key
+                            ? "正在隐藏…"
+                            : item.recommendationViewed
+                              ? "已隐藏"
+                              : "确认隐藏"}
                         </button>
                       </div>
                     </article>
@@ -1240,7 +1254,7 @@ export function AnalysisPreview() {
                   setSearch("");
                   setFilter("all");
                   setShowViewed(false);
-                  setCopyNotice(null);
+                  setRankingNotice(null);
                   setError(null);
                   setLoadError(null);
                   setProgressError(null);
