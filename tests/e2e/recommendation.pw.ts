@@ -16,7 +16,7 @@ import type { SavedRoleRecord } from "../../server/crawler/types";
 // refresh loses view history, stale results remain, missing inventory summary, bare-role
 // discounts require assets, or wild/future pet skills appear as usable assets.
 // All records are simulated; SQLite and UI are real.
-test("推荐榜裸号折价与原差额阶梯→已查看筛选→全部商品与详情→刷新→过期结果移出", async ({
+test("推荐榜裸号折价与原差额阶梯→查看不隐藏→确认隐藏→全部商品与详情→刷新→过期结果移出", async ({
   page,
 }, testInfo) => {
   const database = testInfo.outputPath("recommendation.sqlite");
@@ -243,7 +243,7 @@ test("推荐榜裸号折价与原差额阶梯→已查看筛选→全部商品�
     await ranking.getByText("查看配置条件（每类只计一次）").click();
     await expect(ranking).toContainText("每类只计一次");
     await page.screenshot({ path: testInfo.outputPath("eligible-ranking.png"), fullPage: true });
-    const showViewed = ranking.getByRole("checkbox", { name: "显示已查看的推荐" });
+    const showViewed = ranking.getByRole("checkbox", { name: "显示已隐藏的推荐" });
     await expect(showViewed).not.toBeChecked();
     await ranking
       .getByRole("article")
@@ -252,14 +252,21 @@ test("推荐榜裸号折价与原差额阶梯→已查看筛选→全部商品�
       .click();
     await expect(page.getByRole("dialog", { name: "角色gem" })).toBeVisible();
     await page.getByRole("button", { name: "关闭分析详情" }).click();
+    await expect(ranking.getByRole("article")).toHaveCount(4);
+    await expect(gearCard).toBeVisible();
+    expect(crawl.db.prepare("SELECT listing_key FROM recommendation_views").all()).toEqual([]);
+    await page.reload();
+    await page.getByRole("tab", { name: /推荐榜/ }).click();
+    await expect(gearCard).toBeVisible();
+    await gearCard.getByRole("button", { name: "确认隐藏" }).click();
     await expect(ranking.getByRole("article")).toHaveCount(3);
-    await expect(ranking).not.toContainText("角色gem");
+    await expect(gearCard).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("viewed-hidden.png"), fullPage: true });
     await showViewed.check();
     await expect(ranking.getByRole("article")).toHaveCount(4);
     await expect(ranking).not.toContainText("角色manual");
     await expect(ranking.getByRole("article").filter({ hasText: "角色gem" })).toContainText(
-      "已查看",
+      "已隐藏",
     );
     await page.screenshot({ path: testInfo.outputPath("viewed-shown.png"), fullPage: true });
     await showViewed.uncheck();
@@ -276,7 +283,7 @@ test("推荐榜裸号折价与原差额阶梯→已查看筛选→全部商品�
     await page.getByRole("tab", { name: /推荐榜/ }).click();
     await expect(showViewed).not.toBeChecked();
     await expect(ranking.getByRole("article")).toHaveCount(3);
-    await expect(ranking).not.toContainText("角色gem");
+    await expect(gearCard).toHaveCount(0);
     await showViewed.check();
     await expect(ranking.getByRole("article")).toHaveCount(4);
     const changed = crawl.detail("gem") as SavedRoleRecord;

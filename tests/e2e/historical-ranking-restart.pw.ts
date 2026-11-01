@@ -19,7 +19,7 @@ import { analysisRecord, analysisResponse } from "../fixtures/analysis";
 // a warning; showing viewed products stops working; or a reload is mistaken for
 // a backend restart. Production SQLite/store/profile run in separate processes.
 // The HTTP adapter, captured role, and completed AI result are fixtures.
-test("历史榜单：已查看落库→后端进程重启→行情过期后再次重启→显示历史推荐", async ({
+test("历史榜单：确认隐藏落库→后端进程重启→行情过期后再次重启→显示历史推荐", async ({
   page,
   request,
 }, testInfo) => {
@@ -189,6 +189,9 @@ test("历史榜单：已查看落库→后端进程重启→行情过期后再�
     await ranking.getByRole("button", { name: "查看分析依据 →" }).click();
     await expect(page.getByRole("dialog", { name: "角色restart-role" })).toBeVisible();
     await page.getByRole("button", { name: "关闭分析详情" }).click();
+    await expect(ranking.getByRole("article")).toHaveCount(1);
+    expect((await snapshot(request, true)).items[0].recommendationViewed).toBe(false);
+    await ranking.getByRole("button", { name: "确认隐藏" }).click();
     await expect(ranking.getByRole("article")).toHaveCount(0);
     const viewed = await snapshot(request, true);
     expect(viewed.items[0].recommendationViewed).toBe(true);
@@ -199,7 +202,7 @@ test("历史榜单：已查看落库→后端进程重启→行情过期后再�
     backend = await start(now, port);
     await page.reload();
     await page.getByRole("tab", { name: /推荐榜/ }).click();
-    const showViewed = ranking.getByRole("checkbox", { name: "显示已查看的推荐" });
+    const showViewed = ranking.getByRole("checkbox", { name: "显示已隐藏的推荐" });
     await expect(ranking.getByRole("article")).toHaveCount(0);
     await showViewed.check();
     await expect(ranking.getByRole("article")).toHaveCount(1);
