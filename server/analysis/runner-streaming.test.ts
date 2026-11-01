@@ -127,7 +127,7 @@ describe("分析队列持续处理并等待新角色", () => {
     const prepare = vi.spyOn(x.crawl.db, "prepare");
     expect(x.runner.appendCaptured()).toBe(0);
     expect(x.runner.appendCaptured()).toBe(0);
-    expect(prepare.mock.calls.filter(([sql]) => sql.includes("AND t.input_hash=?"))).toHaveLength(
+    expect(prepare.mock.calls.filter(([sql]) => sql.includes("AND (t.input_hash=?"))).toHaveLength(
       0,
     );
     prepare.mockRestore();
@@ -155,16 +155,16 @@ describe("分析队列持续处理并等待新角色", () => {
       x.crawl.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run("updated", id);
       x.crawl.db.prepare("UPDATE analysis_lock SET expires_at=expires_at+1").run();
       expect(x.runner.appendCaptured()).toBe(0);
-      expect(prepare.mock.calls.filter(([sql]) => sql.includes("AND t.input_hash=?"))).toHaveLength(
-        0,
-      );
+      expect(
+        prepare.mock.calls.filter(([sql]) => sql.includes("AND (t.input_hash=?")),
+      ).toHaveLength(0);
       x.add("new-input", 2);
       prepare.mockClear();
       expect(x.runner.appendCaptured()).toBe(1);
       // Only the new role may need a reusable-result lookup. History stays checked.
-      expect(prepare.mock.calls.filter(([sql]) => sql.includes("AND t.input_hash=?"))).toHaveLength(
-        1,
-      );
+      expect(
+        prepare.mock.calls.filter(([sql]) => sql.includes("AND (t.input_hash=?")),
+      ).toHaveLength(1);
     } finally {
       prepare.mockRestore();
     }
@@ -225,9 +225,9 @@ describe("分析队列持续处理并等待新角色", () => {
     const prepare = vi.spyOn(x.crawl.db, "prepare");
     try {
       expect(reopened.appendCaptured(id, owner)).toBe(0);
-      expect(prepare.mock.calls.filter(([sql]) => sql.includes("AND t.input_hash=?"))).toHaveLength(
-        0,
-      );
+      expect(
+        prepare.mock.calls.filter(([sql]) => sql.includes("AND (t.input_hash=?")),
+      ).toHaveLength(0);
       const other = new CrawlStore(filename);
       try {
         other.db

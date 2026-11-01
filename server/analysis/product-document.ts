@@ -22,6 +22,23 @@ function ordered(value: unknown): unknown {
   return value;
 }
 
+/** Acquisition times do not change the reviewed facts; the full archive hash still includes them. */
+export function analysisDataHash(record: SavedRoleRecord): string {
+  function data(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(data);
+    if (value !== null && typeof value === "object")
+      return Object.fromEntries(
+        Object.entries(value)
+          .filter(([key]) => key !== "collectedAt" && key !== "itemsCollectedAt")
+          .map(([key, child]) => [key, data(child)]),
+      );
+    return value;
+  }
+  return createHash("sha256")
+    .update(JSON.stringify(ordered(data({ listing: record.listing, detail: record.detail }))))
+    .digest("hex");
+}
+
 /** Preserve the complete source and its hash, independently of the AI request's scope. */
 export function buildProductDocument(record: SavedRoleRecord): ProductDocument {
   if (record.status !== "complete" || !record.detail)

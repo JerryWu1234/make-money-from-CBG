@@ -7,8 +7,14 @@ import { aiRequestMessage } from "../ai/request-error";
 import type { AnalysisBackoff } from "./rate-limit";
 import type { Listing, SavedRoleRecord } from "../crawler/types";
 import { analysisPrompt, RULE_VERSION, textHash } from "./contract";
-import { buildProductDocument } from "./product-document";
-import { valuationPrompt, validateValuation } from "./valuation-contract";
+import { analysisDataHash, buildProductDocument } from "./product-document";
+import {
+  bodyReviewVersionCompatible,
+  recalculateReviewedBody,
+  valuationPrompt,
+  validateValuation,
+} from "./valuation-contract";
+import { BARE_ROLE_TEMPLATE } from "./bare-role-prompt";
 import { inventoryMatchesSnapshot, validateExactPricing } from "./pricing-integrity";
 import type { AnalysisProfile } from "./valuation-types";
 import type { ProductDocument } from "./product-document";
@@ -52,6 +58,15 @@ export type AnalysisTask = {
 };
 const now = () => new Date().toISOString();
 const nullable = (value: SQLOutputValue | undefined) => (value == null ? null : String(value));
+// Invalidate checkpoints when review semantics change; pricing versions live in the frozen profile.
+const checkpointKey = (provider: string, model: string, profile: string | null) =>
+  textHash(JSON.stringify(["analysis-checkpoint-v1", RULE_VERSION, provider, model, profile]));
+const currentCheckpointSql = `c.listing_key=l.key AND c.validation_key=?
+  AND c.listing_revision=(SELECT revision FROM record_versions WHERE entity='listings' AND record_key=l.key)
+  AND c.valid_until>? AND c.result_task_id IS NOT NULL AND c.proof_id IS NOT NULL
+  AND EXISTS(SELECT 1 FROM analysis_tasks checked WHERE checked.id=c.result_task_id AND checked.status='completed' AND checked.analysis_data_hash IS NOT NULL)
+  AND c.result_revision=(SELECT revision FROM record_versions WHERE entity='analysis_tasks' AND record_key=c.result_task_id)
+  AND c.proof_revision=(SELECT revision FROM record_versions WHERE entity='analysis_attempts' AND record_key=c.proof_id)`;
 const expiredPricingTimeSql = (column: string, path: string) => {
   const time = `julianday(json_extract(${column},'${path}.searchedAt'))`;
   return `(${time} IS NULL OR ${time}<=julianday('now','-24 hours') OR ${time}>julianday('now','+1 minute'))`;
@@ -151,6 +166,22 @@ function profileScope(
     : null;
 }
 
+function bodyReviewScope(value: AnalysisProfile, serverId: string, listingKey: string) {
+  const {
+    settings: _settings,
+    calculationVersion: _version,
+    ...review
+  } = profileScope(value, serverId, listingKey)!;
+  return {
+    ...review,
+    // This pricing-only migration does not change the bare-role fact review.
+    template: review.template.replace(
+      "确认具有“靓号特效：土豪金”时加 1400 元。",
+      "确认具有“靓号特效：土豪金”时加 800 元。",
+    ),
+  };
+}
+
 export class AnalysisStore {
   private recommendationCache = new Map<
     string,
@@ -222,6 +253,7 @@ export class AnalysisStore {
       ["analysis_attempts", "request_hash"],
       ["analysis_tasks", "equipment_pricing_json"],
       ["analysis_tasks", "pet_pricing_json"],
+      ["analysis_tasks", "analysis_data_hash"],
     ]) {
       if (
         !db
@@ -234,17 +266,36 @@ export class AnalysisStore {
     db.exec(
       "CREATE INDEX IF NOT EXISTS analysis_tasks_run_status ON analysis_tasks(run_id,status,queue_lane,reused,id)",
     );
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS analysis_tasks_data ON analysis_tasks(listing_key,analysis_data_hash,status)",
+    );
     trackRecordVersions(db, "analysis_tasks");
     trackRecordVersions(db, "analysis_attempts");
     installSourceMatches(db);
     db.exec(`CREATE TABLE IF NOT EXISTS analysis_capture_checks (
       run_id TEXT NOT NULL, listing_key TEXT NOT NULL, listing_revision INTEGER NOT NULL,
       result_task_id TEXT, result_revision INTEGER, proof_id TEXT, proof_revision INTEGER,
-      valid_until INTEGER NOT NULL, PRIMARY KEY(run_id,listing_key)
+      valid_until INTEGER NOT NULL, validation_key TEXT, PRIMARY KEY(run_id,listing_key)
     );
     CREATE TRIGGER IF NOT EXISTS analysis_capture_checks_delete AFTER DELETE ON analysis_runs BEGIN
       DELETE FROM analysis_capture_checks WHERE run_id=OLD.id;
     END;`);
+    if (
+      !db
+        .prepare("PRAGMA table_info(analysis_capture_checks)")
+        .all()
+        .some((row) => row.name === "validation_key")
+    )
+      db.exec("ALTER TABLE analysis_capture_checks ADD COLUMN validation_key TEXT");
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS analysis_capture_checks_current ON analysis_capture_checks(listing_key,validation_key)",
+    );
+    db.exec(`CREATE TRIGGER IF NOT EXISTS analysis_checkpoint_profile_update
+      AFTER UPDATE OF provider,model,profile_json ON analysis_runs
+      WHEN OLD.provider IS NOT NEW.provider OR OLD.model IS NOT NEW.model OR OLD.profile_json IS NOT NEW.profile_json BEGIN
+        UPDATE analysis_capture_checks SET validation_key=NULL WHERE run_id=NEW.id OR result_task_id IN
+          (SELECT id FROM analysis_tasks WHERE run_id=NEW.id);
+      END;`);
     db.exec(`CREATE TRIGGER IF NOT EXISTS analysis_asset_counts_invalidate
       AFTER UPDATE OF source_listing_json,source_detail_json ON analysis_tasks
       WHEN OLD.source_listing_json IS NOT NEW.source_listing_json OR OLD.source_detail_json IS NOT NEW.source_detail_json BEGIN
@@ -545,9 +596,10 @@ export class AnalysisStore {
           ? valuationPrompt(document, record, profile)
           : analysisPrompt(document);
         this.db
-          .prepare(`UPDATE analysis_tasks SET input_hash=?,input_text=?,prompt_hash=?,prompt_text=?,source_listing_json=?,source_detail_json=?,collected_at=?,
+          .prepare(`UPDATE analysis_tasks SET analysis_data_hash=?,input_hash=?,input_text=?,prompt_hash=?,prompt_text=?,source_listing_json=?,source_detail_json=?,collected_at=?,
           status='queued',error=NULL,result_json=NULL,completed_at=NULL,reused=0,source_task_id=NULL,equipment_pricing_json=NULL,pet_pricing_json=NULL,pricing_progress_json=NULL WHERE id=?`)
           .run(
+            analysisDataHash(record),
             document.contentHash,
             document.text,
             textHash(prompt),
@@ -602,15 +654,17 @@ export class AnalysisStore {
     prompt: string,
     profile?: AnalysisProfile,
   ) {
+    const dataHash = analysisDataHash(record);
     const previous = this.db
       .prepare(`SELECT t.*,r.profile_json FROM analysis_tasks t
       JOIN analysis_runs r ON t.run_id=r.id
-      WHERE t.listing_key=? AND t.input_hash=? AND t.status='completed'
+      WHERE t.listing_key=? AND (t.input_hash=? OR t.analysis_data_hash=? OR t.analysis_data_hash IS NULL) AND t.status='completed'
       AND r.provider=? AND r.model=? AND r.rule_version=?
       AND coalesce((${expiredPricingSql}),0)=0 ORDER BY t.completed_at DESC,t.id DESC`)
       .all(
         document.productKey,
         document.contentHash,
+        dataHash,
         provider,
         model,
         profile?.version || RULE_VERSION,
@@ -620,17 +674,46 @@ export class AnalysisStore {
         const savedProfile = row.profile_json
           ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
           : null;
-        if (
-          !isDeepStrictEqual(
-            profileScope(savedProfile, record.listing.serverId, record.listing.key),
-            profileScope(profile, record.listing.serverId, record.listing.key),
-          )
-        )
-          continue;
+        const sameProfile = isDeepStrictEqual(
+          profileScope(savedProfile, record.listing.serverId, record.listing.key),
+          profileScope(profile, record.listing.serverId, record.listing.key),
+        );
+        const sameBodyReview =
+          !!profile &&
+          !!savedProfile &&
+          !profile.equipmentSearch &&
+          !profile.petSearch &&
+          !savedProfile.equipmentSearch &&
+          !savedProfile.petSearch &&
+          bodyReviewVersionCompatible(
+            savedProfile.calculationVersion,
+            profile.calculationVersion,
+          ) &&
+          String(row.prompt_text).startsWith(BARE_ROLE_TEMPLATE + "\n\n") &&
+          isDeepStrictEqual(
+            bodyReviewScope(savedProfile, record.listing.serverId, record.listing.key),
+            bodyReviewScope(profile, record.listing.serverId, record.listing.key),
+          );
+        if (!sameProfile && !sameBodyReview) continue;
         if (!profile) {
-          if (row.prompt_hash === textHash(prompt)) return row;
+          if (row.input_hash === document.contentHash && row.prompt_hash === textHash(prompt))
+            return row;
           continue;
         }
+        const source: SavedRoleRecord = {
+          listing: JSON.parse(String(row.source_listing_json)),
+          detail: JSON.parse(String(row.source_detail_json)),
+          status: "complete",
+          error: null,
+        };
+        // Legacy completions already have a durable status and original source. Backfill
+        // their material-data version on demand instead of rebuilding the whole queue.
+        const savedDataHash = analysisDataHash(source);
+        if (row.analysis_data_hash !== savedDataHash)
+          this.db
+            .prepare("UPDATE analysis_tasks SET analysis_data_hash=? WHERE id=?")
+            .run(savedDataHash, row.id);
+        if (savedDataHash !== dataHash) continue;
         const equipment: EquipmentPricingSnapshot | undefined = row.equipment_pricing_json
           ? JSON.parse(String(row.equipment_pricing_json))
           : undefined;
@@ -664,32 +747,127 @@ export class AnalysisStore {
             continue;
         }
         const attempt = this.db
-          .prepare(`SELECT id,raw_response FROM analysis_attempts
-          WHERE task_id=? AND state='completed' ORDER BY finished_at DESC LIMIT 1`)
-          .get(row.source_task_id || row.id);
+          .prepare(`SELECT id,task_id,raw_response FROM analysis_attempts
+          WHERE task_id IN (?,?) AND state='completed'
+          ORDER BY CASE WHEN task_id=? THEN 0 ELSE 1 END,finished_at DESC LIMIT 1`)
+          .get(row.id, row.source_task_id || row.id, row.id);
         if (!attempt?.raw_response) continue;
-        const replayed = validateValuation(
-          String(attempt.raw_response),
-          document,
-          record,
-          profile,
-          equipment,
-          pets,
-        );
-        if (
-          isDeepStrictEqual(
-            JSON.parse(JSON.stringify(replayed)),
+        if (sameProfile && row.input_hash === document.contentHash) {
+          try {
+            const replayed = validateValuation(
+              String(attempt.raw_response),
+              document,
+              record,
+              profile,
+              equipment,
+              pets,
+            );
+            if (
+              isDeepStrictEqual(
+                JSON.parse(JSON.stringify(replayed)),
+                JSON.parse(String(row.result_json)),
+              )
+            )
+              return { ...row, proof_id: attempt.id, proof_task_id: attempt.task_id };
+          } catch {
+            // Pricing may have changed since the review; reuse facts only after
+            // checking the original response and both archived source versions below.
+          }
+        }
+        if (sameBodyReview) {
+          const result = recalculateReviewedBody(
+            String(attempt.raw_response),
             JSON.parse(String(row.result_json)),
-          )
-        )
-          return { ...row, proof_id: attempt.id };
+            source,
+            document,
+            record,
+            profile,
+          );
+          return {
+            ...row,
+            result_json: JSON.stringify(result),
+            prompt_text: prompt,
+            prompt_hash: textHash(prompt),
+            completed_at: now(),
+            recalculated: 1,
+          };
+        }
       } catch {
         // Missing or incompatible saved evidence requires a fresh analysis.
       }
     }
     return undefined;
   }
-  private rememberCapture(id: string, row: Row, previous?: Row) {
+  private insertTask(
+    runId: string,
+    ordinal: number,
+    row: Row,
+    record: SavedRoleRecord,
+    document: ProductDocument,
+    prompt: string,
+    previous?: Row,
+    validationKey?: string,
+  ) {
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json,queue_lane,analysis_data_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        id,
+        runId,
+        ordinal,
+        row.key,
+        document.contentHash,
+        document.text,
+        previous?.prompt_hash || textHash(prompt),
+        previous?.prompt_text || prompt,
+        row.listing_json,
+        row.detail_json,
+        document.collectedAt,
+        previous ? "completed" : "queued",
+        previous ? 1 : 0,
+        previous?.result_json ?? null,
+        previous?.completed_at ?? null,
+        previous
+          ? previous.recalculated
+            ? previous.id
+            : previous.proof_task_id || previous.source_task_id || previous.id
+          : null,
+        previous?.equipment_pricing_json ?? null,
+        previous?.pet_pricing_json ?? null,
+        row.capture_lane === "new" ? "new" : "old",
+        analysisDataHash(record),
+      );
+    if (previous?.recalculated) {
+      const result = JSON.parse(String(previous.result_json)) as ProductAnalysis;
+      const time = now();
+      const proofId = randomUUID();
+      this.db
+        .prepare(`INSERT INTO analysis_attempts(id,task_id,state,created_at,finished_at,raw_response,usage_json,request_text)
+        VALUES(?,?,'completed',?,?,?,?,?)`)
+        .run(
+          proofId,
+          id,
+          time,
+          time,
+          JSON.stringify({
+            decision: result.valuation!.decision,
+            reason: result.valuation!.reason,
+            extracted_facts: result.valuation!.extracted_facts ?? [],
+          }),
+          JSON.stringify({ source: "validated-body-recalculation", sourceTaskId: previous.id }),
+          "复用已完成且原文引用有效的裸号核对，按当前资料快照和价格配置本地复算；未调用AI。",
+        );
+      this.rememberCapture(
+        runId,
+        row,
+        { id, result_json: previous.result_json, proof_id: proofId },
+        validationKey,
+      );
+    }
+  }
+  private rememberCapture(id: string, row: Row, previous?: Row, validationKey?: string) {
     const valuation = previous?.result_json
       ? (JSON.parse(String(previous.result_json)) as ProductAnalysis).valuation
       : undefined;
@@ -703,13 +881,13 @@ export class AnalysisStore {
     const until = Math.min(Number.MAX_SAFE_INTEGER, ...expiry);
     this.db
       .prepare(`INSERT INTO analysis_capture_checks
-      (run_id,listing_key,listing_revision,result_task_id,result_revision,proof_id,proof_revision,valid_until)
+      (run_id,listing_key,listing_revision,result_task_id,result_revision,proof_id,proof_revision,valid_until,validation_key)
       VALUES(?,?,(SELECT revision FROM record_versions WHERE entity='listings' AND record_key=?),?,
         (SELECT revision FROM record_versions WHERE entity='analysis_tasks' AND record_key=?),?,
-        (SELECT revision FROM record_versions WHERE entity='analysis_attempts' AND record_key=?),?)
+        (SELECT revision FROM record_versions WHERE entity='analysis_attempts' AND record_key=?),?,?)
       ON CONFLICT(run_id,listing_key) DO UPDATE SET listing_revision=excluded.listing_revision,
       result_task_id=excluded.result_task_id,result_revision=excluded.result_revision,
-      proof_id=excluded.proof_id,proof_revision=excluded.proof_revision,valid_until=excluded.valid_until`)
+      proof_id=excluded.proof_id,proof_revision=excluded.proof_revision,valid_until=excluded.valid_until,validation_key=excluded.validation_key`)
       .run(
         id,
         row.key,
@@ -719,6 +897,7 @@ export class AnalysisStore {
         previous?.proof_id ?? null,
         previous?.proof_id ?? null,
         Number.isFinite(until) ? until : 0,
+        validationKey ?? null,
       );
   }
   createRun(
@@ -734,6 +913,7 @@ export class AnalysisStore {
     analysisConcurrency(concurrency);
     validateSampleSelection(sample, sampleSize, productKeys);
     const id = randomUUID();
+    const validationKey = checkpointKey(provider, model, profile ? JSON.stringify(profile) : null);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db
@@ -757,13 +937,18 @@ export class AnalysisStore {
         : "";
       const rows = this.db
         .prepare(
-          "SELECT key,listing_json,detail_json,capture_lane FROM listings WHERE status='complete' AND detail_json IS NOT NULL" +
+          "SELECT key,listing_json,detail_json,capture_lane FROM listings l WHERE status='complete' AND detail_json IS NOT NULL" +
             selected +
+            (sample || force
+              ? ""
+              : ` AND NOT EXISTS(SELECT 1 FROM analysis_capture_checks c WHERE ${currentCheckpointSql})`) +
             " ORDER BY " +
             (sample ? "key ASC" : "first_seen_at ASC,key ASC") +
             (sample && !productKeys ? " LIMIT ?" : ""),
         )
-        .all(...(productKeys || (sample ? [sampleSize] : [])));
+        .all(
+          ...(productKeys || (sample ? [sampleSize] : force ? [] : [validationKey, Date.now()])),
+        );
       if (productKeys) {
         if (rows.length !== productKeys.length)
           throw new Error("指定商品不存在或详情未完成，请先补采后再试分析");
@@ -773,9 +958,6 @@ export class AnalysisStore {
         );
       }
       if (!rows.length && sample) throw new Error("暂无详情完整的商品，请先采集商品详情");
-      const insert = this.db.prepare(
-        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json,queue_lane) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      );
       let inserted = 0;
       rows.forEach((row, index) => {
         const record: SavedRoleRecord = {
@@ -797,32 +979,12 @@ export class AnalysisStore {
         const previous = force
           ? undefined
           : this.reusableResult(provider, model, record, document, prompt, profile);
-        if (previous && !sample) {
-          this.rememberCapture(id, row, previous);
+        if (previous && !sample && !previous.recalculated) {
+          this.rememberCapture(id, row, previous, validationKey);
           return;
         }
         inserted++;
-        insert.run(
-          randomUUID(),
-          id,
-          index,
-          String(row.key),
-          document.contentHash,
-          document.text,
-          previous?.prompt_hash || textHash(prompt),
-          previous?.prompt_text || prompt,
-          String(row.listing_json),
-          String(row.detail_json),
-          document.collectedAt,
-          previous ? "completed" : "queued",
-          previous ? 1 : 0,
-          previous?.result_json ?? null,
-          previous?.completed_at ?? null,
-          previous ? previous.source_task_id || previous.id : null,
-          previous?.equipment_pricing_json ?? null,
-          previous?.pet_pricing_json ?? null,
-          row.capture_lane === "new" ? "new" : "old",
-        );
+        this.insertTask(id, index, row, record, document, prompt, previous, validationKey);
       });
       if (!inserted) {
         // Reuse an ordinary batch only with the same frozen settings. A trial stays finite;
@@ -875,6 +1037,11 @@ export class AnalysisStore {
       .prepare("SELECT * FROM analysis_runs WHERE id=? AND status='running' AND follow_capture='1'")
       .get(id);
     if (!run) return 0;
+    const validationKey = checkpointKey(
+      String(run.provider),
+      String(run.model),
+      nullable(run.profile_json),
+    );
     const profile = run.profile_json
       ? (JSON.parse(String(run.profile_json)) as AnalysisProfile)
       : undefined;
@@ -885,11 +1052,12 @@ export class AnalysisStore {
       AND NOT EXISTS(SELECT 1 FROM analysis_tasks t WHERE t.run_id=? AND t.listing_key=l.key)
       AND NOT EXISTS(SELECT 1 FROM analysis_capture_checks c
         JOIN record_versions v ON v.entity='listings' AND v.record_key=l.key
-        WHERE c.run_id=? AND c.listing_key=l.key AND c.listing_revision=v.revision AND c.valid_until>?
+        WHERE c.run_id=? AND c.validation_key=? AND c.listing_key=l.key AND c.listing_revision=v.revision AND c.valid_until>?
         AND (c.result_task_id IS NULL OR c.result_revision=(SELECT revision FROM record_versions WHERE entity='analysis_tasks' AND record_key=c.result_task_id))
         AND (c.proof_id IS NULL OR c.proof_revision=(SELECT revision FROM record_versions WHERE entity='analysis_attempts' AND record_key=c.proof_id)))
+      AND NOT EXISTS(SELECT 1 FROM analysis_capture_checks c WHERE ${currentCheckpointSql})
       ORDER BY l.first_seen_at ASC,l.key ASC`)
-      .all(id, id, Date.now());
+      .all(id, id, validationKey, Date.now(), validationKey, Date.now());
     let ordinal = Number(
       this.db
         .prepare("SELECT coalesce(max(ordinal),-1)+1 n FROM analysis_tasks WHERE run_id=?")
@@ -920,7 +1088,7 @@ export class AnalysisStore {
           (profile || isCurrentRoleCapture(record.detail)) &&
           captureIssues(record.detail!, false, true, record.listing).length
         ) {
-          this.rememberCapture(id, row);
+          this.rememberCapture(id, row, undefined, validationKey);
           continue;
         }
         const document = buildProductDocument(record);
@@ -935,27 +1103,11 @@ export class AnalysisStore {
           prompt,
           profile,
         );
-        if (previous) {
-          this.rememberCapture(id, row, previous);
+        if (previous && !previous.recalculated) {
+          this.rememberCapture(id, row, previous, validationKey);
           continue;
         }
-        this.db
-          .prepare(`INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,queue_lane)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?)`)
-          .run(
-            randomUUID(),
-            id,
-            ordinal++,
-            String(row.key),
-            document.contentHash,
-            document.text,
-            textHash(prompt),
-            prompt,
-            String(row.listing_json),
-            String(row.detail_json),
-            document.collectedAt,
-            row.capture_lane === "new" ? "new" : "old",
-          );
+        this.insertTask(id, ordinal++, row, record, document, prompt, previous, validationKey);
         added++;
       }
       if (added) this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), id);
@@ -1258,6 +1410,22 @@ export class AnalysisStore {
           task.id,
         );
       this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
+      if (
+        outcome.result &&
+        outcome.raw &&
+        this.db.prepare("SELECT matches FROM analysis_source_matches WHERE task_id=?").get(task.id)
+          ?.matches === 1
+      ) {
+        const run = this.db
+          .prepare("SELECT provider,model,profile_json FROM analysis_runs WHERE id=?")
+          .get(task.runId)!;
+        this.rememberCapture(
+          task.runId,
+          { key: task.record.listing.key },
+          { id: task.id, result_json: JSON.stringify(outcome.result), proof_id: attempt },
+          checkpointKey(String(run.provider), String(run.model), nullable(run.profile_json)),
+        );
+      }
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -1283,8 +1451,10 @@ export class AnalysisStore {
       ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
       : null;
     const attempts = this.db
-      .prepare("SELECT * FROM analysis_attempts WHERE task_id=? ORDER BY created_at ASC,rowid ASC")
-      .all(row.source_task_id || id)
+      .prepare(
+        "SELECT * FROM analysis_attempts WHERE task_id IN (?,?) ORDER BY created_at ASC,rowid ASC",
+      )
+      .all(id, row.source_task_id || id)
       .map((attempt) => ({
         id: String(attempt.id),
         state: String(attempt.state),

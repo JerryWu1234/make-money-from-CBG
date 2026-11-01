@@ -8,6 +8,8 @@ import { combineEquipmentPricing, type EquipmentPricingSnapshot } from "./equipm
 import { combinePetPricing, type PetPricingSnapshot } from "./pet-pricing";
 import { applyValuationRange } from "./valuation-range";
 import { bareRolePrompt } from "./bare-role-prompt";
+import { isDeepStrictEqual } from "node:util";
+import { analysisDataHash, buildProductDocument } from "./product-document";
 
 const nullableNumber = { type: ["number", "null"] };
 const strings = { type: "array", items: { type: "string" } };
@@ -156,6 +158,58 @@ export function recalculateValuation(
     petPricing,
   );
 }
+
+export function bodyReviewVersionCompatible(previous: string, current: string) {
+  // v39 changes the gold-ID price to 800; v38 source facts remain valid.
+  return (
+    previous === current ||
+    (previous === "price-comparison-v38" && current === "price-comparison-v39")
+  );
+}
+
+/** Rebind a completed bare-role review to fresh capture times or pricing settings, without AI. */
+export function recalculateReviewedBody(
+  raw: string,
+  previous: ProductAnalysis,
+  source: SavedRoleRecord,
+  document: ProductDocument,
+  record: SavedRoleRecord,
+  profile: AnalysisProfile,
+): ProductAnalysis {
+  if (
+    profile.equipmentSearch ||
+    profile.petSearch ||
+    previous.productKey !== document.productKey ||
+    previous.inputHash !== buildProductDocument(source).contentHash ||
+    !previous.valuation ||
+    !bodyReviewVersionCompatible(
+      previous.valuation.calculation_version,
+      profile.calculationVersion,
+    ) ||
+    analysisDataHash(source) !== analysisDataHash(record)
+  )
+    throw new Error("已分析资料或核对范围发生变化");
+  const response = parseValuationResponse(raw);
+  const facts = validateValuationFacts(response.extracted_facts, source);
+  if (
+    response.decision !== previous.valuation.decision ||
+    response.reason !== (previous.valuation.ai_explanation ?? previous.valuation.reason) ||
+    !isDeepStrictEqual(facts, previous.valuation.extracted_facts ?? [])
+  )
+    throw new Error("已完成分析与原始核对依据不一致");
+  const currentFacts = validateValuationFacts(facts, record);
+  const expected = computedValuation(record, profile, undefined, undefined, currentFacts);
+  return validateValuation(
+    JSON.stringify({
+      decision: expected.decision,
+      reason: expected.reason,
+      extracted_facts: currentFacts,
+    }),
+    document,
+    record,
+    profile,
+  );
+}
 export function valuationPrompt(
   document: ProductDocument,
   record: SavedRoleRecord,
@@ -258,14 +312,7 @@ export function valuationPrompt(
     document.text,
   ].join("\n\n");
 }
-export function validateValuation(
-  raw: string,
-  document: ProductDocument,
-  record: SavedRoleRecord,
-  profile: AnalysisProfile,
-  equipmentPricing?: EquipmentPricingSnapshot,
-  petPricing?: PetPricingSnapshot,
-): ProductAnalysis {
+function parseValuationResponse(raw: string): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(
@@ -279,7 +326,17 @@ export function validateValuation(
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     throw new Error("估值结果格式错误");
-  const result = parsed as Record<string, unknown>;
+  return parsed as Record<string, unknown>;
+}
+export function validateValuation(
+  raw: string,
+  document: ProductDocument,
+  record: SavedRoleRecord,
+  profile: AnalysisProfile,
+  equipmentPricing?: EquipmentPricingSnapshot,
+  petPricing?: PetPricingSnapshot,
+): ProductAnalysis {
+  const result = parseValuationResponse(raw);
   const facts = validateValuationFacts(result.extracted_facts, record);
   const expected = computedValuation(record, profile, equipmentPricing, petPricing, facts);
   const money = [
