@@ -16,9 +16,9 @@ import {
 } from "./equipment-baseline";
 
 export const PROMPT_FILE = resolve("prompts/role-valuation.md");
-export const CALCULATION_VERSION = "price-comparison-v38";
+export const CALCULATION_VERSION = "price-comparison-v39";
 // Update alongside the calculator when changing pricing sections III through VIII.
-const PRICING_HASH = "0b29ddcd68d656a7749b447604eb1c5eae6903c72d74fc3cb1876336a55f5ddf";
+const PRICING_HASH = "9d3bb4e828a36b125661c30c1aeccde3626e908e9bb1acbea464fac84b8745c9";
 export const DEFAULT_SETTINGS: ValuationSettings = {
   analyzeEquipment: false,
   pricingScope: "all",

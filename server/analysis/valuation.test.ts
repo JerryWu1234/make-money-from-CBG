@@ -769,7 +769,7 @@ describe("裸号估值的复算与可追溯输入", () => {
       crawl.db.close();
     }
   });
-  it("只分析1件，缓存区分Prompt和参数，调用和批次冻结输入", async () => {
+  it("只分析1件，计价参数变化本地复算，Prompt变化重新核对且历史输入保留", async () => {
     const crawl = new CrawlStore(":memory:");
     const first = completeRecord();
     crawl.observe(first.listing);
@@ -805,13 +805,13 @@ describe("裸号估值的复算与可追溯输入", () => {
       current = createProfile(template, { ...configured.settings, capMode: "effective" }, false);
       const newParameters = await runner.start("codex", false, current, true);
       await runner.settled();
-      expect(store.run(newParameters)?.reused).toBe(0);
-      expect(analyze).toHaveBeenCalledTimes(2);
+      expect(store.run(newParameters)?.reused).toBe(1);
+      expect(analyze).toHaveBeenCalledTimes(1);
       current = createProfile(template + "\n分析说明调整。", current.settings, false);
       const newPrompt = await runner.start("codex", false, current, true);
       await runner.settled();
       expect(store.run(newPrompt)?.reused).toBe(0);
-      expect(analyze).toHaveBeenCalledTimes(3);
+      expect(analyze).toHaveBeenCalledTimes(2);
       expect(store.detail(task)?.profile?.hash).toBe(configured.hash);
     } finally {
       await runner.shutdown();
