@@ -659,7 +659,8 @@ export class CodexPool {
         }
       }
       abortSignal.throwIfAborted();
-      if (this.persistent && !claimed) {
+      // A retry keeps this lease's dirty claim until its result has been saved.
+      if (this.persistent && !claimed && !slot.persistentDirty) {
         try {
           this.persistent.dirty(slot.threadId);
           slot.persistentDirty = true;

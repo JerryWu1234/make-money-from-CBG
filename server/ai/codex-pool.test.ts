@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { EventEmitter } from "node:events";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { PassThrough } from "node:stream";
@@ -121,11 +121,20 @@ class FakeTransport implements CodexPoolTransport {
 }
 
 const pools: CodexPool[] = [];
-function create(size = 1) {
+const directories: string[] = [];
+function create(size = 1, persistent = false) {
   const transport = new FakeTransport();
-  const pool = new CodexPool(size, "gpt-6-luna", async () => transport);
+  const directory = persistent ? mkdtempSync(join(tmpdir(), "cbg-pool-retry-test-")) : undefined;
+  if (directory) directories.push(directory);
+  const statePath = directory && join(directory, "pool.sqlite");
+  const pool = new CodexPool(
+    size,
+    "gpt-6-luna",
+    async () => transport,
+    statePath ? { statePath, accountId: "fixture-account" } : undefined,
+  );
   pools.push(pool);
-  return { pool, transport };
+  return { pool, transport, statePath };
 }
 async function turns(transport: FakeTransport, count: number) {
   await vi.waitFor(() => expect(transport.turns.size).toBe(count));
@@ -133,6 +142,9 @@ async function turns(transport: FakeTransport, count: number) {
 }
 afterEach(async () => {
   await Promise.allSettled(pools.splice(0).map((pool) => pool.close()));
+  await Promise.all(
+    directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
+  );
   spawnMock.mockReset();
   vi.useRealTimers();
 });
@@ -822,27 +834,32 @@ describe("Codex 固定会话池", () => {
     await expect(pool.acquire(signal)).rejects.toThrow();
   });
 
-  it("同角色发生429后在同一租约重试，持久化后从首个 turn 一次回退", async () => {
-    const { pool, transport } = create();
-    const signal = new AbortController().signal;
-    const lease = await pool.acquire(signal);
-    const first = lease.run("role-a", {}, signal);
-    const [[firstId]] = await turns(transport, 1);
-    const failed = expect(first).rejects.toThrow("failed");
-    transport.finish(firstId!, "", "failed");
-    await failed;
-    const second = lease.run("role-a", {}, signal);
-    const [[, firstInfo], [secondId, secondInfo]] = await turns(transport, 2);
-    expect(firstInfo!.threadId).toBe(secondInfo!.threadId);
-    transport.finish(secondId!, "answer-a");
-    expect((await second).text).toBe("answer-a");
-    expect(transport.calls.filter((call) => call.method === "thread/revert")).toHaveLength(0);
-    await lease.release(true);
-    expect(
-      transport.calls.find((call) => call.method === "thread/revert")?.params.beforeTurnId,
-    ).toBe(firstId);
-    expect(transport.histories.get(firstInfo!.threadId)).toEqual([]);
-  });
+  // Failure cases: a retry reclaims an already-dirty persistent thread, changes its ID,
+  // reverts before persistence, or leaves old turns available to the next role.
+  it.each([false, true])(
+    "同角色失败后在同一租约重试，保存后一次回退；持久线程=%s",
+    async (persistent) => {
+      const { pool, transport } = create(1, persistent);
+      const signal = new AbortController().signal;
+      const lease = await pool.acquire(signal);
+      const first = lease.run("role-a", {}, signal);
+      const [[firstId]] = await turns(transport, 1);
+      const failed = expect(first).rejects.toThrow("failed");
+      transport.finish(firstId!, "", "failed");
+      await failed;
+      const second = lease.run("role-a", {}, signal);
+      const [[, firstInfo], [secondId, secondInfo]] = await turns(transport, 2);
+      expect(firstInfo!.threadId).toBe(secondInfo!.threadId);
+      transport.finish(secondId!, "answer-a");
+      expect((await second).text).toBe("answer-a");
+      expect(transport.calls.filter((call) => call.method === "thread/revert")).toHaveLength(0);
+      await lease.release(true);
+      expect(
+        transport.calls.find((call) => call.method === "thread/revert")?.params.beforeTurnId,
+      ).toBe(firstId);
+      expect(transport.histories.get(firstInfo!.threadId)).toEqual([]);
+    },
+  );
 
   it("首轮失败后第二次在 turn/start 前取消，落库后仍回退首轮", async () => {
     const { pool, transport } = create();
@@ -986,26 +1003,61 @@ describe("Codex 固定会话池", () => {
     await expect(second.release(true)).rejects.toThrow("重复 ID");
   });
 
-  it("turn/start 明确收到429拒绝时允许同租约退避后重试", async () => {
-    const { pool, transport } = create();
-    const original = transport.request.bind(transport);
-    let denied = false;
-    transport.request = async (method, params) => {
-      if (method === "turn/start" && !denied) {
-        denied = true;
-        throw new CodexPoolRpcError("429 rate limit");
+  it.each(["memory", "new", "resumed"])(
+    "turn/start 明确收到429拒绝时允许同租约重试：%s",
+    async (mode) => {
+      const { pool, transport } = create(1, mode !== "memory");
+      const signal = new AbortController().signal;
+      if (mode === "resumed") {
+        const seed = await pool.acquire(signal);
+        const pending = seed.run("previous-role", {}, signal);
+        const [[id]] = await turns(transport, 1);
+        transport.finish(id!, "saved-previous-role");
+        await pending;
+        await seed.release(true);
       }
-      return original(method, params);
-    };
+      const offset = transport.turns.size;
+      const original = transport.request.bind(transport);
+      let denied = false;
+      transport.request = async (method, params) => {
+        if (method === "turn/start" && !denied) {
+          denied = true;
+          throw new CodexPoolRpcError("429 rate limit");
+        }
+        return original(method, params);
+      };
+      const lease = await pool.acquire(signal);
+      await expect(lease.run("role-a", {}, signal)).rejects.toThrow("429 rate limit");
+      const retry = lease.run("role-a", {}, signal);
+      const [id] = (await turns(transport, offset + 1))[offset]!;
+      transport.finish(id!, "answer-a");
+      expect((await retry).text).toBe("answer-a");
+      await lease.release(true);
+      expect(transport.calls.filter((call) => call.method === "thread/start")).toHaveLength(1);
+      expect(transport.calls.filter((call) => call.method === "thread/resume")).toHaveLength(
+        mode === "resumed" ? 1 : 0,
+      );
+    },
+  );
+
+  // A missing persistent row is a real state conflict, even after a successful turn.
+  it("持久线程状态记录丢失时仍暂停且不再派发角色", async () => {
+    const { pool, transport, statePath } = create(1, true);
     const signal = new AbortController().signal;
     const lease = await pool.acquire(signal);
-    await expect(lease.run("role-a", {}, signal)).rejects.toThrow("429 rate limit");
-    const retry = lease.run("role-a", {}, signal);
+    const pending = lease.run("role-a", {}, signal);
     const [[id]] = await turns(transport, 1);
-    transport.finish(id!, "answer-a");
-    expect((await retry).text).toBe("answer-a");
-    await lease.release(true);
-    expect(transport.calls.filter((call) => call.method === "thread/start")).toHaveLength(1);
+    transport.finish(id!, "saved-result");
+    await pending;
+    const db = new DatabaseSync(statePath!);
+    try {
+      db.prepare("DELETE FROM reusable_threads").run();
+    } finally {
+      db.close();
+    }
+    await expect(lease.release(true)).rejects.toThrow("Codex 持久会话状态无效");
+    await expect(pool.acquire(signal)).rejects.toThrow("Codex 持久会话状态无效");
+    expect(transport.turns.size).toBe(1);
   });
 
   it.each(["timeout", "error after started"])(

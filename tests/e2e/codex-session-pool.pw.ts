@@ -1,8 +1,10 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import {
   CodexPool,
+  CodexPoolRpcError,
   type CodexPoolEvent,
   type CodexPoolTransport,
 } from "../../server/ai/codex-pool";
@@ -17,6 +19,8 @@ import { valuationRecord } from "../fixtures/analysis";
 // Failure cases: more than 10 sessions, a session handling two roles at once,
 // stale role history, cross-role results, reset before commit, lost pause/resume
 // progress, or a session reused before interrupted work actually ends.
+// Persistent retry failures: 429 reclaims an owned thread, skips cooldown, loses saved
+// results on refresh, clears history early, or prevents later roles from completing.
 class FixtureTransport implements CodexPoolTransport {
   readonly listeners = new Set<(event: CodexPoolEvent) => void>();
   readonly histories = new Map<string, string[]>();
@@ -24,6 +28,7 @@ class FixtureTransport implements CodexPoolTransport {
   readonly started: Array<{ threadId: string; turnId: string; key: string }> = [];
   readonly reverted: Array<{ threadId: string; turnId: string; key: string; state: string }> = [];
   readonly rejected: string[] = [];
+  readonly rateLimited: Array<{ threadId: string; key: string; at: number }> = [];
   private nextThread = 0;
   private nextTurn = 0;
   closed = false;
@@ -32,6 +37,7 @@ class FixtureTransport implements CodexPoolTransport {
     readonly crawl: CrawlStore,
     readonly profile: ReturnType<typeof createProfile>,
     readonly label: string,
+    readonly rateLimitKey?: string,
   ) {}
 
   subscribe(listener: (event: CodexPoolEvent) => void) {
@@ -49,6 +55,10 @@ class FixtureTransport implements CodexPoolTransport {
       this.histories.set(id, []);
       return { thread: { id } };
     }
+    if (method === "thread/resume") {
+      if (!this.histories.has(String(params.threadId))) throw new Error("未找到模拟持久线程");
+      return { thread: { id: params.threadId } };
+    }
     if (method === "turn/start") {
       const threadId = String(params.threadId);
       const history = this.histories.get(threadId);
@@ -61,6 +71,10 @@ class FixtureTransport implements CodexPoolTransport {
       const prompt = (params.input as Array<{ text: string }>)[0]?.text || "";
       const key = prompt.match(/商品 ID：([^。\n]+)[。\n]/)?.[1];
       if (!key || !params.outputSchema) throw new Error("角色身份或结构化输出缺失");
+      if (key === this.rateLimitKey && !this.rateLimited.length) {
+        this.rateLimited.push({ threadId, key, at: Date.now() });
+        throw new CodexPoolRpcError("429 Too Many Requests");
+      }
       const turnId = `${this.label}-turn-${++this.nextTurn}`;
       history.push(turnId);
       this.pending.set(turnId, { threadId, key });
@@ -156,7 +170,12 @@ class FixtureTransport implements CodexPoolTransport {
   }
 }
 
-async function fixture(page: Page, testInfo: TestInfo, count: number) {
+async function fixture(
+  page: Page,
+  testInfo: TestInfo,
+  count: number,
+  options: { persistent?: boolean; rateLimitKey?: string } = {},
+) {
   const database = testInfo.outputPath("analysis.sqlite");
   await mkdir(path.dirname(database), { recursive: true });
   const crawl = new CrawlStore(database);
@@ -211,15 +230,26 @@ async function fixture(page: Page, testInfo: TestInfo, count: number) {
     false,
   );
   const transports: FixtureTransport[] = [];
+  const statePath = testInfo.outputPath("codex-pool.sqlite");
   const client: AnalysisClient = {
     model: "fixture-codex",
     analyze: async () => {
       throw new Error("应使用复用会话池");
     },
     createSessionPool(size) {
-      const transport = new FixtureTransport(crawl, profile, `run-${transports.length + 1}`);
+      const transport = new FixtureTransport(
+        crawl,
+        profile,
+        `run-${transports.length + 1}`,
+        options.rateLimitKey,
+      );
       transports.push(transport);
-      const pool = new CodexPool(size, "fixture-codex", async () => transport);
+      const pool = new CodexPool(
+        size,
+        "fixture-codex",
+        async () => transport,
+        options.persistent ? { statePath, accountId: "fixture-account" } : undefined,
+      );
       return {
         async acquire(signal) {
           const lease = await pool.acquire(signal);
@@ -304,7 +334,17 @@ async function fixture(page: Page, testInfo: TestInfo, count: number) {
     });
   });
   await page.goto("http://cbg-session-pool.test/analysis-preview");
-  return { crawl, store, profile, runner, transports, keys, database, batch: () => batch };
+  return {
+    crawl,
+    store,
+    profile,
+    runner,
+    transports,
+    keys,
+    database,
+    statePath,
+    batch: () => batch,
+  };
 }
 
 async function saveEvidence(testInfo: TestInfo, name: string, data: unknown) {
@@ -431,6 +471,95 @@ test("中途暂停并继续，已保存角色保留，未完成角色重新分�
       second: { started: second.started, reverted: second.reverted },
       run: x.store.run(x.batch()),
       lifecycle: "暂停关闭首个池；继续分析建立新池，保留已保存结果。",
+    });
+  } finally {
+    await x.runner.shutdown();
+    x.crawl.close();
+  }
+});
+
+test("持久线程：保存首个角色→429冷却并刷新→同租约重试→完成后续角色并保留结果", async ({
+  page,
+}, testInfo) => {
+  const x = await fixture(page, testInfo, 3, { persistent: true, rateLimitKey: "role-02" });
+  try {
+    await page.getByRole("spinbutton", { name: "分析并发数" }).fill("1");
+    await page.getByRole("button", { name: "开始分析已有商品" }).click();
+    await expect.poll(() => x.transports[0]?.pending.size).toBe(1);
+    const transport = x.transports[0]!;
+    const firstKey = transport.started[0]!.key;
+    expect(firstKey).not.toBe("role-02");
+    transport.finishAll();
+    await expect.poll(() => x.store.run(x.batch())!.completed).toBe(1);
+    await expect.poll(() => transport.rateLimited.length).toBe(1);
+    const limited = transport.rateLimited[0]!;
+    const firstResult = x.crawl.db
+      .prepare("SELECT result_json FROM analysis_tasks WHERE listing_key=?")
+      .get(firstKey)!.result_json;
+    expect(transport.pending.size).toBe(0);
+    expect(transport.started).toHaveLength(1);
+    await expect(page.getByLabel("AI限流恢复状态")).toContainText("限流冷却中");
+    await page.reload();
+    await expect(page.getByLabel("AI限流恢复状态")).toContainText("限流冷却中");
+    await page.screenshot({
+      path: testInfo.outputPath("persistent-429-cooldown.png"),
+      fullPage: true,
+    });
+    expect(x.store.run(x.batch())).toMatchObject({ status: "running", completed: 1, failed: 0 });
+    await expect.poll(() => transport.pending.size, { timeout: 45_000 }).toBe(1);
+    const recoveredAt = Date.now();
+    expect(recoveredAt - limited.at).toBeGreaterThanOrEqual(30_000);
+    expect(transport.started[1]).toMatchObject({ key: "role-02", threadId: limited.threadId });
+    expect(transport.reverted).toHaveLength(1);
+    transport.finishAll();
+    await expect.poll(() => x.store.run(x.batch())!.completed).toBe(2);
+    await expect.poll(() => transport.pending.size).toBe(1);
+    transport.finishAll();
+    await expect.poll(() => x.store.run(x.batch())!.completed).toBe(3);
+    await expect.poll(() => transport.reverted.length).toBe(3);
+    expect(transport.histories.size).toBe(1);
+    expect(transport.rateLimited).toHaveLength(1);
+    expect(transport.rejected).toEqual([]);
+    expect([...transport.histories.values()]).toEqual([[]]);
+    expect(
+      x.crawl.db
+        .prepare("SELECT result_json FROM analysis_tasks WHERE listing_key=?")
+        .get(firstKey)!.result_json,
+    ).toBe(firstResult);
+    const tasks = x.crawl.db
+      .prepare("SELECT listing_key,status,result_json FROM analysis_tasks ORDER BY listing_key")
+      .all();
+    expect(tasks).toHaveLength(3);
+    for (const task of tasks) {
+      expect(task.status).toBe("completed");
+      expect(JSON.parse(String(task.result_json)).productKey).toBe(task.listing_key);
+    }
+    const state = new DatabaseSync(x.statePath, { readOnly: true });
+    const threadStates = state.prepare("SELECT id,state FROM reusable_threads").all();
+    state.close();
+    expect(threadStates).toEqual([{ id: limited.threadId, state: "clean" }]);
+    await page.getByRole("button", { name: "暂停分析", exact: true }).click();
+    await expect.poll(() => x.store.run(x.batch())!.status).toBe("paused");
+    await page.reload();
+    await expect(
+      page.getByRole("tabpanel", { name: "分析记录", exact: true }).getByRole("article"),
+    ).toHaveCount(3);
+    await page.screenshot({
+      path: testInfo.outputPath("persistent-429-three-results.png"),
+      fullPage: true,
+    });
+    await saveEvidence(testInfo, "持久线程429冷却重试验证", {
+      database: x.database,
+      statePath: x.statePath,
+      firstKey,
+      limited,
+      recoveredAt,
+      started: transport.started,
+      reverted: transport.reverted,
+      threadStates,
+      run: x.store.run(x.batch()),
+      results: tasks.map((task) => ({ key: task.listing_key, status: task.status })),
+      scope: "真实页面、分析队列、会话池和SQLite；模拟Codex RPC，不调用真实AI或账号。",
     });
   } finally {
     await x.runner.shutdown();
