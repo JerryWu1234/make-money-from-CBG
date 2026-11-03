@@ -18,7 +18,7 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-async function fixture() {
+async function fixture(queueBeforeCompletion = false) {
   const directory = await mkdtemp(join(tmpdir(), "cbg-analysis-checkpoint-"));
   const filename = join(directory, "checkpoint.sqlite");
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
@@ -33,6 +33,9 @@ async function fixture() {
     crawl.save(record.listing, record.detail!);
   }
   const store = new AnalysisStore(crawl.db);
+  const queued = queueBeforeCompletion
+    ? store.createRun("codex", "checkpoint-model", false, profile)
+    : undefined;
   const id = store.createRun("codex", "checkpoint-model", true, profile);
   store.acquire("seed");
   store.setRun(id, "running", null, "seed");
@@ -61,10 +64,181 @@ async function fixture() {
       }),
     };
   });
-  return { directory, filename, crawl, store, profile, id, analyze };
+  return { directory, filename, crawl, store, profile, id, queued, analyze };
 }
 
 describe("数据库保存的分析断点和有效版本", () => {
+  // Failure cases: an older queue repeats newer completions, a disconnect loses
+  // reused results, or a failed attempt is skipped as though it had succeeded.
+  it("旧队列逐件跳过后来已完成的商品，断网重启后只重试未完成项", async () => {
+    const x = await fixture(true);
+    const queued = x.queued!;
+    const original = x.analyze.getMockImplementation()!;
+    x.analyze.mockImplementationOnce(async () => {
+      throw new Error("Codex network disconnected");
+    });
+    const runner = new AnalysisRunner(x.store, async () => ({
+      model: "checkpoint-model",
+      analyze: x.analyze,
+    }));
+    cleanups.push(() => runner.shutdown());
+    await runner.resume(queued, false, 1);
+    await vi.waitFor(() => expect(x.store.run(queued)?.status).toBe("paused"));
+    expect(x.store.run(queued)).toMatchObject({ completed: 2, reused: 2, failed: 1 });
+    expect(x.analyze.mock.calls.map(([prompt]) => prompt.match(/商品 ID：([^。\n]+)/)![1])).toEqual(
+      ["c"],
+    );
+    const saved = x.store.db
+      .prepare(
+        "SELECT listing_key,result_json,source_task_id FROM analysis_tasks WHERE run_id=? AND status='completed' ORDER BY listing_key",
+      )
+      .all(queued);
+    expect(saved).toHaveLength(2);
+    for (const row of saved) {
+      const source = x.store.db
+        .prepare("SELECT id,result_json FROM analysis_tasks WHERE run_id=? AND listing_key=?")
+        .get(x.id, row.listing_key)!;
+      expect(row.source_task_id).toBe(source.id);
+      expect(row.result_json).toBe(source.result_json);
+    }
+    await runner.shutdown();
+    const reopened = new CrawlStore(x.filename);
+    cleanups.push(async () => reopened.close());
+    const store = new AnalysisStore(reopened.db);
+    x.analyze.mockImplementation(original);
+    const resumed = new AnalysisRunner(store, async () => ({
+      model: "checkpoint-model",
+      analyze: x.analyze,
+    }));
+    cleanups.push(() => resumed.shutdown());
+    await resumed.resume(queued, true, 1);
+    await vi.waitFor(() => expect(store.run(queued)?.completed).toBe(3));
+    expect(store.run(queued)).toMatchObject({ reused: 2, failed: 0, queued: 0 });
+    expect(x.analyze.mock.calls.map(([prompt]) => prompt.match(/商品 ID：([^。\n]+)/)![1])).toEqual(
+      ["c", "c"],
+    );
+    const remaining = store.db
+      .prepare("SELECT id FROM analysis_tasks WHERE run_id=? AND listing_key='c'")
+      .get(queued)!;
+    expect(store.detail(String(remaining.id))?.attempts.map((attempt) => attempt.state)).toEqual([
+      "failed",
+      "completed",
+    ]);
+  });
+
+  // Invalid source/proof, changed rules/model, and expired pricing must remain queued.
+  it.each(["source", "rules", "model", "proof", "pricing"])(
+    "派发前检查仍重算已失效的历史：%s",
+    async (changed) => {
+      const x = await fixture(true);
+      const queued = x.queued!;
+      if (changed === "source") {
+        const record = x.crawl.detail("a") as SavedRoleRecord;
+        record.listing.price = "1234";
+        x.crawl.save(record.listing, record.detail!);
+      } else if (changed === "rules") {
+        x.store.db
+          .prepare("UPDATE analysis_runs SET profile_json=? WHERE id=?")
+          .run(
+            JSON.stringify({ ...x.profile, template: x.profile.template + "\n新的事实核对要求" }),
+            queued,
+          );
+      } else if (changed === "model") {
+        x.store.db.prepare("UPDATE analysis_runs SET model='other-model' WHERE id=?").run(queued);
+      } else if (changed === "proof") {
+        x.store.db
+          .prepare(
+            "UPDATE analysis_attempts SET raw_response='invalid' WHERE task_id IN (SELECT id FROM analysis_tasks WHERE run_id=? AND listing_key='a')",
+          )
+          .run(x.id);
+      } else {
+        x.store.db
+          .prepare(
+            "UPDATE analysis_tasks SET result_json=json_set(result_json,'$.valuation.equipment_pricing',json(?)) WHERE run_id=? AND listing_key='a'",
+          )
+          .run(
+            JSON.stringify({
+              searchedAt: new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+            }),
+            x.id,
+          );
+      }
+      const runner = new AnalysisRunner(x.store, async () => ({
+        model: changed === "model" ? "other-model" : "checkpoint-model",
+        analyze: x.analyze,
+      }));
+      cleanups.push(() => runner.shutdown());
+      await runner.resume(queued, false, 1);
+      await vi.waitFor(() => expect(x.store.run(queued)?.completed).toBe(3));
+      const calls = x.analyze.mock.calls.map(([prompt]) => prompt.match(/商品 ID：([^。\n]+)/)![1]);
+      expect(calls).toEqual(
+        changed === "rules" || changed === "model" ? ["a", "b", "c"] : ["a", "c"],
+      );
+    },
+  );
+
+  it("显式强制分析重启后继续调用AI，不被派发前的历史检查跳过", async () => {
+    const x = await fixture();
+    const id = x.store.createRun("codex", "checkpoint-model", true, x.profile, true, 2);
+    const reopened = new CrawlStore(x.filename);
+    cleanups.push(async () => reopened.close());
+    const store = new AnalysisStore(reopened.db);
+    const runner = new AnalysisRunner(store, async () => ({
+      model: "checkpoint-model",
+      analyze: x.analyze,
+    }));
+    cleanups.push(() => runner.shutdown());
+    await runner.resume(id, false, 1);
+    await vi.waitFor(() => expect(store.run(id)?.completed).toBe(2));
+    expect(store.run(id)).toMatchObject({ reused: 0 });
+    expect(x.analyze.mock.calls.map(([prompt]) => prompt.match(/商品 ID：([^。\n]+)/)![1])).toEqual(
+      ["a", "b"],
+    );
+  });
+
+  it("旧队列缺少强制标记时可迁移，复用时间变化的结果并保留中断尝试", async () => {
+    const x = await fixture(true);
+    const queued = x.queued!;
+    x.store.acquire("interrupted");
+    const task = x.store.next(queued)!;
+    const attempt = x.store.begin(task, "interrupted");
+    x.store.finish(task, attempt, "interrupted", {
+      state: "interrupted",
+      error: "Codex连接已断开",
+      requeue: true,
+    });
+    x.store.release("interrupted");
+    x.store.db.exec("ALTER TABLE analysis_tasks DROP COLUMN force_reanalysis");
+    const migrated = new AnalysisStore(x.crawl.db);
+    const record = x.crawl.detail("a") as SavedRoleRecord;
+    record.detail!.collectedAt = new Date().toISOString();
+    x.crawl.save(record.listing, record.detail!);
+    const runner = new AnalysisRunner(migrated, async () => ({
+      model: "checkpoint-model",
+      analyze: x.analyze,
+    }));
+    cleanups.push(() => runner.shutdown());
+    await runner.resume(queued, false, 1);
+    await vi.waitFor(() => expect(migrated.run(queued)?.completed).toBe(3));
+    expect(migrated.run(queued)).toMatchObject({ reused: 2 });
+    expect(x.analyze.mock.calls.map(([prompt]) => prompt.match(/商品 ID：([^。\n]+)/)![1])).toEqual(
+      ["c"],
+    );
+    const attempts = migrated.db
+      .prepare("SELECT state,usage_json FROM analysis_attempts WHERE task_id=? ORDER BY rowid")
+      .all(task.id);
+    expect(attempts.map((row) => row.state)).toEqual(["interrupted", "completed"]);
+    expect(JSON.parse(String(attempts[1]!.usage_json)).source).toBe("validated-body-recalculation");
+    expect(migrated.detail(task.id)?.inputHash).toBe(buildProductDocument(record).contentHash);
+  });
+
+  it("没有执行锁时不能写入复用结果", async () => {
+    const x = await fixture(true);
+    const task = x.store.next(x.queued!)!;
+    expect(() => x.store.reuseCompletedTask(task, "expired-owner")).toThrow("分析锁已失效");
+    expect(x.store.run(x.queued!)).toMatchObject({ queued: 3, completed: 0, reused: 0 });
+  });
+
   it("重新打开数据库后继续原批次，只调用未完成的商品", async () => {
     const x = await fixture();
     const reopened = new CrawlStore(x.filename);

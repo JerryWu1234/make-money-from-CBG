@@ -247,6 +247,7 @@ export class AnalysisStore {
       ["analysis_runs", "profile_json"],
       ["analysis_runs", "follow_capture"],
       ["analysis_runs", "concurrency"],
+      ["analysis_tasks", "force_reanalysis"],
       ["analysis_tasks", "pricing_progress_json"],
       ["analysis_tasks", "asset_counts_json"],
       ["analysis_attempts", "request_text"],
@@ -807,11 +808,17 @@ export class AnalysisStore {
     prompt: string,
     previous?: Row,
     validationKey?: string,
+    force = false,
+    id: string = randomUUID(),
   ) {
-    const id = randomUUID();
-    this.db
+    const inserted = this.db
       .prepare(
-        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json,queue_lane,analysis_data_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json,queue_lane,analysis_data_hash,force_reanalysis) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET status=excluded.status,reused=excluded.reused,
+          result_json=excluded.result_json,completed_at=excluded.completed_at,source_task_id=excluded.source_task_id,
+          prompt_hash=excluded.prompt_hash,prompt_text=excluded.prompt_text,
+          equipment_pricing_json=excluded.equipment_pricing_json,pet_pricing_json=excluded.pet_pricing_json,
+          error=NULL,pricing_progress_json=NULL WHERE analysis_tasks.status='queued'`,
       )
       .run(
         id,
@@ -838,7 +845,9 @@ export class AnalysisStore {
         previous?.pet_pricing_json ?? null,
         row.capture_lane === "new" ? "new" : "old",
         analysisDataHash(record),
+        force ? "1" : "0",
       );
+    if (inserted.changes !== 1) throw new Error("分析任务状态已变化");
     if (previous?.recalculated) {
       const result = JSON.parse(String(previous.result_json)) as ProductAnalysis;
       const time = now();
@@ -984,7 +993,7 @@ export class AnalysisStore {
           return;
         }
         inserted++;
-        this.insertTask(id, index, row, record, document, prompt, previous, validationKey);
+        this.insertTask(id, index, row, record, document, prompt, previous, validationKey, force);
       });
       if (!inserted) {
         // Reuse an ordinary batch only with the same frozen settings. A trial stays finite;
@@ -1141,6 +1150,62 @@ export class AnalysisStore {
       AND NOT EXISTS(SELECT 1 FROM analysis_attempts WHERE task_id=? AND state='running')`)
       .run(String(unavailable.error), task.id, task.id);
     return true;
+  }
+  /** A resumed queue may predate a valid result completed in another batch. */
+  reuseCompletedTask(task: AnalysisTask, owner: string): boolean {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (!this.owns(owner)) throw new Error("分析锁已失效");
+      const row = this.db
+        .prepare(`SELECT t.*,t.listing_key AS key,t.source_listing_json AS listing_json,
+          t.source_detail_json AS detail_json,t.queue_lane AS capture_lane,r.provider,r.model FROM analysis_tasks t
+          JOIN analysis_runs r ON r.id=t.run_id WHERE t.id=? AND t.run_id=?`)
+        .get(task.id, task.runId);
+      if (row?.status === "completed") {
+        this.db.exec("COMMIT");
+        return true;
+      }
+      if (row?.status !== "queued" || row.force_reanalysis === "1") {
+        this.db.exec("COMMIT");
+        return false;
+      }
+      const previous = this.reusableResult(
+        String(row.provider) as AiProvider,
+        String(row.model),
+        task.record,
+        task.document,
+        task.prompt,
+        task.profile ?? undefined,
+      );
+      if (!previous) {
+        this.db.exec("COMMIT");
+        return false;
+      }
+      const key = checkpointKey(
+        String(row.provider),
+        String(row.model),
+        task.profile ? JSON.stringify(task.profile) : null,
+      );
+      this.insertTask(
+        task.runId,
+        Number(row.ordinal),
+        row,
+        task.record,
+        task.document,
+        task.prompt,
+        previous,
+        key,
+        false,
+        task.id,
+      );
+      if (!previous.recalculated) this.rememberCapture(task.runId, row, previous, key);
+      this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
+      this.db.exec("COMMIT");
+      return true;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
   next(runId: string, preferredLane?: AnalysisLane): AnalysisTask | null {
     this.skipUnavailableQueued(runId);
