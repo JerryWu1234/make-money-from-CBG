@@ -178,7 +178,7 @@ async function fixture(
 ) {
   const database = testInfo.outputPath("analysis.sqlite");
   await mkdir(path.dirname(database), { recursive: true });
-  const crawl = new CrawlStore(database);
+  let crawl = new CrawlStore(database);
   const keys = Array.from(
     { length: count },
     (_, index) => `role-${String(index + 1).padStart(2, "0")}`,
@@ -212,7 +212,7 @@ async function fixture(
     crawl.observe(record.listing);
     expect(crawl.save(record.listing, record.detail!)).toBe(true);
   }
-  const store = new AnalysisStore(crawl.db);
+  let store = new AnalysisStore(crawl.db);
   const profile = createProfile(
     await readFile(PROMPT_FILE, "utf8"),
     {
@@ -263,7 +263,7 @@ async function fixture(
       };
     },
   };
-  const runner = new AnalysisRunner(store, async () => client);
+  let runner = new AnalysisRunner(store, async () => client);
   let batch = "";
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
@@ -315,6 +315,10 @@ async function fixture(
           await runner.resume(input.runId, false, input.concurrency);
           body = store.run(batch);
           break;
+        case "/api/analysis/retry":
+          await runner.resume(input.runId, true, input.concurrency);
+          body = store.run(batch);
+          break;
         default:
           throw new Error("未模拟接口：" + url.pathname);
       }
@@ -335,15 +339,30 @@ async function fixture(
   });
   await page.goto("http://cbg-session-pool.test/analysis-preview");
   return {
-    crawl,
-    store,
+    get crawl() {
+      return crawl;
+    },
+    get store() {
+      return store;
+    },
     profile,
-    runner,
+    get runner() {
+      return runner;
+    },
     transports,
     keys,
     database,
     statePath,
     batch: () => batch,
+    async restart(runId: string) {
+      await runner.shutdown();
+      crawl.close();
+      crawl = new CrawlStore(database);
+      store = new AnalysisStore(crawl.db);
+      runner = new AnalysisRunner(store, async () => client);
+      batch = runId;
+      await page.reload();
+    },
   };
 }
 
@@ -471,6 +490,133 @@ test("中途暂停并继续，已保存角色保留，未完成角色重新分�
       second: { started: second.started, reverted: second.reverted },
       run: x.store.run(x.batch()),
       lifecycle: "暂停关闭首个池；继续分析建立新池，保留已保存结果。",
+    });
+  } finally {
+    await x.runner.shutdown();
+    x.crawl.close();
+  }
+});
+
+// Failure cases: recovering an older queue repeats saved roles, discards the
+// disconnected attempt, skips the unfinished role, or loses reuse after reopening SQLite.
+test("保存两件→Codex断网→重启恢复旧队列→跳过历史完成项→仅补完第三件", async ({
+  page,
+}, testInfo) => {
+  const x = await fixture(page, testInfo, 3);
+  try {
+    await page.getByRole("spinbutton", { name: "分析并发数" }).fill("1");
+    await page.getByRole("button", { name: "开始分析已有商品" }).click();
+    await expect.poll(() => x.transports[0]?.pending.size).toBe(1);
+    const originalRun = x.batch();
+    // Persist a queue snapshot predating these completions, as may remain after interruption.
+    const queued = x.store.createRun(
+      "codex",
+      "fixture-codex",
+      false,
+      x.profile,
+      false,
+      1,
+      undefined,
+      1,
+    );
+    x.crawl.db
+      .prepare("UPDATE analysis_runs SET status='paused',error='Codex连接中断，待继续' WHERE id=?")
+      .run(queued);
+    const first = x.transports[0]!;
+    for (let completed = 1; completed <= 2; completed++) {
+      first.finishAll();
+      await expect.poll(() => x.store.run(originalRun)!.completed).toBe(completed);
+      await expect.poll(() => first.pending.size).toBe(1);
+    }
+    const [turnId, interrupted] = [...first.pending][0]!;
+    expect(interrupted.key).toBe("role-03");
+    first.pending.delete(turnId);
+    first.emit("turn/completed", {
+      threadId: interrupted.threadId,
+      turn: { id: turnId, status: "failed", error: { message: "Codex network disconnected" } },
+    });
+    await expect.poll(() => x.store.run(originalRun)!.status).toBe("paused");
+    expect(x.store.run(originalRun)).toMatchObject({ completed: 2, failed: 1 });
+    await page.reload();
+    await page.screenshot({
+      path: testInfo.outputPath("network-disconnected-two-results.png"),
+      fullPage: true,
+    });
+    const saved = x.crawl.db
+      .prepare(
+        "SELECT id,listing_key,result_json FROM analysis_tasks WHERE run_id=? AND status='completed' ORDER BY listing_key",
+      )
+      .all(originalRun);
+    await x.restart(queued);
+    expect(x.store.run(queued)).toMatchObject({ queued: 3, completed: 0 });
+    await page.getByRole("button", { name: "继续分析", exact: true }).click();
+    await expect.poll(() => x.store.run(queued)!.completed).toBe(2);
+    await expect.poll(() => x.transports[1]?.pending.size).toBe(1);
+    const second = x.transports[1]!;
+    expect(second.started.map((turn) => turn.key)).toEqual(["role-03"]);
+    expect(x.store.run(queued)).toMatchObject({ reused: 2, failed: 0 });
+    second.finishAll();
+    await expect.poll(() => x.store.run(queued)!.completed).toBe(3);
+    await expect.poll(() => second.reverted.length).toBe(1);
+    await page.getByRole("button", { name: "暂停分析", exact: true }).click();
+    await expect.poll(() => x.store.run(queued)!.status).toBe("paused");
+    const results = x.crawl.db
+      .prepare(
+        "SELECT listing_key,status,reused,result_json,source_task_id FROM analysis_tasks WHERE run_id=? ORDER BY listing_key",
+      )
+      .all(queued);
+    expect(results).toHaveLength(3);
+    for (const row of saved) {
+      const reused = results.find((result) => result.listing_key === row.listing_key)!;
+      expect(reused).toMatchObject({
+        status: "completed",
+        reused: 1,
+        result_json: row.result_json,
+        source_task_id: row.id,
+      });
+      expect(
+        x.crawl.db.prepare("SELECT result_json FROM analysis_tasks WHERE id=?").get(row.id)!
+          .result_json,
+      ).toBe(row.result_json);
+    }
+    expect(results[2]).toMatchObject({ listing_key: "role-03", status: "completed", reused: 0 });
+    expect(
+      x.crawl.db
+        .prepare(
+          "SELECT state,raw_response FROM analysis_attempts WHERE task_id IN (SELECT id FROM analysis_tasks WHERE run_id=? AND listing_key='role-03')",
+        )
+        .get(originalRun),
+    ).toMatchObject({ state: "failed", raw_response: null });
+    await x.restart(queued);
+    await page.getByRole("button", { name: "继续分析", exact: true }).click();
+    await expect(page.getByRole("button", { name: "暂停分析", exact: true })).toBeVisible();
+    await expect.poll(() => x.transports.length).toBe(3);
+    expect(x.transports[2]!.started).toEqual([]);
+    await page.getByRole("button", { name: "暂停分析", exact: true }).click();
+    await expect.poll(() => x.store.run(queued)!.status).toBe("paused");
+    await page.reload();
+    await expect(
+      page.getByRole("tabpanel", { name: "分析记录", exact: true }).getByRole("article"),
+    ).toHaveCount(3);
+    await page.screenshot({
+      path: testInfo.outputPath("resumed-three-results.png"),
+      fullPage: true,
+    });
+    expect(x.transports.every((transport) => transport.rejected.length === 0)).toBe(true);
+    await saveEvidence(testInfo, "断网恢复旧队列跳过历史结果", {
+      database: x.database,
+      originalRun,
+      resumedRun: queued,
+      callsByPool: x.transports.map((transport) => transport.started),
+      reusedSourceIds: saved.map((row) => row.id),
+      results: results.map((row) => ({
+        key: row.listing_key,
+        status: row.status,
+        reused: row.reused,
+        sourceTaskId: row.source_task_id,
+      })),
+      run: x.store.run(queued),
+      scope: "真实页面、队列、Codex会话池和SQLite重开；资料与Codex通知为模拟，不连接真实AI。",
     });
   } finally {
     await x.runner.shutdown();

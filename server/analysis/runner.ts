@@ -443,6 +443,7 @@ export class AnalysisRunner {
         pause("角色资料尚未完整采集，请补采后继续分析");
         return;
       }
+      if (this.store.reuseCompletedTask(task, owner)) return;
       const equipmentPricingCurrent =
         !!task.equipmentPricing &&
         task.equipmentPricing.inputHash ===
