@@ -93,6 +93,9 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
+// Failure cases: auth/model discovery or READY/search still use the built-in
+// WebSocket provider; a partial built-in override prevents the child from starting;
+// or changing transport loses ChatGPT login isolation and existing tool limits.
 describe("官方 Codex 登录与 SDK", () => {
   it("读取账号时保留可用的工作区标识，缺失时使用空值", async () => {
     rpcResults["account/read"] = {
@@ -206,6 +209,12 @@ describe("官方 Codex 登录与 SDK", () => {
     const codex = await import("./codex");
     const login = await codex.startCodexLogin();
     expect(mocks.spawn.mock.calls[0][1]).toContain('cli_auth_credentials_store="file"');
+    expect(mocks.spawn.mock.calls[0][1]).toEqual(
+      expect.arrayContaining([
+        'model_provider="openai_http"',
+        'model_providers.openai_http={name="OpenAI HTTP",wire_api="responses",requires_openai_auth=true,supports_websockets=false}',
+      ]),
+    );
     expect(mocks.spawn.mock.calls[0][2].env).toMatchObject({
       CODEX_HOME: "/private/tmp/cbg-home-fixture",
       CODEX_SQLITE_HOME: "/private/tmp/cbg-home-fixture",
@@ -243,6 +252,11 @@ describe("官方 Codex 登录与 SDK", () => {
     expect(options.env.CODEX_SQLITE_HOME).toBe("/private/tmp/cbg-home-fixture");
     expect(options.config.forced_login_method).toBe("chatgpt");
     expect(options.config.cli_auth_credentials_store).toBe("file");
+    expect(options.configOverrides).toEqual([
+      'model_provider="openai_http"',
+      'model_providers.openai_http={name="OpenAI HTTP",wire_api="responses",requires_openai_auth=true,supports_websockets=false}',
+    ]);
+    expect(options.config.model_provider).toBeUndefined();
     expect(options.config.features).toEqual({
       shell_tool: false,
       unified_exec: false,

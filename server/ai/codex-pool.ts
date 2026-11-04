@@ -8,6 +8,7 @@ import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { codexHomeEnv } from "./codex-home";
+import { CODEX_HTTP_OVERRIDES, CODEX_HTTP_PROVIDER } from "./codex-provider";
 
 export type CodexPoolEvent = { method: string; params?: unknown; error?: Error };
 export type CodexPoolTransport = {
@@ -174,8 +175,7 @@ async function startTransport(): Promise<CodexPoolTransport> {
       'forced_login_method="chatgpt"',
       "-c",
       'cli_auth_credentials_store="file"',
-      "-c",
-      'model_provider="openai"',
+      ...CODEX_HTTP_OVERRIDES.flatMap((override) => ["-c", override]),
     ],
     {
       cwd: directory,
@@ -564,7 +564,7 @@ export class CodexPool {
                 threadId: existing.id,
                 cwd: slot.directory,
                 model: this.model,
-                modelProvider: "openai",
+                modelProvider: CODEX_HTTP_PROVIDER,
                 sandbox: "read-only",
                 approvalPolicy: "never",
                 config: {
@@ -611,7 +611,7 @@ export class CodexPool {
           start = object(
             await rpc.request("thread/start", {
               model: this.model,
-              modelProvider: "openai",
+              modelProvider: CODEX_HTTP_PROVIDER,
               cwd: slot.directory,
               sandbox: "read-only",
               approvalPolicy: "never",

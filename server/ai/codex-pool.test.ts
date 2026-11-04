@@ -30,6 +30,8 @@ vi.mock("node:child_process", async (importOriginal) => ({
 // events cross between turns, retryable errors stop a turn, results are reset before
 // persistence, old role history reaches a new role, cancellation releases early,
 // a failed reset or an exited server leaves a slot reusable, or waiters never settle.
+// Transport changes must also reach child startup, new threads and resumed clean
+// threads; otherwise an old built-in provider silently restores WebSocket retries.
 class FakeTransport implements CodexPoolTransport {
   readonly calls: { method: string; params: Record<string, unknown> }[] = [];
   readonly histories = new Map<string, string[]>();
@@ -181,6 +183,16 @@ describe("Codex 固定会话池", () => {
       const [id2, turn2] = (await turns(transport, 2))[1]!;
       expect(turn2.threadId).toBe(turn.threadId);
       expect(transport.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+      expect(
+        transport.calls.filter((call) => ["thread/start", "thread/resume"].includes(call.method)),
+      ).toEqual([
+        expect.objectContaining({
+          params: expect.objectContaining({ modelProvider: "openai_http" }),
+        }),
+        expect.objectContaining({
+          params: expect.objectContaining({ modelProvider: "openai_http" }),
+        }),
+      ]);
       transport.finish(id2, "result-b");
       await pendingAgain;
       await expect(again.release(false)).rejects.toThrow("分析结果未保存");
@@ -600,6 +612,12 @@ describe("Codex 固定会话池", () => {
         const lease = await pool.acquire(signal);
         expect((await lease.run("role", {}, signal)).text).toBe("ok");
         expect(spawnMock.mock.calls[0]![1]).toContain('cli_auth_credentials_store="file"');
+        expect(spawnMock.mock.calls[0]![1]).toEqual(
+          expect.arrayContaining([
+            'model_provider="openai_http"',
+            'model_providers.openai_http={name="OpenAI HTTP",wire_api="responses",requires_openai_auth=true,supports_websockets=false}',
+          ]),
+        );
         expect(spawnMock.mock.calls[0]![2].env).toMatchObject({
           CODEX_HOME: "/private/tmp/cbg-pool-fixture",
           CODEX_SQLITE_HOME: "/private/tmp/cbg-pool-fixture",

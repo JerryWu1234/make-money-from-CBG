@@ -7,6 +7,7 @@ import { createInterface } from "node:readline";
 import { Codex, type WebSearchItem, type ThreadItem } from "@openai/codex-sdk";
 import type { CodexLogin } from "./types";
 import { codexHomeEnv } from "./codex-home";
+import { CODEX_HTTP_OVERRIDES } from "./codex-provider";
 
 type Account = {
   type: "chatgpt";
@@ -37,8 +38,7 @@ async function startServer(): Promise<Rpc> {
       "stdio://",
       "-c",
       'forced_login_method="chatgpt"',
-      "-c",
-      'model_provider="openai"',
+      ...CODEX_HTTP_OVERRIDES.flatMap((override) => ["-c", override]),
       "-c",
       'cli_auth_credentials_store="file"',
     ],
@@ -240,10 +240,10 @@ async function runCodexRequest(
     signal.throwIfAborted();
     const codex = new Codex({
       env: codexHomeEnv(),
+      configOverrides: CODEX_HTTP_OVERRIDES,
       config: {
         forced_login_method: "chatgpt",
         cli_auth_credentials_store: "file",
-        model_provider: "openai",
         ...(!probe && !search && options?.model === "gpt-6-luna" ? { service_tier: "fast" } : {}),
         ...(probe || search || options?.bareRoleReview
           ? {

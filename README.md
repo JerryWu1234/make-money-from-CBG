@@ -93,6 +93,8 @@ vp dev
 
 Codex 认证与后台会话保存在仓库之外的项目专用私有目录，与桌面版的 Codex 目录分开；首次使用需要在项目页面重新登录。原有桌面 Codex 配置不会自动继承，环境变量中的网络代理仍会保留。后台按需创建不超过并发数的持久会话，每个角色的结果保存并清理上下文后可在同一账号、模型和分析范围内复用；服务重启后也会恢复已确认安全的会话。状态不明的会话会被隔离，必要时新建，避免不同角色的资料混用。旧的桌面会话不会自动删除或归档。
 
+本项目的 Codex 连接验证、商品分析和联网查询统一使用 `openai_http` 配置，通过 HTTPS/SSE 流式请求模型，跳过 WebSocket 预热和重试。配置由项目启动参数传入，不修改桌面 Codex 的全局设置；ChatGPT 登录、模型选择和并发设置沿用原值。本地程序与 Codex app-server 之间仍使用 stdio 通信。切换前暂停分析，再重启本地服务并继续；已完成结果保留。
+
 `POST /api/analysis/start` 接受 `{ "provider": "codex", "concurrency": 10 }`；`POST /api/analysis/resume` 和 `POST /api/analysis/retry` 可传 `{ "runId": "批次ID", "concurrency": 2 }`。代码入口 `startAnalysis`、`AnalysisRunner.start` 和 `resume` 的末尾参数为并发数。新采齐的角色会自动填入空闲槽位；未启用资产分析时仍只计算裸号。
 
 - 开始时从 SQLite 固定本批次详情完整的商品快照。一件商品的所有已保存列表与详情字段拼成一份完整文本，一次提交给所选 AI；各角色按配置的并发数处理，结果分别核验并入库。待补采商品继续显示在总列表。
