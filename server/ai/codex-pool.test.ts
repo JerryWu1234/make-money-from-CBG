@@ -819,6 +819,229 @@ describe("Codex 固定会话池", () => {
     await Promise.all(again.map((lease) => lease.release(true)));
   });
 
+  // Failure cases: slow resets share app-server's serial work queue, so later RPCs
+  // expire before processing; moving the queue must still allow ten active turns.
+  it("10 个慢回退排队超过20秒仍完成，分析保持10路并发", async () => {
+    const { pool, transport } = create(10);
+    const signal = new AbortController().signal;
+    const leases = await Promise.all(Array.from({ length: 10 }, () => pool.acquire(signal)));
+    const pending = leases.map((lease, index) => lease.run(`role-${index}`, {}, signal));
+    const started = await turns(transport, 10);
+    expect(transport.turns.size).toBe(10);
+    for (const [id, turn] of started) transport.finish(id, `answer:${turn.prompt}`);
+    expect((await Promise.all(pending)).map((result) => result.text).sort()).toEqual(
+      started.map(([, turn]) => `answer:${turn.prompt}`).sort(),
+    );
+
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const original = transport.request.bind(transport);
+    let serverQueue = Promise.resolve();
+    transport.request = async (method, params) => {
+      if (method !== "thread/revert") return original(method, params);
+      return await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Codex thread/revert 响应超时")), 20_000);
+        serverQueue = serverQueue.then(async () => {
+          await new Promise((done) => setTimeout(done, 5_000));
+          const result = await original(method, params);
+          clearTimeout(timeout);
+          resolve(result);
+        });
+      });
+    };
+    const outcomes = Promise.allSettled(leases.map((lease) => lease.release(true)));
+    await vi.advanceTimersByTimeAsync(50_001);
+    const results = await outcomes;
+    expect(results.map((result) => result.status)).toEqual(Array(10).fill("fulfilled"));
+    expect(transport.calls.filter((call) => call.method === "thread/revert")).toHaveLength(10);
+    expect([...transport.histories.values()]).toEqual(Array.from({ length: 10 }, () => []));
+    await (await pool.acquire(signal)).release(true);
+  });
+
+  // Failure cases: separate lifecycle queues overlap; a slow reset blocks inference
+  // or interrupt; canceled or closed queued work is sent later; real timeouts are hidden.
+  it("新建、恢复和回退共用队列，慢回退期间仍能开始和取消 turn", async () => {
+    const { pool, transport } = create(4, true);
+    const signal = new AbortController().signal;
+    const seeds = await Promise.all(Array.from({ length: 3 }, () => pool.acquire(signal)));
+    const seeded = seeds.map((lease, index) => lease.run(`seed-${index}`, {}, signal));
+    const first = await turns(transport, 3);
+    for (const [id] of first) transport.finish(id, "seed-result");
+    await Promise.all(seeded);
+    await Promise.all(seeds.map((lease) => lease.release(true)));
+
+    const saved = await pool.acquire(signal);
+    const active = await pool.acquire(signal);
+    const savedRun = saved.run("saved-role", {}, signal);
+    const activeRun = active.run("retry-role", {}, signal);
+    const started = (await turns(transport, 5)).slice(3);
+    const savedTurn = started.find(([, turn]) => turn.prompt === "saved-role")![0];
+    const retryTurn = started.find(([, turn]) => turn.prompt === "retry-role")![0];
+    transport.finish(savedTurn, "saved-result");
+    transport.finish(retryTurn, "", "failed");
+    await savedRun;
+    await expect(activeRun).rejects.toThrow("failed");
+
+    const original = transport.request.bind(transport);
+    const lifecycle: string[] = [];
+    let inFlight = 0;
+    let maximumInFlight = 0;
+    let unblock!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    transport.request = async (method, params) => {
+      if (!["thread/start", "thread/resume", "thread/revert"].includes(method))
+        return original(method, params);
+      lifecycle.push(method);
+      maximumInFlight = Math.max(maximumInFlight, ++inFlight);
+      try {
+        if (lifecycle.length === 1) await gate;
+        else await new Promise((resolve) => setTimeout(resolve, 10));
+        return await original(method, params);
+      } finally {
+        inFlight--;
+      }
+    };
+    const release = saved.release(true);
+    await vi.waitFor(() => expect(lifecycle).toEqual(["thread/revert"]));
+    const resumeLease = await pool.acquire(signal);
+    const newLease = await pool.acquire(signal);
+    const resumed = resumeLease.run("resumed-role", {}, signal);
+    const created = newLease.run("new-role", {}, signal);
+
+    const controller = new AbortController();
+    const retried = active.run("retry-role", {}, controller.signal);
+    const rejectedRetry = expect(retried).rejects.toThrow("paused during reset");
+    const retryId = (await turns(transport, 6))[5]![0];
+    controller.abort(new Error("paused during reset"));
+    await vi.waitFor(() => expect(transport.calls.at(-1)?.method).toBe("turn/interrupt"));
+    transport.finish(retryId, "", "interrupted");
+    await rejectedRetry;
+    unblock();
+    await release;
+    const following = (await turns(transport, 8)).slice(6);
+    expect(lifecycle[0]).toBe("thread/revert");
+    expect(lifecycle.slice(1).sort()).toEqual(["thread/resume", "thread/start"]);
+    expect(maximumInFlight).toBe(1);
+    for (const [id] of following) transport.finish(id, "next-result");
+    await Promise.all([resumed, created]);
+    transport.request = original;
+    await Promise.all([active.release(true), resumeLease.release(true), newLease.release(true)]);
+  });
+
+  it.each(["start", "resume"])(
+    "排队中的 thread/%s 取消后不发送，持久会话可继续复用",
+    async (mode) => {
+      const { pool, transport, statePath } = create(2, true);
+      const signal = new AbortController().signal;
+      const seedCount = mode === "resume" ? 2 : 1;
+      const seeds = await Promise.all(
+        Array.from({ length: seedCount }, () => pool.acquire(signal)),
+      );
+      const seeded = seeds.map((lease, index) => lease.run(`seed-${index}`, {}, signal));
+      const first = await turns(transport, seedCount);
+      for (const [id] of first) transport.finish(id, "seed-result");
+      await Promise.all(seeded);
+      await Promise.all(seeds.map((lease) => lease.release(true)));
+      const saved = await pool.acquire(signal);
+      const savedRun = saved.run("saved-role", {}, signal);
+      const [savedId] = (await turns(transport, seedCount + 1))[seedCount]!;
+      transport.finish(savedId, "saved-result");
+      await savedRun;
+
+      const original = transport.request.bind(transport);
+      let unblock!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        unblock = resolve;
+      });
+      const sent: string[] = [];
+      transport.request = async (method, params) => {
+        sent.push(method);
+        if (method === "thread/revert") await gate;
+        return original(method, params);
+      };
+      const release = saved.release(true);
+      await vi.waitFor(() => expect(sent).toEqual(["thread/revert"]));
+      const controller = new AbortController();
+      const queued = await pool.acquire(controller.signal);
+      const canceled = queued.run("canceled-role", {}, controller.signal);
+      const rejected = expect(canceled).rejects.toThrow("canceled while queued");
+      // Let workspace preparation and the persistent claim reach the occupied queue.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      controller.abort(new Error("canceled while queued"));
+      await rejected;
+      expect(sent).toEqual(["thread/revert"]);
+      await queued.release(true);
+      unblock();
+      await release;
+      transport.request = original;
+      const db = new DatabaseSync(statePath!);
+      try {
+        expect(
+          db.prepare("SELECT count(*) AS n FROM reusable_threads WHERE state='dirty'").get()?.n,
+        ).toBe(0);
+      } finally {
+        db.close();
+      }
+      const next = await pool.acquire(signal);
+      const pending = next.run("next-role", {}, signal);
+      const [nextId] = (await turns(transport, seedCount + 2))[seedCount + 1]!;
+      transport.finish(nextId, "next-result");
+      expect((await pending).text).toBe("next-result");
+      await next.release(true);
+    },
+  );
+
+  it.each(["timeout", "close"])("已发送请求%s时停止池，不发送队列中的会话请求", async (mode) => {
+    class MockChild extends EventEmitter {
+      readonly stdin = new PassThrough();
+      readonly stdout = new PassThrough();
+      readonly stderr = new PassThrough();
+      kill() {
+        this.stdin.end();
+        this.stdout.end();
+        this.stderr.end();
+        this.emit("exit", 0);
+        this.emit("close", 0);
+        return true;
+      }
+    }
+    const child = new MockChild();
+    spawnMock.mockReturnValue(child);
+    const requests: string[] = [];
+    let buffer = "";
+    child.stdin.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      let end: number;
+      while ((end = buffer.indexOf("\n")) >= 0) {
+        const message = JSON.parse(buffer.slice(0, end)) as { id?: number; method: string };
+        buffer = buffer.slice(end + 1);
+        if (message.method === "initialize")
+          child.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\n");
+        else if (message.method === "thread/start") requests.push(message.method);
+      }
+    });
+    const pool = new CodexPool(2, "gpt-6-luna");
+    pools.push(pool);
+    const signal = new AbortController().signal;
+    const leases = await Promise.all([pool.acquire(signal), pool.acquire(signal)]);
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const outcomes = Promise.allSettled(
+      leases.map((lease, index) => lease.run(`role-${index}`, {}, signal)),
+    );
+    await vi.waitFor(() => expect(requests.length).toBeGreaterThan(0));
+    if (mode === "timeout") await vi.advanceTimersByTimeAsync(20_001);
+    else await pool.close();
+    const results = await outcomes;
+    expect(results.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+    if (mode === "timeout")
+      for (const result of results)
+        if (result.status === "rejected")
+          expect(result.reason.message).toContain("thread/start 响应超时");
+    expect(requests).toEqual(["thread/start"]);
+    await expect(pool.acquire(signal)).rejects.toThrow();
+  });
+
   it("取消后等待该 turn 确认结束并落库，再回退且允许重新领取", async () => {
     const { pool, transport } = create();
     const controller = new AbortController();

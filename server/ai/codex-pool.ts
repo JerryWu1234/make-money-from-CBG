@@ -367,6 +367,7 @@ export type CodexLease = {
 export class CodexPool {
   private readonly slots: Slot[] = [];
   private readonly waiters: Waiter[] = [];
+  private threadRequests: Promise<void> = Promise.resolve();
   private transport?: Promise<CodexPoolTransport>;
   private unsubscribe?: () => void;
   private failure?: Error;
@@ -407,6 +408,35 @@ export class CodexPool {
       this.fail(asError(error));
       throw error;
     }
+  }
+  private threadRequest(
+    rpc: CodexPoolTransport,
+    method: "thread/start" | "thread/resume" | "thread/revert",
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(signal?.reason);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      // Queue before dispatch so app-server's serial thread work cannot consume the RPC deadline.
+      const request = this.threadRequests.then(async () => {
+        signal?.removeEventListener("abort", abort);
+        this.check();
+        signal?.throwIfAborted();
+        try {
+          return await rpc.request(method, params);
+        } catch (error) {
+          this.fail(asError(error));
+          throw error;
+        }
+      });
+      this.threadRequests = request.then(
+        () => {},
+        () => {},
+      );
+      void request.then(resolve, reject);
+    });
   }
   private onEvent(event: CodexPoolEvent) {
     if (event.method === "$closed") {
@@ -556,15 +586,71 @@ export class CodexPool {
         if (existing) {
           claimed = true;
           slot.persistentDirty = true;
+          slot.threadId = existing.id;
+          slot.bare = bare;
           try {
             slot.directory = await this.persistent.restoreWorkspace(existing.workspace);
             abortSignal.throwIfAborted();
             const resumed = object(
-              await rpc.request("thread/resume", {
-                threadId: existing.id,
-                cwd: slot.directory,
+              await this.threadRequest(
+                rpc,
+                "thread/resume",
+                {
+                  threadId: existing.id,
+                  cwd: slot.directory,
+                  model: this.model,
+                  modelProvider: CODEX_HTTP_PROVIDER,
+                  sandbox: "read-only",
+                  approvalPolicy: "never",
+                  config: {
+                    web_search: "disabled",
+                    ...(bare
+                      ? {
+                          features: {
+                            shell_tool: false,
+                            unified_exec: false,
+                            hooks: false,
+                            multi_agent: false,
+                            apps: false,
+                          },
+                        }
+                      : {}),
+                  },
+                  ...(this.model === "gpt-6-luna" ? { serviceTier: "fast" } : {}),
+                },
+                abortSignal,
+              ),
+            );
+            if (object(resumed.thread).id !== existing.id)
+              throw new Error("Codex 恢复会话返回了错误 ID");
+            const history = object(
+              await rpc.request("thread/turns/list", { threadId: existing.id, limit: 1 }),
+            );
+            if (!Array.isArray(history.data) || history.data.length)
+              throw new Error("Codex 恢复会话历史未清空，会话已隔离");
+          } catch (error) {
+            if (!abortSignal.aborted || error !== abortSignal.reason) this.fail(asError(error));
+            throw error;
+          }
+        }
+      }
+      if (!this.persistent && !slot.directory)
+        slot.directory = await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
+      if (!slot.threadId) {
+        slot.directory ||= this.persistent
+          ? await this.persistent.createWorkspace()
+          : await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
+        abortSignal.throwIfAborted();
+        let start: Record<string, unknown>;
+        try {
+          start = object(
+            await this.threadRequest(
+              rpc,
+              "thread/start",
+              {
                 model: this.model,
                 modelProvider: CODEX_HTTP_PROVIDER,
+                cwd: slot.directory,
                 sandbox: "read-only",
                 approvalPolicy: "never",
                 config: {
@@ -582,59 +668,13 @@ export class CodexPool {
                     : {}),
                 },
                 ...(this.model === "gpt-6-luna" ? { serviceTier: "fast" } : {}),
-              }),
-            );
-            if (object(resumed.thread).id !== existing.id)
-              throw new Error("Codex 恢复会话返回了错误 ID");
-            const history = object(
-              await rpc.request("thread/turns/list", { threadId: existing.id, limit: 1 }),
-            );
-            if (!Array.isArray(history.data) || history.data.length)
-              throw new Error("Codex 恢复会话历史未清空，会话已隔离");
-            slot.threadId = existing.id;
-            slot.bare = bare;
-          } catch (error) {
-            this.fail(asError(error));
-            throw error;
-          }
-        }
-      }
-      if (!this.persistent && !slot.directory)
-        slot.directory = await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
-      if (!slot.threadId) {
-        slot.directory ||= this.persistent
-          ? await this.persistent.createWorkspace()
-          : await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
-        abortSignal.throwIfAborted();
-        let start: Record<string, unknown>;
-        try {
-          start = object(
-            await rpc.request("thread/start", {
-              model: this.model,
-              modelProvider: CODEX_HTTP_PROVIDER,
-              cwd: slot.directory,
-              sandbox: "read-only",
-              approvalPolicy: "never",
-              config: {
-                web_search: "disabled",
-                ...(bare
-                  ? {
-                      features: {
-                        shell_tool: false,
-                        unified_exec: false,
-                        hooks: false,
-                        multi_agent: false,
-                        apps: false,
-                      },
-                    }
-                  : {}),
               },
-              ...(this.model === "gpt-6-luna" ? { serviceTier: "fast" } : {}),
-            }),
+              abortSignal,
+            ),
           );
         } catch (error) {
           // A timed-out start may already have created a session: do not allocate a replacement.
-          this.fail(asError(error));
+          if (!abortSignal.aborted || error !== abortSignal.reason) this.fail(asError(error));
           throw error;
         }
         const threadId = object(start.thread).id;
@@ -732,7 +772,7 @@ export class CodexPool {
       if (slot.firstTurnId) {
         if (!slot.threadId) throw new Error("Codex 会话缺少有效 ID");
         const rpc = await this.rpc();
-        await rpc.request("thread/revert", {
+        await this.threadRequest(rpc, "thread/revert", {
           threadId: slot.threadId,
           beforeTurnId: slot.firstTurnId,
         });
