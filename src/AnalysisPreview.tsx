@@ -146,7 +146,11 @@ export function AnalysisPreview() {
         ? "宝宝"
         : "装备";
   const waitingPricing = run?.waitingPricing || 0;
-  const finished = (run?.completed || 0) + (run?.failed || 0) + waitingPricing;
+  const reused = run?.reused || 0;
+  const aiCompleted = (run?.completed || 0) - reused;
+  const aiTotal = (run?.total || 0) - reused;
+  const resultTotal = data?.results.total || 0;
+  const hiddenRecommendations = data?.rankingPagination?.hiddenTotal || 0;
   const sameCalculation =
     !run?.calculationVersion || run.calculationVersion === data?.profile?.calculationVersion;
   const sameMarket = !run?.marketExpired;
@@ -555,12 +559,12 @@ export function AnalysisPreview() {
                     : waitingForRoles
                       ? active.total === 0
                         ? "正在等待首个角色资料采集完整，完成后自动开始分析，无需再次点击。"
-                        : `资料完整的现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。已完成 ${active.completed} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
+                        : `资料完整的现有角色已处理完，等待新角色；资料采集完整后会自动继续分析。本轮 AI 分析完成 ${aiCompleted} 件，已复用 ${reused} 件，失败 ${active.failed} 件，价格待补齐 ${active.waitingPricing || 0} 件。`
                       : (active.runningCount || 0) > 1
-                        ? `正在并发处理：${active.currentItems?.join("、")} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                        ? `正在并发处理：${active.currentItems?.join("、")} · 本轮 AI 分析完成 ${aiCompleted}/${aiTotal} 件`
                         : searchingEquipment
-                          ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
-                          : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · ${active.completed + active.failed + (active.waitingPricing || 0)}/${active.total} 件已处理`
+                          ? `正在联网查${searchAsset}价格：${active.current || "准备下一件"} · 本轮 AI 分析完成 ${aiCompleted}/${aiTotal} 件`
+                          : `正在用 ${providerNames[active.provider]} 分析：${active.current || "准备下一件"} · 本轮 AI 分析完成 ${aiCompleted}/${aiTotal} 件`
                   : data.counts.total === 0
                     ? "尚未采集商品；可以先开始分析并等待，角色资料采集完整后会自动分析。"
                     : run && !sameModel
@@ -572,7 +576,7 @@ export function AnalysisPreview() {
                           : run?.status === "paused"
                             ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续时沿用原计价设置，并发数使用当前输入。`
                             : run?.status === "completed"
-                              ? `本批次已处理：${run.completed} 件成功，${run.failed} 件失败，${waitingPricing} 件价格待补齐。待补齐项保留进度，需单独重试。`
+                              ? `本轮 AI 分析完成 ${aiCompleted} 件，已复用 ${reused} 件结果，${run.failed} 件失败，${waitingPricing} 件价格待补齐。待补齐项保留进度，需单独重试。`
                               : `${data.counts.complete} 件资料完整，可以开始分析；${captureSummary}。`}
             </p>
             {waitingForRoles && (
@@ -651,7 +655,7 @@ export function AnalysisPreview() {
               </strong>
               <span>
                 {run
-                  ? `${finished} / ${run.total} 件已处理`
+                  ? `本轮 AI 分析完成 ${aiCompleted} / ${aiTotal} 件`
                   : `${data?.counts.complete || 0} 件可分析`}
               </span>
             </div>
@@ -666,11 +670,11 @@ export function AnalysisPreview() {
             </p>
           </div>
           <div>
-            <small>已完成分析</small>
-            <strong>{snapshot ? `${snapshot.results?.total || 0} 件已有结果` : "正在加载…"}</strong>
+            <small>全部已分析商品</small>
+            <strong>{snapshot ? `${resultTotal} 件已有结果` : "正在加载…"}</strong>
             <p>
               {run
-                ? `${waitingPricing} 件价格待补齐 · ${run.failed} 件失败 · ${run.queued} 件排队中`
+                ? `本轮：${waitingPricing} 件价格待补齐 · ${run.failed} 件失败 · ${run.queued} 件排队中`
                 : "选择 AI 后点击开始分析"}
             </p>
           </div>
@@ -701,7 +705,7 @@ export function AnalysisPreview() {
                 aria-selected={tab === "history"}
                 onClick={() => setTab("history")}
               >
-                分析记录 <span>{data?.results?.total || 0}</span>
+                分析记录 <span>{resultTotal}</span>
               </button>
             </div>
             {tab === "ranking" ? (
@@ -752,15 +756,20 @@ export function AnalysisPreview() {
                 {listReady && !!snapshot && !snapshot.rankingDeferred && !data?.ranking.length && (
                   <div className="analysis-start-empty">
                     <strong>
-                      {run?.completed
-                        ? valuationMode
-                          ? "暂无符合推荐条件的商品"
-                          : "暂无可排序的结果"
-                        : "暂无分析结果"}
+                      {!showViewed && hiddenRecommendations
+                        ? `${hiddenRecommendations} 件推荐已隐藏`
+                        : resultTotal
+                          ? valuationMode
+                            ? data?.rankingPagination?.eligibleTotal === undefined
+                              ? "当前没有可显示的推荐"
+                              : "暂无符合推荐条件的商品"
+                            : "暂无可排序的结果"
+                          : "暂无分析结果"}
                     </strong>
                     <p>
-                      {run?.completed
-                        ? `已有 ${run.completed} 件分析结果，可在全部商品查看。`
+                      {!showViewed && hiddenRecommendations > 0 && "勾选“显示已隐藏的推荐”可查看。"}
+                      {resultTotal
+                        ? `已有 ${resultTotal} 件分析结果，可在分析记录查看。`
                         : "开始分析后，结果会保存在这里。"}
                     </p>
                   </div>
@@ -1078,7 +1087,12 @@ export function AnalysisPreview() {
                                 <strong className="analysis-result-name">{entry.name}</strong>
                                 <span className="analysis-result-meta">
                                   {entry.server} · {providerNames[entry.provider]} · {entry.model} ·{" "}
-                                  {displayTime(entry.completedAt)}
+                                  {entry.reused === undefined
+                                    ? "已分析"
+                                    : entry.reused
+                                      ? "本地复用/复算"
+                                      : "AI 分析"}{" "}
+                                  · {displayTime(entry.completedAt)}
                                 </span>
                                 <span
                                   className="analysis-result-summary"
@@ -1148,13 +1162,14 @@ export function AnalysisPreview() {
                   : "选择 AI 后开始分析已有商品"}
               </p>
               <div className="analysis-current">
-                <small>处理进度</small>
+                <small>本轮 AI 分析完成</small>
                 <strong>
-                  {finished} / {run?.total || 0}
+                  {aiCompleted} / {aiTotal}
                 </strong>
                 <div className="analysis-progress-track">
-                  <span style={{ width: `${run?.total ? (finished / run.total) * 100 : 0}%` }} />
+                  <span style={{ width: `${aiTotal ? (aiCompleted / aiTotal) * 100 : 0}%` }} />
                 </div>
+                <p>已复用 {reused} 件结果（未调用 AI）</p>
                 <p>
                   {(active?.runningCount || 0) > 1
                     ? `正在处理 ${active?.currentItems?.join("、")}`

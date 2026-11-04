@@ -415,6 +415,8 @@ it("推荐分页包含50条以后的商品，查看后隐藏并在末页缩减�
       page: 3,
       totalPages: 3,
       total: 52,
+      eligibleTotal: 52,
+      hiddenTotal: 0,
     });
     for (const invalidPage of [NaN, Infinity, -1, 0])
       expect(store.overview({ rankingPage: invalidPage }).rankingPagination?.page).toBe(1);
@@ -434,12 +436,20 @@ it("推荐分页包含50条以后的商品，查看后隐藏并在末页缩减�
     });
     for (const key of keys(40, 12)) store.markRecommendationViewed(key);
     const shrunk = store.overview({ rankingPage: 3 });
-    expect(shrunk.rankingPagination).toEqual({ page: 2, totalPages: 2, total: 39 });
+    expect(shrunk.rankingPagination).toEqual({
+      page: 2,
+      totalPages: 2,
+      total: 39,
+      eligibleTotal: 52,
+      hiddenTotal: 13,
+    });
     expect(shrunk.ranking.map((item) => item.key)).toEqual(keys(21, 19));
     expect(store.overview({ rankingPage: 3, showViewed: true }).rankingPagination).toEqual({
       page: 3,
       totalPages: 3,
       total: 52,
+      eligibleTotal: 52,
+      hiddenTotal: 13,
     });
     for (const key of [null, undefined, 1, "", " view-00", "x".repeat(101), "missing"])
       expect(() => store.markRecommendationViewed(key)).toThrow();

@@ -1810,7 +1810,7 @@ export class AnalysisStore {
       // while collection can update the same connection's tables.
       const rankedRows = this.db
         .prepare(
-          `SELECT l.key,t.id task_id,views.viewed_at FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN recommendation_views views ON views.listing_key=l.key WHERE (${stateSql})='completed' AND json_type(t.result_json,'$.valuation.bare_role_value') IN ('integer','real')${options.showViewed ? "" : " AND views.listing_key IS NULL"} ORDER BY coalesce(json_extract(t.result_json,'$.valuation.price_difference_ratio'),json_extract(t.result_json,'$.valuation.margin_of_safety')) DESC,json_extract(t.result_json,'$.score') DESC,l.key ASC`,
+          `SELECT l.key,t.id task_id,views.viewed_at FROM listings l LEFT JOIN analysis_tasks t ON ${taskSelection} LEFT JOIN recommendation_views views ON views.listing_key=l.key WHERE (${stateSql})='completed' AND json_type(t.result_json,'$.valuation.bare_role_value') IN ('integer','real') ORDER BY coalesce(json_extract(t.result_json,'$.valuation.price_difference_ratio'),json_extract(t.result_json,'$.valuation.margin_of_safety')) DESC,json_extract(t.result_json,'$.score') DESC,l.key ASC`,
         )
         .all(...sourceValues);
       const candidateKeys = new Set(rankedRows.map((row) => String(row.key)));
@@ -1866,7 +1866,7 @@ export class AnalysisStore {
         let row: Row | undefined = observed
           ? { ...observed, viewed_at: candidate.viewed_at }
           : undefined;
-        if (!row || row.state !== "completed" || (!options.showViewed && row.viewed_at)) continue;
+        if (!row || row.state !== "completed") continue;
         const key = String(row.key),
           fingerprint = signature(row);
         let cached = this.recommendationCache.get(key);
@@ -1894,7 +1894,11 @@ export class AnalysisStore {
         const status = cached.recommendation?.status;
         if (status === "recommended") {
           ranking.push({ key, taskId: candidate.task_id, signature: fingerprint, cached });
-        } else if (status === "manual" && manualReview.length < 10) {
+        } else if (
+          status === "manual" &&
+          (options.showViewed || !row.viewed_at) &&
+          manualReview.length < 10
+        ) {
           if (!item) {
             row = rankedProduct.get(candidate.key, candidate.task_id, ...sourceValues);
             if (!row || row.state !== "completed" || signature(row) !== fingerprint) continue;
@@ -1919,16 +1923,15 @@ export class AnalysisStore {
         );
       };
       currentManual = manualReview.filter(stillCurrent);
-      // Recheck every eligible key after the yielding scan so removed or viewed items
-      // do not inflate totals or leave an empty page.
+      // Count eligible and hidden products after revalidation, before applying visibility.
+      let eligibleTotal = 0,
+        hiddenTotal = 0;
       const validRanking = ranking.filter((entry) => {
         const row = rankedMetadata.get(entry.key, entry.taskId, ...sourceValues);
-        return (
-          !!row &&
-          row.state === "completed" &&
-          (options.showViewed || !row.viewed_at) &&
-          signature(row) === entry.signature
-        );
+        if (!row || row.state !== "completed" || signature(row) !== entry.signature) return false;
+        eligibleTotal++;
+        if (row.viewed_at) hiddenTotal++;
+        return options.showViewed || !row.viewed_at;
       });
       const rankingTotal = validRanking.length;
       const rankingTotalPages = Math.max(1, Math.ceil(rankingTotal / 20));
@@ -1936,7 +1939,13 @@ export class AnalysisStore {
         ? Math.trunc(options.rankingPage!)
         : 1;
       const rankingPage = Math.max(1, Math.min(rankingTotalPages, requestedPage));
-      rankingPagination = { page: rankingPage, totalPages: rankingTotalPages, total: rankingTotal };
+      rankingPagination = {
+        page: rankingPage,
+        totalPages: rankingTotalPages,
+        total: rankingTotal,
+        eligibleTotal,
+        hiddenTotal,
+      };
       for (const entry of validRanking.slice((rankingPage - 1) * 20, rankingPage * 20)) {
         const row = rankedProduct.get(entry.key, entry.taskId, ...sourceValues);
         const { cached } = entry;
@@ -2002,7 +2011,7 @@ export class AnalysisStore {
         .all(...sourceValues, (resultPage - 1) * 20)
         .map((row) => row.id);
       results = this.db
-        .prepare(`SELECT t.id task_id,t.source_listing_json,${resultColumn} result_json,t.completed_at,
+        .prepare(`SELECT t.id task_id,t.source_listing_json,${resultColumn} result_json,t.completed_at,t.reused,
       r.provider,r.model,r.profile_json,${stateSql} state ${resultsSource}
       WHERE t.id IN (${resultKeys.map(() => "?").join(",") || "NULL"})
       ORDER BY t.completed_at DESC,t.id DESC`)
@@ -2020,6 +2029,7 @@ export class AnalysisStore {
             provider: String(row.provider) as AiProvider,
             model: String(row.model),
             completedAt: String(row.completed_at),
+            reused: !!row.reused,
             stale: row.state !== "completed",
             profileHash: savedProfile?.hash || null,
             profileChanged:
