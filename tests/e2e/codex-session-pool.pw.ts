@@ -21,10 +21,13 @@ import { valuationRecord } from "../fixtures/analysis";
 // progress, or a session reused before interrupted work actually ends.
 // Persistent retry failures: 429 reclaims an owned thread, skips cooldown, loses saved
 // results on refresh, clears history early, or prevents later roles from completing.
+// HTTP selection failures: a start/resume RPC selects the old provider, or a
+// paused/reopened queue loses its clean thread and repeats a saved role.
 class FixtureTransport implements CodexPoolTransport {
   readonly listeners = new Set<(event: CodexPoolEvent) => void>();
-  readonly histories = new Map<string, string[]>();
   readonly pending = new Map<string, { threadId: string; key: string }>();
+  readonly threadSelections: Array<{ method: string; threadId: string; modelProvider: unknown }> =
+    [];
   readonly started: Array<{ threadId: string; turnId: string; key: string }> = [];
   readonly reverted: Array<{ threadId: string; turnId: string; key: string; state: string }> = [];
   readonly rejected: string[] = [];
@@ -38,6 +41,7 @@ class FixtureTransport implements CodexPoolTransport {
     readonly profile: ReturnType<typeof createProfile>,
     readonly label: string,
     readonly rateLimitKey?: string,
+    readonly histories = new Map<string, string[]>(),
   ) {}
 
   subscribe(listener: (event: CodexPoolEvent) => void) {
@@ -51,12 +55,20 @@ class FixtureTransport implements CodexPoolTransport {
 
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
     if (method === "thread/start") {
+      expect(params.modelProvider).toBe("openai_http");
       const id = `${this.label}-thread-${++this.nextThread}`;
       this.histories.set(id, []);
+      this.threadSelections.push({ method, threadId: id, modelProvider: params.modelProvider });
       return { thread: { id } };
     }
     if (method === "thread/resume") {
+      expect(params.modelProvider).toBe("openai_http");
       if (!this.histories.has(String(params.threadId))) throw new Error("未找到模拟持久线程");
+      this.threadSelections.push({
+        method,
+        threadId: String(params.threadId),
+        modelProvider: params.modelProvider,
+      });
       return { thread: { id: params.threadId } };
     }
     if (method === "turn/start") {
@@ -230,6 +242,8 @@ async function fixture(
     false,
   );
   const transports: FixtureTransport[] = [];
+  // Simulate app-server's durable thread history surviving its process restart.
+  const durableHistories = new Map<string, string[]>();
   const statePath = testInfo.outputPath("codex-pool.sqlite");
   const client: AnalysisClient = {
     model: "fixture-codex",
@@ -242,6 +256,7 @@ async function fixture(
         profile,
         `run-${transports.length + 1}`,
         options.rateLimitKey,
+        options.persistent ? durableHistories : undefined,
       );
       transports.push(transport);
       const pool = new CodexPool(
@@ -374,7 +389,7 @@ async function saveEvidence(testInfo: TestInfo, name: string, data: unknown) {
       {
         fixture: true,
         repeat:
-          "vp run build && vp exec playwright test tests/e2e/codex-session-pool.pw.ts --workers=1",
+          "vp run build && vp exec playwright test tests/e2e/codex-session-pool.pw.ts --workers=1 --trace=on",
         ...(data as object),
       },
       null,
@@ -617,6 +632,105 @@ test("保存两件→Codex断网→重启恢复旧队列→跳过历史完成项
       })),
       run: x.store.run(queued),
       scope: "真实页面、队列、Codex会话池和SQLite重开；资料与Codex通知为模拟，不连接真实AI。",
+    });
+  } finally {
+    await x.runner.shutdown();
+    x.crawl.close();
+  }
+});
+
+test("HTTP会话选择：保存首件→暂停→重启→恢复原线程→只完成剩余角色", async ({ page }, testInfo) => {
+  const x = await fixture(page, testInfo, 3, { persistent: true });
+  try {
+    await page.getByRole("spinbutton", { name: "分析并发数" }).fill("1");
+    await page.getByRole("button", { name: "开始分析已有商品" }).click();
+    await expect.poll(() => x.transports[0]?.pending.size).toBe(1);
+    const runId = x.batch();
+    const first = x.transports[0]!;
+    const { key: savedKey, threadId } = first.started[0]!;
+    expect(first.threadSelections[0]).toEqual({
+      method: "thread/start",
+      threadId,
+      modelProvider: "openai_http",
+    });
+    first.finishAll();
+    await expect.poll(() => x.store.run(runId)!.completed).toBe(1);
+    await expect.poll(() => first.pending.size).toBe(1);
+    const saved = x.crawl.db
+      .prepare("SELECT id,result_json FROM analysis_tasks WHERE run_id=? AND listing_key=?")
+      .get(runId, savedKey)!;
+    await page.getByRole("button", { name: "暂停分析", exact: true }).click();
+    await expect.poll(() => x.store.run(runId)!.status).toBe("paused");
+    expect(x.store.run(runId)).toMatchObject({ completed: 1, queued: 2, failed: 0 });
+    expect(first.closed).toBe(true);
+    expect([...first.histories.values()]).toEqual([[]]);
+    await page.screenshot({
+      path: testInfo.outputPath("http-paused-one-saved.png"),
+      fullPage: true,
+    });
+
+    await x.restart(runId);
+    expect(x.store.run(runId)).toMatchObject({ completed: 1, queued: 2 });
+    await page.getByRole("spinbutton", { name: "分析并发数" }).fill("1");
+    await page.getByRole("button", { name: "继续分析", exact: true }).click();
+    await expect.poll(() => x.transports[1]?.pending.size).toBe(1);
+    const second = x.transports[1]!;
+    expect(second.threadSelections[0]).toEqual({
+      method: "thread/resume",
+      threadId,
+      modelProvider: "openai_http",
+    });
+    expect(second.started[0]!.key).not.toBe(savedKey);
+    for (let completed = 2; completed <= 3; completed++) {
+      second.finishAll();
+      await expect.poll(() => x.store.run(runId)!.completed).toBe(completed);
+      if (completed < 3) await expect.poll(() => second.pending.size).toBe(1);
+    }
+    await expect.poll(() => second.reverted.length).toBe(2);
+    expect(second.started.map((turn) => turn.key).sort()).toEqual(
+      x.keys.filter((key) => key !== savedKey).sort(),
+    );
+    expect(second.started.every((turn) => turn.threadId === threadId)).toBe(true);
+    const savedAfter = x.crawl.db
+      .prepare("SELECT id,result_json FROM analysis_tasks WHERE run_id=? AND listing_key=?")
+      .get(runId, savedKey)!;
+    expect(savedAfter).toEqual(saved);
+    expect(
+      x.crawl.db.prepare("SELECT count(*) n FROM analysis_attempts WHERE task_id=?").get(saved.id)
+        ?.n,
+    ).toBe(1);
+    await page.getByRole("button", { name: "暂停分析", exact: true }).click();
+    await expect.poll(() => x.store.run(runId)!.status).toBe("paused");
+    await x.restart(runId);
+    await page.getByRole("spinbutton", { name: "分析并发数" }).fill("1");
+    await page.getByRole("button", { name: "继续分析", exact: true }).click();
+    await expect(page.getByRole("button", { name: "暂停分析", exact: true })).toBeVisible();
+    await expect.poll(() => x.transports.length).toBe(3);
+    expect(x.transports[2]!.started).toEqual([]);
+    expect(x.transports[2]!.threadSelections).toEqual([]);
+    await page.getByRole("button", { name: "暂停分析", exact: true }).click();
+    await expect.poll(() => x.store.run(runId)!.status).toBe("paused");
+    await page.reload();
+    await expect(
+      page.getByRole("tabpanel", { name: "分析记录", exact: true }).getByRole("article"),
+    ).toHaveCount(3);
+    await page.screenshot({
+      path: testInfo.outputPath("http-reopened-three-results.png"),
+      fullPage: true,
+    });
+    expect(x.transports.every((transport) => transport.rejected.length === 0)).toBe(true);
+    await saveEvidence(testInfo, "HTTP会话选择及重启续跑验证", {
+      database: x.database,
+      statePath: x.statePath,
+      runId,
+      savedKey,
+      savedTaskId: saved.id,
+      persistentThreadId: threadId,
+      threadSelections: x.transports.map((transport) => transport.threadSelections),
+      callsByPool: x.transports.map((transport) => transport.started),
+      run: x.store.run(runId),
+      scope:
+        "真实页面、队列、会话池与临时SQLite；模拟Codex RPC，验证HTTP provider选择及恢复，不代表真实网络HTTP验证。",
     });
   } finally {
     await x.runner.shutdown();
