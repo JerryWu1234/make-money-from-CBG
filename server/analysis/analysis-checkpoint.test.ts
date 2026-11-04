@@ -346,6 +346,16 @@ describe("数据库保存的分析断点和有效版本", () => {
     expect(
       x.store.overview({ runId: id }).records.items.find((item) => item.key === "a")?.state,
     ).toBe("completed");
+    const batch = x.store.overview({ runId: id });
+    expect(batch.results.total).toBe(1);
+    expect(batch.results.items[0]).toMatchObject({
+      taskId: saved.id,
+      reused: true,
+      completedAt: saved.completed_at,
+    });
+    const allResults = x.store.overview().results;
+    expect(allResults.total).toBe(2);
+    expect(allResults.items.find((item) => item.result.productKey === "b")?.reused).toBe(false);
     const reopened = new AnalysisStore(x.crawl.db);
     const next = reopened.createRun("codex", "checkpoint-model", false, x.profile);
     expect(reopened.run(next)).toMatchObject({ completed: 0, queued: 1 });

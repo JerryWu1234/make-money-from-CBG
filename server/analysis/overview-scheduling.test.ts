@@ -77,6 +77,7 @@ it("冷汇总分批让出主线程，相同并发请求合并；处理中商品�
     crawl.fail("poll-000", "在异步汇总期间下架或失败");
     const [a, b] = await Promise.all([first, second]);
     expect(a.ranking).toHaveLength(0);
+    expect(a.rankingPagination).toMatchObject({ total: 0, eligibleTotal: 0, hiddenTotal: 0 });
     expect(b).toEqual(a);
     expect(compute.mock.calls.length).toBeLessThanOrEqual(48);
   } finally {
@@ -169,7 +170,9 @@ it("让出线程期间出现更新的完整分析结果，不能再发布旧任�
         "UPDATE analysis_tasks SET status='completed',result_json=? WHERE run_id=? AND listing_key='poll-000'",
       )
       .run(JSON.stringify({ valuation: { bare_role_value: 100, decision: "NEED_INFO" } }), next);
-    expect((await pending).ranking.map((item) => item.key)).not.toContain("poll-000");
+    const output = await pending;
+    expect(output.ranking.map((item) => item.key)).not.toContain("poll-000");
+    expect(output.rankingPagination).toMatchObject({ total: 0, eligibleTotal: 0, hiddenTotal: 0 });
   } finally {
     crawl.close();
   }
@@ -194,7 +197,13 @@ it("汇总期间标记已查看，不计入分页总数且不显示旧推荐", a
     store.markRecommendationViewed("poll-000");
     const output = await pending;
     expect(output.ranking.map((item) => item.key)).not.toContain("poll-000");
-    expect(output.rankingPagination).toEqual({ page: 1, totalPages: 3, total: 47 });
+    expect(output.rankingPagination).toEqual({
+      page: 1,
+      totalPages: 3,
+      total: 47,
+      eligibleTotal: 48,
+      hiddenTotal: 1,
+    });
     expect(output.ranking).toHaveLength(20);
   } finally {
     crawl.close();
@@ -222,7 +231,13 @@ it("并发请求隐藏已查看时，显示已查看的分页不丢失其结果"
     const visible = await showing;
     expect(hidden.rankingPagination?.total).toBe(47);
     expect(hidden.ranking.map((item) => item.key)).not.toContain("poll-000");
-    expect(visible.rankingPagination).toEqual({ page: 1, totalPages: 3, total: 48 });
+    expect(visible.rankingPagination).toEqual({
+      page: 1,
+      totalPages: 3,
+      total: 48,
+      eligibleTotal: 48,
+      hiddenTotal: 1,
+    });
     expect(visible.ranking).toHaveLength(20);
     expect(visible.ranking[0]).toMatchObject({ key: "poll-000", recommendationViewed: true });
   } finally {

@@ -12,6 +12,8 @@ import { AnalysisStore } from "./store";
 // Failure cases: expiration hides unchanged history, restart loses viewed state,
 // unrelated servers mark an item expired, or history bypasses changed facts/settings
 // and the existing prohibition on executing with expired market data.
+// Hidden counts must include only eligible current recommendations, survive reopen,
+// and remain independent of the checkbox used to show hidden products.
 const directories: string[] = [];
 afterEach(() => {
   vi.restoreAllMocks();
@@ -120,6 +122,65 @@ it("历史展示仍排除真实参数或资料变化的旧推荐", () => {
     expect(x.store.overview({ currentProfile: read() }).ranking).toHaveLength(0);
   } finally {
     x.crawl.close();
+  }
+});
+
+it("17件推荐全部隐藏时仍返回符合条件和隐藏数量，不把失效或不符合的商品计入", () => {
+  const x = fixture();
+  try {
+    for (let index = 1; index < 19; index++) {
+      const record = structuredClone(x.record);
+      record.listing.key = `hidden-${index}`;
+      x.crawl.observe(record.listing);
+      x.crawl.save(record.listing, record.detail!);
+    }
+    const runId = x.store.createRun("codex", "fixture-model", true, x.profile);
+    x.crawl.db
+      .prepare(
+        "UPDATE analysis_tasks SET status='completed',result_json=?,completed_at=? WHERE run_id=?",
+      )
+      .run(
+        JSON.stringify({ valuation: { bare_role_value: 2000, decision: "PASS" } }),
+        x.fetchedAt,
+        runId,
+      );
+    x.crawl.db
+      .prepare("UPDATE analysis_tasks SET result_json=? WHERE run_id=? AND listing_key='hidden-18'")
+      .run(JSON.stringify({ valuation: { bare_role_value: 500, decision: "PASS" } }), runId);
+    const changed = x.crawl.detail("hidden-17") as typeof x.record;
+    changed.listing.price = "1001";
+    x.crawl.observe(changed.listing);
+    const keys = [x.record.listing.key, ...Array.from({ length: 18 }, (_, i) => `hidden-${i + 1}`)];
+    for (const key of keys) x.store.markRecommendationViewed(key);
+    const options = { runId, currentProfile: x.profile };
+    expect(x.store.overview(options)).toMatchObject({
+      ranking: [],
+      rankingPagination: { total: 0, eligibleTotal: 17, hiddenTotal: 17 },
+    });
+    const showing = x.store.overview({ ...options, showViewed: true });
+    expect(showing.rankingPagination).toMatchObject({
+      total: 17,
+      eligibleTotal: 17,
+      hiddenTotal: 17,
+    });
+    expect(showing.ranking).toHaveLength(17);
+    expect(new Set(showing.ranking.map((item) => item.key)).size).toBe(17);
+    expect(showing.ranking.every((item) => item.recommendationViewed)).toBe(true);
+    x.crawl.close();
+    const reopened = new CrawlStore(x.filename);
+    try {
+      const store = new AnalysisStore(reopened.db);
+      expect(store.overview(options).rankingPagination).toMatchObject({
+        total: 0,
+        eligibleTotal: 17,
+        hiddenTotal: 17,
+      });
+      expect(reopened.db.prepare("SELECT count(*) n FROM recommendation_views").get()?.n).toBe(19);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    if (x.crawl.db.isOpen) x.crawl.close();
   }
 });
 
