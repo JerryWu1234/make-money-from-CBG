@@ -129,6 +129,32 @@ describe("官方 Codex 登录与 SDK", () => {
     ).rejects.toThrow("429 Too Many Requests");
     expect(mocks.rm).toHaveBeenCalledOnce();
   });
+  it.each(["probe", "bare"])("%s 流收到重连通知后继续等待最终成功", async (mode) => {
+    mocks.runStreamed.mockResolvedValue({
+      events: (async function* () {
+        yield {
+          type: "error",
+          message: "Reconnecting... 1/1 (last status: 429 Too Many Requests)",
+        };
+        yield { type: "item.completed", item: { type: "agent_message", text: "READY" } };
+        yield { type: "turn.completed", usage: { input_tokens: 7, output_tokens: 3 } };
+      })(),
+    });
+    const { probeCodex, requestCodex } = await import("./codex");
+    const signal = new AbortController().signal;
+    if (mode === "probe") await expect(probeCodex("fixture", signal)).resolves.toBe("READY");
+    else
+      await expect(
+        requestCodex("fixture", signal, {
+          model: "gpt-6-luna",
+          outputSchema: {},
+          bareRoleReview: true,
+        }),
+      ).resolves.toMatchObject({
+        text: "READY",
+        usage: { input_tokens: 7, output_tokens: 3 },
+      });
+  });
   it("已完成的流不再接收上级取消，避免SDK清理子进程监听后触发未处理AbortError", async () => {
     const controller = new AbortController();
     const lateAbort = vi.fn();
@@ -212,7 +238,7 @@ describe("官方 Codex 登录与 SDK", () => {
     expect(mocks.spawn.mock.calls[0][1]).toEqual(
       expect.arrayContaining([
         'model_provider="openai_http"',
-        'model_providers.openai_http={name="OpenAI HTTP",wire_api="responses",requires_openai_auth=true,supports_websockets=false}',
+        'model_providers.openai_http={name="OpenAI",wire_api="responses",requires_openai_auth=true,supports_websockets=false}',
       ]),
     );
     expect(mocks.spawn.mock.calls[0][2].env).toMatchObject({
@@ -254,7 +280,7 @@ describe("官方 Codex 登录与 SDK", () => {
     expect(options.config.cli_auth_credentials_store).toBe("file");
     expect(options.configOverrides).toEqual([
       'model_provider="openai_http"',
-      'model_providers.openai_http={name="OpenAI HTTP",wire_api="responses",requires_openai_auth=true,supports_websockets=false}',
+      'model_providers.openai_http={name="OpenAI",wire_api="responses",requires_openai_auth=true,supports_websockets=false}',
     ]);
     expect(options.config.model_provider).toBeUndefined();
     expect(options.config.features).toEqual({

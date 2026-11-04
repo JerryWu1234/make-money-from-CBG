@@ -16,7 +16,7 @@
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.99.1",
     "@earendil-works/pi-ai": "0.99.1",
-    "@openai/codex-sdk": "0.159.3",
+    "@openai/codex-sdk": "0.161.0",
     "playwright-core": "^1.63.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

@@ -4,7 +4,6 @@ import { DatabaseSync } from "node:sqlite";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import {
   CodexPool,
-  CodexPoolRpcError,
   type CodexPoolEvent,
   type CodexPoolTransport,
 } from "../../server/ai/codex-pool";
@@ -25,6 +24,8 @@ import { valuationRecord } from "../fixtures/analysis";
 // paused/reopened queue loses its clean thread and repeats a saved role.
 // Slow lifecycle failures: queued requests consume their response timeout, inference
 // or interruption waits behind cleanup, or restart repeats already saved results.
+// Terminal 429 failures must be cleared before retry, without clearing a valid
+// unsaved result or adding the same role input to its history twice.
 class FixtureTransport implements CodexPoolTransport {
   readonly listeners = new Set<(event: CodexPoolEvent) => void>();
   readonly pending = new Map<string, { threadId: string; key: string }>();
@@ -33,6 +34,7 @@ class FixtureTransport implements CodexPoolTransport {
   readonly started: Array<{ threadId: string; turnId: string; key: string }> = [];
   readonly reverted: Array<{ threadId: string; turnId: string; key: string; state: string }> = [];
   readonly rejected: string[] = [];
+  readonly failedTurns = new Set<string>();
   readonly rateLimited: Array<{ threadId: string; key: string; at: number }> = [];
   readonly lifecycleRequests: Array<{
     method: string;
@@ -141,16 +143,21 @@ class FixtureTransport implements CodexPoolTransport {
       const prompt = (params.input as Array<{ text: string }>)[0]?.text || "";
       const key = prompt.match(/商品 ID：([^。\n]+)[。\n]/)?.[1];
       if (!key || !params.outputSchema) throw new Error("角色身份或结构化输出缺失");
-      if (key === this.rateLimitKey && !this.rateLimited.length) {
-        this.rateLimited.push({ threadId, key, at: Date.now() });
-        throw new CodexPoolRpcError("429 Too Many Requests");
-      }
       const turnId = `${this.label}-turn-${++this.nextTurn}`;
       history.push(turnId);
       this.pending.set(turnId, { threadId, key });
       this.started.push({ threadId, turnId, key });
       // Exercise app-server notifications arriving before the RPC response.
       this.emit("turn/started", { threadId, turn: { id: turnId, status: "inProgress" } });
+      if (key === this.rateLimitKey && !this.rateLimited.length) {
+        this.rateLimited.push({ threadId, key, at: Date.now() });
+        this.failedTurns.add(turnId);
+        this.pending.delete(turnId);
+        this.emit("turn/completed", {
+          threadId,
+          turn: { id: turnId, status: "failed", error: { message: "429 Too Many Requests" } },
+        });
+      }
       return { turn: { id: turnId, status: "inProgress" } };
     }
     if (method === "thread/revert") {
@@ -168,8 +175,7 @@ class FixtureTransport implements CodexPoolTransport {
       if (
         !turn ||
         !row ||
-        row.state === "running" ||
-        !row.finished_at ||
+        (!this.failedTurns.has(turnId) && (row.state === "running" || !row.finished_at)) ||
         this.pending.has(turnId)
       ) {
         this.rejected.push(turnId);
@@ -180,7 +186,12 @@ class FixtureTransport implements CodexPoolTransport {
       const index = history.indexOf(turnId);
       if (index < 0) throw new Error("回退的轮次不属于这个 session");
       history.splice(index);
-      this.reverted.push({ threadId, turnId, key: turn.key, state: String(row.state) });
+      this.reverted.push({
+        threadId,
+        turnId,
+        key: turn.key,
+        state: this.failedTurns.has(turnId) ? "failed-turn" : String(row.state),
+      });
       return { thread: { id: threadId } };
     }
     if (method === "thread/turns/list")
@@ -923,7 +934,7 @@ test("持久线程：保存首个角色→429冷却并刷新→同租约重试�
       .prepare("SELECT result_json FROM analysis_tasks WHERE listing_key=?")
       .get(firstKey)!.result_json;
     expect(transport.pending.size).toBe(0);
-    expect(transport.started).toHaveLength(1);
+    expect(transport.started).toHaveLength(2);
     await expect(page.getByLabel("AI限流恢复状态")).toContainText("限流冷却中");
     await page.reload();
     await expect(page.getByLabel("AI限流恢复状态")).toContainText("限流冷却中");
@@ -935,14 +946,15 @@ test("持久线程：保存首个角色→429冷却并刷新→同租约重试�
     await expect.poll(() => transport.pending.size, { timeout: 45_000 }).toBe(1);
     const recoveredAt = Date.now();
     expect(recoveredAt - limited.at).toBeGreaterThanOrEqual(30_000);
-    expect(transport.started[1]).toMatchObject({ key: "role-02", threadId: limited.threadId });
-    expect(transport.reverted).toHaveLength(1);
+    expect(transport.started[2]).toMatchObject({ key: "role-02", threadId: limited.threadId });
+    expect(transport.reverted).toHaveLength(2);
+    expect(transport.reverted[1]?.state).toBe("failed-turn");
     transport.finishAll();
     await expect.poll(() => x.store.run(x.batch())!.completed).toBe(2);
     await expect.poll(() => transport.pending.size).toBe(1);
     transport.finishAll();
     await expect.poll(() => x.store.run(x.batch())!.completed).toBe(3);
-    await expect.poll(() => transport.reverted.length).toBe(3);
+    await expect.poll(() => transport.reverted.length).toBe(4);
     expect(transport.histories.size).toBe(1);
     expect(transport.rateLimited).toHaveLength(1);
     expect(transport.rejected).toEqual([]);
