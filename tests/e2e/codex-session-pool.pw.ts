@@ -23,6 +23,8 @@ import { valuationRecord } from "../fixtures/analysis";
 // results on refresh, clears history early, or prevents later roles from completing.
 // HTTP selection failures: a start/resume RPC selects the old provider, or a
 // paused/reopened queue loses its clean thread and repeats a saved role.
+// Slow lifecycle failures: queued requests consume their response timeout, inference
+// or interruption waits behind cleanup, or restart repeats already saved results.
 class FixtureTransport implements CodexPoolTransport {
   readonly listeners = new Set<(event: CodexPoolEvent) => void>();
   readonly pending = new Map<string, { threadId: string; key: string }>();
@@ -32,6 +34,15 @@ class FixtureTransport implements CodexPoolTransport {
   readonly reverted: Array<{ threadId: string; turnId: string; key: string; state: string }> = [];
   readonly rejected: string[] = [];
   readonly rateLimited: Array<{ threadId: string; key: string; at: number }> = [];
+  readonly lifecycleRequests: Array<{
+    method: string;
+    receivedAt: number;
+    startedAt?: number;
+    finishedAt?: number;
+  }> = [];
+  readonly interrupts: Array<{ key: string; duringLifecycle: boolean }> = [];
+  private lifecycle = Promise.resolve();
+  private lifecycleBusy = false;
   private nextThread = 0;
   private nextTurn = 0;
   closed = false;
@@ -42,6 +53,7 @@ class FixtureTransport implements CodexPoolTransport {
     readonly label: string,
     readonly rateLimitKey?: string,
     readonly histories = new Map<string, string[]>(),
+    readonly lifecycleDelayMs = 0,
   ) {}
 
   subscribe(listener: (event: CodexPoolEvent) => void) {
@@ -54,6 +66,52 @@ class FixtureTransport implements CodexPoolTransport {
   }
 
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
+    if (
+      this.lifecycleDelayMs &&
+      ["thread/start", "thread/resume", "thread/revert"].includes(method)
+    ) {
+      const entry: (typeof this.lifecycleRequests)[number] = {
+        method,
+        receivedAt: Date.now(),
+      };
+      this.lifecycleRequests.push(entry);
+      const operation = this.lifecycle.then(async () => {
+        entry.startedAt = Date.now();
+        this.lifecycleBusy = true;
+        try {
+          await new Promise((resolve) => setTimeout(resolve, this.lifecycleDelayMs));
+          return await this.respond(method, params);
+        } finally {
+          entry.finishedAt = Date.now();
+          this.lifecycleBusy = false;
+        }
+      });
+      this.lifecycle = operation.then(
+        () => {},
+        () => {},
+      );
+      return await new Promise((resolve, reject) => {
+        // Scale the incident's 5-second work / 20-second RPC deadline by 1:10.
+        const timer = setTimeout(
+          () => reject(new Error(`Codex ${method} 响应超时`)),
+          this.lifecycleDelayMs * 4,
+        );
+        operation.then(
+          (result) => {
+            clearTimeout(timer);
+            resolve(result);
+          },
+          (error) => {
+            clearTimeout(timer);
+            reject(error);
+          },
+        );
+      });
+    }
+    return await this.respond(method, params);
+  }
+
+  private async respond(method: string, params: Record<string, unknown>): Promise<unknown> {
     if (method === "thread/start") {
       expect(params.modelProvider).toBe("openai_http");
       const id = `${this.label}-thread-${++this.nextThread}`;
@@ -131,6 +189,7 @@ class FixtureTransport implements CodexPoolTransport {
       const turnId = String(params.turnId),
         turn = this.pending.get(turnId);
       if (turn) {
+        this.interrupts.push({ key: turn.key, duringLifecycle: this.lifecycleBusy });
         this.pending.delete(turnId);
         queueMicrotask(() =>
           this.emit("turn/completed", {
@@ -186,7 +245,7 @@ async function fixture(
   page: Page,
   testInfo: TestInfo,
   count: number,
-  options: { persistent?: boolean; rateLimitKey?: string } = {},
+  options: { persistent?: boolean; rateLimitKey?: string; lifecycleDelayMs?: number } = {},
 ) {
   const database = testInfo.outputPath("analysis.sqlite");
   await mkdir(path.dirname(database), { recursive: true });
@@ -257,6 +316,7 @@ async function fixture(
         `run-${transports.length + 1}`,
         options.rateLimitKey,
         options.persistent ? durableHistories : undefined,
+        options.lifecycleDelayMs,
       );
       transports.push(transport);
       const pool = new CodexPool(
@@ -455,6 +515,112 @@ test("30 个角色复用固定 10 个 session，结果落库后才回退", async
       results,
       run: x.store.run(x.batch()),
       lifecycle: "每次连续分析运行固定10个session；暂停关闭池，继续后建立新池。",
+    });
+  } finally {
+    await x.runner.shutdown();
+    x.crawl.close();
+  }
+});
+
+test("慢会话清理：10并发→保留首批→清理中暂停→重启继续→30个结果落库", async ({ page }, testInfo) => {
+  const x = await fixture(page, testInfo, 30, { lifecycleDelayMs: 500 });
+  try {
+    await page.getByRole("button", { name: "开始分析已有商品" }).click();
+    await expect.poll(() => x.transports[0]?.pending.size, { timeout: 15_000 }).toBe(10);
+    const first = x.transports[0]!;
+    await page.screenshot({ path: testInfo.outputPath("slow-ten-running.png"), fullPage: true });
+    first.finishAll();
+    await expect.poll(() => x.store.run(x.batch())!.completed).toBe(10);
+    const saved = x.crawl.db
+      .prepare(
+        "SELECT listing_key,result_json FROM analysis_tasks WHERE run_id=? AND status='completed' ORDER BY listing_key",
+      )
+      .all(x.batch());
+    // The first freed session starts another turn while later sessions still clean up.
+    await expect.poll(() => first.started.length).toBeGreaterThan(10);
+    expect(first.lifecycleRequests.some((entry) => !entry.finishedAt)).toBe(true);
+    await page.getByRole("button", { name: "暂停分析", exact: true }).click();
+    await expect.poll(() => x.store.run(x.batch())!.status).toBe("paused");
+    expect(first.interrupts.some((entry) => entry.duringLifecycle)).toBe(true);
+    expect(x.store.run(x.batch())).toMatchObject({ completed: 10, queued: 20, failed: 0 });
+    await expect.poll(() => first.closed, { timeout: 15_000 }).toBe(true);
+    expect(first.pending.size).toBe(0);
+    expect(first.rejected).toEqual([]);
+    await x.restart(x.batch());
+    await page.getByRole("button", { name: "继续分析", exact: true }).click();
+    await expect.poll(() => x.transports[1]?.pending.size, { timeout: 15_000 }).toBe(10);
+    const second = x.transports[1]!;
+    expect(second.started.every((turn) => !saved.some((row) => row.listing_key === turn.key))).toBe(
+      true,
+    );
+    for (let completed = 20; completed <= 30; completed += 10) {
+      expect(second.pending.size).toBe(10);
+      second.finishAll();
+      await expect.poll(() => x.store.run(x.batch())!.completed).toBe(completed);
+      await expect.poll(() => second.reverted.length, { timeout: 15_000 }).toBe(completed - 10);
+      if (completed < 30)
+        await expect.poll(() => second.pending.size, { timeout: 15_000 }).toBe(10);
+    }
+    await page.getByRole("button", { name: "暂停分析", exact: true }).click();
+    await expect.poll(() => x.store.run(x.batch())!.status).toBe("paused");
+    await expect.poll(() => second.closed, { timeout: 15_000 }).toBe(true);
+    expect(x.store.run(x.batch())).toMatchObject({ completed: 30, queued: 0, failed: 0 });
+    const rows = x.crawl.db
+      .prepare(
+        "SELECT listing_key,result_json FROM analysis_tasks WHERE run_id=? ORDER BY listing_key",
+      )
+      .all(x.batch());
+    expect(rows).toHaveLength(30);
+    for (const [index, row] of rows.entries()) {
+      const result = JSON.parse(String(row.result_json));
+      expect(result.productKey).toBe(row.listing_key);
+      expect(result.valuation.asking_price).toBe(500 + index);
+      expect(result.valuation.ai_explanation).toContain(String(row.listing_key));
+    }
+    for (const row of saved)
+      expect(rows.find((result) => result.listing_key === row.listing_key)?.result_json).toBe(
+        row.result_json,
+      );
+    expect(second.started).toHaveLength(20);
+    expect(new Set(second.started.map((turn) => turn.key)).size).toBe(20);
+    expect(first.histories.size).toBe(10);
+    expect(second.histories.size).toBe(10);
+    expect(second.rejected).toEqual([]);
+    expect([...second.histories.values()].every((history) => history.length === 0)).toBe(true);
+    const duplicateCompletions = x.crawl.db
+      .prepare(
+        `SELECT t.listing_key,count(*) AS count FROM analysis_attempts a
+         JOIN analysis_tasks t ON t.id=a.task_id
+         WHERE t.run_id=? AND a.state='completed' GROUP BY t.listing_key HAVING count(*)<>1`,
+      )
+      .all(x.batch());
+    expect(duplicateCompletions).toEqual([]);
+    await page.reload();
+    await page.screenshot({ path: testInfo.outputPath("slow-thirty-saved.png"), fullPage: true });
+    const snapshot = testInfo.outputPath("analysis-final.sqlite");
+    x.crawl.db.exec("VACUUM INTO '" + snapshot.replaceAll("'", "''") + "'");
+    await testInfo.attach("慢会话流程最终数据库", {
+      path: snapshot,
+      contentType: "application/vnd.sqlite3",
+    });
+    await saveEvidence(testInfo, "慢会话暂停重启完整流程", {
+      database: snapshot,
+      timing: { scale: "1:10", lifecycleWorkMs: 500, responseTimeoutMs: 2000 },
+      first: {
+        started: first.started,
+        reverted: first.reverted,
+        interrupts: first.interrupts,
+        lifecycleRequests: first.lifecycleRequests,
+      },
+      second: {
+        started: second.started,
+        reverted: second.reverted,
+        lifecycleRequests: second.lifecycleRequests,
+      },
+      savedKeys: saved.map((row) => row.listing_key),
+      results: rows.map((row) => ({ key: row.listing_key, status: "completed" })),
+      run: x.store.run(x.batch()),
+      scope: "真实页面、分析队列、Codex会话池与SQLite重开；模拟串行慢RPC及AI回复，不调用真实AI。",
     });
   } finally {
     await x.runner.shutdown();
