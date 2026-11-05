@@ -1,23 +1,10 @@
-import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { isAbsolute, relative, sep } from "node:path";
+import { codexHomeDirectory } from "../../scripts/codex-runtime.mjs";
 
 /** Keep project authentication and Codex thread history separate from the desktop app. */
-export function codexHomeDirectory(projectRoot = process.cwd(), userHome = homedir()) {
-  const identity = createHash("sha256")
-    .update(realpathSync(projectRoot))
-    .digest("hex")
-    .slice(0, 32);
-  return join(
-    realpathSync(userHome),
-    ".local",
-    "share",
-    "make-money-from-cbg",
-    identity,
-    "codex-home",
-  );
-}
+export { codexHomeDirectory };
 
 export function codexHomeEnv(
   baseEnv: NodeJS.ProcessEnv = process.env,

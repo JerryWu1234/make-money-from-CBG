@@ -3,7 +3,6 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { publicAiRequestError } from "./ai/request-error";
 import { CodexPool } from "./ai/codex-pool";
-import { codexHomeDirectory } from "./ai/codex-home";
 import {
   codexAccount,
   codexModel,
@@ -325,8 +324,7 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
   if (provider === "codex") {
     const account = await codexAccount();
     if (!account) throw new Error("请先登录 ChatGPT，再开始分析");
-    if (!account.email) throw new Error("无法确认 Codex 登录账号，暂不能安全复用会话，请重新登录");
-    const accountEmail = account.email;
+    if (!account.email) throw new Error("无法确认 Codex 登录账号，请重新登录");
     const workspaceId = account.workspaceId ?? null;
     if (selectedModel && !(await codexModels()).some((item) => item.id === selectedModel))
       throw new Error("Codex 模型不在当前模型列表中，请重新选择或使用默认模型");
@@ -337,10 +335,7 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
       searchPets,
       searchPetGear,
       createSessionPool(concurrency: number) {
-        const pool = new CodexPool(concurrency, model, undefined, {
-          statePath: resolve(codexHomeDirectory(), "cbg-analysis-pool.sqlite"),
-          accountId: JSON.stringify([accountEmail, workspaceId]),
-        });
+        const pool = new CodexPool(concurrency, model);
         return {
           async acquire(signal: AbortSignal) {
             const lease = await pool.acquire(signal);

@@ -9,8 +9,10 @@ import { initializeScanSchedule } from "./server/crawler/schedule";
 import { createLocalServiceShutdown } from "./server/shutdown";
 import { resetServiceLifecycle } from "./server/service-lifecycle";
 import { resetBrowserSessionLifecycle } from "./server/session";
+import { attachCodexRuntime } from "./scripts/codex-runtime.mjs";
 
 let closeService: (() => Promise<void>) | undefined;
+let closeCodexRuntime: (() => Promise<void>) | undefined;
 
 /** Vite's glob deny checks the requested path, so resolve symlink targets first. */
 export function codexHomeGuard(home = codexHomeDirectory): Plugin {
@@ -79,6 +81,12 @@ export default defineConfig({
     react(),
     codexHomeGuard(),
     {
+      name: "cbg-codex-runtime",
+      async configureServer(server) {
+        closeCodexRuntime = await attachCodexRuntime(server);
+      },
+    },
+    {
       name: "cbg-browser-middleware",
       configureServer(server) {
         if (server.httpServer) {
@@ -126,7 +134,11 @@ export default defineConfig({
       },
       async closeBundle() {
         // Vite 等待此异步钩子，稳定入口才可以在 server.close() 后退出。
-        await closeService?.();
+        try {
+          await closeService?.();
+        } finally {
+          await closeCodexRuntime?.();
+        }
       },
     },
   ],

@@ -1,6 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import {
   CodexPool,
@@ -15,26 +14,19 @@ import { createProfile, PROMPT_FILE } from "../../server/analysis/profile";
 import { calculateValuation } from "../../server/analysis/valuation-calculator";
 import { valuationRecord } from "../fixtures/analysis";
 
-// Failure cases: more than 10 sessions, a session handling two roles at once,
-// stale role history, cross-role results, reset before commit, lost pause/resume
-// progress, or a session reused before interrupted work actually ends.
-// Persistent retry failures: 429 reclaims an owned thread, skips cooldown, loses saved
-// results on refresh, clears history early, or prevents later roles from completing.
-// HTTP selection failures: a start/resume RPC selects the old provider, or a
-// paused/reopened queue loses its clean thread and repeats a saved role.
-// Slow lifecycle failures: queued requests consume their response timeout, inference
-// or interruption waits behind cleanup, or restart repeats already saved results.
-// Terminal 429 failures must be cleared before retry, without clearing a valid
-// unsaved result or adding the same role input to its history twice.
+// Failure cases: more than 10 in-flight requests, cross-role context or results,
+// releasing a successful response before its result commits, lost pause/restart
+// progress, or reusing a failed thread when retrying after a terminal 429.
+// Runtime threads are temporary; analysis results remain durable in SQLite.
 class FixtureTransport implements CodexPoolTransport {
   readonly listeners = new Set<(event: CodexPoolEvent) => void>();
   readonly pending = new Map<string, { threadId: string; key: string }>();
   readonly threadSelections: Array<{ method: string; threadId: string; modelProvider: unknown }> =
     [];
   readonly started: Array<{ threadId: string; turnId: string; key: string }> = [];
-  readonly reverted: Array<{ threadId: string; turnId: string; key: string; state: string }> = [];
+  readonly released: Array<{ threadId: string; turnId: string; key: string; state: string }> = [];
   readonly rejected: string[] = [];
-  readonly failedTurns = new Set<string>();
+  readonly terminalStates = new Map<string, string>();
   readonly rateLimited: Array<{ threadId: string; key: string; at: number }> = [];
   readonly lifecycleRequests: Array<{
     method: string;
@@ -64,14 +56,15 @@ class FixtureTransport implements CodexPoolTransport {
   }
 
   emit(method: string, params: unknown) {
+    if (method === "turn/completed") {
+      const turn = (params as { turn: { id: string; status: string } }).turn;
+      this.terminalStates.set(turn.id, turn.status);
+    }
     for (const listener of this.listeners) listener({ method, params });
   }
 
   async request(method: string, params: Record<string, unknown>): Promise<unknown> {
-    if (
-      this.lifecycleDelayMs &&
-      ["thread/start", "thread/resume", "thread/revert"].includes(method)
-    ) {
+    if (this.lifecycleDelayMs && ["thread/start", "thread/unsubscribe"].includes(method)) {
       const entry: (typeof this.lifecycleRequests)[number] = {
         method,
         receivedAt: Date.now(),
@@ -116,20 +109,11 @@ class FixtureTransport implements CodexPoolTransport {
   private async respond(method: string, params: Record<string, unknown>): Promise<unknown> {
     if (method === "thread/start") {
       expect(params.modelProvider).toBe("openai_http");
+      expect(params.ephemeral).toBe(true);
       const id = `${this.label}-thread-${++this.nextThread}`;
       this.histories.set(id, []);
       this.threadSelections.push({ method, threadId: id, modelProvider: params.modelProvider });
-      return { thread: { id } };
-    }
-    if (method === "thread/resume") {
-      expect(params.modelProvider).toBe("openai_http");
-      if (!this.histories.has(String(params.threadId))) throw new Error("未找到模拟持久线程");
-      this.threadSelections.push({
-        method,
-        threadId: String(params.threadId),
-        modelProvider: params.modelProvider,
-      });
-      return { thread: { id: params.threadId } };
+      return { thread: { id, ephemeral: true } };
     }
     if (method === "turn/start") {
       const threadId = String(params.threadId);
@@ -151,7 +135,6 @@ class FixtureTransport implements CodexPoolTransport {
       this.emit("turn/started", { threadId, turn: { id: turnId, status: "inProgress" } });
       if (key === this.rateLimitKey && !this.rateLimited.length) {
         this.rateLimited.push({ threadId, key, at: Date.now() });
-        this.failedTurns.add(turnId);
         this.pending.delete(turnId);
         this.emit("turn/completed", {
           threadId,
@@ -160,42 +143,31 @@ class FixtureTransport implements CodexPoolTransport {
       }
       return { turn: { id: turnId, status: "inProgress" } };
     }
-    if (method === "thread/revert") {
-      const threadId = String(params.threadId),
-        turnId = String(params.beforeTurnId);
-      const turn = this.started.find(
-        (item) => item.turnId === turnId && item.threadId === threadId,
-      );
+    if (method === "thread/unsubscribe") {
+      const threadId = String(params.threadId);
+      const turn = this.started.find((item) => item.threadId === threadId);
       const row =
         turn &&
         this.crawl.db
           .prepare(`SELECT a.state,a.finished_at,t.result_json FROM analysis_attempts a
           JOIN analysis_tasks t ON t.id=a.task_id WHERE t.listing_key=? ORDER BY a.rowid DESC LIMIT 1`)
           .get(turn.key);
+      const status = turn && this.terminalStates.get(turn.turnId);
       if (
-        !turn ||
-        !row ||
-        (!this.failedTurns.has(turnId) && (row.state === "running" || !row.finished_at)) ||
-        this.pending.has(turnId)
+        turn &&
+        (!status ||
+          this.pending.has(turn.turnId) ||
+          (status === "completed" &&
+            (!row || row.state !== "completed" || !row.finished_at || !row.result_json)))
       ) {
-        this.rejected.push(turnId);
-        throw new Error("角色结果或中断记录未保存，不能回退 session");
+        this.rejected.push(turn.turnId);
+        throw new Error("角色结果未保存或请求尚未终止，不能释放临时会话");
       }
-      if (row.state === "completed" && !row.result_json) throw new Error("角色报价未保存");
-      const history = this.histories.get(threadId)!;
-      const index = history.indexOf(turnId);
-      if (index < 0) throw new Error("回退的轮次不属于这个 session");
-      history.splice(index);
-      this.reverted.push({
-        threadId,
-        turnId,
-        key: turn.key,
-        state: this.failedTurns.has(turnId) ? "failed-turn" : String(row.state),
-      });
-      return { thread: { id: threadId } };
+      if (turn)
+        this.released.push({ threadId, turnId: turn.turnId, key: turn.key, state: status! });
+      this.histories.delete(threadId);
+      return { status: "unsubscribed" };
     }
-    if (method === "thread/turns/list")
-      return { data: (this.histories.get(String(params.threadId)) || []).map((id) => ({ id })) };
     if (method === "turn/interrupt") {
       const turnId = String(params.turnId),
         turn = this.pending.get(turnId);
@@ -256,7 +228,7 @@ async function fixture(
   page: Page,
   testInfo: TestInfo,
   count: number,
-  options: { persistent?: boolean; rateLimitKey?: string; lifecycleDelayMs?: number } = {},
+  options: { rateLimitKey?: string; lifecycleDelayMs?: number } = {},
 ) {
   const database = testInfo.outputPath("analysis.sqlite");
   await mkdir(path.dirname(database), { recursive: true });
@@ -312,13 +284,10 @@ async function fixture(
     false,
   );
   const transports: FixtureTransport[] = [];
-  // Simulate app-server's durable thread history surviving its process restart.
-  const durableHistories = new Map<string, string[]>();
-  const statePath = testInfo.outputPath("codex-pool.sqlite");
   const client: AnalysisClient = {
     model: "fixture-codex",
     analyze: async () => {
-      throw new Error("应使用复用会话池");
+      throw new Error("应使用独立临时会话");
     },
     createSessionPool(size) {
       const transport = new FixtureTransport(
@@ -326,16 +295,11 @@ async function fixture(
         profile,
         `run-${transports.length + 1}`,
         options.rateLimitKey,
-        options.persistent ? durableHistories : undefined,
+        undefined,
         options.lifecycleDelayMs,
       );
       transports.push(transport);
-      const pool = new CodexPool(
-        size,
-        "fixture-codex",
-        async () => transport,
-        options.persistent ? { statePath, accountId: "fixture-account" } : undefined,
-      );
+      const pool = new CodexPool(size, "fixture-codex", async () => transport);
       return {
         async acquire(signal) {
           const lease = await pool.acquire(signal);
@@ -438,7 +402,6 @@ async function fixture(
     transports,
     keys,
     database,
-    statePath,
     batch: () => batch,
     async restart(runId: string) {
       await runner.shutdown();
@@ -470,7 +433,7 @@ async function saveEvidence(testInfo: TestInfo, name: string, data: unknown) {
   await testInfo.attach(name, { path: file, contentType: "application/json" });
 }
 
-test("30 个角色复用固定 10 个 session，结果落库后才回退", async ({ page }, testInfo) => {
+test("30 个角色使用独立临时会话，最多 10 并发且结果落库后才释放", async ({ page }, testInfo) => {
   const x = await fixture(page, testInfo, 30);
   try {
     await page.getByRole("button", { name: "开始分析已有商品" }).click();
@@ -484,16 +447,14 @@ test("30 个角色复用固定 10 个 session，结果落库后才回退", async
       expect(transport.pending.size).toBe(10);
       transport.finishAll();
       await expect.poll(() => x.store.run(x.batch())!.completed).toBe(wave * 10);
-      await expect.poll(() => transport.reverted.length).toBe(wave * 10);
+      await expect.poll(() => transport.released.length).toBe(wave * 10);
       if (wave < 3) await expect.poll(() => transport.pending.size).toBe(10);
     }
-    expect(transport.histories.size).toBe(10);
-    expect(new Set(transport.started.map((item) => item.threadId)).size).toBe(10);
+    expect(transport.histories.size).toBe(0);
+    expect(new Set(transport.started.map((item) => item.threadId)).size).toBe(30);
     expect(transport.started).toHaveLength(30);
     expect(new Set(transport.started.map((item) => item.key)).size).toBe(30);
-    for (const threadId of transport.histories.keys())
-      expect(transport.started.filter((item) => item.threadId === threadId)).toHaveLength(3);
-    expect(transport.reverted.every((item) => item.state === "completed")).toBe(true);
+    expect(transport.released.every((item) => item.state === "completed")).toBe(true);
     expect(transport.rejected).toEqual([]);
     expect([...transport.histories.values()].every((history) => history.length === 0)).toBe(true);
     const rows = x.crawl.db
@@ -518,14 +479,14 @@ test("30 个角色复用固定 10 个 session，结果落库后才回退", async
     await expect.poll(() => x.store.run(x.batch())!.status).toBe("paused");
     await page.reload();
     await page.screenshot({ path: testInfo.outputPath("thirty-results.png"), fullPage: true });
-    await saveEvidence(testInfo, "30 角色会话复用验证", {
+    await saveEvidence(testInfo, "30 角色临时会话验证", {
       database: x.database,
-      sessionCount: transport.histories.size,
+      sessionCount: transport.threadSelections.length,
       started: transport.started,
-      reverted: transport.reverted,
+      released: transport.released,
       results,
       run: x.store.run(x.batch()),
-      lifecycle: "每次连续分析运行固定10个session；暂停关闭池，继续后建立新池。",
+      lifecycle: "每次请求独立临时会话，最多10个在途请求；成功结果保存后释放。",
     });
   } finally {
     await x.runner.shutdown();
@@ -547,8 +508,8 @@ test("慢会话清理：10并发→保留首批→清理中暂停→重启继续
         "SELECT listing_key,result_json FROM analysis_tasks WHERE run_id=? AND status='completed' ORDER BY listing_key",
       )
       .all(x.batch());
-    // The first freed session starts another turn while later sessions still clean up.
-    await expect.poll(() => first.started.length).toBeGreaterThan(10);
+    // Fresh requests start while the remaining lifecycle work is still queued.
+    await expect.poll(() => first.started.length, { timeout: 15_000 }).toBeGreaterThan(10);
     expect(first.lifecycleRequests.some((entry) => !entry.finishedAt)).toBe(true);
     await page.getByRole("button", { name: "暂停分析", exact: true }).click();
     await expect.poll(() => x.store.run(x.batch())!.status).toBe("paused");
@@ -568,7 +529,7 @@ test("慢会话清理：10并发→保留首批→清理中暂停→重启继续
       expect(second.pending.size).toBe(10);
       second.finishAll();
       await expect.poll(() => x.store.run(x.batch())!.completed).toBe(completed);
-      await expect.poll(() => second.reverted.length, { timeout: 15_000 }).toBe(completed - 10);
+      await expect.poll(() => second.released.length, { timeout: 15_000 }).toBe(completed - 10);
       if (completed < 30)
         await expect.poll(() => second.pending.size, { timeout: 15_000 }).toBe(10);
     }
@@ -594,8 +555,8 @@ test("慢会话清理：10并发→保留首批→清理中暂停→重启继续
       );
     expect(second.started).toHaveLength(20);
     expect(new Set(second.started.map((turn) => turn.key)).size).toBe(20);
-    expect(first.histories.size).toBe(10);
-    expect(second.histories.size).toBe(10);
+    expect(first.histories.size).toBe(0);
+    expect(second.histories.size).toBe(0);
     expect(second.rejected).toEqual([]);
     expect([...second.histories.values()].every((history) => history.length === 0)).toBe(true);
     const duplicateCompletions = x.crawl.db
@@ -619,13 +580,13 @@ test("慢会话清理：10并发→保留首批→清理中暂停→重启继续
       timing: { scale: "1:10", lifecycleWorkMs: 500, responseTimeoutMs: 2000 },
       first: {
         started: first.started,
-        reverted: first.reverted,
+        released: first.released,
         interrupts: first.interrupts,
         lifecycleRequests: first.lifecycleRequests,
       },
       second: {
         started: second.started,
-        reverted: second.reverted,
+        released: second.released,
         lifecycleRequests: second.lifecycleRequests,
       },
       savedKeys: saved.map((row) => row.listing_key),
@@ -657,7 +618,7 @@ test("中途暂停并继续，已保存角色保留，未完成角色重新分�
     await expect.poll(() => x.store.run(x.batch())!.status).toBe("paused");
     expect(x.store.run(x.batch())).toMatchObject({ completed: 1, queued: 11 });
     expect(first.rejected).toEqual([]);
-    expect(first.reverted.some((item) => item.state === "interrupted")).toBe(true);
+    expect(first.released.some((item) => item.state === "interrupted")).toBe(true);
     await page.getByRole("button", { name: "继续分析" }).click();
     await expect.poll(() => x.transports[1]?.pending.size).toBe(10);
     const second = x.transports[1]!;
@@ -667,7 +628,7 @@ test("中途暂停并继续，已保存角色保留，未完成角色重新分�
     await expect.poll(() => second.pending.size).toBe(1);
     second.finishAll();
     await expect.poll(() => x.store.run(x.batch())!.completed).toBe(12);
-    await expect.poll(() => second.reverted.length).toBe(11);
+    await expect.poll(() => second.released.length).toBe(11);
     expect(second.rejected).toEqual([]);
     await page.getByRole("button", { name: "暂停分析", exact: true }).click();
     await expect.poll(() => x.store.run(x.batch())!.status).toBe("paused");
@@ -678,8 +639,8 @@ test("中途暂停并继续，已保存角色保留，未完成角色重新分�
     await saveEvidence(testInfo, "暂停续跑会话验证", {
       database: x.database,
       savedKey,
-      first: { started: first.started, reverted: first.reverted },
-      second: { started: second.started, reverted: second.reverted },
+      first: { started: first.started, released: first.released },
+      second: { started: second.started, released: second.released },
       run: x.store.run(x.batch()),
       lifecycle: "暂停关闭首个池；继续分析建立新池，保留已保存结果。",
     });
@@ -690,7 +651,7 @@ test("中途暂停并继续，已保存角色保留，未完成角色重新分�
 });
 
 // Failure cases: recovering an older queue repeats saved roles, discards the
-// disconnected attempt, skips the unfinished role, or loses reuse after reopening SQLite.
+// disconnected attempt, skips the unfinished role, or loses saved results after reopening SQLite.
 test("保存两件→Codex断网→重启恢复旧队列→跳过历史完成项→仅补完第三件", async ({
   page,
 }, testInfo) => {
@@ -749,7 +710,7 @@ test("保存两件→Codex断网→重启恢复旧队列→跳过历史完成项
     expect(x.store.run(queued)).toMatchObject({ reused: 2, failed: 0 });
     second.finishAll();
     await expect.poll(() => x.store.run(queued)!.completed).toBe(3);
-    await expect.poll(() => second.reverted.length).toBe(1);
+    await expect.poll(() => second.released.length).toBe(1);
     await page.getByRole("button", { name: "暂停分析", exact: true }).click();
     await expect.poll(() => x.store.run(queued)!.status).toBe("paused");
     const results = x.crawl.db
@@ -816,8 +777,8 @@ test("保存两件→Codex断网→重启恢复旧队列→跳过历史完成项
   }
 });
 
-test("HTTP会话选择：保存首件→暂停→重启→恢复原线程→只完成剩余角色", async ({ page }, testInfo) => {
-  const x = await fixture(page, testInfo, 3, { persistent: true });
+test("HTTP临时会话：保存首件→暂停→重启→创建新线程→保留原分析结果", async ({ page }, testInfo) => {
+  const x = await fixture(page, testInfo, 3);
   try {
     await page.getByRole("spinbutton", { name: "分析并发数" }).fill("1");
     await page.getByRole("button", { name: "开始分析已有商品" }).click();
@@ -840,7 +801,7 @@ test("HTTP会话选择：保存首件→暂停→重启→恢复原线程→只�
     await expect.poll(() => x.store.run(runId)!.status).toBe("paused");
     expect(x.store.run(runId)).toMatchObject({ completed: 1, queued: 2, failed: 0 });
     expect(first.closed).toBe(true);
-    expect([...first.histories.values()]).toEqual([[]]);
+    expect(first.histories.size).toBe(0);
     await page.screenshot({
       path: testInfo.outputPath("http-paused-one-saved.png"),
       fullPage: true,
@@ -852,22 +813,23 @@ test("HTTP会话选择：保存首件→暂停→重启→恢复原线程→只�
     await page.getByRole("button", { name: "继续分析", exact: true }).click();
     await expect.poll(() => x.transports[1]?.pending.size).toBe(1);
     const second = x.transports[1]!;
-    expect(second.threadSelections[0]).toEqual({
-      method: "thread/resume",
-      threadId,
+    expect(second.threadSelections[0]).toMatchObject({
+      method: "thread/start",
       modelProvider: "openai_http",
     });
+    expect(second.threadSelections[0]!.threadId).not.toBe(threadId);
     expect(second.started[0]!.key).not.toBe(savedKey);
     for (let completed = 2; completed <= 3; completed++) {
       second.finishAll();
       await expect.poll(() => x.store.run(runId)!.completed).toBe(completed);
       if (completed < 3) await expect.poll(() => second.pending.size).toBe(1);
     }
-    await expect.poll(() => second.reverted.length).toBe(2);
+    await expect.poll(() => second.released.length).toBe(2);
     expect(second.started.map((turn) => turn.key).sort()).toEqual(
       x.keys.filter((key) => key !== savedKey).sort(),
     );
-    expect(second.started.every((turn) => turn.threadId === threadId)).toBe(true);
+    expect(second.started.every((turn) => turn.threadId !== threadId)).toBe(true);
+    expect(new Set(second.started.map((turn) => turn.threadId)).size).toBe(2);
     const savedAfter = x.crawl.db
       .prepare("SELECT id,result_json FROM analysis_tasks WHERE run_id=? AND listing_key=?")
       .get(runId, savedKey)!;
@@ -898,16 +860,15 @@ test("HTTP会话选择：保存首件→暂停→重启→恢复原线程→只�
     expect(x.transports.every((transport) => transport.rejected.length === 0)).toBe(true);
     await saveEvidence(testInfo, "HTTP会话选择及重启续跑验证", {
       database: x.database,
-      statePath: x.statePath,
       runId,
       savedKey,
       savedTaskId: saved.id,
-      persistentThreadId: threadId,
+      discardedThreadId: threadId,
       threadSelections: x.transports.map((transport) => transport.threadSelections),
       callsByPool: x.transports.map((transport) => transport.started),
       run: x.store.run(runId),
       scope:
-        "真实页面、队列、会话池与临时SQLite；模拟Codex RPC，验证HTTP provider选择及恢复，不代表真实网络HTTP验证。",
+        "真实页面、队列、会话池与临时SQLite；模拟Codex RPC，验证HTTP provider选择、临时会话及结果恢复，不代表真实网络HTTP验证。",
     });
   } finally {
     await x.runner.shutdown();
@@ -915,10 +876,10 @@ test("HTTP会话选择：保存首件→暂停→重启→恢复原线程→只�
   }
 });
 
-test("持久线程：保存首个角色→429冷却并刷新→同租约重试→完成后续角色并保留结果", async ({
+test("临时线程：保存首个角色→429冷却并刷新→新线程重试→保留全部分析结果", async ({
   page,
 }, testInfo) => {
-  const x = await fixture(page, testInfo, 3, { persistent: true, rateLimitKey: "role-02" });
+  const x = await fixture(page, testInfo, 3, { rateLimitKey: "role-02" });
   try {
     await page.getByRole("spinbutton", { name: "分析并发数" }).fill("1");
     await page.getByRole("button", { name: "开始分析已有商品" }).click();
@@ -939,26 +900,26 @@ test("持久线程：保存首个角色→429冷却并刷新→同租约重试�
     await page.reload();
     await expect(page.getByLabel("AI限流恢复状态")).toContainText("限流冷却中");
     await page.screenshot({
-      path: testInfo.outputPath("persistent-429-cooldown.png"),
+      path: testInfo.outputPath("ephemeral-429-cooldown.png"),
       fullPage: true,
     });
     expect(x.store.run(x.batch())).toMatchObject({ status: "running", completed: 1, failed: 0 });
     await expect.poll(() => transport.pending.size, { timeout: 45_000 }).toBe(1);
     const recoveredAt = Date.now();
     expect(recoveredAt - limited.at).toBeGreaterThanOrEqual(30_000);
-    expect(transport.started[2]).toMatchObject({ key: "role-02", threadId: limited.threadId });
-    expect(transport.reverted).toHaveLength(2);
-    expect(transport.reverted[1]?.state).toBe("failed-turn");
+    expect(transport.started[2]).toMatchObject({ key: "role-02" });
+    expect(transport.started[2]!.threadId).not.toBe(limited.threadId);
+    expect(transport.released).toHaveLength(2);
+    expect(transport.released[1]?.state).toBe("failed");
     transport.finishAll();
     await expect.poll(() => x.store.run(x.batch())!.completed).toBe(2);
     await expect.poll(() => transport.pending.size).toBe(1);
     transport.finishAll();
     await expect.poll(() => x.store.run(x.batch())!.completed).toBe(3);
-    await expect.poll(() => transport.reverted.length).toBe(4);
-    expect(transport.histories.size).toBe(1);
+    await expect.poll(() => transport.released.length).toBe(4);
+    expect(transport.histories.size).toBe(0);
     expect(transport.rateLimited).toHaveLength(1);
     expect(transport.rejected).toEqual([]);
-    expect([...transport.histories.values()]).toEqual([[]]);
     expect(
       x.crawl.db
         .prepare("SELECT result_json FROM analysis_tasks WHERE listing_key=?")
@@ -972,10 +933,7 @@ test("持久线程：保存首个角色→429冷却并刷新→同租约重试�
       expect(task.status).toBe("completed");
       expect(JSON.parse(String(task.result_json)).productKey).toBe(task.listing_key);
     }
-    const state = new DatabaseSync(x.statePath, { readOnly: true });
-    const threadStates = state.prepare("SELECT id,state FROM reusable_threads").all();
-    state.close();
-    expect(threadStates).toEqual([{ id: limited.threadId, state: "clean" }]);
+    expect(new Set(transport.started.map((turn) => turn.threadId)).size).toBe(4);
     await page.getByRole("button", { name: "暂停分析", exact: true }).click();
     await expect.poll(() => x.store.run(x.batch())!.status).toBe("paused");
     await page.reload();
@@ -983,18 +941,16 @@ test("持久线程：保存首个角色→429冷却并刷新→同租约重试�
       page.getByRole("tabpanel", { name: "分析记录", exact: true }).getByRole("article"),
     ).toHaveCount(3);
     await page.screenshot({
-      path: testInfo.outputPath("persistent-429-three-results.png"),
+      path: testInfo.outputPath("ephemeral-429-three-results.png"),
       fullPage: true,
     });
-    await saveEvidence(testInfo, "持久线程429冷却重试验证", {
+    await saveEvidence(testInfo, "临时线程429冷却重试验证", {
       database: x.database,
-      statePath: x.statePath,
       firstKey,
       limited,
       recoveredAt,
       started: transport.started,
-      reverted: transport.reverted,
-      threadStates,
+      released: transport.released,
       run: x.store.run(x.batch()),
       results: tasks.map((task) => ({ key: task.listing_key, status: task.status })),
       scope: "真实页面、分析队列、会话池和SQLite；模拟Codex RPC，不调用真实AI或账号。",

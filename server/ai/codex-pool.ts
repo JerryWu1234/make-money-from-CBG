@@ -1,12 +1,9 @@
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
-import { chmodSync, lstatSync, mkdirSync } from "node:fs";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { DatabaseSync } from "node:sqlite";
 import { codexHomeEnv } from "./codex-home";
 import { CODEX_HTTP_OVERRIDES, CODEX_HTTP_PROVIDER } from "./codex-provider";
 
@@ -28,10 +25,7 @@ type TurnEvents = { text?: string; usage?: unknown; status?: string; error?: str
 type Slot = {
   busy: boolean;
   threadId?: string;
-  bare?: boolean;
   directory?: string;
-  firstTurnId?: string;
-  persistentDirty?: boolean;
   current?: {
     turns: Map<string, TurnEvents>;
     expected?: string;
@@ -51,94 +45,6 @@ type Waiter = {
   signal: AbortSignal;
   abort: () => void;
 };
-
-/** Only clean threads may be claimed; a crash leaves the claimed thread isolated. */
-class PersistentThreads {
-  private readonly db: DatabaseSync;
-  private readonly account: string;
-  private readonly workspaces: string;
-  constructor(path: string, accountId: string) {
-    if (!accountId.trim()) throw new Error("Codex 账号标识缺失，无法复用会话");
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    this.workspaces = join(dirname(path), "cbg-pool-workspaces");
-    mkdirSync(this.workspaces, { recursive: true, mode: 0o700 });
-    if (!lstatSync(this.workspaces).isDirectory())
-      throw new Error("Codex 会话目录无效，已暂停分析");
-    this.account = createHash("sha256").update(accountId).digest("hex");
-    this.db = new DatabaseSync(path);
-    if (path !== ":memory:") chmodSync(path, 0o600);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS reusable_threads (
-      id TEXT PRIMARY KEY, account TEXT NOT NULL, model TEXT NOT NULL,
-      bare INTEGER NOT NULL, version INTEGER NOT NULL, state TEXT NOT NULL, workspace TEXT
-    )`);
-    const columns = this.db.prepare("PRAGMA table_info(reusable_threads)").all();
-    if (!columns.some((column) => column.name === "workspace"))
-      this.db.exec("ALTER TABLE reusable_threads ADD COLUMN workspace TEXT");
-  }
-  claim(model: string, bare: boolean): { id: string; workspace: string } | undefined {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.db
-        .prepare(
-          "SELECT id,workspace FROM reusable_threads WHERE account=? AND model=? AND bare=? AND version=2 AND state='clean' ORDER BY id LIMIT 1",
-        )
-        .get(this.account, model, Number(bare));
-      if (!row) {
-        this.db.exec("COMMIT");
-        return undefined;
-      }
-      const id = String(row.id);
-      this.dirty(id);
-      this.db.exec("COMMIT");
-      return { id, workspace: String(row.workspace) };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-  }
-  async createWorkspace() {
-    return await mkdtemp(join(this.workspaces, "thread-"));
-  }
-  async restoreWorkspace(name: string) {
-    if (!/^thread-[A-Za-z0-9]+$/.test(name)) throw new Error("Codex 会话目录无效，已暂停分析");
-    const directory = join(this.workspaces, name);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    if (!lstatSync(directory).isDirectory()) throw new Error("Codex 会话目录无效，已暂停分析");
-    await this.clearWorkspace(directory);
-    return directory;
-  }
-  async clearWorkspace(directory: string) {
-    if (dirname(directory) !== this.workspaces || !lstatSync(directory).isDirectory())
-      throw new Error("Codex 会话目录无效，已暂停分析");
-    for (const entry of await readdir(directory))
-      await rm(join(directory, entry), { recursive: true, force: true });
-  }
-  add(id: string, model: string, bare: boolean, directory: string) {
-    const workspace = basename(directory);
-    if (dirname(directory) !== this.workspaces || !/^thread-[A-Za-z0-9]+$/.test(workspace))
-      throw new Error("Codex 会话目录无效，已暂停分析");
-    this.db
-      .prepare(
-        "INSERT INTO reusable_threads(id,account,model,bare,version,state,workspace) VALUES(?,?,?,?,2,'dirty',?)",
-      )
-      .run(id, this.account, model, Number(bare), workspace);
-  }
-  dirty(id: string) {
-    const result = this.db
-      .prepare("UPDATE reusable_threads SET state='dirty' WHERE id=? AND state='clean'")
-      .run(id);
-    if (result.changes !== 1) throw new Error("Codex 持久会话状态无效，已暂停分析");
-  }
-  clean(id: string) {
-    const result = this.db
-      .prepare("UPDATE reusable_threads SET state='clean' WHERE id=? AND state='dirty'")
-      .run(id);
-    if (result.changes !== 1) throw new Error("Codex 持久会话状态无效，已暂停分析");
-  }
-  close() {
-    this.db.close();
-  }
-}
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -179,7 +85,16 @@ async function startTransport(): Promise<CodexPoolTransport> {
       'forced_login_method="chatgpt"',
       "-c",
       'cli_auth_credentials_store="file"',
-      ...CODEX_HTTP_OVERRIDES.flatMap((override) => ["-c", override]),
+      ...[
+        ...CODEX_HTTP_OVERRIDES,
+        'history.persistence="none"',
+        "thread_unload_delay_secs=0",
+        "skills.bundled.enabled=false",
+        "skills.include_instructions=false",
+        "features.plugins=false",
+        "features.skip_host_skill_discovery=true",
+        "features.shell_snapshot=false",
+      ].flatMap((override) => ["-c", override]),
     ],
     {
       cwd: directory,
@@ -367,26 +282,21 @@ export type CodexLease = {
   release(persisted: boolean): Promise<void>;
 };
 
-/** One reusable conversation per slot; history is reverted only after the caller persists the result. */
+/** Reuse the server and concurrency slots; every request gets a new ephemeral thread. */
 export class CodexPool {
   private readonly slots: Slot[] = [];
   private readonly waiters: Waiter[] = [];
-  private readonly loadedThreads = new Set<string>();
   private threadRequests: Promise<void> = Promise.resolve();
   private transport?: Promise<CodexPoolTransport>;
   private unsubscribe?: () => void;
   private failure?: Error;
   private closed = false;
-  private readonly persistent?: PersistentThreads;
   constructor(
     private readonly size: number,
     private readonly model: string,
     private readonly createTransport: () => Promise<CodexPoolTransport> = startTransport,
-    persistence?: { statePath: string; accountId: string },
   ) {
     if (!Number.isSafeInteger(size) || size < 1) throw new Error("分析并发数必须是正整数");
-    if (persistence)
-      this.persistent = new PersistentThreads(persistence.statePath, persistence.accountId);
   }
   private fail(error: Error) {
     this.failure ||= error;
@@ -416,7 +326,7 @@ export class CodexPool {
   }
   private threadRequest(
     rpc: CodexPoolTransport,
-    method: "thread/start" | "thread/resume" | "thread/revert",
+    method: "thread/start" | "thread/unsubscribe",
     params: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<unknown> {
@@ -539,12 +449,9 @@ export class CodexPool {
     this.check();
     signal.throwIfAborted();
     const bare = options.bareRoleReview === true;
-    if (slot.threadId && slot.bare !== bare) {
-      const error = new Error("Codex 会话分析范围已变化，请重新开始分析");
-      this.fail(error);
-      throw error;
-    }
     const previous = slot.current;
+    if (previous?.expected && previous.turns.get(previous.expected)?.status === "completed")
+      throw new Error("分析结果尚未保存，请先释放当前请求");
     let resolve!: (value: TurnEvents) => void;
     let reject!: (error: Error) => void;
     const current: NonNullable<Slot["current"]> = {
@@ -586,175 +493,66 @@ export class CodexPool {
     try {
       const rpc = await this.rpc();
       abortSignal.throwIfAborted();
-      if (
-        previous?.terminal &&
-        previous.expected &&
-        previous.turns.get(previous.expected)?.status === "failed"
-      ) {
-        try {
-          if (!slot.threadId || !slot.firstTurnId)
-            throw new Error("Codex 失败轮次缺少有效 ID，已暂停分析");
-          // Retrying the full prompt must not include the failed copy in its history.
+      slot.directory = await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
+      abortSignal.throwIfAborted();
+      let start: Record<string, unknown>;
+      try {
+        start = object(
           await this.threadRequest(
             rpc,
-            "thread/revert",
-            { threadId: slot.threadId, beforeTurnId: slot.firstTurnId },
-            abortSignal,
-          );
-          const history = object(
-            await rpc.request("thread/turns/list", { threadId: slot.threadId, limit: 1 }),
-          );
-          if (!Array.isArray(history.data) || history.data.length)
-            throw new Error("Codex 失败轮次历史未清空，会话已隔离");
-          slot.firstTurnId = undefined;
-        } catch (error) {
-          if (!abortSignal.aborted || error !== abortSignal.reason) this.fail(asError(error));
-          throw error;
-        }
-        abortSignal.throwIfAborted();
-      }
-      let claimed = false;
-      if (!slot.threadId && this.persistent) {
-        const existing = this.persistent.claim(this.model, bare);
-        if (existing) {
-          claimed = true;
-          slot.persistentDirty = true;
-          slot.threadId = existing.id;
-          slot.bare = bare;
-          try {
-            slot.directory = await this.persistent.restoreWorkspace(existing.workspace);
-            abortSignal.throwIfAborted();
-            // Reclaim and check history every time; only rejoining a loaded thread is redundant.
-            if (!this.loadedThreads.has(existing.id)) {
-              const resumed = object(
-                await this.threadRequest(
-                  rpc,
-                  "thread/resume",
-                  {
-                    threadId: existing.id,
-                    cwd: slot.directory,
-                    model: this.model,
-                    modelProvider: CODEX_HTTP_PROVIDER,
-                    ...(bare ? { baseInstructions: BARE_ROLE_INSTRUCTIONS } : {}),
-                    sandbox: "read-only",
-                    approvalPolicy: "never",
-                    config: {
-                      web_search: "disabled",
-                      ...(bare
-                        ? {
-                            features: {
-                              shell_tool: false,
-                              shell_snapshot: false,
-                              unified_exec: false,
-                              hooks: false,
-                              multi_agent: false,
-                              apps: false,
-                              plugins: false,
-                              skip_host_skill_discovery: true,
-                            },
-                          }
-                        : {}),
-                    },
-                    ...(this.model === "gpt-6-luna" ? { serviceTier: "fast" } : {}),
-                  },
-                  abortSignal,
-                ),
-              );
-              if (object(resumed.thread).id !== existing.id)
-                throw new Error("Codex 恢复会话返回了错误 ID");
-              this.loadedThreads.add(existing.id);
-            }
-            const history = object(
-              await rpc.request("thread/turns/list", { threadId: existing.id, limit: 1 }),
-            );
-            if (!Array.isArray(history.data) || history.data.length)
-              throw new Error("Codex 恢复会话历史未清空，会话已隔离");
-          } catch (error) {
-            if (!abortSignal.aborted || error !== abortSignal.reason) this.fail(asError(error));
-            throw error;
-          }
-        }
-      }
-      if (!this.persistent && !slot.directory)
-        slot.directory = await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
-      if (!slot.threadId) {
-        slot.directory ||= this.persistent
-          ? await this.persistent.createWorkspace()
-          : await mkdtemp(join(tmpdir(), "cbg-codex-check-"));
-        abortSignal.throwIfAborted();
-        let start: Record<string, unknown>;
-        try {
-          start = object(
-            await this.threadRequest(
-              rpc,
-              "thread/start",
-              {
-                model: this.model,
-                modelProvider: CODEX_HTTP_PROVIDER,
-                ...(bare ? { baseInstructions: BARE_ROLE_INSTRUCTIONS } : {}),
-                cwd: slot.directory,
-                sandbox: "read-only",
-                approvalPolicy: "never",
-                config: {
-                  web_search: "disabled",
-                  ...(bare
-                    ? {
-                        features: {
-                          shell_tool: false,
-                          shell_snapshot: false,
-                          unified_exec: false,
-                          hooks: false,
-                          multi_agent: false,
-                          apps: false,
-                          plugins: false,
-                          skip_host_skill_discovery: true,
-                        },
-                      }
-                    : {}),
-                },
-                ...(this.model === "gpt-6-luna" ? { serviceTier: "fast" } : {}),
+            "thread/start",
+            {
+              ephemeral: true,
+              model: this.model,
+              modelProvider: CODEX_HTTP_PROVIDER,
+              ...(bare ? { baseInstructions: BARE_ROLE_INSTRUCTIONS } : {}),
+              cwd: slot.directory,
+              sandbox: "read-only",
+              approvalPolicy: "never",
+              config: {
+                web_search: "disabled",
+                ...(bare
+                  ? {
+                      features: {
+                        shell_tool: false,
+                        shell_snapshot: false,
+                        unified_exec: false,
+                        hooks: false,
+                        multi_agent: false,
+                        apps: false,
+                        plugins: false,
+                        skip_host_skill_discovery: true,
+                      },
+                    }
+                  : {}),
               },
-              abortSignal,
-            ),
-          );
-        } catch (error) {
-          // A timed-out start may already have created a session: do not allocate a replacement.
-          if (!abortSignal.aborted || error !== abortSignal.reason) this.fail(asError(error));
-          throw error;
-        }
-        const threadId = object(start.thread).id;
-        if (
-          typeof threadId !== "string" ||
-          !threadId ||
-          this.slots.some((item) => item !== slot && item.threadId === threadId)
-        ) {
-          const error = new Error("Codex 会话返回无效或重复 ID，已暂停分析");
-          this.fail(error);
-          throw error;
-        }
-        slot.threadId = threadId;
-        slot.bare = bare;
-        this.loadedThreads.add(threadId);
-        try {
-          this.persistent?.add(threadId, this.model, bare, slot.directory);
-          claimed = !!this.persistent;
-          slot.persistentDirty = claimed;
-        } catch (error) {
-          this.fail(asError(error));
-          throw error;
-        }
+              ...(this.model === "gpt-6-luna" ? { serviceTier: "fast" } : {}),
+            },
+            abortSignal,
+          ),
+        );
+      } catch (error) {
+        // A timed-out start may already have created a session: do not allocate a replacement.
+        if (!abortSignal.aborted || error !== abortSignal.reason) this.fail(asError(error));
+        throw error;
+      }
+      const threadId = object(start.thread).id;
+      if (
+        typeof threadId !== "string" ||
+        !threadId ||
+        this.slots.some((item) => item !== slot && item.threadId === threadId)
+      ) {
+        const error = new Error("Codex 会话返回无效或重复 ID，已暂停分析");
+        this.fail(error);
+        throw error;
+      }
+      slot.threadId = threadId;
+      if (object(start.thread).ephemeral !== true) {
+        const error = new Error("Codex 未创建无状态会话，已暂停分析");
+        this.fail(error);
+        throw error;
       }
       abortSignal.throwIfAborted();
-      // A retry keeps this lease's dirty claim until its result has been saved.
-      if (this.persistent && !claimed && !slot.persistentDirty) {
-        try {
-          this.persistent.dirty(slot.threadId);
-          slot.persistentDirty = true;
-        } catch (error) {
-          this.fail(asError(error));
-          throw error;
-        }
-      }
       current.startSent = true;
       const started = object(
         await rpc.request("turn/start", {
@@ -768,7 +566,6 @@ export class CodexPool {
       const id = object(started.turn).id;
       if (typeof id !== "string" || !id) throw new Error("Codex 分析未返回有效 turn ID");
       current.expected = id;
-      slot.firstTurnId ||= id;
       const already = current.turns.get(id);
       if (already?.status) {
         current.terminal = true;
@@ -797,49 +594,45 @@ export class CodexPool {
           current.startSent = false;
         else this.fail(asError(error));
       }
+      clearTimeout(cancelDeadline);
+      // A terminal failure or an explicit rejection may be retried only with a new thread.
+      if (!this.failure && !this.closed && (!current.startSent || current.terminal)) {
+        try {
+          await this.clearRequest(slot);
+        } catch (cleanupError) {
+          this.fail(asError(cleanupError));
+          throw cleanupError;
+        }
+      }
       throw error;
     } finally {
       abortSignal.removeEventListener("abort", interrupt);
       clearTimeout(cancelDeadline);
     }
   }
+  private async clearRequest(slot: Slot) {
+    if (slot.threadId) {
+      const rpc = await this.rpc();
+      const result = object(
+        await this.threadRequest(rpc, "thread/unsubscribe", { threadId: slot.threadId }),
+      );
+      if (!["unsubscribed", "notLoaded", "notSubscribed"].includes(String(result.status)))
+        throw new Error("Codex 临时会话未确认卸载，已暂停分析");
+      slot.threadId = undefined;
+    }
+    if (slot.directory) await rm(slot.directory, { recursive: true, force: true });
+    slot.directory = undefined;
+  }
   private async release(slot: Slot, persisted: boolean) {
     const current = slot.current;
     if (current?.promise) await current.promise.catch(() => {});
-    if (!persisted) {
-      const error = new Error("分析结果未保存，Codex 会话已隔离");
-      this.fail(error);
-      throw error;
-    }
     try {
       this.check();
-      if (current?.startSent && (!current.expected || !current.terminal || !slot.threadId))
+      if (current?.startSent && (!current.expected || !current.terminal))
         throw new Error("Codex 分析状态未确认，会话已隔离");
-      if (slot.firstTurnId) {
-        if (!slot.threadId) throw new Error("Codex 会话缺少有效 ID");
-        const rpc = await this.rpc();
-        await this.threadRequest(rpc, "thread/revert", {
-          threadId: slot.threadId,
-          beforeTurnId: slot.firstTurnId,
-        });
-        const history = object(
-          await rpc.request("thread/turns/list", { threadId: slot.threadId, limit: 1 }),
-        );
-        if (!Array.isArray(history.data) || history.data.length)
-          throw new Error("Codex 会话历史未清空，会话已隔离");
-      }
-      if (slot.directory) {
-        if (this.persistent) await this.persistent.clearWorkspace(slot.directory);
-        else await rm(slot.directory, { recursive: true, force: true });
-      }
-      if (slot.threadId && this.persistent && slot.persistentDirty) {
-        this.persistent.clean(slot.threadId);
-        slot.persistentDirty = false;
-        slot.threadId = undefined;
-        slot.bare = undefined;
-      }
-      slot.directory = undefined;
-      slot.firstTurnId = undefined;
+      // The caller saves the answer before releasing its slot; cleanup cannot lose it.
+      await this.clearRequest(slot);
+      if (!persisted) throw new Error("分析结果未保存，Codex 会话已隔离");
       slot.current = undefined;
       slot.busy = false;
       while (this.waiters.length) {
@@ -867,9 +660,19 @@ export class CodexPool {
         const transport = await this.transport.catch(() => undefined);
         if (transport) await transport.close();
       }
+      await Promise.allSettled(
+        this.slots.flatMap((slot) => (slot.current?.promise ? [slot.current.promise] : [])),
+      );
+      // A process with an uncertain turn must stop before its workspace is removed.
+      await Promise.all(
+        this.slots.map(async (slot) => {
+          if (slot.directory) await rm(slot.directory, { recursive: true, force: true });
+          slot.directory = undefined;
+          slot.threadId = undefined;
+        }),
+      );
     } finally {
       this.unsubscribe?.();
-      this.persistent?.close();
     }
   }
 }
