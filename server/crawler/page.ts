@@ -337,7 +337,7 @@ export async function hoverListing(
   page: Page,
   item: Listing,
   signal: AbortSignal,
-  recoveredActionability?: (stage: "scroll" | "visibility" | "handle") => void,
+  recoveredActionability?: (stage: "scroll" | "visibility" | "handle" | "pointer") => void,
   onDiagnostic?: (diagnostic: ListingHoverDiagnostic) => void,
 ): Promise<Listing> {
   checkAborted(signal);

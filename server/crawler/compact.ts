@@ -86,6 +86,9 @@ export function observedEquipmentCategory(category = "", location = "", modelId 
   if (modelId === "50344") return "材料 · 钟灵石";
   if (modelId === "4001") return "材料 · 百炼精铁";
   if (modelId === "4002") return "材料 · 太阳石";
+  if (modelId === "4004") return "材料 · 光芒石";
+  if (modelId === "3995") return "材料 · 附魔宝珠";
+  if (modelId === "56973") return "道具 · 坐骑玄灵珠";
   if (modelId === "612") return "材料 · 制造指南书";
   if (modelId === "4034") return "材料 · 点化石";
   if (modelId === "17320") return "消耗品";
