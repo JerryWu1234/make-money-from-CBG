@@ -100,8 +100,10 @@ export function captureIssues(
   if (isCurrentRoleCapture(detail))
     issues.push(...roleIdentityIssues(detail.valuation?.source, listing));
   if (hasSchoolSkillContract(detail)) {
-    if (!schoolSkillsComplete(detail.tabs))
-      issues.push("师门技能未完整读取：须核对7项不重复技能及明确非负整数等级");
+    if (!schoolSkillsComplete(detail.tabs, detail.valuation?.source))
+      issues.push(
+        "师门技能未完整读取：须与官网原始技能逐项一致，无来源证明时须核对7项不重复技能及明确非负整数等级",
+      );
   }
   if (!includeAssets) {
     if (detail.captureMode === "body") {

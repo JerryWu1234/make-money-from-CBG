@@ -232,6 +232,7 @@ export async function captureValuation(page: Page): Promise<ValuationCapture> {
         options: Record<string, unknown>,
       ) => {
         raw_info: Record<string, unknown>;
+        conf?: { skill?: { school_skill?: Record<string, { name?: unknown; pos?: unknown }> } };
         result: { shenqi?: unknown; basic_info?: Record<string, unknown> };
       };
       const encoded = document.querySelector<HTMLTextAreaElement>("#equip_desc_value")?.value;
@@ -241,6 +242,27 @@ export async function captureValuation(page: Page): Promise<ValuationCapture> {
         serverId,
       });
       const raw = parser.raw_info;
+      const schoolConfig = parser.conf?.skill?.school_skill;
+      const allSkills = raw.all_skills;
+      // The official renderer starts with seven empty slots, then fills only learned skills.
+      // Preserve its ID/name/slot mapping independently of the DOM we are checking.
+      const schoolSkills =
+        schoolConfig &&
+        typeof schoolConfig === "object" &&
+        !Array.isArray(schoolConfig) &&
+        Object.keys(schoolConfig).length &&
+        allSkills &&
+        typeof allSkills === "object" &&
+        !Array.isArray(allSkills)
+          ? Object.entries(allSkills)
+              .filter(([id]) => Object.hasOwn(schoolConfig, id))
+              .map(([id, level]) => ({
+                id,
+                level,
+                name: schoolConfig[id]?.name,
+                slot: schoolConfig[id]?.pos,
+              }))
+          : undefined;
       return {
         riders: raw.AllRider ?? {},
         advancedMount: raw.jinjie_rider_info ?? { isJinJie: 0 },
@@ -255,6 +277,7 @@ export async function captureValuation(page: Page): Promise<ValuationCapture> {
           xianyu: raw.xianyu,
         },
         allSkills: raw.all_skills,
+        ...(schoolSkills === undefined ? {} : { schoolSkills }),
         holyLevel: raw.i3FlyLv,
         serverId,
         eid,

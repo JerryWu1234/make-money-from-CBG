@@ -1,15 +1,16 @@
 import type { DetailItem, TabSnapshot } from "./types";
 
-export function schoolSkillsComplete(tabs: TabSnapshot[]) {
+export function schoolSkillsComplete(tabs: TabSnapshot[], source?: Record<string, unknown>) {
   const schoolTabs = tabs.filter((tab) => tab.name === "技能").map(completeSchoolSkillsFromText);
   const skills = schoolTabs.flatMap((tab) =>
     (tab.items || []).filter((item) => item.category === "师门技能"),
   );
   const names = skills.map((item) => (typeof item.name === "string" ? item.name.trim() : ""));
-  return (
+  const valid =
     schoolTabs.length === 1 &&
-    skills.length === 7 &&
-    new Set(names).size === 7 &&
+    skills.length > 0 &&
+    skills.length <= 7 &&
+    new Set(names).size === skills.length &&
     names.every(Boolean) &&
     skills.every(
       (item) =>
@@ -17,8 +18,80 @@ export function schoolSkillsComplete(tabs: TabSnapshot[]) {
         typeof item.level === "string" &&
         /^\d+$/.test(item.level) &&
         Number.isSafeInteger(Number(item.level)),
+    );
+  if (!valid) return false;
+  // Older captures have no independent school-skill evidence. Keep their seven-item gate.
+  if (source?.schoolSkills === undefined) return skills.length === 7;
+  const expected = source.schoolSkills;
+  const allSkills = source.allSkills;
+  if (
+    !Array.isArray(expected) ||
+    expected.length !== skills.length ||
+    !allSkills ||
+    typeof allSkills !== "object" ||
+    Array.isArray(allSkills)
+  )
+    return false;
+  const ids = new Set<string>(),
+    slots = new Set<number>(),
+    levels = new Map<string, number>();
+  for (const value of expected) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const { id, name, level, slot } = value as Record<string, unknown>;
+    if (
+      typeof id !== "string" ||
+      !/^\d+$/.test(id) ||
+      ids.has(id) ||
+      typeof name !== "string" ||
+      !name.trim() ||
+      levels.has(name.trim()) ||
+      typeof level !== "number" ||
+      !Number.isSafeInteger(level) ||
+      level < 0 ||
+      typeof slot !== "number" ||
+      !Number.isInteger(slot) ||
+      slot < 1 ||
+      slot > 7 ||
+      slots.has(slot) ||
+      !Object.hasOwn(allSkills, id) ||
+      (allSkills as Record<string, unknown>)[id] !== level
+    )
+      return false;
+    ids.add(id);
+    slots.add(slot);
+    levels.set(name.trim(), level);
+  }
+  const text = schoolSkillText(schoolTabs[0]);
+  return (
+    !!text &&
+    text.size === levels.size &&
+    skills.every(
+      (item) =>
+        levels.get(item.name.trim()) === Number(item.level) &&
+        text.get(item.name.trim()) === item.level,
     )
   );
+}
+
+function schoolSkillText(tab: TabSnapshot): Map<string, string> | undefined {
+  const lines = tab.text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const starts = lines.flatMap((line, index) => (line === "师门技能" ? [index] : []));
+  const ends = lines.flatMap((line, index) => (line === "生活技能" ? [index] : []));
+  if (starts.length !== 1 || ends.length !== 1 || ends[0] <= starts[0]) return;
+  const content = lines.slice(starts[0] + 1, ends[0]);
+  if (!content.length || content.length > 14 || content.length % 2 !== 0) return;
+  const levels = new Map<string, string>();
+  for (let index = 0; index < content.length; index += 2) {
+    const level = content[index],
+      name = content[index + 1];
+    if (!/^\d{1,3}$/.test(level) || !/^\p{Script=Han}{2,12}$/u.test(name) || levels.has(name))
+      return;
+    levels.set(name, level);
+  }
+  return levels;
 }
 
 /** Fill an icon omission only when the saved school-skill text proves all seven pairs. */
@@ -26,23 +99,8 @@ export function completeSchoolSkillsFromText(tab: TabSnapshot): TabSnapshot {
   if (tab.name !== "技能" || !tab.items) return tab;
   const existing = tab.items.filter((item) => item.category === "师门技能");
   if (!existing.length || existing.length >= 7) return tab;
-  const lines = tab.text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const starts = lines.flatMap((line, index) => (line === "师门技能" ? [index] : []));
-  const ends = lines.flatMap((line, index) => (line === "生活技能" ? [index] : []));
-  if (starts.length !== 1 || ends.length !== 1 || ends[0] <= starts[0]) return tab;
-  const content = lines.slice(starts[0] + 1, ends[0]);
-  if (content.length !== 14) return tab;
-  const levels = new Map<string, string>();
-  for (let index = 0; index < content.length; index += 2) {
-    const level = content[index],
-      name = content[index + 1];
-    if (!/^\d{1,3}$/.test(level) || !/^\p{Script=Han}{2,12}$/u.test(name) || levels.has(name))
-      return tab;
-    levels.set(name, level);
-  }
+  const levels = schoolSkillText(tab);
+  if (levels?.size !== 7) return tab;
   const observed = new Set<string>();
   for (const item of existing) {
     if (item.kind !== "skill" || observed.has(item.name) || levels.get(item.name) !== item.level)
