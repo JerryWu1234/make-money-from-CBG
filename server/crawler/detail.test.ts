@@ -883,6 +883,8 @@ describe("装备局部补采", () => {
     ["visibility", true],
     ["handle", false],
     ["handle", true],
+    ["pointer", false],
+    ["pointer", true],
   ] as const)("原生悬停卡在 %s 阶段时核对命中目标，遮罩存在：%s", async (stage, covered) => {
     const page = await browser.newPage();
     try {
@@ -898,7 +900,9 @@ describe("装备局部补采", () => {
               ? "  element is visible and stable\n  scrolling into view if needed"
               : stage === "handle"
                 ? "  locator resolved to <button>测试物品</button>"
-                : "  waiting for element to be visible and stable"),
+                : stage === "pointer"
+                  ? "  element is visible and stable\n  performing hover action"
+                  : "  waiting for element to be visible and stable"),
         ),
         { name: "TimeoutError" },
       );
@@ -930,6 +934,63 @@ describe("装备局部补采", () => {
       await page.close();
     }
   });
+  it.each(["replace", "move", "cover", "close", "cover-after-move"] as const)(
+    "鼠标动作超时恢复拒绝目标变化和安全遮罩：%s",
+    async (change) => {
+      const page = await browser.newPage();
+      try {
+        await page.setContent(
+          '<button style="margin:100px;width:120px;height:50px" onmouseover="window.inspected=event.isTrusted">坐骑入口</button>',
+        );
+        if (change === "cover-after-move")
+          await page.locator("button").evaluateAll((elements) => {
+            elements[0].addEventListener("mouseover", () => {
+              const cover = document.createElement("div");
+              cover.style.cssText = "position:fixed;inset:0;background:white;z-index:9999";
+              cover.setAttribute("role", "dialog");
+              document.body.appendChild(cover);
+            });
+          });
+        const target = page.locator("button");
+        const recovered = vi.fn();
+        const error = Object.assign(
+          new Error("locator.hover: Timeout 5000ms exceeded.\n  performing hover action"),
+          { name: "TimeoutError" },
+        );
+        const hover = vi.spyOn(target, "hover").mockRejectedValueOnce(error);
+        const evaluate = target.evaluateAll.bind(target);
+        let reads = 0;
+        vi.spyOn(target, "evaluateAll").mockImplementation(async (...args) => {
+          const result = await evaluate(...args);
+          if (++reads === 2 && change !== "cover-after-move") {
+            if (change === "close") await page.close();
+            else
+              await page.evaluate((change) => {
+                const button = document.querySelector("button")!;
+                if (change === "replace") button.replaceWith(button.cloneNode(true));
+                if (change === "move") button.style.marginLeft = "110px";
+                if (change === "cover") {
+                  const cover = document.createElement("div");
+                  cover.style.cssText = "position:fixed;inset:0;background:white;z-index:9999";
+                  cover.setAttribute("role", "dialog");
+                  document.body.appendChild(cover);
+                }
+              }, change);
+          }
+          return result;
+        });
+        const result = hoverForInspection(page, target, recovered);
+        if (change === "close") await expect(result).rejects.toThrow(/closed/);
+        else await expect(result).rejects.toBe(error);
+        expect(hover).toHaveBeenCalledOnce();
+        expect(recovered).not.toHaveBeenCalled();
+        if (!page.isClosed() && change !== "cover-after-move")
+          expect(await page.evaluate(() => Reflect.get(window, "inspected"))).not.toBe(true);
+      } finally {
+        await page.close();
+      }
+    },
+  );
   it.each(["price", "duplicate"] as const)("句柄恢复时%s改变仍拒绝读取商品", async (change) => {
     const page = await browser.newPage();
     try {
@@ -1882,6 +1943,46 @@ describe("装备局部补采", () => {
       expect(items[2].description).toBe("等级 150");
       expect(items[3].description).toContain("可制造等级：150");
       expect(items[4].description).toBe("附加技能：高级幸运");
+    } finally {
+      await page.close();
+    }
+  }, 15000);
+
+  it("归档确认的附魔宝珠、光芒石和坐骑玄灵珠不等待人物装备提示框", async () => {
+    const page = await browser.newPage();
+    try {
+      const materials = [
+        ["3995", "附魔宝珠", "等级：140"],
+        ["4004", "光芒石", "等级 5"],
+        ["56973", "玄灵珠·回春", "等级6"],
+      ];
+      await page.route(url, (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(
+            false,
+            undefined,
+            undefined,
+            materials
+              .map(
+                ([model, name, description]) =>
+                  `<img width="40" height="40" data_equip_name="${name}" data_equip_type="${model}" data_equip_desc="${description}" data_tip_box="MissingMaterial${model}TipsBox">`,
+              )
+              .join(""),
+          ),
+        }),
+      );
+      const detail = await collectDetail(page, listing, new AbortController().signal);
+      expect(detail.equipmentCapture).toMatchObject({ complete: true, issues: [] });
+      const items = detail.tabs.find((entry) => entry.name === "道具/法宝")!.items!;
+      expect(items.slice(1).map(({ modelId, name }) => [modelId, name])).toEqual(
+        materials.map(([model, name]) => [model, name]),
+      );
+      expect(
+        equipmentInventory({ listing, detail, status: "complete", error: null }).items.map(
+          ({ name }) => name,
+        ),
+      ).toEqual(["新武器"]);
     } finally {
       await page.close();
     }

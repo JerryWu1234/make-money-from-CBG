@@ -28,7 +28,7 @@ export async function clickForInspection(element: Locator) {
 export async function hoverForInspection(
   page: Page,
   element: Locator,
-  recoveredActionability?: (stage: "scroll" | "visibility" | "handle") => void,
+  recoveredActionability?: (stage: "scroll" | "visibility" | "handle" | "pointer") => void,
 ) {
   await ensureWorkViewport(page);
   // 移出上一个图标，触发网站自己的 mouseout；仅让提示框不拦截后续鼠标。
@@ -64,6 +64,11 @@ export async function hoverForInspection(
     await element.hover({ timeout: 5000 });
   } catch (error) {
     if (!(error instanceof Error)) throw error;
+    const pointerTimeout =
+      error.name === "TimeoutError" &&
+      error.message.includes("performing hover action") &&
+      !error.message.includes("outside of the viewport") &&
+      !error.message.includes("hover action done");
     const actionabilityTimeout =
       error.name === "TimeoutError" &&
       (error.message.includes("waiting for element to be visible and stable") ||
@@ -77,62 +82,67 @@ export async function hoverForInspection(
       !/attempting hover action|waiting for element|visible and stable|not visible|not stable|intercepts pointer events|performing hover action|hover action done|scrolling into view if needed/.test(
         error.message,
       );
-    if (actionabilityTimeout || handleTimeout) {
-      // 原生 hover 还可能停在已解析节点后的句柄读取，尚未进入动作检查。
+    if (actionabilityTimeout || handleTimeout || pointerTimeout) {
+      if (page.isClosed()) throw error;
+      // 原生 hover 可能停在已解析节点后的句柄读取或鼠标动作阶段。
       // 不重新请求句柄；先核对当前 DOM 的可见性、
       // 稳定几何和鼠标命中，再发一次原生鼠标动作；真实遮挡或不可见仍然失败。
-      const point = () =>
-        element.evaluateAll((elements) => {
-          if (elements.length !== 1) return null;
-          const el = elements[0];
-          if (
-            !el.isConnected ||
-            !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
-          )
-            return null;
-          const rect = el.getBoundingClientRect();
-          const left = Math.max(0, rect.left),
-            right = Math.min(window.innerWidth, rect.right),
-            top = Math.max(0, rect.top),
-            bottom = Math.min(window.innerHeight, rect.bottom);
-          if (right <= left || bottom <= top) return null;
-          const x = (left + right) / 2,
-            y = (top + bottom) / 2;
-          if (!el.contains(document.elementFromPoint(x, y))) return null;
-          return { x, y, width: rect.width, height: rect.height };
-        });
-      const before = await point();
+      const token = `${Date.now()}:${Math.random()}`;
+      const point = (mark: boolean) =>
+        element.evaluateAll(
+          (elements, { token, mark }) => {
+            if (elements.length !== 1) return null;
+            const el = elements[0];
+            const marker = Symbol.for("cbg.inspection-hover-target");
+            if (mark) Reflect.set(el, marker, token);
+            else if (Reflect.get(el, marker) !== token) return null;
+            if (
+              !el.isConnected ||
+              !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+            )
+              return null;
+            const rect = el.getBoundingClientRect();
+            const left = Math.max(0, rect.left),
+              right = Math.min(window.innerWidth, rect.right),
+              top = Math.max(0, rect.top),
+              bottom = Math.min(window.innerHeight, rect.bottom);
+            if (right <= left || bottom <= top) return null;
+            const x = (left + right) / 2,
+              y = (top + bottom) / 2;
+            if (!el.contains(document.elementFromPoint(x, y))) return null;
+            return { x, y, width: rect.width, height: rect.height };
+          },
+          { token, mark },
+        );
+      const before = await point(true);
       await new Promise((resolve) => setTimeout(resolve, 100));
-      const after = await point();
+      const after = await point(false);
       if (!before || !after || JSON.stringify(before) !== JSON.stringify(after)) throw error;
       await page.mouse.move(after.x, after.y);
       if (
         !(await element.evaluateAll(
-          (elements, { x, y }) =>
+          (elements, { x, y, token }) =>
             elements.length === 1 &&
             elements[0].isConnected &&
+            Reflect.get(elements[0], Symbol.for("cbg.inspection-hover-target")) === token &&
             elements[0].contains(document.elementFromPoint(x, y)),
-          after,
+          { ...after, token },
         ))
       )
         throw error;
       recoveredActionability?.(
-        handleTimeout
-          ? "handle"
-          : error.message.includes("scrolling into view if needed")
-            ? "scroll"
-            : "visibility",
+        pointerTimeout
+          ? "pointer"
+          : handleTimeout
+            ? "handle"
+            : error.message.includes("scrolling into view if needed")
+              ? "scroll"
+              : "visibility",
       );
       return;
     }
     const outside = error.message.includes("outside of the viewport");
-    // Visible/stable/hit-target checks already passed. Retry a stalled native
-    // mouse action once; invisible elements and intercepting dialogs still fail.
-    const pointerTimeout =
-      error.name === "TimeoutError" &&
-      error.message.includes("performing hover action") &&
-      !error.message.includes("hover action done");
-    if (!outside && !pointerTimeout) throw error;
+    if (!outside) throw error;
     // 老工作页或网站固定宽度布局可能使可视区域与文档不同步，重新设定后仅重试一次。
     if (outside) {
       const width = await page.evaluate(() =>
