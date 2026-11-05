@@ -276,6 +276,7 @@ async function runCodexRequest(
         ...(options?.bareRoleReview ? { outputSchema: options.outputSchema } : {}),
       });
       let finalResponse = "";
+      let streamError = "";
       const items: ThreadItem[] = [];
       for await (const event of events) {
         signal.throwIfAborted();
@@ -284,12 +285,13 @@ async function runCodexRequest(
           if (event.item.type === "agent_message") finalResponse = event.item.text;
         }
         if (event.type === "turn.failed") throw new Error(event.error.message);
-        if (event.type === "error") throw new Error(event.message);
+        // Reconnect notices also use error; wait for the terminal turn event.
+        if (event.type === "error") streamError = event.message;
         // Closing this completed stream also releases the SDK-owned process.
         if (event.type === "turn.completed") return { items, finalResponse, usage: event.usage };
       }
       signal.throwIfAborted();
-      throw new Error("Codex 调用未收到完整完成事件，请重试");
+      throw new Error(streamError || "Codex 调用未收到完整完成事件，请重试");
     }
     return await thread.run(prompt, {
       signal: request.signal,

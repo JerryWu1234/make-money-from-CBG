@@ -71,10 +71,10 @@ function installCodexFixture(project, includeCli = true) {
     path.join(sdk, "package.json"),
     JSON.stringify({
       name: "@openai/codex-sdk",
-      version: "0.159.3",
+      version: "0.161.0",
       type: "module",
       exports: { ".": { import: "./index.js" } },
-      dependencies: { "@openai/codex": "0.159.3" },
+      dependencies: { "@openai/codex": "0.161.0" },
     }),
   );
   writeFileSync(path.join(sdk, "index.js"), "export {};\n");
@@ -85,7 +85,7 @@ function installCodexFixture(project, includeCli = true) {
     path.join(cli, "package.json"),
     JSON.stringify({
       name: "@openai/codex",
-      version: "0.159.3",
+      version: "0.161.0",
       type: "module",
       bin: { codex: "./bin/codex.js" },
     }),
@@ -108,7 +108,7 @@ if (state.codexExitCode) {
   process.stderr.write("fixture Codex native binary cannot run\\n");
   process.exit(state.codexExitCode);
 }
-if (!state.codexEmptyOutput) console.log("codex-cli 0.159.3");
+if (!state.codexEmptyOutput) console.log("codex-cli 0.161.0");
 `,
   );
 }
@@ -156,7 +156,7 @@ async function fixture(t, changes = {}) {
       name: "make-money-from-cbg",
       type: "module",
       scripts: { "dev:stable": "node scripts/serve-local.mjs" },
-      dependencies: { "@openai/codex-sdk": "0.159.3" },
+      dependencies: { "@openai/codex-sdk": "0.161.0" },
       devEngines: { packageManager: { name: "pnpm", version: "11.25.0" } },
     }),
   );
@@ -873,7 +873,7 @@ test("项目依赖安装 Codex CLI，无可用全局命令也能校验后启动"
   assert.equal(existsSync(cliPackage), false, "CLI 应随 pnpm 安装，而非夹具预装");
   const result = await f.run();
   successful(result);
-  assert.match(result.stdout, /项目内 Codex CLI.*codex-cli 0\.159\.3/);
+  assert.match(result.stdout, /项目内 Codex CLI.*codex-cli 0\.161\.0/);
   assert.equal(existsSync(cliPackage), true);
   const calls = f.calls();
   const installAt = calls.findIndex(
