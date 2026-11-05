@@ -72,6 +72,7 @@ beforeEach(() => {
   });
   child.kill.mockImplementation(() => {
     child.emit("exit", 0);
+    child.emit("close", 0);
     return true;
   });
   send = (message) => child.stdout.write(JSON.stringify(message) + "\n");
@@ -97,6 +98,73 @@ afterEach(async () => {
 // WebSocket provider; a partial built-in override prevents the child from starting;
 // or changing transport loses ChatGPT login isolation and existing tool limits.
 describe("官方 Codex 登录与 SDK", () => {
+  it("关闭登录服务等待子进程close后再删除临时目录", async () => {
+    const codex = await import("./codex");
+    await codex.codexAccount();
+    const child = mocks.spawn.mock.results[0]!.value;
+    child.kill.mockImplementation(() => {
+      child.emit("exit", 0);
+      return true;
+    });
+    let finished = false;
+    const closing = codex.shutdownCodex().then(() => {
+      finished = true;
+    });
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith("SIGTERM"));
+    expect(finished).toBe(false);
+    expect(mocks.rm).not.toHaveBeenCalled();
+    child.emit("close", 0);
+    await closing;
+    expect(finished).toBe(true);
+    expect(mocks.rm).toHaveBeenCalledExactlyOnceWith("/private/tmp/cbg-codex-fixture", {
+      recursive: true,
+      force: true,
+    });
+  });
+
+  it("登录服务忽略SIGTERM时等待SIGKILL关闭，不提前删除目录", async () => {
+    const codex = await import("./codex");
+    await codex.codexAccount();
+    const child = mocks.spawn.mock.results[0]!.value;
+    child.kill.mockImplementation((signal: string) => {
+      if (signal === "SIGKILL") {
+        child.emit("exit", null, signal);
+        child.emit("close", null, signal);
+      }
+      return true;
+    });
+    vi.useFakeTimers();
+    try {
+      const closing = codex.shutdownCodex();
+      await vi.advanceTimersByTimeAsync(1_001);
+      await closing;
+      expect(child.kill.mock.calls).toEqual([["SIGTERM"], ["SIGKILL"]]);
+      expect(mocks.rm).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("无法确认登录服务退出时拒绝关停并保留工作目录", async () => {
+    const codex = await import("./codex");
+    await codex.codexAccount();
+    const child = mocks.spawn.mock.results[0]!.value;
+    child.kill.mockReturnValue(true);
+    vi.useFakeTimers();
+    try {
+      const rejected = expect(codex.shutdownCodex()).rejects.toThrow(
+        "无法确认 Codex 登录服务进程已关闭",
+      );
+      await vi.advanceTimersByTimeAsync(3_001);
+      await rejected;
+      expect(mocks.rm).not.toHaveBeenCalled();
+      child.emit("exit", 0);
+      child.emit("close", 0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("读取账号时保留可用的工作区标识，缺失时使用空值", async () => {
     rpcResults["account/read"] = {
       account: { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" },
@@ -278,12 +346,17 @@ describe("官方 Codex 登录与 SDK", () => {
     expect(options.env.CODEX_SQLITE_HOME).toBe("/private/tmp/cbg-home-fixture");
     expect(options.config.forced_login_method).toBe("chatgpt");
     expect(options.config.cli_auth_credentials_store).toBe("file");
+    expect(options.codexPathOverride).toMatch(/\/scripts\/codex-stateless\.mjs$/);
+    expect(options.config.history).toEqual({ persistence: "none" });
     expect(options.configOverrides).toEqual([
       'model_provider="openai_http"',
       'model_providers.openai_http={name="OpenAI",wire_api="responses",requires_openai_auth=true,supports_websockets=false}',
     ]);
     expect(options.config.model_provider).toBeUndefined();
     expect(options.config.features).toEqual({
+      plugins: false,
+      skip_host_skill_discovery: true,
+      shell_snapshot: false,
       shell_tool: false,
       unified_exec: false,
       hooks: false,

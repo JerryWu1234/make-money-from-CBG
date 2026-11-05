@@ -62,7 +62,11 @@ function fixture() {
     .run("clear-attempt", task.id, new Date().toISOString());
   analysis.markRecommendationViewed(record.listing.key);
   crawl.db
-    .prepare("INSERT INTO analysis_capture_checks VALUES(?,?,1,NULL,NULL,NULL,NULL,0)")
+    .prepare(
+      `INSERT INTO analysis_capture_checks
+       (run_id,listing_key,listing_revision,result_task_id,result_revision,proof_id,proof_revision,valid_until)
+       VALUES(?,?,1,NULL,NULL,NULL,NULL,0)`,
+    )
     .run(run, record.listing.key);
   crawl.db.exec(`CREATE TABLE analysis_school_formula_confirmations (
     listing_key TEXT PRIMARY KEY, levels_json TEXT NOT NULL, note TEXT NOT NULL, confirmed_at TEXT NOT NULL

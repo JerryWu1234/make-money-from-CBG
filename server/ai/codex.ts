@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import { Codex, type WebSearchItem, type ThreadItem } from "@openai/codex-sdk";
 import type { CodexLogin } from "./types";
@@ -17,7 +18,7 @@ type Account = {
 };
 type Rpc = {
   request: <T>(method: string, params?: Record<string, unknown>) => Promise<T>;
-  stop: () => void;
+  stop: () => Promise<void>;
 };
 
 let server: Promise<Rpc> | null = null;
@@ -41,8 +42,25 @@ async function startServer(): Promise<Rpc> {
       ...CODEX_HTTP_OVERRIDES.flatMap((override) => ["-c", override]),
       "-c",
       'cli_auth_credentials_store="file"',
+      "-c",
+      "features.plugins=false",
+      "-c",
+      "features.skip_host_skill_discovery=true",
+      "-c",
+      'history.persistence="none"',
+      "-c",
+      "features.shell_snapshot=false",
+      "-c",
+      "skills.bundled.enabled=false",
+      "-c",
+      "skills.include_instructions=false",
     ],
-    { cwd: directory, env, stdio: ["pipe", "pipe", "pipe"] },
+    {
+      cwd: directory,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    },
   );
   const pending = new Map<
     number,
@@ -54,10 +72,32 @@ async function startServer(): Promise<Rpc> {
   >();
   let nextId = 0;
   let stopped = false;
+  let childExited = false;
+  let childClosed = false;
+  let cleanupPromise: Promise<void> | undefined;
+  const cleanup = () => (cleanupPromise ||= rm(directory, { recursive: true, force: true }));
+  const closed = new Promise<void>((resolve) => {
+    child.once("close", () => {
+      childClosed = true;
+      resolve();
+    });
+  });
+  child.once("exit", () => {
+    childExited = true;
+  });
+  const waitClosed = async (milliseconds: number) => {
+    if (childClosed) return true;
+    return await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), milliseconds);
+      void closed.then(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
+  };
   const fail = () => {
     if (stopped) return;
     stopped = true;
-    server = null;
     for (const task of pending.values()) {
       clearTimeout(task.timer);
       task.reject(new Error("Codex 登录服务已退出，请重试"));
@@ -68,8 +108,14 @@ async function startServer(): Promise<Rpc> {
       login.error = "Codex 登录服务已退出，请重新登录";
       clearTimeout(loginTimeout);
     }
-    void rm(directory, { recursive: true, force: true });
   };
+  child.once("close", () => {
+    server = null;
+    fail();
+    lines.close();
+    // An exit/error alone does not confirm that inherited child pipes are closed.
+    void cleanup().catch(() => {});
+  });
   child.on("error", fail);
   child.on("exit", fail);
   child.stdin.on("error", fail);
@@ -120,11 +166,37 @@ async function startServer(): Promise<Rpc> {
         reject(new Error("无法连接 Codex 登录服务，请重试"));
       });
     });
-  const stop = () => {
-    child.kill();
-    lines.close();
-    fail();
-  };
+  let stopping: Promise<void> | undefined;
+  const stop = () =>
+    (stopping ||= (async () => {
+      fail();
+      const signal = (name: NodeJS.Signals) => {
+        if (childExited || childClosed) return;
+        if (process.platform !== "win32" && child.pid) {
+          try {
+            process.kill(-child.pid, name);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          }
+        } else child.kill(name);
+      };
+      if (!childClosed) {
+        if (childExited) {
+          if (!(await waitClosed(2_000)))
+            throw new Error("Codex 登录服务已退出，但无法确认子进程关闭");
+        } else {
+          signal("SIGTERM");
+          if (!(await waitClosed(1_000))) {
+            // Never signal an old process group after its leader exits: its PID may be reused.
+            if (childExited) throw new Error("Codex 登录服务已退出，但无法确认子进程关闭");
+            signal("SIGKILL");
+            if (!(await waitClosed(2_000))) throw new Error("无法确认 Codex 登录服务进程已关闭");
+          }
+        }
+      }
+      lines.close();
+      await cleanup();
+    })());
   try {
     await request("initialize", {
       clientInfo: { name: "cbg_helper", title: "藏宝阁助手", version: "0.1.0" },
@@ -132,7 +204,7 @@ async function startServer(): Promise<Rpc> {
     child.stdin.write(JSON.stringify({ method: "initialized", params: {} }) + "\n");
     return { request, stop };
   } catch (error) {
-    stop();
+    await stop();
     throw error;
   }
 }
@@ -239,23 +311,31 @@ async function runCodexRequest(
   try {
     signal.throwIfAborted();
     const codex = new Codex({
+      codexPathOverride: fileURLToPath(
+        new URL("../../scripts/codex-stateless.mjs", import.meta.url),
+      ),
       env: codexHomeEnv(),
       configOverrides: CODEX_HTTP_OVERRIDES,
       config: {
         forced_login_method: "chatgpt",
         cli_auth_credentials_store: "file",
-        ...(!probe && !search && options?.model === "gpt-6-luna" ? { service_tier: "fast" } : {}),
-        ...(probe || search || options?.bareRoleReview
-          ? {
-              features: {
+        history: { persistence: "none" },
+        skills: { bundled: { enabled: false }, include_instructions: false },
+        features: {
+          plugins: false,
+          skip_host_skill_discovery: true,
+          shell_snapshot: false,
+          ...(probe || search || options?.bareRoleReview
+            ? {
                 shell_tool: false,
                 unified_exec: false,
                 hooks: false,
                 multi_agent: false,
                 apps: false,
-              },
-            }
-          : {}),
+              }
+            : {}),
+        },
+        ...(!probe && !search && options?.model === "gpt-6-luna" ? { service_tier: "fast" } : {}),
       },
     });
     const thread = codex.startThread({
@@ -362,5 +442,5 @@ export async function shutdownCodex() {
   clearTimeout(loginTimeout);
   const current = server;
   server = null;
-  if (current) (await current.catch(() => null))?.stop();
+  if (current) await (await current.catch(() => null))?.stop();
 }

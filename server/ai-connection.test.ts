@@ -60,7 +60,7 @@ vi.mock("./analysis/pet-gear-search", () => ({ searchPetGearPricing: mocks.searc
 const account = { type: "chatgpt", email: "fixture@example.invalid", planType: "pro" };
 const fakeKey = "test-only-deepseek-key";
 
-it("账号标识缺失时拒绝复用会话，避免不同账号共用分析线程", async () => {
+it("账号标识缺失时先重新登录，避免向未确认的账号发送角色资料", async () => {
   mocks.codexAccount.mockResolvedValue({ ...account, email: null });
   const { prepareAnalysisClient } = await import("./ai-connection");
   await expect(prepareAnalysisClient("codex")).rejects.toThrow("无法确认 Codex 登录账号");
