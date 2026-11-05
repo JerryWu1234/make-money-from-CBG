@@ -1,4 +1,5 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 import {
@@ -13,6 +14,8 @@ import { AnalysisStore } from "../../server/analysis/store";
 import { createProfile, PROMPT_FILE } from "../../server/analysis/profile";
 import { calculateValuation } from "../../server/analysis/valuation-calculator";
 import { valuationRecord } from "../fixtures/analysis";
+import { acquireCodexRuntime } from "../../scripts/codex-runtime.mjs";
+import { CodexLifecycle } from "../../server/ai/codex-lifecycle";
 
 // Failure cases: more than 10 in-flight requests, cross-role context or results,
 // releasing a successful response before its result commits, lost pause/restart
@@ -27,6 +30,7 @@ class FixtureTransport implements CodexPoolTransport {
   readonly released: Array<{ threadId: string; turnId: string; key: string; state: string }> = [];
   readonly rejected: string[] = [];
   readonly terminalStates = new Map<string, string>();
+  readonly workspaces: string[] = [];
   readonly rateLimited: Array<{ threadId: string; key: string; at: number }> = [];
   readonly lifecycleRequests: Array<{
     method: string;
@@ -48,6 +52,7 @@ class FixtureTransport implements CodexPoolTransport {
     readonly rateLimitKey?: string,
     readonly histories = new Map<string, string[]>(),
     readonly lifecycleDelayMs = 0,
+    readonly runtimeDirectory?: string,
   ) {}
 
   subscribe(listener: (event: CodexPoolEvent) => void) {
@@ -111,6 +116,14 @@ class FixtureTransport implements CodexPoolTransport {
       expect(params.modelProvider).toBe("openai_http");
       expect(params.ephemeral).toBe(true);
       const id = `${this.label}-thread-${++this.nextThread}`;
+      const workspace = String(params.cwd);
+      this.workspaces.push(workspace);
+      await writeFile(path.join(workspace, "fixture-request.tmp"), id);
+      if (this.runtimeDirectory) {
+        await mkdir(path.join(this.runtimeDirectory, "cache"), { recursive: true });
+        await writeFile(path.join(this.runtimeDirectory, "cache", "fixture-runtime.json"), id);
+        await writeFile(path.join(this.runtimeDirectory, "logs_2.sqlite"), "fixture-runtime-log");
+      }
       this.histories.set(id, []);
       this.threadSelections.push({ method, threadId: id, modelProvider: params.modelProvider });
       return { thread: { id, ephemeral: true } };
@@ -224,11 +237,146 @@ class FixtureTransport implements CodexPoolTransport {
   }
 }
 
+function barrier() {
+  let release!: () => void;
+  let enter!: () => void;
+  return {
+    wait: new Promise<void>((resolve) => {
+      release = resolve;
+    }),
+    started: new Promise<void>((resolve) => {
+      enter = resolve;
+    }),
+    release: () => release(),
+    enter: () => enter(),
+  };
+}
+
+async function sharedCleanupFixture(
+  testInfo: TestInfo,
+  crawl: () => CrawlStore,
+  transports: FixtureTransport[],
+) {
+  const root = testInfo.outputPath("isolated-runtime");
+  const projectRoot = path.join(root, "project");
+  const userHome = path.join(root, "user");
+  await Promise.all([
+    mkdir(projectRoot, { recursive: true }),
+    mkdir(userHome, { recursive: true }),
+  ]);
+  let authActive = false;
+  let authCalls = 0;
+  let sweeping = false;
+  let failNext = false;
+  let sweepBlock: ReturnType<typeof barrier> | undefined;
+  const blocks: ReturnType<typeof barrier>[] = [];
+  const sweeps: Array<{ removed: string[]; savedResults: number }> = [];
+  const failures: string[] = [];
+  const lease = await acquireCodexRuntime({
+    projectRoot,
+    userHome,
+    checkWriters: async () => {
+      expect(
+        transports.every((transport) => transport.closed && transport.pending.size === 0),
+      ).toBe(true);
+      expect(authActive).toBe(false);
+    },
+  });
+  await lease.clean();
+  await writeFile(path.join(lease.directory, "auth.json"), "fixture-login-preserved");
+  const lifecycle = new CodexLifecycle({
+    cleanup: async () => {
+      sweeping = true;
+      try {
+        expect(
+          transports.every((transport) => transport.closed && transport.pending.size === 0),
+        ).toBe(true);
+        expect(authActive).toBe(false);
+        const block = sweepBlock;
+        sweepBlock = undefined;
+        block?.enter();
+        await block?.wait;
+        if (failNext) {
+          failNext = false;
+          failures.push("fixture cleanup I/O failure");
+          throw new Error("fixture cleanup I/O failure");
+        }
+        const removed = await lease.sweep();
+        const savedResults = Number(
+          crawl()
+            .db.prepare("SELECT count(*) n FROM analysis_tasks WHERE result_json IS NOT NULL")
+            .get()?.n,
+        );
+        sweeps.push({ removed, savedResults });
+      } finally {
+        sweeping = false;
+      }
+    },
+  });
+  lifecycle.registerShutdown(async () => {
+    authActive = false;
+  });
+  const operation = (block?: ReturnType<typeof barrier>) =>
+    lifecycle.withOperation(async () => {
+      expect(sweeping).toBe(false);
+      authCalls++;
+      authActive = true;
+      await writeFile(path.join(lease.directory, "models_cache.json"), "fixture-model-catalog");
+      block?.enter();
+      await block?.wait;
+      return "READY";
+    });
+  return {
+    lifecycle,
+    directory: lease.directory,
+    sweeps,
+    failures,
+    get authCalls() {
+      return authCalls;
+    },
+    get sweeping() {
+      return sweeping;
+    },
+    operation,
+    blockNextSweep() {
+      const block = barrier();
+      blocks.push(block);
+      sweepBlock = block;
+      return block;
+    },
+    holdOperation() {
+      const block = barrier();
+      blocks.push(block);
+      const done = operation(block);
+      return { ...block, done };
+    },
+    failNextSweep() {
+      failNext = true;
+    },
+    unblock() {
+      for (const block of blocks) block.release();
+    },
+    async close() {
+      for (const block of blocks) block.release();
+      try {
+        await lifecycle.requestCleanup();
+      } finally {
+        await lease.release();
+      }
+    },
+  };
+}
+
 async function fixture(
   page: Page,
   testInfo: TestInfo,
   count: number,
-  options: { rateLimitKey?: string; lifecycleDelayMs?: number } = {},
+  options: {
+    rateLimitKey?: string;
+    lifecycleDelayMs?: number;
+    sharedCleanup?: boolean;
+    finiteBatch?: boolean;
+  } = {},
 ) {
   const database = testInfo.outputPath("analysis.sqlite");
   await mkdir(path.dirname(database), { recursive: true });
@@ -284,12 +432,16 @@ async function fixture(
     false,
   );
   const transports: FixtureTransport[] = [];
+  const shared = options.sharedCleanup
+    ? await sharedCleanupFixture(testInfo, () => crawl, transports)
+    : undefined;
   const client: AnalysisClient = {
     model: "fixture-codex",
     analyze: async () => {
       throw new Error("应使用独立临时会话");
     },
     createSessionPool(size) {
+      const batch = shared?.lifecycle.beginBatch();
       const transport = new FixtureTransport(
         crawl,
         profile,
@@ -297,19 +449,28 @@ async function fixture(
         options.rateLimitKey,
         undefined,
         options.lifecycleDelayMs,
+        shared?.directory,
       );
       transports.push(transport);
       const pool = new CodexPool(size, "fixture-codex", async () => transport);
       return {
         async acquire(signal) {
-          const lease = await pool.acquire(signal);
+          const scope = await batch;
+          const lease = scope
+            ? await scope.run(() => pool.acquire(signal))
+            : await pool.acquire(signal);
           return {
             analyze: (prompt, schema, requestSignal, options) =>
-              lease.run(prompt, schema, requestSignal, options),
+              scope
+                ? scope.run(() => lease.run(prompt, schema, requestSignal, options))
+                : lease.run(prompt, schema, requestSignal, options),
             release: (persisted) => lease.release(persisted),
           };
         },
-        close: () => pool.close(),
+        async close() {
+          await pool.close();
+          await (await batch)?.finish();
+        },
       };
     },
   };
@@ -327,6 +488,7 @@ async function fixture(
       let body: unknown;
       switch (url.pathname) {
         case "/api/ai/status":
+          await shared?.operation();
           body = {
             codex: { state: "connected", model: "fixture-codex", response: "READY" },
             deepseek: { state: "unconfigured" },
@@ -334,6 +496,7 @@ async function fixture(
           };
           break;
         case "/api/ai/models":
+          await shared?.operation();
           body = {
             provider: "codex",
             defaultModel: "fixture-codex",
@@ -349,9 +512,9 @@ async function fixture(
             input.provider,
             false,
             profile,
-            false,
+            options.finiteBatch || false,
             undefined,
-            1,
+            count,
             undefined,
             input.concurrency,
           );
@@ -402,6 +565,7 @@ async function fixture(
     transports,
     keys,
     database,
+    shared,
     batch: () => batch,
     async restart(runId: string) {
       await runner.shutdown();
@@ -411,6 +575,12 @@ async function fixture(
       runner = new AnalysisRunner(store, async () => client);
       batch = runId;
       await page.reload();
+    },
+    async close() {
+      shared?.unblock();
+      await runner.shutdown();
+      await shared?.close();
+      crawl.close();
     },
   };
 }
@@ -451,6 +621,9 @@ test("30 个角色使用独立临时会话，最多 10 并发且结果落库后�
       if (wave < 3) await expect.poll(() => transport.pending.size).toBe(10);
     }
     expect(transport.histories.size).toBe(0);
+    await expect
+      .poll(() => transport.workspaces.every((directory) => !existsSync(directory)))
+      .toBe(true);
     expect(new Set(transport.started.map((item) => item.threadId)).size).toBe(30);
     expect(transport.started).toHaveLength(30);
     expect(new Set(transport.started.map((item) => item.key)).size).toBe(30);
@@ -489,8 +662,7 @@ test("30 个角色使用独立临时会话，最多 10 并发且结果落库后�
       lifecycle: "每次请求独立临时会话，最多10个在途请求；成功结果保存后释放。",
     });
   } finally {
-    await x.runner.shutdown();
-    x.crawl.close();
+    await x.close();
   }
 });
 
@@ -595,13 +767,12 @@ test("慢会话清理：10并发→保留首批→清理中暂停→重启继续
       scope: "真实页面、分析队列、Codex会话池与SQLite重开；模拟串行慢RPC及AI回复，不调用真实AI。",
     });
   } finally {
-    await x.runner.shutdown();
-    x.crawl.close();
+    await x.close();
   }
 });
 
 test("中途暂停并继续，已保存角色保留，未完成角色重新分析", async ({ page }, testInfo) => {
-  const x = await fixture(page, testInfo, 12);
+  const x = await fixture(page, testInfo, 12, { sharedCleanup: true });
   try {
     await page.getByRole("button", { name: "开始分析已有商品" }).click();
     await expect.poll(() => x.transports[0]?.pending.size).toBe(10);
@@ -614,8 +785,12 @@ test("中途暂停并继续，已保存角色保留，未完成角色重新分�
     first.finishAll();
     for (const [id, turn] of otherTurns) first.pending.set(id, turn);
     await expect.poll(() => x.store.run(x.batch())!.completed).toBe(1);
+    expect(existsSync(path.join(x.shared!.directory, "cache", "fixture-runtime.json"))).toBe(true);
+    expect(x.shared!.sweeps).toHaveLength(0);
     await page.getByRole("button", { name: "暂停分析", exact: true }).click();
     await expect.poll(() => x.store.run(x.batch())!.status).toBe("paused");
+    await expect.poll(() => x.shared!.sweeps.length).toBe(1);
+    expect(existsSync(path.join(x.shared!.directory, "cache", "fixture-runtime.json"))).toBe(false);
     expect(x.store.run(x.batch())).toMatchObject({ completed: 1, queued: 11 });
     expect(first.rejected).toEqual([]);
     expect(first.released.some((item) => item.state === "interrupted")).toBe(true);
@@ -645,8 +820,7 @@ test("中途暂停并继续，已保存角色保留，未完成角色重新分�
       lifecycle: "暂停关闭首个池；继续分析建立新池，保留已保存结果。",
     });
   } finally {
-    await x.runner.shutdown();
-    x.crawl.close();
+    await x.close();
   }
 });
 
@@ -772,8 +946,7 @@ test("保存两件→Codex断网→重启恢复旧队列→跳过历史完成项
       scope: "真实页面、队列、Codex会话池和SQLite重开；资料与Codex通知为模拟，不连接真实AI。",
     });
   } finally {
-    await x.runner.shutdown();
-    x.crawl.close();
+    await x.close();
   }
 });
 
@@ -871,15 +1044,14 @@ test("HTTP临时会话：保存首件→暂停→重启→创建新线程→保�
         "真实页面、队列、会话池与临时SQLite；模拟Codex RPC，验证HTTP provider选择、临时会话及结果恢复，不代表真实网络HTTP验证。",
     });
   } finally {
-    await x.runner.shutdown();
-    x.crawl.close();
+    await x.close();
   }
 });
 
 test("临时线程：保存首个角色→429冷却并刷新→新线程重试→保留全部分析结果", async ({
   page,
 }, testInfo) => {
-  const x = await fixture(page, testInfo, 3, { rateLimitKey: "role-02" });
+  const x = await fixture(page, testInfo, 3, { rateLimitKey: "role-02", sharedCleanup: true });
   try {
     await page.getByRole("spinbutton", { name: "分析并发数" }).fill("1");
     await page.getByRole("button", { name: "开始分析已有商品" }).click();
@@ -896,6 +1068,8 @@ test("临时线程：保存首个角色→429冷却并刷新→新线程重试�
       .get(firstKey)!.result_json;
     expect(transport.pending.size).toBe(0);
     expect(transport.started).toHaveLength(2);
+    expect(x.shared!.sweeps).toHaveLength(0);
+    expect(existsSync(path.join(x.shared!.directory, "cache", "fixture-runtime.json"))).toBe(true);
     await expect(page.getByLabel("AI限流恢复状态")).toContainText("限流冷却中");
     await page.reload();
     await expect(page.getByLabel("AI限流恢复状态")).toContainText("限流冷却中");
@@ -936,6 +1110,8 @@ test("临时线程：保存首个角色→429冷却并刷新→新线程重试�
     expect(new Set(transport.started.map((turn) => turn.threadId)).size).toBe(4);
     await page.getByRole("button", { name: "暂停分析", exact: true }).click();
     await expect.poll(() => x.store.run(x.batch())!.status).toBe("paused");
+    await expect.poll(() => x.shared!.sweeps.length).toBe(1);
+    expect(existsSync(path.join(x.shared!.directory, "cache", "fixture-runtime.json"))).toBe(false);
     await page.reload();
     await expect(
       page.getByRole("tabpanel", { name: "分析记录", exact: true }).getByRole("article"),
@@ -956,7 +1132,155 @@ test("临时线程：保存首个角色→429冷却并刷新→新线程重试�
       scope: "真实页面、分析队列、会话池和SQLite；模拟Codex RPC，不调用真实AI或账号。",
     });
   } finally {
-    await x.runner.shutdown();
-    x.crawl.close();
+    await x.close();
+  }
+});
+
+test("批后真实清理：等待在途认证→刷新请求排队→同进程第二批再次清理且结论保留", async ({
+  page,
+}, testInfo) => {
+  const x = await fixture(page, testInfo, 2, { sharedCleanup: true, finiteBatch: true });
+  const shared = x.shared!;
+  try {
+    await page.getByRole("button", { name: "开始分析已有商品" }).click();
+    await expect.poll(() => x.transports[0]?.pending.size).toBe(2);
+    const firstRun = x.batch();
+    const auth = shared.holdOperation();
+    await auth.started;
+    const sweep = shared.blockNextSweep();
+    x.transports[0]!.finishAll();
+    await expect.poll(() => x.store.run(firstRun)!.completed).toBe(2);
+    await expect.poll(() => x.transports[0]!.closed).toBe(true);
+    expect(shared.sweeping).toBe(false);
+    expect(shared.sweeps).toHaveLength(0);
+    expect(existsSync(path.join(shared.directory, "cache", "fixture-runtime.json"))).toBe(true);
+    const saved = x.crawl.db
+      .prepare("SELECT id,result_json FROM analysis_tasks WHERE run_id=? ORDER BY id")
+      .all(firstRun);
+
+    auth.release();
+    await auth.done;
+    await sweep.started;
+    const authCalls = shared.authCalls;
+    const statusRequest = page.waitForRequest("**/api/ai/status");
+    const refreshed = page.reload();
+    await statusRequest;
+    let lateOperationEntered = false;
+    const lateOperation = shared.lifecycle.withOperation(async () => {
+      lateOperationEntered = true;
+      expect(shared.sweeping).toBe(false);
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(lateOperationEntered).toBe(false);
+    expect(shared.authCalls).toBe(authCalls);
+    expect(shared.sweeping).toBe(true);
+
+    sweep.release();
+    await Promise.all([lateOperation, refreshed, x.runner.settled()]);
+    await expect.poll(() => shared.sweeps.length).toBe(1);
+    expect(lateOperationEntered).toBe(true);
+    expect(shared.sweeps[0]).toMatchObject({ savedResults: 2 });
+    expect(shared.sweeps[0]!.removed).toEqual(expect.arrayContaining(["cache", "logs_2.sqlite"]));
+    expect(existsSync(path.join(shared.directory, "cache", "fixture-runtime.json"))).toBe(false);
+    expect(await readFile(path.join(shared.directory, "auth.json"), "utf8")).toBe(
+      "fixture-login-preserved",
+    );
+    expect(x.store.run(firstRun)).toMatchObject({ status: "completed", completed: 2, failed: 0 });
+
+    const changed = x.crawl.detail("role-01") as SavedRoleRecord;
+    changed.listing.price = "900";
+    x.crawl.observe(changed.listing);
+    expect(x.crawl.save(changed.listing, changed.detail!)).toBe(true);
+    await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
+    await expect.poll(() => x.transports[1]?.pending.size).toBe(1);
+    const secondRun = x.batch();
+    expect(secondRun).not.toBe(firstRun);
+    expect(x.transports[1]!.started.map((turn) => turn.key)).toEqual(["role-01"]);
+    expect(existsSync(path.join(shared.directory, "cache", "fixture-runtime.json"))).toBe(true);
+    x.transports[1]!.finishAll();
+    await x.runner.settled();
+    expect(shared.sweeps).toHaveLength(2);
+    expect(shared.sweeps[1]!.removed).toEqual(expect.arrayContaining(["cache", "logs_2.sqlite"]));
+    expect(existsSync(path.join(shared.directory, "cache", "fixture-runtime.json"))).toBe(false);
+    for (const row of saved)
+      expect(
+        x.crawl.db.prepare("SELECT result_json FROM analysis_tasks WHERE id=?").get(row.id),
+      ).toEqual({ result_json: row.result_json });
+    expect(x.store.run(secondRun)).toMatchObject({ status: "completed", completed: 2, failed: 0 });
+    expect(
+      x.transports.every((transport) => transport.workspaces.every((dir) => !existsSync(dir))),
+    ).toBe(true);
+    await page.reload();
+    await page.screenshot({
+      path: testInfo.outputPath("batch-cleanup-results-retained.png"),
+      fullPage: true,
+    });
+    await saveEvidence(testInfo, "批后清理与共享调用闸门", {
+      runtimeDirectory: shared.directory,
+      database: x.database,
+      firstRun,
+      secondRun,
+      sweeps: shared.sweeps,
+      completedResultsPreserved: saved.length,
+      pendingOperationsDuringSweep: 0,
+      scope:
+        "真实生命周期闸门、运行目录清理、队列、SQLite及页面；模拟认证和Codex回复，无真实账号或模型请求。",
+    });
+  } finally {
+    await x.close();
+  }
+});
+
+test("批后清理失败不覆盖分析结论，下轮仍能重新清理", async ({ page }, testInfo) => {
+  const x = await fixture(page, testInfo, 2, { sharedCleanup: true, finiteBatch: true });
+  const shared = x.shared!;
+  try {
+    await page.getByRole("button", { name: "开始分析已有商品" }).click();
+    await expect.poll(() => x.transports[0]?.pending.size).toBe(2);
+    const firstRun = x.batch();
+    shared.failNextSweep();
+    x.transports[0]!.finishAll();
+    await x.runner.settled();
+    expect(shared.failures).toEqual(["fixture cleanup I/O failure"]);
+    expect(shared.sweeps).toHaveLength(0);
+    expect(x.store.run(firstRun)).toMatchObject({
+      status: "completed",
+      completed: 2,
+      failed: 0,
+      error: null,
+    });
+    const saved = x.crawl.db
+      .prepare("SELECT id,result_json FROM analysis_tasks WHERE run_id=? ORDER BY id")
+      .all(firstRun);
+    expect(saved.every((row) => row.result_json)).toBe(true);
+    expect(existsSync(path.join(shared.directory, "cache", "fixture-runtime.json"))).toBe(true);
+
+    const changed = x.crawl.detail("role-01") as SavedRoleRecord;
+    changed.listing.price = "950";
+    x.crawl.observe(changed.listing);
+    expect(x.crawl.save(changed.listing, changed.detail!)).toBe(true);
+    await page.reload();
+    await page.getByRole("button", { name: "分析新增或已更新商品", exact: true }).click();
+    await expect.poll(() => x.transports[1]?.pending.size).toBe(1);
+    x.transports[1]!.finishAll();
+    await x.runner.settled();
+    expect(shared.sweeps).toHaveLength(1);
+    expect(existsSync(path.join(shared.directory, "cache", "fixture-runtime.json"))).toBe(false);
+    expect(x.store.run(x.batch())).toMatchObject({ status: "completed", completed: 2, failed: 0 });
+    for (const row of saved)
+      expect(
+        x.crawl.db.prepare("SELECT result_json FROM analysis_tasks WHERE id=?").get(row.id),
+      ).toEqual({ result_json: row.result_json });
+    await saveEvidence(testInfo, "清理故障后保留结论并恢复清理", {
+      database: x.database,
+      firstRun,
+      secondRun: x.batch(),
+      failures: shared.failures,
+      sweeps: shared.sweeps,
+      completedResultsPreserved: saved.length,
+      scope: "真实生命周期闸门及运行清理；只在清理回调注入一次I/O故障，模拟Codex回复。",
+    });
+  } finally {
+    await x.close();
   }
 });

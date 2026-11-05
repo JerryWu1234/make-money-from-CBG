@@ -303,6 +303,15 @@ export class AnalysisRunner {
         controller.abort(new Error("无法续期分析锁，请继续分析"));
       }
     }, 30_000);
+    const recordFailure = (error: unknown) => {
+      if (this.store.owns(owner))
+        this.store.setRun(
+          id,
+          "paused",
+          error instanceof Error ? error.message : "分析已暂停，请重试",
+          owner,
+        );
+    };
     activity.completion = this.process(
       id,
       owner,
@@ -311,15 +320,20 @@ export class AnalysisRunner {
       concurrency,
       providerPause,
     )
-      .finally(() => pool?.close())
-      .catch((error: unknown) => {
-        if (this.store.owns(owner))
-          this.store.setRun(
-            id,
-            "paused",
-            error instanceof Error ? error.message : "分析已暂停，请重试",
-            owner,
-          );
+      .catch(recordFailure)
+      .finally(async () => {
+        try {
+          await pool?.close();
+        } catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "CODEX_CLEANUP_FAILED") {
+            // Cleanup has its own diagnostics; saved answers and a business
+            // pause/error remain authoritative even when disk cleanup fails.
+            console.warn("Codex 运行数据清理失败，已保存的分析结果保留", {
+              runId: id,
+              error: error.message,
+            });
+          } else recordFailure(error);
+        }
       })
       .finally(() => {
         clearInterval(heartbeat);

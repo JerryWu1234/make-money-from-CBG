@@ -10,8 +10,10 @@ const mocks = vi.hoisted(() => ({
   options: vi.fn(),
   mkdtemp: vi.fn(),
   rm: vi.fn(),
+  cleanRuntime: vi.fn(),
 }));
 vi.mock("node:child_process", () => ({ spawn: mocks.spawn }));
+vi.mock("../../scripts/codex-runtime.mjs", () => ({ cleanActiveCodexRuntime: mocks.cleanRuntime }));
 vi.mock("node:fs/promises", () => ({ mkdtemp: mocks.mkdtemp, rm: mocks.rm }));
 vi.mock("./codex-home", () => ({
   codexHomeEnv: () => {
@@ -43,6 +45,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.mkdtemp.mockResolvedValue("/private/tmp/cbg-codex-fixture");
   mocks.rm.mockResolvedValue(undefined);
+  mocks.cleanRuntime.mockResolvedValue([]);
   mocks.run.mockResolvedValue({ finalResponse: "READY" });
   mocks.runStreamed.mockResolvedValue({
     events: (async function* () {
@@ -91,6 +94,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   await (await import("./codex")).shutdownCodex();
+  await (await import("./codex-lifecycle")).requestCodexCleanup().catch(() => {});
   vi.unstubAllEnvs();
 });
 
@@ -98,6 +102,143 @@ afterEach(async () => {
 // WebSocket provider; a partial built-in override prevents the child from starting;
 // or changing transport loses ChatGPT login isolation and existing tool limits.
 describe("官方 Codex 登录与 SDK", () => {
+  it("单次SDK完成先关闭auth再清缓存，清理失败仍返回原答案", async () => {
+    const codex = await import("./codex");
+    await codex.codexAccount();
+    const child = mocks.spawn.mock.results[0]!.value;
+    mocks.cleanRuntime.mockImplementation(async () => {
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      throw new Error("cleanup denied");
+    });
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await codex.probeCodex("fixture", new AbortController().signal)).toBe("READY");
+      expect(warned).toHaveBeenCalledWith(
+        "Codex 运行文件清理失败",
+        expect.objectContaining({ code: "CODEX_CLEANUP_FAILED" }),
+      );
+    } finally {
+      warned.mockRestore();
+    }
+    mocks.cleanRuntime.mockResolvedValue([]);
+  });
+
+  it("批清理等待未完成登录，cancel穿过pending门后才关闭auth和清缓存", async () => {
+    const codex = await import("./codex");
+    const { beginCodexBatch } = await import("./codex-lifecycle");
+    const login = await codex.startCodexLogin();
+    const child = mocks.spawn.mock.results[0]!.value;
+    const batch = await beginCodexBatch();
+    const finished = batch.finish();
+    let pollFinished = false;
+    const polling = codex.codexModels().then(() => {
+      pollFinished = true;
+    });
+    await Promise.resolve();
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(mocks.cleanRuntime).not.toHaveBeenCalled();
+    await codex.cancelCodexLogin(login.loginId);
+    await finished;
+    await polling;
+    expect(codex.codexLoginStatus(login.loginId).state).toBe("cancelled");
+    expect(pollFinished).toBe(true);
+    expect(mocks.cleanRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("登录超时可在清理pending时取消RPC并释放hold", async () => {
+    const codex = await import("./codex");
+    const { beginCodexBatch } = await import("./codex-lifecycle");
+    vi.useFakeTimers();
+    try {
+      const login = await codex.startCodexLogin();
+      const batch = await beginCodexBatch();
+      const finishing = batch.finish();
+      await vi.advanceTimersByTimeAsync(5 * 60_000 + 1);
+      await finishing;
+      expect(codex.codexLoginStatus(login.loginId)).toMatchObject({
+        state: "error",
+        error: "登录等待超时，请重新登录",
+      });
+      expect(requests.some((request) => request.method === "account/login/cancel")).toBe(true);
+      expect(mocks.cleanRuntime).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("批清理等待SDK流终态后关闭后台并清缓存", async () => {
+    const codex = await import("./codex");
+    const { beginCodexBatch } = await import("./codex-lifecycle");
+    let finishStream!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const terminal = new Promise<void>((resolve) => {
+      finishStream = resolve;
+    });
+    mocks.runStreamed.mockImplementation(async () => ({
+      events: (async function* () {
+        markStarted();
+        await terminal;
+        yield { type: "item.completed", item: { type: "agent_message", text: "READY" } };
+        yield { type: "turn.completed", usage: {} };
+      })(),
+    }));
+    const probe = codex.probeCodex("fixture", new AbortController().signal);
+    await started;
+    const batch = await beginCodexBatch();
+    const finishing = batch.finish();
+    expect(mocks.cleanRuntime).not.toHaveBeenCalled();
+    finishStream();
+    expect(await probe).toBe("READY");
+    await finishing;
+    expect(mocks.cleanRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("并发启动登录共用一次初始化与一个hold，取消后清理不会挂起", async () => {
+    const codex = await import("./codex");
+    const { beginCodexBatch } = await import("./codex-lifecycle");
+    const [first, second] = await Promise.all([codex.startCodexLogin(), codex.startCodexLogin()]);
+    expect(first.loginId).toBe(second.loginId);
+    expect(requests.filter((request) => request.method === "account/login/start")).toHaveLength(1);
+    const batch = await beginCodexBatch();
+    const finished = batch.finish();
+    await codex.cancelCodexLogin(first.loginId);
+    await finished;
+    expect(mocks.cleanRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("登录完成与长批次并存时只延期清理，不阻塞metadata刷新", async () => {
+    const codex = await import("./codex");
+    const { beginCodexBatch } = await import("./codex-lifecycle");
+    const login = await codex.startCodexLogin();
+    const child = mocks.spawn.mock.results[0]!.value;
+    const batch = await beginCodexBatch();
+    send({ method: "account/login/completed", params: { loginId: login.loginId, success: true } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(codex.codexLoginStatus(login.loginId).state).toBe("completed");
+    expect((await codex.codexModels()).some((model) => model.id === "gpt-6-luna")).toBe(true);
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(mocks.cleanRuntime).not.toHaveBeenCalled();
+    await batch.finish();
+    expect(mocks.cleanRuntime).toHaveBeenCalledOnce();
+  });
+
+  it("服务关停取消登录只释放hold，不反向等待尚未结束的分析批次", async () => {
+    const codex = await import("./codex");
+    const { beginCodexBatch } = await import("./codex-lifecycle");
+    const login = await codex.startCodexLogin();
+    const child = mocks.spawn.mock.results[0]!.value;
+    const batch = await beginCodexBatch();
+    await codex.cancelPendingCodexLogin();
+    expect(codex.codexLoginStatus(login.loginId).state).toBe("cancelled");
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(mocks.cleanRuntime).not.toHaveBeenCalled();
+    await batch.finish();
+    expect(mocks.cleanRuntime).toHaveBeenCalledOnce();
+  });
+
   it("关闭登录服务等待子进程close后再删除临时目录", async () => {
     const codex = await import("./codex");
     await codex.codexAccount();

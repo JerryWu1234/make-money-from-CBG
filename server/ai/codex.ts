@@ -9,6 +9,13 @@ import { Codex, type WebSearchItem, type ThreadItem } from "@openai/codex-sdk";
 import type { CodexLogin } from "./types";
 import { codexHomeEnv } from "./codex-home";
 import { CODEX_HTTP_OVERRIDES } from "./codex-provider";
+import {
+  beginCodexBatch,
+  registerCodexShutdown,
+  requestCodexCleanup,
+  withCodexOperation,
+  type CodexBatch,
+} from "./codex-lifecycle";
 
 type Account = {
   type: "chatgpt";
@@ -24,6 +31,21 @@ type Rpc = {
 let server: Promise<Rpc> | null = null;
 let login: CodexLogin | null = null;
 let loginTimeout: ReturnType<typeof setTimeout> | undefined;
+let loginHold: CodexBatch | undefined;
+let startingLogin: Promise<CodexLogin> | undefined;
+
+async function finishLoginHold(cleanupAfter = true) {
+  const hold = loginHold;
+  loginHold = undefined;
+  if (!hold) return;
+  try {
+    await hold.finish();
+    if (cleanupAfter) await requestCodexCleanup({ whenIdle: true });
+  } catch (error) {
+    // Login completion/cancellation must remain visible even if filesystem cleanup fails.
+    console.warn("Codex 登录结束后的运行文件清理失败", error);
+  }
+}
 
 async function startServer(): Promise<Rpc> {
   const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));
@@ -107,6 +129,7 @@ async function startServer(): Promise<Rpc> {
       login.state = "error";
       login.error = "Codex 登录服务已退出，请重新登录";
       clearTimeout(loginTimeout);
+      void finishLoginHold();
     }
   };
   child.once("close", () => {
@@ -149,6 +172,7 @@ async function startServer(): Promise<Rpc> {
       clearTimeout(loginTimeout);
       login.state = message.params.success ? "completed" : "error";
       if (!message.params.success) login.error = message.params.error || "ChatGPT 登录失败，请重试";
+      void finishLoginHold();
     }
   });
   const request: Rpc["request"] = <T>(method: string, params = {}) =>
@@ -217,7 +241,7 @@ function authServer() {
   return server;
 }
 
-export async function codexAccount() {
+async function readCodexAccount() {
   const result = await (
     await authServer()
   ).request<{
@@ -234,27 +258,42 @@ export async function codexAccount() {
     : null;
 }
 
-export async function startCodexLogin(): Promise<CodexLogin> {
+async function startLogin(): Promise<CodexLogin> {
   if (login?.state === "pending") return { ...login };
-  const rpc = await authServer();
-  const result = await rpc.request<{ loginId: string; authUrl: string }>("account/login/start", {
-    type: "chatgpt",
-    useHostedLoginSuccessPage: true,
-    appBrand: "chatgpt",
-  });
-  const url = new URL(result.authUrl);
-  if (url.protocol !== "https:" || !["auth.openai.com", "chatgpt.com"].includes(url.hostname))
-    throw new Error("Codex 返回了无效的官方登录地址");
-  login = { ...result, state: "pending" };
-  const session = login;
-  loginTimeout = setTimeout(() => {
-    if (session.state !== "pending") return;
-    session.state = "error";
-    session.error = "登录等待超时，请重新登录";
-    void rpc.request("account/login/cancel", { loginId: session.loginId }).catch(() => {});
-  }, 5 * 60_000);
-  loginTimeout.unref();
-  return { ...session };
+  loginHold ||= await beginCodexBatch({ cleanupAfter: false });
+  try {
+    const rpc = await authServer();
+    const result = await rpc.request<{ loginId: string; authUrl: string }>("account/login/start", {
+      type: "chatgpt",
+      useHostedLoginSuccessPage: true,
+      appBrand: "chatgpt",
+    });
+    const url = new URL(result.authUrl);
+    if (url.protocol !== "https:" || !["auth.openai.com", "chatgpt.com"].includes(url.hostname))
+      throw new Error("Codex 返回了无效的官方登录地址");
+    login = { ...result, state: "pending" };
+    const session = login;
+    loginTimeout = setTimeout(() => {
+      if (session.state !== "pending") return;
+      session.state = "error";
+      session.error = "登录等待超时，请重新登录";
+      const cancel = () =>
+        withCodexOperation(async () => {
+          await rpc.request("account/login/cancel", { loginId: session.loginId });
+        });
+      const hold = loginHold;
+      void (hold ? hold.run(cancel) : cancel())
+        .catch(() => {})
+        .finally(() => {
+          void finishLoginHold();
+        });
+    }, 5 * 60_000);
+    loginTimeout.unref();
+    return { ...session };
+  } catch (error) {
+    await finishLoginHold();
+    throw error;
+  }
 }
 
 export function codexLoginStatus(loginId: string): CodexLogin {
@@ -262,23 +301,69 @@ export function codexLoginStatus(loginId: string): CodexLogin {
   return { ...login };
 }
 
-export async function cancelCodexLogin(loginId: string) {
-  if (login?.loginId === loginId && login.state === "pending") {
-    login.state = "cancelled";
-    clearTimeout(loginTimeout);
-    await (await authServer()).request("account/login/cancel", { loginId });
-  }
-  return { ok: true };
+export function startCodexLogin(): Promise<CodexLogin> {
+  if (startingLogin) return startingLogin;
+  const hold = loginHold;
+  const start = () => withCodexOperation(startLogin);
+  const pending = hold ? hold.run(start) : start();
+  startingLogin = pending;
+  const settled = () => {
+    if (startingLogin === pending) startingLogin = undefined;
+  };
+  void pending.then(settled, settled);
+  return pending;
 }
 
-export async function codexModel() {
+/** Service shutdown releases a login hold without waiting on the analysis cleanup it protects. */
+export async function cancelPendingCodexLogin() {
+  if (startingLogin) await startingLogin.catch(() => {});
+  const hold = loginHold;
+  if (!hold || login?.state !== "pending") return;
+  const session = login;
+  try {
+    await hold.run(() =>
+      withCodexOperation(async () => {
+        if (session.state !== "pending") return;
+        session.state = "cancelled";
+        clearTimeout(loginTimeout);
+        await (await authServer()).request("account/login/cancel", { loginId: session.loginId });
+      }),
+    );
+  } finally {
+    await finishLoginHold(false);
+  }
+}
+
+export async function cancelCodexLogin(loginId: string) {
+  const hold = loginHold;
+  const cancel = () =>
+    withCodexOperation(async () => {
+      if (login?.loginId === loginId && login.state === "pending") {
+        login.state = "cancelled";
+        clearTimeout(loginTimeout);
+        await (await authServer()).request("account/login/cancel", { loginId });
+      }
+      return { ok: true };
+    });
+  try {
+    return await (hold ? hold.run(cancel) : cancel());
+  } finally {
+    if (login?.loginId === loginId && login.state !== "pending") await finishLoginHold();
+  }
+}
+
+export function codexAccount() {
+  return withCodexOperation(readCodexAccount);
+}
+
+async function readCodexModel() {
   const model = "gpt-6-luna";
   if (!(await codexModels()).some((item) => item.id === model))
     throw new Error("默认分析模型 GPT-6-Luna 不在当前 Codex 模型列表中，请选择可用模型");
   return model;
 }
 
-export async function codexModels() {
+async function readCodexModels() {
   const rpc = await authServer();
   const models: { id: string; name: string }[] = [];
   let cursor: string | undefined;
@@ -297,7 +382,19 @@ export async function codexModels() {
   return models;
 }
 
-async function runCodexRequest(
+export function codexModel() {
+  return withCodexOperation(readCodexModel);
+}
+
+export function codexModels() {
+  return withCodexOperation(readCodexModels);
+}
+
+function runCodexRequest(...args: Parameters<typeof runCodexRequestRaw>) {
+  return withCodexOperation(() => runCodexRequestRaw(...args), { cleanupAfter: true });
+}
+
+async function runCodexRequestRaw(
   prompt: string,
   signal: AbortSignal,
   options?: { model: string; outputSchema: unknown; bareRoleReview?: boolean },
@@ -440,7 +537,19 @@ export async function probeCodex(prompt: string, signal: AbortSignal) {
 
 export async function shutdownCodex() {
   clearTimeout(loginTimeout);
+  if (login?.state === "pending") {
+    login.state = "error";
+    login.error = "Codex 登录服务已关闭，请重新登录";
+  }
+  const finishingLogin = finishLoginHold(false);
   const current = server;
   server = null;
-  if (current) await (await current.catch(() => null))?.stop();
+  try {
+    if (current) await (await current.catch(() => null))?.stop();
+  } finally {
+    await finishingLogin;
+  }
 }
+
+// The exclusive lifecycle phase calls this raw closer without taking another read lease.
+registerCodexShutdown(shutdownCodex);

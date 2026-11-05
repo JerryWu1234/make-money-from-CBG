@@ -11,6 +11,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup();
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 function setup(
@@ -220,6 +221,61 @@ it("池关闭失败时保留结果、报告暂停并释放分析锁", async () =
   expect(x.snapshots[0]!.result).toEqual(expect.any(String));
   expect(x.crawl.db.prepare("SELECT count(*) AS n FROM analysis_lock").get()?.n).toBe(0);
   expect(x.runner.isRunning()).toBe(false);
+});
+
+it("共享缓存清理失败只记独立诊断，保留成功结果与批次完成状态", async () => {
+  const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const x = setup(["a"], {
+    close: async () => {
+      throw Object.assign(new Error("缓存文件无法删除"), { code: "CODEX_CLEANUP_FAILED" });
+    },
+  });
+  const id = await x.runner.start("codex", false, undefined, false, undefined, 1, undefined, 1);
+  await x.runner.settled();
+  expect(x.store.run(id)).toMatchObject({ status: "completed", completed: 1, error: null });
+  expect(x.snapshots[0]).toMatchObject({ persisted: true, state: "completed" });
+  expect(x.snapshots[0]!.result).toEqual(expect.any(String));
+  expect(warning).toHaveBeenCalledWith(expect.stringContaining("清理失败"), {
+    runId: id,
+    error: "缓存文件无法删除",
+  });
+  expect(x.crawl.db.prepare("SELECT count(*) AS n FROM analysis_lock").get()?.n).toBe(0);
+});
+
+it("业务分析失败后清理再失败，不能覆盖原失败记录和暂停原因", async () => {
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  const x = setup(["a"], {
+    response: async () => "not-json",
+    close: async () => {
+      throw Object.assign(new Error("清理失败"), { code: "CODEX_CLEANUP_FAILED" });
+    },
+  });
+  const id = await x.runner.start("codex", false, undefined, false, undefined, 1, undefined, 1);
+  await x.runner.settled();
+  expect(x.store.run(id)).toMatchObject({ status: "paused", failed: 1 });
+  expect(x.store.run(id)!.error).not.toContain("清理失败");
+  expect(x.snapshots).toEqual([
+    { key: "a", persisted: true, state: "failed", raw: "not-json", result: null },
+  ]);
+});
+
+it("整批清理未结束前仍持有分析锁，不提前报告运行已退出", async () => {
+  let cleaned!: () => void;
+  const waiting = new Promise<void>((resolve) => (cleaned = resolve));
+  const x = setup(["a"], { close: async () => waiting });
+  const id = await x.runner.start("codex", false, undefined, false, undefined, 1, undefined, 1);
+  try {
+    await vi.waitFor(() => expect(x.close).toHaveBeenCalledOnce());
+    expect(x.store.run(id)).toMatchObject({ status: "completed", completed: 1 });
+    expect(x.runner.isRunning()).toBe(true);
+    expect(x.crawl.db.prepare("SELECT count(*) AS n FROM analysis_lock").get()?.n).toBe(1);
+    cleaned();
+    await x.runner.settled();
+    expect(x.runner.isRunning()).toBe(false);
+    expect(x.crawl.db.prepare("SELECT count(*) AS n FROM analysis_lock").get()?.n).toBe(0);
+  } finally {
+    cleaned();
+  }
 });
 
 it("会话内 429 仍遵循统一冷却并在结果落库后释放", async () => {

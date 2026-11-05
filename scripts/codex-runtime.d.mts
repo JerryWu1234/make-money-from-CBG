@@ -10,8 +10,10 @@ export type CodexRuntimeOptions = {
 export function acquireCodexRuntime(options?: CodexRuntimeOptions): Promise<{
   directory: string;
   clean(assertActive?: () => void): Promise<string[]>;
+  sweep(assertActive?: () => void): Promise<string[]>;
   release(): Promise<void>;
 }>;
+export function cleanActiveCodexRuntime(reason?: string): Promise<string[]>;
 export function attachCodexRuntime(
   server: ViteDevServer,
   options?: CodexRuntimeOptions,

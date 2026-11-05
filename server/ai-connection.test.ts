@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   requestCodexSearch: vi.fn(),
   probeCodex: vi.fn(),
   shutdownCodex: vi.fn(),
+  cancelPendingCodexLogin: vi.fn(),
   probeDeepSeek: vi.fn(),
   requestDeepSeek: vi.fn(),
   readFile: vi.fn(),
@@ -31,6 +32,9 @@ const mocks = vi.hoisted(() => ({
   searchPetGearPricing: vi.fn(),
 }));
 vi.mock("./ai/codex", () => mocks);
+vi.mock("./ai/codex-lifecycle", () => ({
+  withCodexOperation: (work: () => Promise<unknown>) => work(),
+}));
 vi.mock("./ai/deepseek", () => ({
   probeDeepSeek: mocks.probeDeepSeek,
   requestDeepSeek: mocks.requestDeepSeek,
