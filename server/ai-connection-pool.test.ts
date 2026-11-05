@@ -10,6 +10,16 @@ const mocks = vi.hoisted(() => ({
   run: vi.fn(),
   release: vi.fn(),
   close: vi.fn(),
+  beginBatch: vi.fn(),
+  finishBatch: vi.fn(),
+  batchRun: vi.fn(),
+}));
+vi.mock("./ai/codex-lifecycle", () => ({
+  beginCodexBatch: mocks.beginBatch,
+  withCodexOperation: (work: () => Promise<unknown>) => work(),
+  CodexCleanupError: class extends Error {
+    readonly code = "CODEX_CLEANUP_FAILED";
+  },
 }));
 vi.mock("./ai/codex", () => ({
   codexAccount: mocks.account,
@@ -18,6 +28,7 @@ vi.mock("./ai/codex", () => ({
   requestCodex: vi.fn(),
   probeCodex: vi.fn(),
   shutdownCodex: vi.fn(),
+  cancelPendingCodexLogin: vi.fn(),
   startCodexLogin: vi.fn(),
   codexLoginStatus: vi.fn(),
   cancelCodexLogin: vi.fn(),
@@ -42,6 +53,9 @@ beforeEach(() => {
   mocks.run.mockResolvedValue({ text: "result", usage: { input_tokens: 1 } });
   mocks.release.mockResolvedValue(undefined);
   mocks.close.mockResolvedValue(undefined);
+  mocks.finishBatch.mockResolvedValue(undefined);
+  mocks.batchRun.mockImplementation((work: () => Promise<unknown>) => work());
+  mocks.beginBatch.mockResolvedValue({ run: mocks.batchRun, finish: mocks.finishBatch });
 });
 
 it("会话池保留模型、并发、账号校验和请求参数，并交由调用方释放", async () => {
@@ -67,6 +81,43 @@ it("会话池保留模型、并发、账号校验和请求参数，并交由调�
   await pool.close();
   expect(mocks.release).toHaveBeenCalledWith(true);
   expect(mocks.close).toHaveBeenCalledOnce();
+  expect(mocks.finishBatch).toHaveBeenCalledOnce();
+  expect(mocks.close.mock.invocationCallOrder[0]).toBeLessThan(
+    mocks.finishBatch.mock.invocationCallOrder[0]!,
+  );
+});
+
+it("关闭批次先等待分析进程退出，再清共享缓存，重复关闭只执行一次", async () => {
+  const { prepareAnalysisClient } = await import("./ai-connection");
+  const client = await prepareAnalysisClient("codex");
+  if (!("createSessionPool" in client) || !client.createSessionPool) throw new Error("缺少会话池");
+  const pool = client.createSessionPool(10);
+  let stopped!: () => void;
+  mocks.close.mockImplementation(() => new Promise<void>((resolve) => (stopped = resolve)));
+  const closing = pool.close();
+  await vi.waitFor(() => expect(mocks.close).toHaveBeenCalledOnce());
+  expect(mocks.finishBatch).not.toHaveBeenCalled();
+  stopped();
+  await closing;
+  await pool.close();
+  expect(mocks.finishBatch).toHaveBeenCalledOnce();
+  expect(mocks.close).toHaveBeenCalledOnce();
+});
+
+it("分析进程关闭和缓存清理都失败时保留两个原因，仍尝试批次收尾", async () => {
+  const { prepareAnalysisClient } = await import("./ai-connection");
+  const client = await prepareAnalysisClient("codex");
+  if (!("createSessionPool" in client) || !client.createSessionPool) throw new Error("缺少会话池");
+  const pool = client.createSessionPool(1);
+  const stopError = new Error("进程未退出");
+  const cleanError = new Error("目录被占用");
+  mocks.close.mockRejectedValueOnce(stopError);
+  mocks.finishBatch.mockRejectedValueOnce(cleanError);
+  await expect(pool.close()).rejects.toMatchObject({
+    code: "CODEX_CLEANUP_FAILED",
+    cause: expect.objectContaining({ errors: [stopError, cleanError] }),
+  });
+  expect(mocks.finishBatch).toHaveBeenCalledOnce();
 });
 
 it("账号已变化时不让已获取的会话启动模型请求", async () => {

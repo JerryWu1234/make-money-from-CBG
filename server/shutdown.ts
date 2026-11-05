@@ -1,18 +1,26 @@
 import { crawlActivity, stopCrawl } from "./crawler/controller";
 import { shutdownScanSchedule } from "./crawler/schedule";
 import { shutdownAnalysis } from "./analysis/controller";
-import { shutdownAiConnections } from "./ai-connection";
+import { shutdownAiConnections, stopAiConnectionRequests } from "./ai-connection";
 import { beginServiceShutdown } from "./service-lifecycle";
 import { shutdownBrowserSession } from "./session";
 import { finishBrowserWorkflow } from "./cbg";
 
 export async function shutdownLocalService() {
   beginServiceShutdown();
+  // Release pending login holds before analysis waits for its exclusive cleanup.
+  // Start cancellation without awaiting it so analysis can abort in parallel.
+  const cancellation = stopAiConnectionRequests();
   // 先禁止定时器发起新任务，再让采集和分析各自保存退出状态、释放租约。
   const schedule = shutdownScanSchedule();
   const capture = crawlActivity();
   stopCrawl();
-  const results = await Promise.allSettled([schedule, capture?.completion, shutdownAnalysis()]);
+  const results = await Promise.allSettled([
+    schedule,
+    capture?.completion,
+    shutdownAnalysis(),
+    cancellation,
+  ]);
   // 某一路退出失败时，也必须等待其他任务并关闭 AI 连接。
   results.push(...(await Promise.allSettled([shutdownAiConnections()])));
   const failures = results.filter((result) => result.status === "rejected");

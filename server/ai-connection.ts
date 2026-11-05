@@ -3,6 +3,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { publicAiRequestError } from "./ai/request-error";
 import { CodexPool } from "./ai/codex-pool";
+import { beginCodexBatch, CodexCleanupError, withCodexOperation } from "./ai/codex-lifecycle";
 import {
   codexAccount,
   codexModel,
@@ -10,6 +11,7 @@ import {
   probeCodex,
   requestCodex,
   shutdownCodex,
+  cancelPendingCodexLogin,
 } from "./ai/codex";
 import {
   DEFAULT_DEEPSEEK_MODEL,
@@ -156,6 +158,18 @@ export async function verifyAi(
   input: { apiKey?: unknown; model?: unknown },
   requestSignal: AbortSignal,
 ): Promise<AiConnectionStatus> {
+  return provider === "codex"
+    ? withCodexOperation(() => verifyAiConnection(provider, input, requestSignal), {
+        cleanupAfter: true,
+      })
+    : verifyAiConnection(provider, input, requestSignal);
+}
+
+async function verifyAiConnection(
+  provider: AiProvider,
+  input: { apiKey?: unknown; model?: unknown },
+  requestSignal: AbortSignal,
+): Promise<AiConnectionStatus> {
   if (active.has(provider)) throw new Error("当前服务正在验证，请稍候");
   const controller = new AbortController();
   const signal = AbortSignal.any([requestSignal, controller.signal, AbortSignal.timeout(60_000)]);
@@ -221,8 +235,13 @@ export async function verifyAi(
   }
 }
 
-export async function shutdownAiConnections() {
+export async function stopAiConnectionRequests() {
   for (const controller of active.values()) controller.abort();
+  await cancelPendingCodexLogin();
+}
+
+export async function shutdownAiConnections() {
+  await stopAiConnectionRequests();
   await shutdownCodex();
 }
 
@@ -336,9 +355,16 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
       searchPetGear,
       createSessionPool(concurrency: number) {
         const pool = new CodexPool(concurrency, model);
+        const batch = beginCodexBatch();
+        // A queued batch may not be acquired until the current cleanup ends.
+        // Its rejection is still observed by acquire() or close().
+        void batch.catch(() => {});
+        let closing: Promise<void> | undefined;
         return {
           async acquire(signal: AbortSignal) {
-            const lease = await pool.acquire(signal);
+            signal.throwIfAborted();
+            const owner = await batch;
+            const lease = await owner.run(() => pool.acquire(signal));
             return {
               async analyze(
                 prompt: string,
@@ -346,24 +372,47 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
                 requestSignal: AbortSignal,
                 options?: AnalysisRequestOptions,
               ) {
-                const current = await codexAccount();
-                if (
-                  !current ||
-                  current.email !== account.email ||
-                  (current.workspaceId ?? null) !== workspaceId
-                )
-                  throw new Error("ChatGPT 登录账号已变化，请重新连接");
-                requestSignal.throwIfAborted();
-                try {
-                  return await lease.run(prompt, schema, requestSignal, options);
-                } catch (error) {
-                  throw publicAiRequestError(error, publicError(error));
-                }
+                return owner.run(async () => {
+                  const current = await codexAccount();
+                  if (
+                    !current ||
+                    current.email !== account.email ||
+                    (current.workspaceId ?? null) !== workspaceId
+                  )
+                    throw new Error("ChatGPT 登录账号已变化，请重新连接");
+                  requestSignal.throwIfAborted();
+                  try {
+                    return await lease.run(prompt, schema, requestSignal, options);
+                  } catch (error) {
+                    throw publicAiRequestError(error, publicError(error));
+                  }
+                });
               },
-              release: (persisted: boolean) => lease.release(persisted),
+              release: (persisted: boolean) => owner.run(() => lease.release(persisted)),
             };
           },
-          close: () => pool.close(),
+          close: () =>
+            (closing ||= (async () => {
+              const owner = await batch;
+              const failures: unknown[] = [];
+              try {
+                await owner.run(() => pool.close());
+              } catch (error) {
+                failures.push(error);
+              }
+              try {
+                await owner.finish();
+              } catch (error) {
+                failures.push(error);
+              }
+              if (failures.length)
+                throw new CodexCleanupError("Codex 分析结束后的运行数据清理未完成", {
+                  cause:
+                    failures.length === 1
+                      ? failures[0]
+                      : new AggregateError(failures, "关闭分析进程及清理运行数据失败"),
+                });
+            })()),
         };
       },
       async analyze(
@@ -372,22 +421,28 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
         signal: AbortSignal,
         options?: AnalysisRequestOptions,
       ) {
-        const current = await codexAccount();
-        if (
-          !current ||
-          current.email !== account.email ||
-          (current.workspaceId ?? null) !== workspaceId
-        )
-          throw new Error("ChatGPT 登录账号已变化，请重新连接");
-        try {
-          return await requestCodex(prompt, signal, {
-            model,
-            outputSchema: schema,
-            ...(options?.bareRoleReview ? { bareRoleReview: true } : {}),
-          });
-        } catch (error) {
-          throw publicAiRequestError(error, publicError(error));
-        }
+        return withCodexOperation(
+          async () => {
+            const current = await codexAccount();
+            if (
+              !current ||
+              current.email !== account.email ||
+              (current.workspaceId ?? null) !== workspaceId
+            )
+              throw new Error("ChatGPT 登录账号已变化，请重新连接");
+            signal.throwIfAborted();
+            try {
+              return await requestCodex(prompt, signal, {
+                model,
+                outputSchema: schema,
+                ...(options?.bareRoleReview ? { bareRoleReview: true } : {}),
+              });
+            } catch (error) {
+              throw publicAiRequestError(error, publicError(error));
+            }
+          },
+          { cleanupAfter: true },
+        );
       },
     };
   }

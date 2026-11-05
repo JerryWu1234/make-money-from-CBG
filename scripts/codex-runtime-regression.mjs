@@ -17,7 +17,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { acquireCodexRuntime, attachCodexRuntime, codexHomeDirectory } from "./codex-runtime.mjs";
+import {
+  acquireCodexRuntime,
+  attachCodexRuntime,
+  cleanActiveCodexRuntime,
+  codexHomeDirectory,
+} from "./codex-runtime.mjs";
 
 const run = promisify(execFile);
 
@@ -304,6 +309,116 @@ void test("release times out clearly, still releases ownership, and skips waitin
   });
 });
 
+void test("repeated batch sweeps remove new runtime files while retaining the process lock and credentials", async () => {
+  await fixture(async ({ options, directory }) => {
+    const lease = await acquireCodexRuntime(options);
+    try {
+      await assert.rejects(lease.sweep(), /启动清理尚未开始/);
+      await writeFile(join(directory, "auth.json"), "fixture credentials");
+      await writeFile(join(directory, "config.toml"), "fixture settings");
+      await lease.clean();
+      for (let batch = 0; batch < 2; batch++) {
+        await writeFile(join(directory, "logs_2.sqlite"), `batch ${batch}`);
+        await writeFile(join(directory, "logs_2.sqlite-wal"), `batch ${batch}`);
+        await lease.clean();
+        assert.equal(await readFile(join(directory, "logs_2.sqlite"), "utf8"), `batch ${batch}`);
+        assert.deepEqual((await lease.sweep()).sort(), ["logs_2.sqlite", "logs_2.sqlite-wal"]);
+      }
+      const child = await run(process.execPath, [
+        "--input-type=module",
+        "-e",
+        `
+        import { acquireCodexRuntime } from ${JSON.stringify(import.meta.resolve("./codex-runtime.mjs"))};
+        try {
+          const lease = await acquireCodexRuntime(${JSON.stringify(options)});
+          await lease.release();
+          process.exitCode = 42;
+        } catch (error) {
+          if (!error.message.includes("已有服务")) throw error;
+          process.stdout.write("lock remains held");
+        }
+      `,
+      ]);
+      assert.equal(child.stdout, "lock remains held");
+      assert.equal(await readFile(join(directory, "auth.json"), "utf8"), "fixture credentials");
+      assert.equal(await readFile(join(directory, "config.toml"), "utf8"), "fixture settings");
+    } finally {
+      await lease.release();
+    }
+  });
+});
+
+void test("an occupied sweep preserves files and its cause, then succeeds after the writer exits", async () => {
+  await fixture(async ({ options, directory }) => {
+    let writerActive = false;
+    const writerError = new Error("fixture writer remains active");
+    const lease = await acquireCodexRuntime({
+      ...options,
+      releaseTimeoutMs: 120,
+      checkWriters: async () => {
+        if (writerActive) throw writerError;
+      },
+    });
+    try {
+      await lease.clean();
+      await writeFile(join(directory, "state_5.sqlite"), "keep while occupied");
+      await writeFile(join(directory, "auth.json"), "keep credentials");
+      writerActive = true;
+      await assert.rejects(lease.sweep(), (error) => {
+        assert.match(error.message, /未清理运行文件，服务锁仍持有/);
+        assert.equal(error.cause, writerError);
+        return true;
+      });
+      assert.equal(
+        await readFile(join(directory, "state_5.sqlite"), "utf8"),
+        "keep while occupied",
+      );
+      await assert.rejects(acquireCodexRuntime(options), /已有服务/);
+      writerActive = false;
+      assert.deepEqual(await lease.sweep(), ["state_5.sqlite"]);
+      assert.equal(await readFile(join(directory, "auth.json"), "utf8"), "keep credentials");
+    } finally {
+      writerActive = false;
+      await lease.release();
+    }
+  });
+});
+
+void test("overlapping sweeps share the same operation and release waits until it finishes", async () => {
+  await fixture(async ({ options, directory }) => {
+    let blocked = false;
+    let unblock;
+    const block = new Promise((resolve) => (unblock = resolve));
+    let checked;
+    const waiting = new Promise((resolve) => (checked = resolve));
+    const lease = await acquireCodexRuntime({
+      ...options,
+      checkWriters: async () => {
+        if (!blocked) return;
+        checked();
+        await block;
+      },
+    });
+    await lease.clean();
+    await writeFile(join(directory, "models_cache.json"), "batch cache");
+    blocked = true;
+    const first = lease.sweep();
+    assert.equal(lease.sweep(), first);
+    await waiting;
+    let releaseFinished = false;
+    const release = lease.release().then(() => (releaseFinished = true));
+    await Promise.resolve();
+    assert.equal(releaseFinished, false);
+    await assert.rejects(acquireCodexRuntime(options), /已有服务/);
+    blocked = false;
+    unblock();
+    assert.deepEqual(await first, ["models_cache.json"]);
+    await release;
+    const next = await acquireCodexRuntime(options);
+    await next.release();
+  });
+});
+
 function fakeServer(projectRoot) {
   const httpServer = new EventEmitter();
   httpServer.listening = false;
@@ -331,6 +446,35 @@ function fakeServer(projectRoot) {
     },
   };
 }
+
+void test("active cleanup requires its project's live lease and waits for startup readiness", async () => {
+  await fixture(async ({ options, projectRoot, directory }) => {
+    const originalCwd = process.cwd();
+    process.chdir(projectRoot);
+    let close;
+    try {
+      await assert.rejects(cleanActiveCodexRuntime(), /没有唯一的活动 Codex 服务租约/);
+      const server = fakeServer(projectRoot);
+      close = await attachCodexRuntime(server, options);
+      let finished = false;
+      const sweep = cleanActiveCodexRuntime("fixture batch").then((names) => {
+        finished = true;
+        return names;
+      });
+      await Promise.resolve();
+      assert.equal(finished, false);
+      server.bind();
+      await sweep;
+      await writeFile(join(directory, "logs_2.sqlite"), "second batch");
+      assert.deepEqual(await cleanActiveCodexRuntime("fixture next batch"), ["logs_2.sqlite"]);
+      await close();
+      await assert.rejects(cleanActiveCodexRuntime(), /没有唯一的活动 Codex 服务租约/);
+    } finally {
+      if (close) await close();
+      process.chdir(originalCwd);
+    }
+  });
+});
 
 void test("a port conflict never cleans, successful binding gates ready and requests, reload does not clean twice", async () => {
   await fixture(async ({ projectRoot, options, directory }) => {

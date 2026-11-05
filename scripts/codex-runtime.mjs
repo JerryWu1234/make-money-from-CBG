@@ -138,7 +138,7 @@ async function assertNoWriters(directory, { timeoutMs = 10_000 } = {}) {
   throw new Error("无法确认 Codex 运行目录没有写入者，已停止清理");
 }
 
-async function waitForWriters(directory, checkWriters, timeoutMs) {
+async function waitForWriters(directory, checkWriters, timeoutMs, keepLock = false) {
   const deadline = performance.now() + timeoutMs;
   let lastError;
   while (performance.now() < deadline) {
@@ -161,7 +161,9 @@ async function waitForWriters(directory, checkWriters, timeoutMs) {
     if (pause) await new Promise((resolve) => setTimeout(resolve, pause));
   }
   throw new Error(
-    `等待 Codex 进程退出超时（${timeoutMs} 毫秒），服务锁将释放；下次启动仍会检查残留写入者`,
+    keepLock
+      ? `等待 Codex 进程退出超时（${timeoutMs} 毫秒），未清理运行文件，服务锁仍持有`
+      : `等待 Codex 进程退出超时（${timeoutMs} 毫秒），服务锁将释放；下次启动仍会检查残留写入者`,
     { cause: lastError },
   );
 }
@@ -177,59 +179,117 @@ export async function acquireCodexRuntime({
   await privateDirectory(directory, projectRoot);
   const lock = await acquireLock(join(dirname(directory), "codex-runtime.lock"));
   let cleaning;
+  let sweeping;
   let cleaned = false;
+  let closing = false;
   let released = false;
   let releasing;
+  const removeGenerated = async (assertActive, waitForExit) => {
+    lock.assertHeld();
+    if (waitForExit) await waitForWriters(directory, checkWriters, releaseTimeoutMs, true);
+    else await checkWriters(directory);
+    lock.assertHeld();
+    assertActive();
+    if (released) throw new Error("Codex 服务已关闭，已停止清理");
+    await privateDirectory(directory, projectRoot);
+    const names = (await readdir(directory)).filter(
+      (name) =>
+        generatedDirectories.has(name) || generatedFiles.has(name) || generatedDatabase.test(name),
+    );
+    try {
+      if ((await lstat(join(directory, "skills"))).isSymbolicLink())
+        throw new Error("Codex 系统技能目录不能通过符号链接重定向");
+      await lstat(join(directory, "skills", ".system"));
+      names.push("skills/.system");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    // Validate the complete deletion set before removing the first entry.
+    // rm does not follow nested symlinks, and top-level redirections are rejected.
+    for (const name of names)
+      if ((await lstat(join(directory, name))).isSymbolicLink())
+        throw new Error(`Codex 生成文件不能是符号链接：${name}`);
+    lock.assertHeld();
+    assertActive();
+    if (released) throw new Error("Codex 服务已关闭，已停止清理");
+    for (const name of names) await rm(join(directory, name), { recursive: true, force: true });
+    return names;
+  };
   return {
     directory,
     clean(assertActive = () => {}) {
+      if (closing && !cleaning) return Promise.reject(new Error("Codex 服务正在关闭，已停止清理"));
       cleaning ||= (async () => {
-        lock.assertHeld();
-        await checkWriters(directory);
-        lock.assertHeld();
-        assertActive();
-        if (released) throw new Error("Codex 服务已关闭，已停止清理");
-        await privateDirectory(directory, projectRoot);
-        const names = (await readdir(directory)).filter(
-          (name) =>
-            generatedDirectories.has(name) ||
-            generatedFiles.has(name) ||
-            generatedDatabase.test(name),
-        );
-        try {
-          if ((await lstat(join(directory, "skills"))).isSymbolicLink())
-            throw new Error("Codex 系统技能目录不能通过符号链接重定向");
-          await lstat(join(directory, "skills", ".system"));
-          names.push("skills/.system");
-        } catch (error) {
-          if (error.code !== "ENOENT") throw error;
-        }
-        // Validate the complete deletion set before removing the first entry.
-        // rm does not follow nested symlinks, and top-level redirections are rejected.
-        for (const name of names)
-          if ((await lstat(join(directory, name))).isSymbolicLink())
-            throw new Error(`Codex 生成文件不能是符号链接：${name}`);
-        for (const name of names) await rm(join(directory, name), { recursive: true, force: true });
+        const names = await removeGenerated(assertActive, false);
         cleaned = true;
         return names;
       })();
       return cleaning;
     },
+    sweep(assertActive = () => {}) {
+      if (closing) return Promise.reject(new Error("Codex 服务正在关闭，已停止清理"));
+      if (!cleaning) return Promise.reject(new Error("Codex 启动清理尚未开始，拒绝清理运行文件"));
+      if (!sweeping) {
+        const pending = (async () => {
+          await cleaning;
+          return await removeGenerated(assertActive, true);
+        })();
+        sweeping = pending;
+        const finished = () => {
+          if (sweeping === pending) sweeping = undefined;
+        };
+        void pending.then(finished, finished);
+      }
+      return sweeping;
+    },
     release() {
       releasing ||= (async () => {
-        released = true;
+        closing = true;
         if (cleaning) await cleaning.catch(() => {});
+        let sweepFailure;
+        if (sweeping) {
+          try {
+            await sweeping;
+          } catch (error) {
+            sweepFailure = error;
+          }
+        }
         try {
           // SDK completion can precede its CLI process closing SQLite handles.
           // Keep ownership until those short-lived writers finish shutting down.
           if (cleaned) await waitForWriters(directory, checkWriters, releaseTimeoutMs);
+          if (sweepFailure) throw sweepFailure;
         } finally {
+          released = true;
           await lock.release();
         }
       })();
       return releasing;
     },
   };
+}
+
+/** Called only after the lifecycle manager drains requests and closes Codex writers. */
+export async function cleanActiveCodexRuntime(reason = "分析结束") {
+  const projectRoot = realpathSync(process.cwd());
+  const states = globalThis[runtimeKey];
+  const matches = states
+    ? [...states.values()].filter((state) => state.projectRoot === projectRoot && state.users.size)
+    : [];
+  if (matches.length !== 1)
+    throw new Error("当前项目没有唯一的活动 Codex 服务租约，拒绝清理运行文件");
+  const state = matches[0];
+  await state.startupReady;
+  const assertActive = () => {
+    if (states.get(state.directory) !== state || !state.users.size)
+      throw new Error("Codex 服务租约已关闭，拒绝清理运行文件");
+  };
+  assertActive();
+  const lease = await state.lease;
+  const names = await lease.sweep(assertActive);
+  const logger = [...state.users][0]?.config.logger;
+  logger?.info(`已清理项目 Codex 运行文件（${reason}，${names.length} 项），保留登录与配置`);
+  return names;
 }
 
 /** Bind first, then clean before publishing listening or accepting business requests. */
@@ -239,10 +299,22 @@ export async function attachCodexRuntime(server, options = {}) {
   const states = (globalThis[runtimeKey] ||= new Map());
   let state = states.get(directory);
   if (!state) {
+    let resolveStartup;
+    let rejectStartup;
+    const startupReady = new Promise((resolve, reject) => {
+      resolveStartup = resolve;
+      rejectStartup = reject;
+    });
+    void startupReady.catch(() => {});
     state = {
+      directory,
+      projectRoot: realpathSync(options.projectRoot || server.config.root),
       lease: acquireCodexRuntime({ projectRoot: server.config.root, ...options }),
       users: new Set(),
       ready: null,
+      startupReady,
+      resolveStartup,
+      rejectStartup,
     };
     states.set(directory, state);
     state.lease.catch(() => {
@@ -271,6 +343,7 @@ export async function attachCodexRuntime(server, options = {}) {
     state.ready.then(
       (names) => {
         if (!active) return;
+        state.resolveStartup();
         resolveReady();
         if (names.length && !state.logged) {
           state.logged = true;
@@ -281,6 +354,7 @@ export async function attachCodexRuntime(server, options = {}) {
         emit.call(http, "listening", ...args);
       },
       (error) => {
+        state.rejectStartup(error);
         rejectReady(error);
         emit.call(http, "error", error);
         http.close();
@@ -299,6 +373,7 @@ export async function attachCodexRuntime(server, options = {}) {
     rejectReady(new Error("本地服务已关闭"));
     state.users.delete(server);
     if (!state.users.size) {
+      state.rejectStartup(new Error("Codex 服务已关闭，启动清理未完成"));
       if (states.get(directory) === state) states.delete(directory);
       await lease.release();
     }

@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   stopCapture: vi.fn(),
   stopSchedule: vi.fn(),
   stopAnalysis: vi.fn(),
+  cancelAi: vi.fn(),
   closeAi: vi.fn(),
   closeBrowser: vi.fn(),
   finishWorkflow: vi.fn(),
@@ -15,7 +16,10 @@ vi.mock("./crawler/controller", () => ({
 }));
 vi.mock("./crawler/schedule", () => ({ shutdownScanSchedule: mocks.stopSchedule }));
 vi.mock("./analysis/controller", () => ({ shutdownAnalysis: mocks.stopAnalysis }));
-vi.mock("./ai-connection", () => ({ shutdownAiConnections: mocks.closeAi }));
+vi.mock("./ai-connection", () => ({
+  shutdownAiConnections: mocks.closeAi,
+  stopAiConnectionRequests: mocks.cancelAi,
+}));
 vi.mock("./session", () => ({ shutdownBrowserSession: mocks.closeBrowser }));
 vi.mock("./cbg", () => ({ finishBrowserWorkflow: mocks.finishWorkflow }));
 
@@ -32,17 +36,24 @@ beforeEach(() => {
   vi.resetAllMocks();
   mocks.stopSchedule.mockResolvedValue(undefined);
   mocks.stopAnalysis.mockResolvedValue(undefined);
+  mocks.cancelAi.mockResolvedValue(undefined);
   mocks.closeAi.mockResolvedValue(undefined);
   mocks.closeBrowser.mockResolvedValue(undefined);
   mocks.finishWorkflow.mockResolvedValue(undefined);
 });
 
-it("禁止新定时任务后暂停采集，等采集和分析退出才关闭 AI 连接", async () => {
+it("先取消认证交互并并行暂停分析，等认证、采集和分析退出才关闭 AI 连接", async () => {
   const capture = deferred();
   const analysis = deferred();
+  const cancellation = deferred();
   mocks.activity.mockReturnValue({ completion: capture.promise });
   mocks.stopAnalysis.mockReturnValue(analysis.promise);
+  mocks.cancelAi.mockReturnValue(cancellation.promise);
   const shutdown = shutdownLocalService();
+  expect(mocks.cancelAi.mock.invocationCallOrder[0]).toBeLessThan(
+    mocks.stopAnalysis.mock.invocationCallOrder[0],
+  );
+  expect(mocks.stopAnalysis).toHaveBeenCalledOnce();
   expect(mocks.stopSchedule.mock.invocationCallOrder[0]).toBeLessThan(
     mocks.stopCapture.mock.invocationCallOrder[0],
   );
@@ -50,8 +61,32 @@ it("禁止新定时任务后暂停采集，等采集和分析退出才关闭 AI 
   await Promise.resolve();
   expect(mocks.closeAi).not.toHaveBeenCalled();
   analysis.resolve();
+  await Promise.resolve();
+  expect(mocks.closeAi).not.toHaveBeenCalled();
+  cancellation.resolve();
   await shutdown;
   expect(mocks.stopCapture).toHaveBeenCalledOnce();
+  expect(mocks.closeAi).toHaveBeenCalledOnce();
+});
+
+it("取消认证失败仍等待分析和采集退出并关闭 AI，随后保留取消错误", async () => {
+  const capture = deferred();
+  const analysis = deferred();
+  const failure = new Error("取消登录失败");
+  mocks.activity.mockReturnValue({ completion: capture.promise });
+  mocks.stopAnalysis.mockReturnValue(analysis.promise);
+  mocks.cancelAi.mockRejectedValue(failure);
+  const result = shutdownLocalService().catch((error: unknown) => error);
+  expect(mocks.stopSchedule).toHaveBeenCalledOnce();
+  expect(mocks.stopCapture).toHaveBeenCalledOnce();
+  expect(mocks.stopAnalysis).toHaveBeenCalledOnce();
+  await Promise.resolve();
+  expect(mocks.closeAi).not.toHaveBeenCalled();
+  capture.resolve();
+  analysis.resolve();
+  const error = await result;
+  expect(error).toBeInstanceOf(AggregateError);
+  expect((error as AggregateError).errors).toEqual([failure]);
   expect(mocks.closeAi).toHaveBeenCalledOnce();
 });
 
