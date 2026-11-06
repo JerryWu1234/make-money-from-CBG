@@ -5,10 +5,12 @@ import { itemFromAttributes, isNonRoleEquipment } from "./compact";
 import { equipmentCaptureSummary } from "./detail";
 import type { DetailItem, TabSnapshot } from "./types";
 
-// Exact model/name/level pairs retained by the three failed project captures.
+// Exact model/name/level pairs retained by failed project captures.
 const materials = [
   { model: "3995", name: "附魔宝珠", description: "等级：140", category: "材料 · 附魔宝珠" },
   { model: "4004", name: "光芒石", description: "等级 5", category: "材料 · 光芒石" },
+  { model: "4003", name: "月亮石", description: "等级 5", category: "材料 · 月亮石" },
+  { model: "61719", name: "五色灵尘", description: "等级 6", category: "材料 · 五色灵尘" },
   { model: "56973", name: "玄灵珠·回春", description: "等级6", category: "道具 · 坐骑玄灵珠" },
 ];
 const weapon = () =>
@@ -33,6 +35,20 @@ const tab = (items: DetailItem[]): TabSnapshot => ({
 });
 
 describe("归档中精确确认的非人物装备型号", () => {
+  it.each(["61717", "61718"])("五色灵尘分类不放过相邻的真实玉魄型号%s", (model) => {
+    const item = itemFromAttributes(
+      {
+        data_equip_name: "上古玉魄",
+        data_equip_type: model,
+        data_equip_desc: "等级 6",
+      },
+      1,
+    );
+    expect(item.category).toBe("上古玉魄");
+    expect(isNonRoleEquipment(item)).toBe(false);
+    expect(equipmentCaptureSummary([tab([weapon(), item])], "saved-capture").complete).toBe(false);
+  });
+
   it.each(materials)("$name 保留等级，不要求人物装备属性，不进入装备查价", (material) => {
     const item = itemFromAttributes(
       {

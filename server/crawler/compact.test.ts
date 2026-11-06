@@ -122,7 +122,7 @@ describe("有官网证据的角色装备分类", () => {
       description: "等级 6",
       location: "saved-item-location",
     });
-    for (const modelId of ["", "4003", "04002", "31301"])
+    for (const modelId of ["", "999999", "04002", "31301"])
       expect(
         itemFromAttributes({ ...attrs, data_equip_type: modelId }, 5).category,
       ).toBeUndefined();
