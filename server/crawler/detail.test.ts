@@ -1948,12 +1948,15 @@ describe("装备局部补采", () => {
     }
   }, 15000);
 
-  it("归档确认的附魔宝珠、光芒石和坐骑玄灵珠不等待人物装备提示框", async () => {
+  it("归档确认的材料和坐骑道具不等待人物装备提示框", async () => {
     const page = await browser.newPage();
     try {
       const materials = [
         ["3995", "附魔宝珠", "等级：140"],
         ["4004", "光芒石", "等级 5"],
+        ["4003", "月亮石", "等级 5"],
+        ["61719", "五色灵尘", "等级 6"],
+        ["61719", "五色灵尘", "等级 6"],
         ["56973", "玄灵珠·回春", "等级6"],
       ];
       await page.route(url, (route) =>
@@ -2037,7 +2040,7 @@ describe("装备局部补采", () => {
     const page = await browser.newPage();
     try {
       const unknowns =
-        '<img width="40" height="40" data_equip_name="太阳石" data_equip_type="4003" data_equip_desc="等级 6" data_tip_box="MissingUnknownStoneTipsBox"><img width="40" height="40" data_equip_name="未知武器" data_equip_type="31301" data_equip_desc="伤害 +750" data_tip_box="MissingUnknownWeaponTipsBox">';
+        '<img width="40" height="40" data_equip_name="太阳石" data_equip_type="999999" data_equip_desc="等级 6" data_tip_box="MissingUnknownStoneTipsBox"><img width="40" height="40" data_equip_name="未知武器" data_equip_type="31301" data_equip_desc="伤害 +750" data_tip_box="MissingUnknownWeaponTipsBox">';
       await page.route(url, (route) =>
         route.fulfill({
           contentType: "text/html",
