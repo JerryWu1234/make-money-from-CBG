@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 import { crawl, validateCrawlOptions } from "../../server/crawler/runner";
 import { createCrawlSource } from "../../server/crawler/source";
 import { CrawlStore } from "../../server/crawler/store";
@@ -8,9 +8,11 @@ import { MAIN_TABS } from "../../server/crawler/detail";
 import {
   CrawlAccessError,
   type CrawlStatus,
+  type Listing,
   type SavedRoleRecord,
 } from "../../server/crawler/types";
 import { browserStatus } from "../fixtures/saved-role";
+import { clickForInspection } from "../../server/viewport";
 
 const pages: Record<number, string[]> = { 1: ["a", "b", "c", "d"], 2: ["d", "e"] };
 const raw = (id: string) => ({
@@ -173,6 +175,213 @@ const detailDocument = (id: string) => {
   );
   return `<meta charset="utf-8"><script>var IsLogin=1,LoginInfo={login:1},EquipInfo={eid:'${id}',server_id:367};window.decode_desc=v=>v;window.RoleInfoParser=class{constructor(){this.raw_info={AllRider:{},jinjie_rider_info:{isJinJie:0},all_skills:{201:140},i3FlyLv:0};this.result={shenqi:false,basic_info:{is_gold_id:false}}}};var content=${JSON.stringify(tabs)};function show(name){document.getElementById('panel').innerHTML=content[name]}</script><section><nav>${MAIN_TABS.map((name) => `<button onclick="show('${name}')">${name}</button>`).join("")}</nav><div id="panel">${"模拟角色完整资料。".repeat(30)}</div><div id="RoleEquipTipsBox" style="display:none"></div><textarea id="equip_desc_value" hidden>fixture-source-${id}</textarea></section>`;
 };
+
+// 失败方式：点击 RPC 重叠、网络等待占用点击锁、多页串号、标签漏读、重开数据库后资料不完整。
+for (const concurrency of [2, 6, 10]) {
+  test(`${concurrency}页点击逐个派发，网络并发读取后完整入库并重开核验`, async ({
+    context,
+  }, testInfo) => {
+    test.setTimeout(90000);
+    const origin = "http://127.0.0.1:17777";
+    const ids = Array.from({ length: concurrency }, (_, index) => String.fromCharCode(97 + index));
+    const listings: Listing[] = ids.map((id) => ({
+      key: `367:${id}`,
+      serverId: "367",
+      eid: id,
+      ordersn: `order-${id}`,
+      url: `${origin}/equip?s=367&eid=${id}`,
+      sellingTime: null,
+      createdTime: null,
+      orderTime: null,
+      name: `模拟角色${id}`,
+      price: "222",
+      attrs: {},
+      summary: null,
+    }));
+    const database = testInfo.outputPath(`${concurrency}-role-capture.sqlite`);
+    const workers = await Promise.all(ids.map(() => context.newPage()));
+    const listPage = await context.newPage();
+    let store: CrawlStore | undefined = new CrawlStore(database);
+    const control = new AbortController();
+    let releaseClick!: () => void;
+    const clickGate = new Promise<void>((resolve) => {
+      releaseClick = resolve;
+    });
+    let firstClick!: () => void;
+    const firstClickRequest = new Promise<void>((resolve) => {
+      firstClick = resolve;
+    });
+    let releaseLoading!: () => void;
+    const loadingGate = new Promise<void>((resolve) => {
+      releaseLoading = resolve;
+    });
+    const loading = new Set<string>();
+    const dispatches: Array<{ phase: string; eid: string; inFlight: number }> = [];
+    let phase = "probe";
+    let inFlight = 0;
+    let maximum = 0;
+    const prototype = Object.getPrototypeOf(workers[0].locator("button"));
+    const evaluateAll: Locator["evaluateAll"] = prototype.evaluateAll;
+    // Hold the actual CDP evaluation open; an event handler counter alone cannot show RPC overlap.
+    prototype.evaluateAll = async function (
+      this: Locator,
+      ...args: Parameters<Locator["evaluateAll"]>
+    ) {
+      const [callback] = args;
+      if (typeof callback !== "function" || !/\.click\(\)/.test(String(callback)))
+        return evaluateAll.apply(this, args);
+      const eid = new URL(this.page().url()).searchParams.get("eid")!;
+      maximum = Math.max(maximum, ++inFlight);
+      dispatches.push({ phase, eid, inFlight });
+      try {
+        return await evaluateAll.call(
+          this,
+          async (elements, metadata) => {
+            const { source, phase } = metadata as { source: string; phase: string };
+            // oxlint-disable-next-line typescript/no-implied-eval -- Run the original click callback inside the gated browser RPC.
+            const dispatch = new Function("elements", `return (${source})(elements)`);
+            const clicked: unknown = dispatch(elements);
+            await fetch(`/click-rpc?phase=${phase}`);
+            return clicked;
+          },
+          { source: String(callback), phase },
+        );
+      } finally {
+        inFlight--;
+      }
+    };
+    await context.route("**/*", async (route) => {
+      const url = new URL(route.request().url());
+      if (url.origin !== origin) return route.abort();
+      if (url.pathname === "/click-rpc") {
+        if (url.searchParams.get("phase") === "probe") {
+          firstClick();
+          await clickGate;
+        }
+        return route.fulfill({ body: "done" });
+      }
+      if (url.pathname === "/tab-ready") {
+        loading.add(url.searchParams.get("eid")!);
+        if (loading.size === ids.length) releaseLoading();
+        await loadingGate;
+        return route.fulfill({ body: "ready" });
+      }
+      if (url.pathname !== "/equip") return route.abort();
+      const id = url.searchParams.get("eid")!;
+      // All first-tab loads must start before any can finish. Locking a whole tab read deadlocks here.
+      const gatedFirstTab = `<script>const render=show;show=name=>{render(name);if(name===${JSON.stringify(MAIN_TABS[0])})fetch('/tab-ready?eid=${id}')}</script>`;
+      return route.fulfill({
+        contentType: "text/html",
+        body: detailDocument(id) + gatedFirstTab,
+      });
+    });
+    let capture: Promise<void[]> | undefined;
+    let probe: Promise<void[]> | undefined;
+    try {
+      await Promise.all(workers.map((worker, index) => worker.goto(listings[index].url)));
+      probe = Promise.all(
+        workers.map((worker) =>
+          clickForInspection(worker.getByText("技能", { exact: true }), control.signal),
+        ),
+      );
+      await firstClickRequest;
+      expect(maximum, `${concurrency}个调用已同时发起；仅1个点击RPC可以进入浏览器`).toBe(1);
+      releaseClick();
+      await probe;
+      expect(dispatches).toHaveLength(concurrency);
+      phase = "capture";
+      const available = workers.slice(1);
+      const source = createCrawlSource({
+        listPage,
+        detailPage: workers[0],
+        createDetailPage: async () => available.shift()!,
+        signal: control.signal,
+        onDetailProgress: () => {},
+        log: () => {},
+      });
+      capture = Promise.all(
+        listings.map(async (item) => {
+          store!.observe(item);
+          const detail = await source.detail(item);
+          expect(detail.tabs.map((tab) => tab.name)).toEqual(MAIN_TABS);
+          expect(detail.valuation!.source.eid).toBe(item.eid);
+          store!.save(item, detail);
+        }),
+      );
+      await capture;
+      expect([...loading].sort()).toEqual(ids);
+      expect(maximum).toBe(1);
+      expect(dispatches.filter((entry) => entry.phase === "capture")).toHaveLength(
+        concurrency * MAIN_TABS.length,
+      );
+      store.close();
+      store = new CrawlStore(database);
+      expect(store.count()).toBe(concurrency);
+      const records = listings.map((item) => {
+        const record = store!.detail(item.key) as SavedRoleRecord;
+        expect(record.status).toBe("complete");
+        expect(record.listing.eid).toBe(item.eid);
+        expect(record.detail!.valuation!.source).toMatchObject({ serverId: "367", eid: item.eid });
+        expect(record.detail!.tabs.map((tab) => tab.name)).toEqual(MAIN_TABS);
+        expect(record.detail!.tabs.find((tab) => tab.name === "人物/修炼")!.text).toContain(
+          `模拟角色${item.eid}`,
+        );
+        expect(record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items![0].name).toBe(
+          `武器${item.eid}`,
+        );
+        expect(record.detail!.tabs.find((tab) => tab.name === "技能")!.items).toHaveLength(7);
+        expect(record.detail!.equipmentCapture!.complete).toBe(true);
+        expect(record.detail!.petCapture!.complete).toBe(true);
+        return record;
+      });
+      const sql =
+        "SELECT key,status,json_extract(detail_json,'$.valuation.source.eid') AS eid,json_array_length(json_extract(detail_json,'$.tabs')) AS tabs FROM listings ORDER BY key;";
+      await writeFile(testInfo.outputPath("verify.sql"), sql + "\n");
+      await writeFile(
+        testInfo.outputPath("evidence.json"),
+        JSON.stringify(
+          {
+            fixture: true,
+            concurrency,
+            repeat: `vp exec playwright test tests/e2e/crawl-concurrency.pw.ts --grep '${concurrency}页点击逐个派发' --workers=1`,
+            verify: `sqlite3 ${path.basename(database)} < verify.sql`,
+            database: path.basename(database),
+            clickRpcMaximum: maximum,
+            dispatches,
+            firstTabLoadingGate: {
+              scope: "验证各页网络加载可并行；标签内容同步更新，不验证延迟标签内容就绪。",
+              expected: ids.length,
+              arrived: [...loading].sort(),
+              released: true,
+            },
+            rows: store.db.prepare(sql).all(),
+            records,
+          },
+          null,
+          2,
+        ),
+      );
+      store.close();
+      store = undefined;
+      await testInfo.attach(`${concurrency}页采集验证结果`, {
+        path: testInfo.outputPath("evidence.json"),
+        contentType: "application/json",
+      });
+      await testInfo.attach(`可重开的${concurrency}角色数据库`, {
+        path: database,
+        contentType: "application/vnd.sqlite3",
+      });
+    } finally {
+      releaseClick();
+      releaseLoading();
+      control.abort(new Error("测试清理"));
+      await Promise.allSettled([...(probe ? [probe] : []), ...(capture ? [capture] : [])]);
+      prototype.evaluateAll = evaluateAll;
+      await Promise.allSettled([...workers, listPage].map((worker) => worker.close()));
+      store?.close();
+    }
+  });
+}
 
 // 失败方式：页面未传并发数、详情页串号、暂停后仍落库、续采丢失排队项、跨页重复入库。
 test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", async ({ page, context }, testInfo) => {

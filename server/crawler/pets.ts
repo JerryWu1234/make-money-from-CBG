@@ -1,6 +1,6 @@
 import type { Page } from "playwright-core";
 import type { PetSnapshot, RoleDetail, TabSnapshot } from "./types";
-import { hoverForInspection } from "../viewport";
+import { clickForInspection, hoverForInspection } from "../viewport";
 import { captureBrowserStep } from "../browser-evidence";
 
 export function petCaptureSummary(
@@ -175,7 +175,7 @@ export async function collectPets(
     report(`正在读取第 ${index + 1}/${discovered.count} 只召唤兽的资质、技能及装备…`);
     const entry = page.locator(`[data-cbg-pet-index="${index}"]`);
     await hoverForInspection(page, entry);
-    await entry.evaluate((el) => (el as HTMLElement).click());
+    await clickForInspection(entry, signal);
     await settled();
     const proof = await page.evaluate(() => {
       const root = document.querySelector<HTMLElement>("[data-cbg-detail-root]")!;

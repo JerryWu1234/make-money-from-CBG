@@ -677,7 +677,7 @@ async function captureMountEntries(
   for (let index = 0; index < (await entries.count()); index++) {
     checkAborted(signal);
     report(`正在读取第 ${index + 1} 只坐骑…`);
-    await clickForInspection(entries.nth(index));
+    await clickForInspection(entries.nth(index), signal);
     await pace(signal, 250, 150);
     tabs.push(await capture(page, `坐骑 / 第${index + 1}只`));
     await captureBrowserStep(
@@ -772,7 +772,7 @@ async function inspectEquipmentTabs(
     if (href && /^https?:|^\//.test(href)) continue;
     report(`正在读取道具/法宝 / ${name}`);
     await hoverForInspection(page, tab);
-    await clickForInspection(tab);
+    await clickForInspection(tab, signal);
     await settled(page, signal);
     const child = await capture(page, `道具/法宝 / ${name}`);
     await inspectItems(page, child, signal, report, issues, worn);
@@ -811,7 +811,7 @@ export async function collectDetail(
       await pace(signal, 500, 600);
       await hoverForInspection(page, tab);
       // 仅操作已确认的详情标签，不点击购买、还价、收藏或站外链接。
-      await clickForInspection(tab);
+      await clickForInspection(tab, signal);
       await settled(page, signal);
       await captureBrowserStep(
         page,
@@ -861,7 +861,7 @@ export async function collectDetail(
         const href = await childTab.getAttribute("href");
         if (href && /^https?:|^\//.test(href)) continue;
         await hoverForInspection(page, childTab);
-        await clickForInspection(childTab);
+        await clickForInspection(childTab, signal);
         await settled(page, signal);
         const childSnapshot = await capture(page, `${name} / ${child}`);
         tabs.push(childSnapshot);
@@ -883,7 +883,7 @@ export async function collectDetail(
         const href = await entry.getAttribute("href");
         if (href && /^https?:|^\//.test(href)) continue;
         await hoverForInspection(page, entry);
-        await clickForInspection(entry);
+        await clickForInspection(entry, signal);
         await settled(page, signal);
         const entryName = (await entry.innerText()).trim() || `第 ${index + 1} 项`;
         const entrySnapshot = await capture(page, `${name} / ${entryName}`);
