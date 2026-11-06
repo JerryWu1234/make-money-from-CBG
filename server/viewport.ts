@@ -1,6 +1,7 @@
 import type { Locator, Page } from "playwright-core";
 
 const WORK_VIEWPORT = { width: 1440, height: 1080 };
+let inspectionClickTail = Promise.resolve();
 // CDP 连接日常浏览器时没有 Playwright 默认视口；隐藏 target 可能是 0×0。
 // 只调整本程序的隐藏页，不调整用户的浏览器窗口。
 export async function ensureWorkViewport(page: Page) {
@@ -14,12 +15,21 @@ export async function ensureWorkViewport(page: Page) {
   }
 }
 /** Use the verified locator directly in the main world, without adopting a node handle. */
-export async function clickForInspection(element: Locator) {
-  const clicked = await element.evaluateAll((elements) => {
-    if (elements.length !== 1) return false;
-    (elements[0] as HTMLElement).click();
-    return true;
+export async function clickForInspection(element: Locator, signal?: AbortSignal) {
+  // Keep page loading and data reads outside this shared click queue.
+  const click = inspectionClickTail.then(() => {
+    signal?.throwIfAborted();
+    return element.evaluateAll((elements) => {
+      if (elements.length !== 1) return false;
+      (elements[0] as HTMLElement).click();
+      return true;
+    });
   });
+  inspectionClickTail = click.then(
+    () => {},
+    () => {},
+  );
+  const clicked = await click;
   if (!clicked)
     throw Object.assign(new Error("待读取标签或分页目标已变化，未执行点击"), {
       name: "IncompleteDetailError",

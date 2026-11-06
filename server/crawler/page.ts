@@ -275,7 +275,7 @@ export async function gotoPage(
   try {
     // 优先点击网站现有分页链接；远距离定位使用网站自己的跳页函数。
     const link = page.locator(`#pager_bar a[href="javascript:goto(${wanted})"]`).first();
-    if (await link.count()) await clickForInspection(link);
+    if (await link.count()) await clickForInspection(link, signal);
     else
       await page.evaluate((number) => {
         const goto = (window as Window & { goto?: (page: number) => void }).goto;
@@ -321,7 +321,7 @@ export async function prepareList(
       await pace(signal);
       await observeListNavigation(page);
       try {
-        await clickForInspection(page.locator(`#order_menu a[data_attr_name="${field}"]`));
+        await clickForInspection(page.locator(`#order_menu a[data_attr_name="${field}"]`), signal);
         await waitList(page, 1, true);
       } finally {
         await clearListNavigation(page).catch(() => {});

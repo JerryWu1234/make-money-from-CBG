@@ -1,6 +1,131 @@
 import { expect, it, vi } from "vite-plus/test";
 import type { Locator, Page } from "playwright-core";
-import { hoverForInspection } from "./viewport";
+import { clickForInspection, hoverForInspection } from "./viewport";
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+it.each([2, 6, 10])("%s 个页面的点击按调用顺序执行，同时最多执行一次", async (count) => {
+  const entered = Array.from({ length: count }, deferred);
+  const release = Array.from({ length: count }, deferred);
+  const order: number[] = [];
+  let active = 0;
+  let maximum = 0;
+  const targets = release.map((gate, index) => ({
+    evaluateAll: vi.fn(async () => {
+      order.push(index);
+      maximum = Math.max(maximum, ++active);
+      entered[index].resolve();
+      await gate.promise;
+      active--;
+      return true;
+    }),
+  }));
+  const clicks = targets.map((target) => clickForInspection(target as unknown as Locator));
+  try {
+    for (let index = 0; index < targets.length; index++) {
+      await entered[index].promise;
+      expect(order).toEqual(Array.from({ length: index + 1 }, (_, value) => value));
+      expect(active).toBe(1);
+      release[index].resolve();
+    }
+  } finally {
+    release.forEach((gate) => gate.resolve());
+    await Promise.all(clicks);
+  }
+  expect(maximum).toBe(1);
+  targets.forEach((target) => expect(target.evaluateAll).toHaveBeenCalledOnce());
+});
+
+it("点击失败保留原错误，后续点击仍可执行", async () => {
+  const error = new Error("页面已关闭");
+  const failed = { evaluateAll: vi.fn().mockRejectedValue(error) };
+  const next = { evaluateAll: vi.fn().mockResolvedValue(true) };
+  const first = clickForInspection(failed as unknown as Locator);
+  const second = clickForInspection(next as unknown as Locator);
+  await expect(first).rejects.toBe(error);
+  await second;
+  expect(next.evaluateAll).toHaveBeenCalledOnce();
+});
+
+it("排队期间取消的点击不再求值，也不阻塞后续点击", async () => {
+  const entered = deferred();
+  const release = deferred();
+  const first = {
+    evaluateAll: vi.fn(async () => {
+      entered.resolve();
+      await release.promise;
+      return true;
+    }),
+  };
+  const canceled = { evaluateAll: vi.fn().mockResolvedValue(true) };
+  const next = { evaluateAll: vi.fn().mockResolvedValue(true) };
+  const controller = new AbortController();
+  const error = new Error("已停止采集");
+  const running = clickForInspection(first as unknown as Locator);
+  await entered.promise;
+  const pending = clickForInspection(canceled as unknown as Locator, controller.signal);
+  const last = clickForInspection(next as unknown as Locator);
+  const rejection = expect(pending).rejects.toBe(error);
+  controller.abort(error);
+  release.resolve();
+  await Promise.all([running, rejection, last]);
+  expect(canceled.evaluateAll).not.toHaveBeenCalled();
+  expect(next.evaluateAll).toHaveBeenCalledOnce();
+});
+
+it.each([0, 2])("点击目标数量为 %s 时保留原校验和错误，不点击任何目标", async (count) => {
+  const click = vi.fn();
+  const target = {
+    evaluateAll: vi.fn((evaluate: (elements: Element[]) => boolean) =>
+      evaluate(Array.from({ length: count }, () => ({ click }) as unknown as Element)),
+    ),
+  };
+  await expect(clickForInspection(target as unknown as Locator)).rejects.toMatchObject({
+    name: "IncompleteDetailError",
+    message: "待读取标签或分页目标已变化，未执行点击",
+  });
+  expect(click).not.toHaveBeenCalled();
+});
+
+it("唯一点击目标仍执行一次点击", async () => {
+  const click = vi.fn();
+  const target = {
+    evaluateAll: vi.fn((evaluate: (elements: Element[]) => boolean) =>
+      evaluate([{ click } as unknown as Element]),
+    ),
+  };
+  await clickForInspection(target as unknown as Locator);
+  expect(click).toHaveBeenCalledOnce();
+});
+
+it("点击后的业务等待不占住全局点击队列", async () => {
+  const waiting = deferred();
+  const release = deferred();
+  let completed = false;
+  const first = { evaluateAll: vi.fn().mockResolvedValue(true) };
+  const next = { evaluateAll: vi.fn().mockResolvedValue(true) };
+  const capture = (async () => {
+    await clickForInspection(first as unknown as Locator);
+    waiting.resolve();
+    await release.promise;
+    completed = true;
+  })();
+  await waiting.promise;
+  try {
+    await clickForInspection(next as unknown as Locator);
+    expect(next.evaluateAll).toHaveBeenCalledOnce();
+    expect(completed).toBe(false);
+  } finally {
+    release.resolve();
+    await capture;
+  }
+});
 
 const timeout = () =>
   Object.assign(
