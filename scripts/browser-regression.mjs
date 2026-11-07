@@ -29,6 +29,7 @@ const stateUrl = await moduleUrl("server/page-state.ts");
 const { readPageSnapshot, buildPageState, disconnectedState } = await import(stateUrl);
 const { runFixedWorkflow, readRoleList } = await import(
   await moduleUrl("server/workflow.ts", {
+    "./role-search": await moduleUrl("server/role-search.ts"),
     "./config": await moduleUrl("server/config.ts"),
     "./page-state": stateUrl,
     "./browser-evidence": browserEvidenceUrl,
@@ -199,7 +200,7 @@ try {
   assert.equal(context.pages().length, 2);
   assert.equal(await workPage.evaluate(() => sessionStorage.getItem("submits")), "1");
   assert.ok(requests.includes("/cgi-bin/equip_detail.py"));
-  assert.deepEqual(searchArgs, { server_type: "3" });
+  assert.deepEqual(searchArgs, { server_type: "1,2,3" });
   assert.equal(result.roleList.rows.length, 1);
   assert.equal(result.isLoggedIn, true);
   assert.ok(stages.indexOf("cross_server") < stages.indexOf("server_age"));
@@ -208,7 +209,7 @@ try {
   assert.ok(requests.includes("/cgi-bin/equipquery.py?act=show_overall_search_equip"));
   assert.equal(await helper.locator("a[target='_blank']").count(), 0);
   console.log(
-    "PASS: login redirects to a detail page without a cross-server link; one submission reaches cross-server → 3+ years → role search → results in one work page",
+    "PASS: login redirects to a detail page without a cross-server link; one submission reaches cross-server → all three server ages → role search → results in one work page",
   );
   await helper.screenshot({ path: "/tmp/cbg-role-results-regression.png", fullPage: true });
 
@@ -254,7 +255,7 @@ try {
   });
   await assert.rejects(readRoleList(workPage), /未保留/);
   await workPage.evaluate(() => {
-    window.QueryArgs.server_type = "3";
+    window.QueryArgs.server_type = "1,2,3";
     document.querySelector("#query_result").innerHTML =
       '<table id="soldList"><tr><th>角色</th></tr></table>';
   });

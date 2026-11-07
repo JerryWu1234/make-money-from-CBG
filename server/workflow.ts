@@ -2,6 +2,7 @@ import type { Page } from "playwright-core";
 import { CBG_HOME_URL, CBG_CROSS_SERVER_URL } from "./config";
 import { buildPageState, readPageSnapshot, type PageSnapshot } from "./page-state";
 import type { OpenCbgResult, RoleList, WorkflowStep } from "./types";
+import { ROLE_SERVER_TYPES, ROLE_SERVER_AGE_LABEL } from "./role-search";
 import { captureBrowserStep } from "./browser-evidence";
 
 type Publish = (state: Partial<OpenCbgResult>) => void;
@@ -47,7 +48,7 @@ export async function selectServerAge(
   page: Page,
   panel: "#server_type_panel" | "#server_type",
 ): Promise<void> {
-  const option = page.locator(`${panel} li`).filter({ hasText: "3年以上服" }).first();
+  const option = page.locator(`${panel} li[data_value="3"]`).first();
   if (panel === "#server_type" && !(await option.isVisible())) {
     const expand = page.locator("#btn_advance_search_fold");
     if (await expand.isVisible()) await expand.evaluate((el) => (el as HTMLElement).click());
@@ -56,54 +57,67 @@ export async function selectServerAge(
       await title.evaluate((el) => (el as HTMLElement).click());
   }
   await option.waitFor({ state: "visible", timeout: 30000 });
-  // 删除同组其他年龄条件，避免保存的搜索条件把 1 到 3 年服也包含进来。
-  for (const selected of await page.locator(`${panel} li.on`).all()) {
-    if (!(await selected.innerText()).includes("3年以上服"))
-      await selected.evaluate((el) => (el as HTMLElement).click());
-  }
-  if (!(await option.evaluate((el) => el.classList.contains("on")))) {
-    await option.evaluate((el) => (el as HTMLElement).click());
+  // 保留已选标签，只点击缺少的标签，沿用网站自身的多选逻辑。
+  for (const value of ROLE_SERVER_TYPES) {
+    const choice = page.locator(`${panel} li[data_value="${value}"]`).first();
+    await choice.waitFor({ state: "visible", timeout: 30000 });
+    if (!(await choice.evaluate((el) => el.classList.contains("on"))))
+      await choice.evaluate((el) => (el as HTMLElement).click());
   }
   await page.waitForFunction(
-    (panelSelector) => {
-      const choices = Array.from(document.querySelectorAll(`${panelSelector} li.on`));
-      return choices.length === 1 && choices[0].textContent?.trim() === "3年以上服";
+    ({ panelSelector, serverTypes }) => {
+      const choices = Array.from(document.querySelectorAll(`${panelSelector} li.on`))
+        .map((el) => el.getAttribute("data_value") || "")
+        .sort((a, b) => a.localeCompare(b));
+      return choices.join(",") === serverTypes.join(",");
     },
-    panel,
+    { panelSelector: panel, serverTypes: ROLE_SERVER_TYPES },
     { timeout: 10000, polling: 250 },
   );
 }
 
 export async function readRoleList(page: Page): Promise<RoleList> {
-  return page.evaluate(() => {
-    const args = (
-      window as Window & {
-        QueryArgs?: { server_type?: string | number; serverid?: string | number };
-      }
-    ).QueryArgs;
-    if (String(args?.server_type) !== "3")
-      throw new Error("角色列表未保留 3 年以上服条件，已停止。");
-    const serverId = args?.serverid == null ? "" : String(args.serverid).trim();
-    if (serverId && serverId !== "0") throw new Error("角色列表仍限定单个服务器，已停止。");
-    const table = document.querySelector<HTMLTableElement>("#soldList");
-    const clean = (value: string) => value.replace(/\s+/g, " ").trim();
-    const columns = table
-      ? Array.from(table.querySelectorAll("th")).map((cell) => clean(cell.innerText))
-      : [];
-    const rows = table
-      ? Array.from(table.querySelectorAll("tr"))
-          .filter((row) => row.querySelector("td"))
-          .map((row) => Array.from(row.querySelectorAll("td")).map((cell) => clean(cell.innerText)))
-      : [];
-    const empty = document.querySelector<HTMLElement>("#query_result")?.innerText || "";
-    if (!rows.length && !empty.includes("没有符合条件")) throw new Error("角色列表尚未加载完成。");
-    return {
-      columns,
-      rows,
-      serverAge: "3年以上服",
-      ...(!rows.length ? { emptyMessage: "没有符合条件的角色" } : {}),
-    };
-  });
+  return page.evaluate(
+    ({ serverTypes, label }) => {
+      const args = (
+        window as Window & {
+          QueryArgs?: { server_type?: string | number; serverid?: string | number };
+        }
+      ).QueryArgs;
+      if (
+        String(args?.server_type ?? "")
+          .split(",")
+          .map((value) => value.trim())
+          .sort()
+          .join(",") !== serverTypes.join(",")
+      )
+        throw new Error("角色列表未保留全部三个服龄条件，请重新搜索后继续。");
+      const serverId = args?.serverid == null ? "" : String(args.serverid).trim();
+      if (serverId && serverId !== "0") throw new Error("角色列表仍限定单个服务器，已停止。");
+      const table = document.querySelector<HTMLTableElement>("#soldList");
+      const clean = (value: string) => value.replace(/\s+/g, " ").trim();
+      const columns = table
+        ? Array.from(table.querySelectorAll("th")).map((cell) => clean(cell.innerText))
+        : [];
+      const rows = table
+        ? Array.from(table.querySelectorAll("tr"))
+            .filter((row) => row.querySelector("td"))
+            .map((row) =>
+              Array.from(row.querySelectorAll("td")).map((cell) => clean(cell.innerText)),
+            )
+        : [];
+      const empty = document.querySelector<HTMLElement>("#query_result")?.innerText || "";
+      if (!rows.length && !empty.includes("没有符合条件"))
+        throw new Error("角色列表尚未加载完成。");
+      return {
+        columns,
+        rows,
+        serverAge: label,
+        ...(!rows.length ? { emptyMessage: "没有符合条件的角色" } : {}),
+      };
+    },
+    { serverTypes: ROLE_SERVER_TYPES, label: ROLE_SERVER_AGE_LABEL },
+  );
 }
 
 export async function clearServerFilter(page: Page): Promise<void> {
@@ -234,7 +248,7 @@ async function executeFixedWorkflow(page: Page, publish: Publish): Promise<OpenC
     await captureBrowserStep(page, { flow: "query", stage: "登录后跨服购买页面打开完成" });
   }
   await page.locator("#server_type_panel li").first().waitFor({ state: "visible", timeout: 30000 });
-  stage("server_age", "正在选择开服时间：3年以上服…");
+  stage("server_age", "正在选择开服时间：1年以内服、1到3年服、3年以上服…");
   await selectServerAge(page, "#server_type_panel");
   await captureBrowserStep(page, { flow: "query", stage: "开服时间选择完成" });
 
@@ -248,10 +262,10 @@ async function executeFixedWorkflow(page: Page, publish: Publish): Promise<OpenC
     (form as HTMLFormElement).target = "_self";
   });
   await captureBrowserStep(page, { flow: "query", stage: "角色搜索条件准备完成" });
-  stage("role_list", "正在加载3年以上服的角色列表…");
+  stage("role_list", "正在加载全部服龄的角色列表…");
   await clickInWorkPage(page, "#btn_do_query");
   await page.waitForFunction(
-    () => {
+    (serverTypes) => {
       const globals = window as Window & {
         QueryArgs?: { server_type?: string | number };
         CaptchaCheck?: { need_captcha?: boolean };
@@ -259,12 +273,16 @@ async function executeFixedWorkflow(page: Page, publish: Publish): Promise<OpenC
       if (globals.CaptchaCheck?.need_captcha)
         throw new Error("网站要求安全验证，请完成验证后重试。");
       return (
-        String(globals.QueryArgs?.server_type) === "3" &&
+        String(globals.QueryArgs?.server_type ?? "")
+          .split(",")
+          .map((value) => value.trim())
+          .sort()
+          .join(",") === serverTypes.join(",") &&
         (Boolean(document.querySelector("#soldList td")) ||
           document.querySelector<HTMLElement>("#query_result")?.innerText.includes("没有符合条件"))
       );
     },
-    undefined,
+    ROLE_SERVER_TYPES,
     { timeout: 45000, polling: 250 },
   );
   const roleList = await readRoleList(page);
@@ -276,7 +294,7 @@ async function executeFixedWorkflow(page: Page, publish: Publish): Promise<OpenC
     running: false,
     workflowStep: "completed",
     roleList,
-    message: `已进入3年以上服的角色列表，当前页 ${roleList.rows.length} 条。`,
+    message: `已进入全部服龄的角色列表，当前页 ${roleList.rows.length} 条。`,
   };
 }
 

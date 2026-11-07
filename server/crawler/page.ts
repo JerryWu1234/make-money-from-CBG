@@ -1,4 +1,5 @@
 import type { Page } from "playwright-core";
+import { ROLE_SERVER_TYPES } from "../role-search";
 import { clickForInspection, ensureWorkViewport, hoverForInspection } from "../viewport";
 import { parseListing } from "./listing";
 import {
@@ -115,13 +116,19 @@ export async function assertAvailable(page: Page) {
 }
 export async function readListings(page: Page): Promise<ListingPage> {
   await assertAvailable(page);
-  const data = await page.evaluate(() => {
+  const data = await page.evaluate((serverTypes) => {
     const globals = window as Window & {
       QueryArgs?: { server_type?: string; order_by?: string; page?: number };
       QueryResult?: Record<string, unknown>[];
     };
-    if (String(globals.QueryArgs?.server_type) !== "3")
-      throw new Error("当前列表未确认3年以上服条件");
+    if (
+      String(globals.QueryArgs?.server_type ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .sort()
+        .join(",") !== serverTypes.join(",")
+    )
+      throw new Error("当前列表未确认全部三个服龄条件，请重新搜索后继续");
     const pager = document.querySelector<HTMLElement>("#pager_bar")?.innerText || "";
     const current = Number(pager.match(/第\s*(\d+)\s*页/)?.[1] || globals.QueryArgs?.page || 1);
     const total = Number(pager.match(/共\s*(\d+)\s*页/)?.[1] || current);
@@ -159,13 +166,13 @@ export async function readListings(page: Page): Promise<ListingPage> {
       ?.innerText.includes("没有符合条件");
     if (!items.length && !empty) throw new Error("列表没有可识别的商品链接，已停止以免跳过数据");
     return { page: current, totalPages: total, order: globals.QueryArgs?.order_by || "", items };
-  });
+  }, ROLE_SERVER_TYPES);
   return {
     ...data,
-    items: data.items.map((item) => ({
-      ...parseListing(item.href, item.attrs, item.summary, data.order, item.raw),
-      serverAge: "older",
-    })),
+    // 混合服龄列表不能证明单个角色的服龄，不再统一写成三年以上服。
+    items: data.items.map((item) =>
+      parseListing(item.href, item.attrs, item.summary, data.order, item.raw),
+    ),
   };
 }
 interface ListNavigationWindow extends Window {

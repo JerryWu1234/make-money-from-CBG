@@ -41,7 +41,7 @@ const fixture = `<!doctype html><meta charset="utf-8">
 <div id="order_menu"><a data_attr_name="expire_time">到期时间</a></div>
 <div id="soldList"></div><div id="pager_bar"></div><p id="hover-result">尚未悬停</p>
 <script>
-window.QueryArgs={server_type:'3',page:1,order_by:'expire_time DESC'};
+window.QueryArgs={server_type:'1,2,3',page:1,order_by:'expire_time DESC'};
 window.fixtureMouseovers=0;
 const rows=[['1','baseline','已保存的首页角色'],['133','202610231500113-133-OSUWYRGDRWSS','21138978'],['413','after-target','失败商品之后的角色']];
 window.goto=function(number){

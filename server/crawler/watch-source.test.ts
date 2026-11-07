@@ -32,7 +32,7 @@ it.each(["selling_time DESC", "expire_time DESC"])(
       },
     );
     const globals = {
-      QueryArgs: { server_type: "3", order_by: order, page: 1 },
+      QueryArgs: { server_type: "1,2,3", order_by: order, page: 1 },
       QueryResult: [],
       goto: go,
     };
