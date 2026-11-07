@@ -17,8 +17,9 @@ it("完整搜号流程在两个表单全选后，提交三个服龄并读取结�
   const page = await browser.newPage();
   let submitted = "";
   const panel = (id: string) => `<ul id="${id}">
-    <li data_value="1">1年以内服</li><li data_value="2">1到3年服</li>
-    <li data_value="3" class="on">3年以上服</li></ul>
+    <li ${id === "server_type" ? 'data_value="1"' : ""}>1年内服</li>
+    <li ${id === "server_type" ? 'data_value="2"' : ""}>1到3年服</li>
+    <li ${id === "server_type" ? 'data_value="3"' : ""} class="on">3年以上服</li></ul>
     <script>document.querySelectorAll('li').forEach(el=>el.onclick=()=>el.classList.toggle('on'))</script>`;
   // 所有地址都被拦截并由内存数据响应，不向官网发送请求。
   await page.route("**/*", async (route) => {
@@ -53,21 +54,21 @@ it("完整搜号流程在两个表单全选后，提交三个服龄并读取结�
 
 // 只操作内存模拟页面；不访问官网，也不使用采集浏览器的持久化配置。
 it.each(["server_type_panel", "server_type"])(
-  "%s 从仅三年以上服补选另外两个标签，重复执行不反选",
+  "%s 兼容入口无 data_value、表单有 data_value，补选后重复执行不反选",
   async (panel) => {
     const page = await browser.newPage();
     try {
       await page.setContent(`
         <button id="btn_advance_search_fold" onclick="document.querySelector('ul').hidden=false">展开</button>
         <ul id="${panel}" ${panel === "server_type" ? "hidden" : ""}>
-          <li data_value="1"><span>1年以内服</span></li>
-          <li data_value="2"><span>1到3年服</span></li>
-          <li data_value="3" class="on"><span>3年以上服</span></li>
+          <li ${panel === "server_type" ? 'data_value="1"' : ""}><span>1年以内服</span></li>
+          <li ${panel === "server_type" ? 'data_value="2"' : ""}><span>1到3年服</span></li>
+          <li ${panel === "server_type" ? 'data_value="3"' : ""} class="on"><span>3年以上服</span></li>
         </ul>
         <script>
           window.clicks = [];
           document.querySelectorAll('li').forEach(el => el.onclick = () => {
-            window.clicks.push(el.getAttribute('data_value'));
+            window.clicks.push(el.textContent);
             el.classList.toggle('on');
           });
         </script>`);
@@ -76,7 +77,10 @@ it.each(["server_type_panel", "server_type"])(
       expect(
         await page.locator("li.on").evaluateAll((els) => els.map((el) => el.textContent)),
       ).toEqual(["1年以内服", "1到3年服", "3年以上服"]);
-      expect(await page.evaluate(() => Reflect.get(window, "clicks"))).toEqual(["1", "2"]);
+      expect(await page.evaluate(() => Reflect.get(window, "clicks"))).toEqual([
+        "1年以内服",
+        "1到3年服",
+      ]);
     } finally {
       await page.close();
     }

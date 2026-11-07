@@ -15,7 +15,7 @@ export const authenticated = (body) =>
   );
 
 export const equipment =
-  authenticated(`<ul id="server_type_panel"><li data_value="3">3年以上服</li><li data_value="2" class="on">1到3年服</li><li data_value="1">1年内服</li></ul>
+  authenticated(`<ul id="server_type_panel"><li>3年以上服</li><li class="on">1到3年服</li><li>1年内服</li></ul>
   <script>document.querySelectorAll('#server_type_panel li').forEach(li=>li.onclick=()=>li.classList.toggle('on'))</script>
   <a id="sub_role" href="/cgi-bin/xyq_overall_search.py?act=show_search_role_form" onclick="if(document.querySelectorAll('#server_type_panel li.on').length!==3){event.preventDefault();throw Error('开服时间未选择')}" target="_blank">角色搜索</a>`);
 

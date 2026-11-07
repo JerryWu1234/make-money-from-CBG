@@ -48,7 +48,13 @@ export async function selectServerAge(
   page: Page,
   panel: "#server_type_panel" | "#server_type",
 ): Promise<void> {
-  const option = page.locator(`${panel} li[data_value="3"]`).first();
+  // 跨服入口的标签没有角色搜索表单的 data_value 属性，两个面板按可见文字定位。
+  const labels: Record<string, RegExp> = {
+    "1": /^\s*1年(?:以)?内服\s*$/,
+    "2": /^\s*1到3年服\s*$/,
+    "3": /^\s*3年以上服\s*$/,
+  };
+  const option = page.locator(`${panel} li`).filter({ hasText: labels["3"] }).first();
   if (panel === "#server_type" && !(await option.isVisible())) {
     const expand = page.locator("#btn_advance_search_fold");
     if (await expand.isVisible()) await expand.evaluate((el) => (el as HTMLElement).click());
@@ -59,19 +65,22 @@ export async function selectServerAge(
   await option.waitFor({ state: "visible", timeout: 30000 });
   // 保留已选标签，只点击缺少的标签，沿用网站自身的多选逻辑。
   for (const value of ROLE_SERVER_TYPES) {
-    const choice = page.locator(`${panel} li[data_value="${value}"]`).first();
+    const choice = page.locator(`${panel} li`).filter({ hasText: labels[value] }).first();
     await choice.waitFor({ state: "visible", timeout: 30000 });
     if (!(await choice.evaluate((el) => el.classList.contains("on"))))
       await choice.evaluate((el) => (el as HTMLElement).click());
   }
   await page.waitForFunction(
-    ({ panelSelector, serverTypes }) => {
-      const choices = Array.from(document.querySelectorAll(`${panelSelector} li.on`))
-        .map((el) => el.getAttribute("data_value") || "")
-        .sort((a, b) => a.localeCompare(b));
-      return choices.join(",") === serverTypes.join(",");
+    (panelSelector) => {
+      const choices = Array.from(document.querySelectorAll(`${panelSelector} li.on`)).map((el) =>
+        el.textContent?.replace(/\s+/g, "").replace("1年内服", "1年以内服"),
+      );
+      return (
+        choices.length === 3 &&
+        ["1年以内服", "1到3年服", "3年以上服"].every((label) => choices.includes(label))
+      );
     },
-    { panelSelector: panel, serverTypes: ROLE_SERVER_TYPES },
+    panel,
     { timeout: 10000, polling: 250 },
   );
 }
