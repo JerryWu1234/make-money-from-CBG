@@ -31,11 +31,13 @@ const viewport = await moduleUrl("server/viewport.ts");
 const pageState = await moduleUrl("server/page-state.ts");
 const configuration = await moduleUrl("server/config.ts");
 const crawlerPage = await moduleUrl("server/crawler/page.ts", {
+  "../role-search": await moduleUrl("server/role-search.ts"),
   "./listing": await moduleUrl("server/crawler/listing.ts"),
   "./types": await moduleUrl("server/crawler/types.ts"),
   "../viewport": viewport,
 });
 const workflow = await moduleUrl("server/workflow.ts", {
+  "./role-search": await moduleUrl("server/role-search.ts"),
   "./config": configuration,
   "./page-state": pageState,
   "./browser-evidence": browserEvidenceUrl,

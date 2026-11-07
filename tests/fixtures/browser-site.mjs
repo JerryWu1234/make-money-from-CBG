@@ -17,7 +17,7 @@ export const authenticated = (body) =>
 export const equipment =
   authenticated(`<ul id="server_type_panel"><li>3年以上服</li><li class="on">1到3年服</li><li>1年内服</li></ul>
   <script>document.querySelectorAll('#server_type_panel li').forEach(li=>li.onclick=()=>li.classList.toggle('on'))</script>
-  <a id="sub_role" href="/cgi-bin/xyq_overall_search.py?act=show_search_role_form" onclick="if(document.querySelectorAll('#server_type_panel li.on').length!==1||document.querySelector('#server_type_panel li.on').innerText!=='3年以上服'){event.preventDefault();throw Error('开服时间未选择')}" target="_blank">角色搜索</a>`);
+  <a id="sub_role" href="/cgi-bin/xyq_overall_search.py?act=show_search_role_form" onclick="if(document.querySelectorAll('#server_type_panel li.on').length!==3){event.preventDefault();throw Error('开服时间未选择')}" target="_blank">角色搜索</a>`);
 
 export const roleForm =
   authenticated(`<script>var QueryArgs={serverid:'367'};</script><div id="advance_search_box"><button class="js_form_title" data-title="转服搜索" onclick="document.querySelector('#server_type').style.display='block'">转服搜索</button>
@@ -27,7 +27,7 @@ export const roleForm =
   <script>document.querySelectorAll('#server_type li').forEach(li=>li.onclick=()=>li.classList.toggle('on'))</script>`);
 
 export const roleResults =
-  authenticated(`<script>var QueryArgs={server_type:'3'};var CaptchaCheck={need_captcha:false};</script>
+  authenticated(`<script>var QueryArgs={server_type:'1,2,3'};var CaptchaCheck={need_captcha:false};</script>
   <div id="query_result">加载中</div><script>setTimeout(()=>{document.querySelector('#query_result').innerHTML='<table id="soldList"><tr><th>角色</th><th>等级</th><th>服务器</th><th>价格</th></tr><tr><td>测试剑侠客</td><td>175</td><td>测试服务器</td><td>¥ 10,000</td></tr></table>'},500)</script>`);
 
 export const home = html(

@@ -30,6 +30,7 @@ const compactUrl = await moduleUrl("server/crawler/compact.ts", {
 const { CAPTURE_VERSION } = await import(compactUrl);
 const typesUrl = await moduleUrl("server/crawler/types.ts");
 const pageUrl = await moduleUrl("server/crawler/page.ts", {
+  "../role-search": await moduleUrl("server/role-search.ts"),
   "./listing": listingUrl,
   "./types": typesUrl,
   "../viewport": viewportUrl,

@@ -20,7 +20,7 @@ export interface RoleList {
   columns: string[];
   rows: string[][];
   emptyMessage?: string;
-  serverAge: "3年以上服";
+  serverAge: "全部服龄";
 }
 
 export interface OpenCbgResult {

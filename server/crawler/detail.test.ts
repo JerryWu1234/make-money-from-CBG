@@ -995,7 +995,7 @@ describe("装备局部补采", () => {
     const page = await browser.newPage();
     try {
       await page.setContent(
-        `<style>a{display:block;width:240px;height:40px}</style><div id="soldList"><a class="soldImg" href="https://xyq.cbg.163.com/equip?s=1&eid=handle-fixture" data_price="100">目标</a></div><div id="pager_bar">第 1 页 共 1 页</div><script>window.QueryArgs={server_type:'3',page:1,order_by:'expire_time DESC'};</script>`,
+        `<style>a{display:block;width:240px;height:40px}</style><div id="soldList"><a class="soldImg" href="https://xyq.cbg.163.com/equip?s=1&eid=handle-fixture" data_price="100">目标</a></div><div id="pager_bar">第 1 页 共 1 页</div><script>window.QueryArgs={server_type:'1,2,3',page:1,order_by:'expire_time DESC'};</script>`,
       );
       const item = (await readListings(page)).items[0];
       const locate = page.locator.bind(page);
@@ -1031,7 +1031,7 @@ describe("装备局部补采", () => {
       await page.route("**/*", (route) =>
         route.fulfill({
           contentType: "text/html",
-          body: `<style>a{display:block;width:100px;height:30px}</style><div id="soldList">${Array.from({ length: 15 }, (_, index) => `<a class="soldImg" href="https://xyq.cbg.163.com/equip?s=1&eid=fixture-${index}" onmouseover="window.hovered='fixture-${index}'">角色${index}</a>`).join("")}</div><div id="pager_bar">第 1 页 共 1 页</div><script>window.QueryArgs={server_type:'3',page:1,order_by:'expire_time DESC'};</script>`,
+          body: `<style>a{display:block;width:100px;height:30px}</style><div id="soldList">${Array.from({ length: 15 }, (_, index) => `<a class="soldImg" href="https://xyq.cbg.163.com/equip?s=1&eid=fixture-${index}" onmouseover="window.hovered='fixture-${index}'">角色${index}</a>`).join("")}</div><div id="pager_bar">第 1 页 共 1 页</div><script>window.QueryArgs={server_type:'1,2,3',page:1,order_by:'expire_time DESC'};</script>`,
         }),
       );
       try {
@@ -1081,7 +1081,7 @@ describe("装备局部补采", () => {
             )
             .join(
               "",
-            )}</div><div id="pager_bar">第 1 页 共 1 页</div><script>window.QueryArgs={server_type:'3',page:1,order_by:'expire_time DESC'};</script>`,
+            )}</div><div id="pager_bar">第 1 页 共 1 页</div><script>window.QueryArgs={server_type:'1,2,3',page:1,order_by:'expire_time DESC'};</script>`,
           { waitUntil: "domcontentloaded", timeout: 10000 },
         );
         const target = (await readListings(page)).items.find((row) => row.key === "1:fixture-13")!;
@@ -1139,7 +1139,7 @@ describe("装备局部补采", () => {
       let hoverCalls = 0;
       try {
         await page.setContent(
-          `<base href="https://xyq.cbg.163.com"><style>body{font:18px sans-serif;padding:32px;background:#f4f6fa}a{display:block;width:300px;height:48px;margin:16px;background:#fff}#result{padding:20px;background:#fff3c4}</style><h1>隔离回归：列表目标短暂消失后重现</h1><p id="result">等待采集核对</p><div id="soldList"><a id="target" class="soldImg" href="/equip?s=421&eid=round6-target&reco_request_id=fixture&token=redact-me#secret-fragment" data_price="5684" data_selling_time="2026-10-24T03:25:36Z" onmouseover="window.hovered={key:'421:round6-target',trusted:event.isTrusted}">421:round6-target</a><a class="soldImg" href="/equip?s=4211&eid=round6-target">其他服务器</a><a class="soldImg" href="/equip?s=421&eid=round6-target-other">其他角色</a></div><div id="pager_bar">第 3 页 共 100 页</div><script>window.QueryArgs={server_type:'3',page:3,order_by:'expire_time DESC'};</script>`,
+          `<base href="https://xyq.cbg.163.com"><style>body{font:18px sans-serif;padding:32px;background:#f4f6fa}a{display:block;width:300px;height:48px;margin:16px;background:#fff}#result{padding:20px;background:#fff3c4}</style><h1>隔离回归：列表目标短暂消失后重现</h1><p id="result">等待采集核对</p><div id="soldList"><a id="target" class="soldImg" href="/equip?s=421&eid=round6-target&reco_request_id=fixture&token=redact-me#secret-fragment" data_price="5684" data_selling_time="2026-10-24T03:25:36Z" onmouseover="window.hovered={key:'421:round6-target',trusted:event.isTrusted}">421:round6-target</a><a class="soldImg" href="/equip?s=4211&eid=round6-target">其他服务器</a><a class="soldImg" href="/equip?s=421&eid=round6-target-other">其他角色</a></div><div id="pager_bar">第 3 页 共 100 页</div><script>window.QueryArgs={server_type:'1,2,3',page:3,order_by:'expire_time DESC'};</script>`,
         );
         const target = (await readListings(page)).items.find(
           (row) => row.key === "421:round6-target",

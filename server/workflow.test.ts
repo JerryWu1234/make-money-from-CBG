@@ -60,7 +60,7 @@ describe("业务步骤截图", () => {
     serverName: "测试服务器",
   };
   it("在页面打开、查询条件完成和列表读取完成后依次留痕", async () => {
-    const roleList = { rows: [["角色"]], columns: ["名称"], serverAge: "3年以上服" };
+    const roleList = { rows: [["角色"]], columns: ["名称"], serverAge: "全部服龄" };
     const evaluate = vi
       .fn()
       .mockResolvedValueOnce(loggedIn)

@@ -25,7 +25,7 @@ const html = `<!doctype html><meta charset="utf-8"><style>a{display:block;margin
 <div id="soldList"><a class="soldImg" href="https://xyq.cbg.163.com/equip?s=583&eid=202605281800113-583-ZLDRYSFTFKJK" data_equip_name="88088059" data_price="100" onmouseover="window.inspected=event.isTrusted">模拟商品88088059</a></div>
 <div id="pager_bar">第1页 共1页</div>
 <script>
-window.QueryArgs={server_type:'3',page:1,order_by:'expire_time DESC'};
+window.QueryArgs={server_type:'1,2,3',page:1,order_by:'expire_time DESC'};
 window.fixtureRefreshes=0;
 window.goto=(number)=>{
   QueryArgs.page=number;

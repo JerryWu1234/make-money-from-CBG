@@ -14,7 +14,7 @@ afterAll(async () => {
 const fixture = `<!doctype html><meta charset="utf-8">
 <div id="query_result"><div id="soldList"></div><div id="pager_bar"></div></div>
 <script>
-window.QueryArgs = { server_type: '3', order_by: 'expire_time DESC', page: 1 };
+window.QueryArgs = { server_type: '1,2,3', order_by: 'expire_time DESC', page: 1 };
 window.fixtureCalls = 0;
 window.fixtureCommits = 0;
 function render(number) {

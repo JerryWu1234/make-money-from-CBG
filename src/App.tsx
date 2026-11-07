@@ -9,7 +9,7 @@ import { BrowserLogin } from "./BrowserLogin";
 const FLOW: [WorkflowStep, string][] = [
   ["logging_in", "扫码登录"],
   ["cross_server", "跨服购买"],
-  ["server_age", "3年以上服"],
+  ["server_age", "全部服龄"],
   ["role_list", "角色列表"],
 ];
 const ORDER: WorkflowStep[] = [
@@ -156,7 +156,9 @@ export function App() {
               : "在本页完成 · 复用日常浏览器登录状态"}
           </div>
           <h1 className="title">藏宝阁角色查询</h1>
-          <p className="subtitle">扫码登录后，自动进入跨服购买，选择3年以上服并加载角色列表。</p>
+          <p className="subtitle">
+            扫码登录后，自动进入跨服购买，同时选择1年以内服、1到3年服、3年以上服，再加载角色列表。
+          </p>
         </header>
         <div className="workspace-query-layout">
           <div className="workspace-query-main">
