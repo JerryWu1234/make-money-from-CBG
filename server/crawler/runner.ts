@@ -254,7 +254,7 @@ export async function crawl(
       signal.throwIfAborted();
       if (!(error instanceof SellingOrderUnavailableError)) throw error;
       const notice =
-        "网站没有上架时间排序入口：定时检查首页新增，并持续逐页核对完整列表；优先派发新号，无新号待派时由历史角色补足空闲名额";
+        "网站没有上架时间排序入口：从第一页顺序核对完整列表，刷新后重新顺扫；优先派发新发现的角色";
       publish({ phase: "locating", message: notice, strategy: notice });
       // 到期排序不代表上架顺序：不用时间水位截断发现，也不据此跳过历史页。
       return watchCrawl(source, store, signal, publish, options, "expire_time DESC", seed);

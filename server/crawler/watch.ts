@@ -3,9 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import type { CrawlStore } from "./store";
 import { compactListing } from "./compact";
 import { IncompleteCaptureError } from "./capture-readiness";
-import { locateCheckpoint } from "./resume";
 import { browserConnectionFailure } from "../browser-connection";
-import { pageSignature, readPageReview, refreshRepeatedPage } from "./repeated-pages";
+import { pageSignature, refreshRepeatedPage } from "./repeated-pages";
 import { DEFAULT_HEAD_REFRESH, headRefreshDelayMs } from "./head-refresh";
 import {
   DEFAULT_CRAWL_CONCURRENCY,
@@ -20,7 +19,6 @@ import {
   type CrawlStatus,
   type Listing,
   type ListingPage,
-  type PageReview,
   type SavedRoleRecord,
 } from "./types";
 
@@ -78,10 +76,14 @@ export async function watchCrawl(
     historyPage = 1,
     totalPages = 1,
     nextHeadCheck = Date.now();
-  let historyDone = ordered && store.backfillComplete() && !store.pageReviews().length;
+  const hadBackfill = store.backfillComplete();
+  let scanHead: { time: string; keys: string[] } | undefined;
+  let historyDone = false;
   let historyPass = 0;
-  let reviewsScheduled = false;
-  let reviewQueue: PageReview[] = [];
+  let currentPage: ListingPage | undefined;
+  let itemIndex = 0;
+  let previousSignature = "";
+  let previousLastTime: string | undefined;
   const check = () => {
     signal.throwIfAborted();
     if (failure) throw failure.error;
@@ -301,67 +303,26 @@ export async function watchCrawl(
       }
     }
   };
-  const discoverHead = async (first: ListingPage) => {
-    if (!ordered) {
-      publish({ headPage: 1 });
-      for (const listed of first.items) await observe(listed, "new");
-      publish({ headCheckedAt: new Date().toISOString() });
-      return;
-    }
-    const previous = store.headCheckpoint();
+  const beginScan = (first: ListingPage) => {
+    checkPage(first, 1, order);
+    // 刷新已经回到第一页，直接复用返回的列表，不再跳回旧页或重取第一页。
+    historyPage = 1;
+    totalPages = first.totalPages;
+    historyDone = false;
+    historyPass++;
+    currentPage = first;
     const top = first.items[0]?.sellingTime;
-    const catchUp = !previous && store.backfillComplete();
-    const legacyPoint = catchUp ? store.checkpoint() : undefined;
-    const legacyBoundary =
-      legacyPoint?.order === ORDER &&
-      legacyPoint.time &&
-      Number.isFinite(Date.parse(legacyPoint.time))
-        ? legacyPoint.time
+    scanHead =
+      ordered && top
+        ? {
+            time: top,
+            keys: first.items.filter((item) => item.sellingTime === top).map((item) => item.key),
+          }
         : undefined;
-    const boundary = previous?.time ?? (catchUp ? legacyBoundary : top);
-    const keys = new Set<string>(previous && previous.time === top ? previous.keys : []);
-    let page = first,
-      signature = "",
-      previousLastTime: string | undefined;
-    for (let number = 1; ; number++) {
-      check();
-      checkPage(page, number, order);
-      const result = await refreshRepeatedPage(source, store, page, signature, signal, publish);
-      page = result.page;
-      totalPages = page.totalPages;
-      if (result.deferred) {
-        if (number >= page.totalPages) break;
-        page = await source.page(number + 1);
-        continue;
-      }
-      checkPage(page, number, order);
-      const firstTime = page.items[0]?.sellingTime;
-      if (previousLastTime && firstTime && firstTime > previousLastTime)
-        throw new Error("相邻列表页未保持上架时间倒序，已暂停以免漏采");
-      previousLastTime = page.items.at(-1)?.sellingTime ?? undefined;
-      signature = pageSignature(page);
-      publish({ headPage: number, page: number, totalPages: page.totalPages });
-      for (const listed of page.items) {
-        if ((previous || catchUp) && boundary && listed.sellingTime! < boundary) break;
-        // 第一次以当前首页建界；同一秒延伸到下一页时继续登记，避免截断。
-        if (!previous && !catchUp && number > 1 && listed.sellingTime! < boundary!) break;
-        const item = await observe(listed, "new");
-        if (item.sellingTime === top) keys.add(item.key);
-      }
-      pump();
-      if (
-        !page.items.length ||
-        (boundary && page.items.at(-1)!.sellingTime! < boundary) ||
-        number >= page.totalPages
-      )
-        break;
-      page = await source.page(number + 1);
-    }
-    check();
-    // 所有本次发现项已由 observe 持久登记，详情失败也不会丢失发现边界。
-    if (top && (!previous || top >= previous.time) && !store.pageReviews(order).length)
-      store.setHeadCheckpoint({ time: top, keys: [...keys] });
-    publish({ headCheckedAt: new Date().toISOString() });
+    itemIndex = 0;
+    previousSignature = "";
+    previousLastTime = undefined;
+    publish({ page: 1, historyPage: 1, headPage: 1, totalPages });
   };
   const scheduleHeadCheck = () => {
     // 每一轮只抽取一次，详情完成、状态轮询等事件不会重置已经排定的时间。
@@ -393,131 +354,125 @@ export async function watchCrawl(
     phase: "collecting",
     current: undefined,
     detailProgress: undefined,
-    message: "优先采集新上架角色，空闲名额继续从原断点补齐历史角色…",
+    message: "从第一页顺序检查角色，未加入的登记待采，已完整的跳过；刷新后重新顺扫…",
   });
   try {
-    const first = await retryDiscovery(async () => {
-      const first = await source.prepare(order);
-      check();
-      checkPage(first, 1, order);
-      totalPages = first.totalPages;
-      await discoverHead(first);
-      return first;
-    });
+    beginScan(await source.prepare(order));
     scheduleHeadCheck();
-    const point = store.checkpoint();
-    if (store.pageReviews().length) historyDone = false;
-    if (ordered && !historyDone && point && !store.pageReviews().length)
-      historyPage = (await locateCheckpoint(source, first, point, signal)) ?? 1;
-    let previousSignature = "",
-      previousHeadSignature = first.items.map((item) => item.key).join("|");
     while (true) {
       check();
-      pump();
+      // 先登记刷新后的第一页，避免旧队列抢在本页新号前派发。
+      if (!(historyPage === 1 && itemIndex === 0 && currentPage)) pump();
       publish({ nextHeadCheckAt: new Date(nextHeadCheck).toISOString() });
       if (Date.now() >= nextHeadCheck) {
-        const headPointBefore = JSON.stringify(store.headCheckpoint());
-        const refreshed = await retryDiscovery(async () => {
-          const refreshed = await source.prepare(order);
-          check();
-          checkPage(refreshed, 1, order);
-          totalPages = refreshed.totalPages;
-          await discoverHead(refreshed);
-          return refreshed;
-        });
+        // 生产 Source 刷新页面后直接读取自然返回的第一页；兼容旧的 Source 实现。
+        const first = source.refresh ? await source.refresh(order) : await source.prepare(order);
+        check();
+        beginScan(first);
         scheduleHeadCheck();
-        const headSignature = refreshed.items.map((item) => item.key).join("|");
-        // 首页商品确有位移时，历史重叠页才需重建比较；相同首页不能掩盖重复页。
-        if (
-          headSignature !== previousHeadSignature ||
-          JSON.stringify(store.headCheckpoint()) !== headPointBefore
-        )
-          previousSignature = "";
-        previousHeadSignature = headSignature;
-        // 先完成本轮有界复核，再开始下一轮全量扫描；首页巡检不能挤掉待复核页。
-        if (historyDone && reviewsScheduled && !reviewQueue.length) {
-          if (!ordered) {
-            historyDone = false;
-            historyPage = 1;
-            historyPass++;
-            previousSignature = "";
-          }
-          reviewsScheduled = false;
-        }
-      } else if (historyDone && !reviewsScheduled) {
-        // Snapshot once per pass/巡检周期; persistent duplicates cannot create an immediate retry loop.
-        reviewQueue = store.pageReviews(order).filter((review) => review.page <= totalPages);
-        reviewsScheduled = true;
-      } else if (historyDone && reviewQueue.length) {
-        const review = reviewQueue[0]!;
-        await retryDiscovery(async () => {
-          const result = await readPageReview(source, store, review, signal, publish);
-          check();
-          const page = result.page;
-          totalPages = page.totalPages;
-          if (historyPage <= totalPages) historyDone = false;
-          if (result.deferred) return;
-          checkPage(page, review.page, order);
-          for (const listed of page.items) await observe(listed, "new");
-          // Discovery has persisted all tasks; this check never advances the historical checkpoint.
-          store.resolvePageReview(order, review.page);
-          publish({ pageReviews: store.pageReviews() });
-        });
-        reviewQueue.shift();
-        pump();
-      } else if (!historyDone && historyPage > totalPages) {
-        historyDone = true;
-      } else if (!historyDone && !queued().new.length && queued().old.length < concurrency) {
+      } else if (historyDone) {
+        await waitForWork();
+      } else if (historyPage > 1 && queued().new.length) {
+        await waitForWork();
+      } else {
         const discovered = await retryDiscovery(async () => {
-          let page = await source.page(historyPage);
-          check();
-          checkPage(page, historyPage, order);
-          totalPages = page.totalPages;
-          const result = await refreshRepeatedPage(
-            source,
-            store,
-            page,
-            previousSignature,
-            signal,
-            publish,
-          );
-          check();
-          page = result.page;
-          totalPages = page.totalPages;
-          if (result.deferred) {
-            publish({ historyPage, page: historyPage, totalPages });
-            return { signature: pageSignature(page), complete: true };
+          if (!currentPage) {
+            let page = await source.page(historyPage);
+            check();
+            checkPage(page, historyPage, order);
+            totalPages = page.totalPages;
+            const result = await refreshRepeatedPage(
+              source,
+              store,
+              page,
+              previousSignature,
+              signal,
+              publish,
+            );
+            check();
+            page = result.page;
+            checkPage(page, historyPage, order);
+            totalPages = page.totalPages;
+            if (result.deferred)
+              return { signature: pageSignature(page), complete: true, lastTime: undefined };
+            const firstTime = page.items[0]?.sellingTime;
+            if (ordered && previousLastTime && firstTime && firstTime > previousLastTime)
+              throw new Error("相邻列表页未保持上架时间倒序，已暂停以免漏采");
+            currentPage = page;
+            itemIndex = 0;
           }
-          checkPage(page, historyPage, order);
-          const signature = pageSignature(page);
+          const page = currentPage;
           publish({ historyPage, page: historyPage, totalPages });
-          for (const listed of page.items) {
-            const lane = !ordered && historyPass > 0 && !store.detail(listed.key) ? "new" : "old";
-            // 队列满时保留当前历史页，让出发现流程供到期头扫使用。
-            // 下次重读同页；只有全页登记后才推进页码和重复页签名。
-            if (queued()[lane].length >= concurrency) return { signature, complete: false };
-            const item = await observe(listed, lane);
-            if (store.captureLane(item.key) === "old")
-              historyPoints.set(item.key, {
-                index: historyIndex++,
-                point: {
-                  key: item.key,
-                  time: ordered ? item.sellingTime : item.orderTime,
-                  order,
-                  page: historyPage,
-                  savedAt: new Date().toISOString(),
-                },
-              });
+          try {
+            for (; itemIndex < page.items.length; itemIndex++) {
+              const listed = page.items[itemIndex]!;
+              const lane =
+                historyPage === 1 || ((historyPass > 1 || hadBackfill) && !store.detail(listed.key))
+                  ? "new"
+                  : "old";
+              // 复用现有有界队列；满时保留本页位置，等空位或下一次刷新，不重复点击分页。
+              if (queued()[lane].length >= concurrency) {
+                pump();
+                if (queued()[lane].length >= concurrency)
+                  return {
+                    signature: pageSignature(page),
+                    complete: false,
+                    lastTime: page.items.at(-1)?.sellingTime,
+                  };
+              }
+              const item = await observe(listed, lane);
+              if (store.captureLane(item.key) === "old" && !inFlight.has(item.key))
+                historyPoints.set(item.key, {
+                  index: historyIndex++,
+                  point: {
+                    key: item.key,
+                    time: ordered ? item.sellingTime : item.orderTime,
+                    order,
+                    page: historyPage,
+                    savedAt: new Date().toISOString(),
+                  },
+                });
+            }
+          } catch (error) {
+            if (error instanceof ListingDisappearedError) currentPage = undefined;
+            throw error;
           }
-          return { signature, complete: true };
+          const signature = pageSignature(page);
+          if (scanHead)
+            scanHead.keys = [
+              ...new Set([
+                ...scanHead.keys,
+                ...page.items
+                  .filter((item) => item.sellingTime === scanHead!.time)
+                  .map((item) => item.key),
+              ]),
+            ];
+          // 只在顺扫实际经过该页且与本轮前页不同后清除复核；不再为复核跳回旧页。
+          if (historyPage > 1 && previousSignature && signature !== previousSignature) {
+            store.resolvePageReview(order, historyPage);
+            publish({ pageReviews: store.pageReviews() });
+          }
+          if (historyPage === 1) publish({ headCheckedAt: new Date().toISOString() });
+          return { signature, complete: true, lastTime: page.items.at(-1)?.sellingTime };
         });
         if (discovered.complete) {
           previousSignature = discovered.signature;
+          previousLastTime = discovered.lastTime ?? undefined;
           historyDone = historyPage >= totalPages;
+          const previousHead = store.headCheckpoint();
+          if (
+            historyDone &&
+            scanHead &&
+            !store.pageReviews(order).length &&
+            (!previousHead || scanHead.time >= previousHead.time)
+          )
+            store.setHeadCheckpoint(scanHead);
           historyPage++;
-        }
-        pump();
-      } else await waitForWork();
+          currentPage = undefined;
+          itemIndex = 0;
+          pump();
+        } else await waitForWork();
+      }
     }
   } catch (error) {
     if (error instanceof ListingChangedError)

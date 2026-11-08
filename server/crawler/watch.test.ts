@@ -97,6 +97,75 @@ afterEach(() => {
 });
 
 describe("持续发现新号和历史详情共享采集池", () => {
+  it.each(["selling_time DESC", "expire_time DESC"])(
+    "%s 从第一页顺扫至20页，刷新后自然接第2页，不跳回断点且保留在途任务",
+    async (order) => {
+      vi.useFakeTimers();
+      const db = memory(),
+        control = new AbortController();
+      const pages = Array.from({ length: 20 }, (_, index) => [item(index + 1, 2000 - index)]);
+      for (const [index, rows] of pages.slice(0, 19).entries()) {
+        const row = rows[0]!;
+        db.observe(row);
+        db.save(row, detail(row), {
+          key: row.key,
+          time: row.orderTime,
+          order,
+          page: index + 1,
+          savedAt: "now",
+        });
+      }
+      pages[19] = Array.from({ length: 6 }, (_, index) => item(100 + index, 1900 - index));
+      const src = source(pages),
+        read = src.page,
+        active = holdDetails(src);
+      const events: string[] = [];
+      src.prepare = vi.fn(async (requested) => {
+        if (order === "expire_time DESC" && requested === "selling_time DESC")
+          throw new SellingOrderUnavailableError();
+        events.push("prepare");
+        return { ...(await read(1)), order };
+      });
+      src.page = vi.fn(async (number, refresh) => {
+        events.push(`page:${number}:${!!refresh}`);
+        return { ...(await read(number, refresh)), order };
+      });
+      const fresh = item(999, 3000);
+      src.refresh = vi.fn(async () => {
+        events.push("reload");
+        return { ...(await read(1)), order, items: [fresh, ...pages[0]!] };
+      });
+      const outcome = crawl(src, db, control.signal, vi.fn(), {
+        watch: true,
+        concurrency: 2,
+        headIntervalMs: 100,
+      }).catch((error: unknown) => error);
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        expect(events).toEqual([
+          "prepare",
+          ...Array.from({ length: 19 }, (_, index) => `page:${index + 2}:false`),
+        ]);
+        expect(active.size).toBe(2);
+        const previousActive = [...active.keys()];
+        await vi.advanceTimersByTimeAsync(100);
+        expect(src.refresh).toHaveBeenCalledOnce();
+        expect([...active.keys()]).toEqual(previousActive);
+        expect(readSaved(db, fresh.key)?.status).toBe("pending");
+        active.get(previousActive[0]!)!();
+        await flush();
+        expect(active.has(fresh.key)).toBe(true);
+        expect(active.has(previousActive[1]!)).toBe(true);
+        expect(events.slice(events.indexOf("reload"))).toEqual(["reload", "page:2:false"]);
+        expect(src.page).not.toHaveBeenCalledWith(1);
+        expect(src.page).toHaveBeenCalledTimes(20);
+      } finally {
+        control.abort(new Error("暂停"));
+        active.forEach((release) => release());
+        await outcome;
+      }
+    },
+  );
   it.each([false, true])(
     "首页按%s随机设置排期，每次完成后重抽且在等待期间不重抽",
     async (random) => {
@@ -727,14 +796,14 @@ describe("持续发现新号和历史详情共享采集池", () => {
     await flush();
     expect(src.prepare).toHaveBeenNthCalledWith(1, "selling_time DESC");
     expect(src.prepare).toHaveBeenLastCalledWith("expire_time DESC");
-    expect(src.page).toHaveBeenCalledWith(1);
+    expect(src.page).not.toHaveBeenCalledWith(1);
     expect(src.page).toHaveBeenCalledWith(2);
     expect(src.detail).toHaveBeenCalledTimes(2);
     expect(db.count()).toBe(3);
     expect(readSaved(db, saved.key)?.status).toBe("complete");
     expect(db.headCheckpoint()).toBeUndefined();
     expect(publish).toHaveBeenCalledWith(
-      expect.objectContaining({ strategy: expect.stringContaining("定时检查首页新增") }),
+      expect.objectContaining({ strategy: expect.stringContaining("刷新后重新顺扫") }),
     );
     // 首页未变，后页新增也必须由下一轮全表检查发现，不能遇到已知商品就截断。
     const added = item(3, 1);
@@ -921,7 +990,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
     }
   });
 
-  it("头扫越过已知 key 并覆盖旧水位的整秒，登记后才推进水位", async () => {
+  it("顺扫覆盖同秒及旧水位之后的商品，全轮登记后记录首页水位", async () => {
     const db = memory(),
       known = item(1, 100),
       sameSecond = item(2, 100),
@@ -945,13 +1014,13 @@ describe("持续发现新号和历史详情共享采集池", () => {
     expect(src.page).toHaveBeenCalledWith(2);
     expect(src.page).toHaveBeenCalledWith(3);
     expect(setPoint).toHaveBeenCalledTimes(1);
-    expect(db.detail(older.key)).toBeNull();
+    expect(readSaved(db, older.key)?.status).toBe("pending");
     control.abort(new Error("暂停"));
     active.forEach((release) => release());
     await outcome;
   });
 
-  it("已补齐的旧库首次启用头扫时，补查到旧 selling 断点并覆盖同秒", async () => {
+  it("已补齐的旧库也从首页顺扫，不再在旧 selling 断点截止", async () => {
     const db = memory(),
       old = item(20, 80),
       sameSecond = item(21, 80),
@@ -983,7 +1052,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
     );
     await flush();
     expect(src.page).toHaveBeenCalledWith(3);
-    expect(db.detail(older.key)).toBeNull();
+    expect(readSaved(db, older.key)?.status).toBe("pending");
     expect(db.captureLane(between.key)).toBe("new");
     expect(setPoint).toHaveBeenCalledTimes(1);
     expect(db.checkpoint()).toEqual(point);
@@ -1232,7 +1301,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
     try {
       await flush();
       expect(src.page).toHaveBeenCalledWith(2);
-      expect(src.page).not.toHaveBeenCalledWith(3);
+      expect(src.page).toHaveBeenCalledWith(3);
       const added = sameSecond
         ? [100, 101, 102, 103].map((id) => item(id, 1000))
         : [item(0, 1004), item(100, 1003), item(101, 1002), item(102, 1001)];
@@ -1242,12 +1311,12 @@ describe("持续发现新号和历史详情共享采集池", () => {
       await flush();
       expect(src.prepare).toHaveBeenCalledTimes(2);
       expect(added.every((row) => readSaved(db, row.key)?.status === "pending")).toBe(true);
-      // 同秒新增全部持久登记后可推进发现水位；不要求详情先完成。
-      if (sameSecond) expect(db.headCheckpoint()?.keys).toHaveLength(8);
+      // 同秒商品也按顺序覆盖；整轮未扫完，不提前推进首页水位。
+      if (sameSecond) expect(db.headCheckpoint()).toBeUndefined();
       fresh.forEach((row) => active.get(row.key)!());
       await flush();
       expect([...active.keys()].sort()).toEqual(added.map((row) => row.key).sort());
-      if (sameSecond) expect(db.headCheckpoint()?.keys).toHaveLength(8);
+      if (sameSecond) expect(db.headCheckpoint()).toBeUndefined();
       added.slice(0, 2).forEach((row) => active.get(row.key)!());
       await flush();
       expect(old.filter((row) => active.has(row.key))).toHaveLength(2);
@@ -1255,6 +1324,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
       expect(src.page).toHaveBeenCalledWith(3);
       expect(src.page).toHaveBeenCalledWith(4);
       expect(db.detail(tail.key)).not.toBeNull();
+      if (sameSecond) expect(db.headCheckpoint()?.keys).toHaveLength(8);
       expect(
         vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old[0]!.key),
       ).toHaveLength(1);
@@ -1300,7 +1370,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
   });
 
   it.each(["selling_time DESC", "expire_time DESC"])(
-    "%s 的重复页刷新后仍相同则继续后页，每轮只补查一次且保留待复核",
+    "%s 的重复页刷新后仍相同则继续后页，本轮不回跳补查并保留待复核",
     async (order) => {
       vi.useFakeTimers();
       const db = memory(),
@@ -1326,7 +1396,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
       try {
         await flush();
         expect(src.page).toHaveBeenCalledWith(4);
-        expect(vi.mocked(src.page).mock.calls.filter(([number]) => number === 3)).toHaveLength(3);
+        expect(vi.mocked(src.page).mock.calls.filter(([number]) => number === 3)).toHaveLength(2);
         expect(db.pageReviews()).toEqual([
           expect.objectContaining({ order, page: 3, signature: old.key }),
         ]);
@@ -1347,7 +1417,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
     },
   );
 
-  it("重复页本轮末补查恢复后补采缺失商品并清除待复核，不倒退成功断点", async () => {
+  it("重复页下一轮顺扫恢复后补采缺失商品并清除待复核，不倒退成功断点", async () => {
     vi.useFakeTimers();
     const db = memory(),
       old = item(20),
@@ -1359,7 +1429,8 @@ describe("持续发现新号和历史详情共享采集池", () => {
     let refreshes = 0;
     src.page = vi.fn(async (number, refresh) => {
       const page = await readPage(number, refresh);
-      if (number === 3 && (!refresh || ++refreshes === 1)) return { ...page, items: [old] };
+      if (number === 3 && (!refresh ? refreshes === 0 : ++refreshes === 1))
+        return { ...page, items: [old] };
       return page;
     });
     const outcome = crawl(src, db, control.signal, vi.fn(), {
@@ -1368,11 +1439,14 @@ describe("持续发现新号和历史详情共享采集池", () => {
     }).catch((error: unknown) => error);
     try {
       await flush();
-      expect(refreshes).toBe(2);
+      expect(refreshes).toBe(1);
+      expect(db.pageReviews()).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await flush();
       expect(db.pageReviews()).toEqual([]);
       expect(db.count()).toBe(4);
       expect(readSaved(db, missing.key)?.status).toBe("complete");
-      expect(db.checkpoint()?.key).not.toBe(missing.key);
+      expect(db.checkpoint()?.page ?? 0).toBeLessThanOrEqual(4);
       expect(db.backfillComplete()).toBe(true);
     } finally {
       control.abort(new Error("暂停"));
@@ -1383,8 +1457,8 @@ describe("持续发现新号和历史详情共享采集池", () => {
   it.each([
     ["首次刷新", 1, false],
     ["首次刷新", 1, true],
-    ["本轮补查", 2, false],
-    ["本轮补查", 2, true],
+    ["下轮复核", 2, false],
+    ["下轮复核", 2, true],
   ] as const)(
     "重复页%s第 %i 次强制读取发现总页数增加时继续采集尾页，重复解除=%s",
     async (_where, at, recovered) => {
@@ -1411,6 +1485,11 @@ describe("持续发现新号和历史详情共享采集池", () => {
       }).catch((error: unknown) => error);
       try {
         await flush();
+        if (at === 2) {
+          expect(src.page).not.toHaveBeenCalledWith(4);
+          await vi.advanceTimersByTimeAsync(60_000);
+          await flush();
+        }
         expect(src.page).toHaveBeenCalledWith(4);
         expect(readSaved(db, tail.key)?.status).toBe("complete");
         expect(db.pageReviews()).toHaveLength(recovered ? 0 : 1);
@@ -1474,9 +1553,9 @@ describe("持续发现新号和历史详情共享采集池", () => {
     }
   });
 
-  // 失败方式：首页巡检到期时提前开启下一轮，挤掉尚未开始或尚未完成的本轮复核。
+  // 失败方式：旧复核队列在刷新后触发远距离回跳，或刷新清掉尚未核验的记录。
   it.each(["selling_time DESC", "expire_time DESC"])(
-    "%s 首页不变且跨巡检周期时先完成本轮待复核，再开始下一轮",
+    "%s 短间隔到期后重开顺扫，不跳回远处复核页",
     async (order) => {
       vi.useFakeTimers();
       const db = memory(),
@@ -1494,6 +1573,8 @@ describe("持续发现新号和历史详情共享采集池", () => {
         await new Promise<void>((resolve) => setTimeout(resolve, 110));
         return { ...(await readPage(number, refresh)), order };
       });
+      db.deferPageReview(order, 3, old.key);
+      db.deferPageReview(order, 5, tail.key);
       let failure: unknown;
       const outcome = crawl(src, db, control.signal, vi.fn(), {
         watch: true,
@@ -1514,25 +1595,9 @@ describe("持续发现新号和历史详情共享采集池", () => {
         ]);
         expect(db.backfillComplete()).toBe(false);
         expect(vi.mocked(src.prepare).mock.calls.length).toBeGreaterThan(1);
-        expect(src.page).toHaveBeenCalledWith(4);
-        expect(readSaved(db, tail.key)?.status).toBe("complete");
-        const calls = vi.mocked(src.page).mock.calls;
-        // 每页第一次强制读取是即时刷新，第二次才是本轮末补查。
-        const lastReviewed = Math.max(
-          ...[3, 5].map((page) => {
-            const indices = calls.flatMap(([number, refresh], index) =>
-              number === page && refresh ? [index] : [],
-            );
-            expect(indices.length).toBeGreaterThanOrEqual(2);
-            return indices[1]!;
-          }),
-        );
-        if (order === "expire_time DESC") {
-          const nextPass = calls.flatMap(([number, refresh], index) =>
-            number === 1 && !refresh ? [index] : [],
-          )[1];
-          expect(nextPass).toBeGreaterThan(lastReviewed);
-        }
+        expect(vi.mocked(src.page).mock.calls.every(([number]) => number === 2)).toBe(true);
+        expect(src.page).not.toHaveBeenCalledWith(4);
+        expect(db.detail(tail.key)).toBeNull();
       } finally {
         control.abort(new Error("暂停"));
         await vi.runOnlyPendingTimersAsync();
@@ -1724,7 +1789,8 @@ describe("持续发现新号和历史详情共享采集池", () => {
     await expect(
       crawl(src, db, new AbortController().signal, vi.fn(), { watch: true }),
     ).rejects.toBeInstanceOf(ListingDisappearedError);
-    expect(src.prepare).toHaveBeenCalledTimes(2);
+    expect(src.prepare).toHaveBeenCalledTimes(1);
+    expect(src.page).toHaveBeenCalledWith(1);
     expect(src.hover).toHaveBeenCalledTimes(2);
     expect(src.detail).not.toHaveBeenCalled();
     expect(db.headCheckpoint()).toBeUndefined();

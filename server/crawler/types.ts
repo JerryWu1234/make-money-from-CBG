@@ -83,6 +83,7 @@ export interface ListingPage {
 }
 export interface CrawlSource {
   prepare: (order?: string) => Promise<ListingPage>;
+  refresh?: (order?: string) => Promise<ListingPage>;
   page: (number: number, refresh?: boolean) => Promise<ListingPage>;
   onShelf: (item: Listing) => Promise<boolean>;
   hover: (item: Listing) => Promise<Listing>;

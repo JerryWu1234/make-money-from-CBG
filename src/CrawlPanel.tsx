@@ -262,7 +262,7 @@ export function CrawlPanel({
                 首页下次检查：{displayTime(status.nextHeadCheckAt)}
                 {status.headCheckedAt ? ` · 上次检查：${displayTime(status.headCheckedAt)}` : ""}
                 {status.headPage ? ` · 新号检查至第 ${status.headPage} 页` : ""}
-                {status.historyPage ? ` · 老号回补至第 ${status.historyPage} 页` : ""}
+                {status.historyPage ? ` · 顺序扫描至第 ${status.historyPage} 页` : ""}
                 {status.headRefresh
                   ? ` · 本轮设置：${describeHeadRefresh(status.headRefresh)}`
                   : ""}

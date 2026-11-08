@@ -1,6 +1,6 @@
 import type { Page } from "playwright-core";
 import { collectDetail, isOnShelf, MAIN_TABS } from "./detail";
-import { gotoPage, hoverListing, pace, prepareList } from "./page";
+import { gotoPage, hoverListing, pace, prepareList, refreshList } from "./page";
 import {
   SellingOrderUnavailableError,
   type CrawlSource,
@@ -233,6 +233,10 @@ export function createCrawlSource({
         });
         return result;
       }),
+    refresh: (order) =>
+      step(listPage, "列表刷新后读取第一页", () =>
+        refreshList(listPage, signal, order ?? preferredOrder),
+      ),
     page: (number, refresh = false) =>
       step(listPage, `列表翻页至第 ${number} 页`, async () => {
         const result = await gotoPage(listPage, number, signal, refresh);
