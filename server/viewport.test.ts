@@ -10,23 +10,35 @@ function deferred() {
   return { promise, resolve };
 }
 
-it.each([2, 6, 10])("%s 个页面的点击按调用顺序执行，同时最多执行一次", async (count) => {
+const clickPoint = { x: 50, y: 30, left: 0, top: 0, width: 100, height: 60 };
+function clickTarget() {
+  const mouse = {
+    move: vi.fn().mockResolvedValue(undefined),
+    click: vi.fn().mockResolvedValue(undefined),
+  };
+  const page = { viewportSize: () => ({ width: 1440, height: 1080 }), mouse };
+  const target = { page: () => page, evaluateAll: vi.fn().mockResolvedValue(clickPoint) };
+  return { mouse, target, locator: target as unknown as Locator };
+}
+
+it.each([2, 6, 10])("%s 个页面的鼠标点击按调用顺序执行，同时最多执行一次", async (count) => {
   const entered = Array.from({ length: count }, deferred);
   const release = Array.from({ length: count }, deferred);
   const order: number[] = [];
   let active = 0;
   let maximum = 0;
-  const targets = release.map((gate, index) => ({
-    evaluateAll: vi.fn(async () => {
+  const targets = release.map((gate, index) => {
+    const target = clickTarget();
+    target.mouse.click.mockImplementation(async () => {
       order.push(index);
       maximum = Math.max(maximum, ++active);
       entered[index].resolve();
       await gate.promise;
       active--;
-      return true;
-    }),
-  }));
-  const clicks = targets.map((target) => clickForInspection(target as unknown as Locator));
+    });
+    return target;
+  });
+  const clicks = targets.map(({ locator }) => clickForInspection(locator));
   try {
     for (let index = 0; index < targets.length; index++) {
       await entered[index].promise;
@@ -39,87 +51,98 @@ it.each([2, 6, 10])("%s 个页面的点击按调用顺序执行，同时最多�
     await Promise.all(clicks);
   }
   expect(maximum).toBe(1);
-  targets.forEach((target) => expect(target.evaluateAll).toHaveBeenCalledOnce());
+  targets.forEach(({ mouse }) => expect(mouse.click).toHaveBeenCalledOnce());
 });
 
-it("点击失败保留原错误，后续点击仍可执行", async () => {
+it("鼠标点击失败不重放，后续页面仍可点击", async () => {
   const error = new Error("页面已关闭");
-  const failed = { evaluateAll: vi.fn().mockRejectedValue(error) };
-  const next = { evaluateAll: vi.fn().mockResolvedValue(true) };
-  const first = clickForInspection(failed as unknown as Locator);
-  const second = clickForInspection(next as unknown as Locator);
+  const failed = clickTarget(),
+    next = clickTarget();
+  failed.mouse.click.mockRejectedValue(error);
+  const first = clickForInspection(failed.locator);
+  const second = clickForInspection(next.locator);
   await expect(first).rejects.toBe(error);
   await second;
-  expect(next.evaluateAll).toHaveBeenCalledOnce();
+  expect(failed.mouse.click).toHaveBeenCalledOnce();
+  expect(next.mouse.click).toHaveBeenCalledOnce();
 });
 
 it("排队期间取消的点击不再求值，也不阻塞后续点击", async () => {
-  const entered = deferred();
-  const release = deferred();
-  const first = {
-    evaluateAll: vi.fn(async () => {
-      entered.resolve();
-      await release.promise;
-      return true;
-    }),
-  };
-  const canceled = { evaluateAll: vi.fn().mockResolvedValue(true) };
-  const next = { evaluateAll: vi.fn().mockResolvedValue(true) };
+  const entered = deferred(),
+    release = deferred();
+  const first = clickTarget(),
+    canceled = clickTarget(),
+    next = clickTarget();
+  first.mouse.click.mockImplementation(async () => {
+    entered.resolve();
+    await release.promise;
+  });
   const controller = new AbortController();
   const error = new Error("已停止采集");
-  const running = clickForInspection(first as unknown as Locator);
+  const running = clickForInspection(first.locator);
   await entered.promise;
-  const pending = clickForInspection(canceled as unknown as Locator, controller.signal);
-  const last = clickForInspection(next as unknown as Locator);
+  const pending = clickForInspection(canceled.locator, controller.signal);
+  const last = clickForInspection(next.locator);
   const rejection = expect(pending).rejects.toBe(error);
   controller.abort(error);
   release.resolve();
   await Promise.all([running, rejection, last]);
-  expect(canceled.evaluateAll).not.toHaveBeenCalled();
-  expect(next.evaluateAll).toHaveBeenCalledOnce();
+  expect(canceled.target.evaluateAll).not.toHaveBeenCalled();
+  expect(canceled.mouse.click).not.toHaveBeenCalled();
+  expect(next.mouse.click).toHaveBeenCalledOnce();
 });
 
-it.each([0, 2])("点击目标数量为 %s 时保留原校验和错误，不点击任何目标", async (count) => {
-  const click = vi.fn();
-  const target = {
-    evaluateAll: vi.fn((evaluate: (elements: Element[]) => boolean) =>
-      evaluate(Array.from({ length: count }, () => ({ click }) as unknown as Element)),
-    ),
-  };
-  await expect(clickForInspection(target as unknown as Locator)).rejects.toMatchObject({
+it("定位校验失败时不发送鼠标输入", async () => {
+  const target = clickTarget();
+  target.target.evaluateAll.mockResolvedValue(null);
+  await expect(clickForInspection(target.locator)).rejects.toMatchObject({
     name: "IncompleteDetailError",
-    message: "待读取标签或分页目标已变化，未执行点击",
   });
-  expect(click).not.toHaveBeenCalled();
+  expect(target.mouse.move).not.toHaveBeenCalled();
+  expect(target.mouse.click).not.toHaveBeenCalled();
 });
 
-it("唯一点击目标仍执行一次点击", async () => {
-  const click = vi.fn();
-  const target = {
-    evaluateAll: vi.fn((evaluate: (elements: Element[]) => boolean) =>
-      evaluate([{ click } as unknown as Element]),
-    ),
-  };
-  await clickForInspection(target as unknown as Locator);
-  expect(click).toHaveBeenCalledOnce();
+it("鼠标移入导致目标改变时不点击", async () => {
+  const target = clickTarget();
+  target.target.evaluateAll
+    .mockResolvedValueOnce(clickPoint)
+    .mockResolvedValueOnce(clickPoint)
+    .mockResolvedValueOnce(null);
+  await expect(clickForInspection(target.locator)).rejects.toMatchObject({
+    name: "IncompleteDetailError",
+  });
+  expect(target.mouse.move).toHaveBeenCalledWith(50, 30);
+  expect(target.mouse.click).not.toHaveBeenCalled();
+});
+
+it("稳定等待期间取消的点击不再发送鼠标输入", async () => {
+  const target = clickTarget();
+  const controller = new AbortController();
+  const reason = new Error("暂停");
+  target.target.evaluateAll.mockImplementation(async () => {
+    controller.abort(reason);
+    return clickPoint;
+  });
+  await expect(clickForInspection(target.locator, controller.signal)).rejects.toBe(reason);
+  expect(target.mouse.click).not.toHaveBeenCalled();
 });
 
 it("点击后的业务等待不占住全局点击队列", async () => {
-  const waiting = deferred();
-  const release = deferred();
+  const waiting = deferred(),
+    release = deferred();
   let completed = false;
-  const first = { evaluateAll: vi.fn().mockResolvedValue(true) };
-  const next = { evaluateAll: vi.fn().mockResolvedValue(true) };
+  const first = clickTarget(),
+    next = clickTarget();
   const capture = (async () => {
-    await clickForInspection(first as unknown as Locator);
+    await clickForInspection(first.locator);
     waiting.resolve();
     await release.promise;
     completed = true;
   })();
   await waiting.promise;
   try {
-    await clickForInspection(next as unknown as Locator);
-    expect(next.evaluateAll).toHaveBeenCalledOnce();
+    await clickForInspection(next.locator);
+    expect(next.mouse.click).toHaveBeenCalledOnce();
     expect(completed).toBe(false);
   } finally {
     release.resolve();

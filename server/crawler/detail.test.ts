@@ -1739,8 +1739,9 @@ describe("装备局部补采", () => {
   ])("空装备只有实际容器或明确文字可确认：%s", async (kind) => {
     const page = await browser.newPage();
     try {
+      // The image request is aborted below; fixed dimensions keep visibility independent of its error event.
       const artifacts =
-        '<div id="RoleUsingFabao"><img data_equip_name="法宝" data_equip_type="6033" src="/images/fabao.png"></div>';
+        '<div id="RoleUsingFabao"><img width="40" height="40" data_equip_name="法宝" data_equip_type="6033" src="/images/fabao.png"></div>';
       const empty =
         '<table id="RoleUsingEquips"><tbody><tr><td></td></tr></tbody></table><table id="RoleStoreEquips"><tbody><tr><td></td></tr></tbody></table>';
       const material = `<img width="50" height="50" src="/images/equip/small/17320.gif" data_equip_name="${kind === "wrong-name" ? "未知物品" : "三界密令"}" data_equip_type="${kind === "unknown-item" ? "17321" : "17320"}" data_equip_desc="灵气：158" data_equip_type_desc="流传于三界之间的神秘信物，内藏乾坤，完成密令任务获得奖励（转换月卡可得，右键使用）">`;
