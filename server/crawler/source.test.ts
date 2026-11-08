@@ -424,6 +424,115 @@ it("六个在途详情共用五秒开页间隔，读取仍可并行，补位也�
   }
 });
 
+it("38个详情排队超过180秒仍能开页，最后一件从开页起保留完整180秒读取预算", async () => {
+  vi.useFakeTimers();
+  const controller = new AbortController();
+  const starts: number[] = [];
+  const beginning = Date.now();
+  let lastSignal: AbortSignal | undefined;
+  const partial = reusableDetail();
+  vi.mocked(collectDetail).mockImplementation(async (_page, listing, signal) => {
+    starts.push(Date.now() - beginning);
+    if (listing.eid === "queued-37") {
+      lastSignal = signal;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => reject(new IncompleteCaptureError("读取中断", partial, signal.reason)),
+          { once: true },
+        );
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return {
+      ...reusableDetail(),
+      valuation: {
+        ...reusableDetail().valuation!,
+        source: { serverId: listing.serverId, eid: listing.eid },
+      },
+    };
+  });
+  const close = vi.fn().mockResolvedValue(undefined);
+  const makePage = () => ({ ...page, close }) as unknown as Page;
+  const source = createCrawlSource({
+    ...options(),
+    signal: controller.signal,
+    listPage: page,
+    detailPage: makePage(),
+    createDetailPage: async () => makePage(),
+  });
+  const captures = Array.from({ length: 38 }, (_, index) =>
+    source.detail({ ...item, key: `367:queued-${index}`, eid: `queued-${index}` }),
+  );
+  const outcomes = Promise.allSettled(captures);
+  try {
+    await vi.advanceTimersByTimeAsync(185000);
+    expect(starts).toEqual(Array.from({ length: 38 }, (_, index) => index * 5000));
+    expect(lastSignal?.aborted).toBe(false);
+    expect(close).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(179999);
+    expect(lastSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const results = await outcomes;
+    expect(results.slice(0, 37).every((result) => result.status === "fulfilled")).toBe(true);
+    expect(results[37]).toMatchObject({
+      status: "rejected",
+      reason: { detail: partial, cause: { code: "DETAIL_TIMEOUT" } },
+    });
+    expect(close).toHaveBeenCalledOnce();
+  } finally {
+    controller.abort(new Error("cleanup"));
+    await outcomes;
+    vi.useRealTimers();
+  }
+});
+
+it("初次开页后的导航重试共用读取预算，不因第二次排队获准而重置超时", async () => {
+  vi.useFakeTimers();
+  const controller = new AbortController();
+  const error = Object.assign(new Error("page.goto: Timeout 45000ms exceeded"), {
+    name: "TimeoutError",
+  });
+  let readingSignal: AbortSignal | undefined;
+  vi.mocked(collectDetail)
+    .mockRejectedValueOnce(error)
+    .mockImplementationOnce(
+      async (_page, _item, signal) =>
+        new Promise((_resolve, reject) => {
+          readingSignal = signal;
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+    );
+  const close = vi.fn().mockResolvedValue(undefined);
+  const retryPage = {
+    ...page,
+    close,
+    goto: vi.fn().mockResolvedValue(undefined),
+  } as unknown as Page;
+  const source = createCrawlSource({
+    ...options(),
+    signal: controller.signal,
+    listPage: page,
+    detailPage: retryPage,
+    detailTimeoutMs: 7000,
+  });
+  const outcome = source.detail(item).catch((error: unknown) => error);
+  try {
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(collectDetail).toHaveBeenCalledTimes(2);
+    expect(readingSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(readingSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await outcome).toMatchObject({ code: "DETAIL_TIMEOUT" });
+    expect(close).toHaveBeenCalledOnce();
+  } finally {
+    controller.abort(new Error("cleanup"));
+    await outcome;
+    vi.useRealTimers();
+  }
+});
+
 it("详情导航重试仍等待同一个开页队列，复用完整资料不申请开页", async () => {
   const waitForDetailOpen = vi.fn().mockResolvedValue(undefined);
   const reset = vi.fn().mockResolvedValue(undefined);
@@ -450,41 +559,45 @@ it("详情导航重试仍等待同一个开页队列，复用完整资料不申�
   expect(waitForDetailOpen).toHaveBeenCalledTimes(2);
 });
 
-it("暂停取消正在读取和等待开页的六个任务，之后不再打开详情", async () => {
-  vi.useFakeTimers();
-  const controller = new AbortController();
-  const reason = new Error("用户暂停采集");
-  vi.mocked(collectDetail).mockImplementation(
-    async (_page, _item, signal) =>
-      new Promise((_resolve, reject) => {
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-      }),
-  );
-  const makePage = () =>
-    ({ ...page, close: vi.fn().mockResolvedValue(undefined) }) as unknown as Page;
-  const source = createCrawlSource({
-    ...options(),
-    signal: controller.signal,
-    listPage: page,
-    detailPage: makePage(),
-    createDetailPage: async () => makePage(),
-  });
-  const captures = Array.from({ length: 6 }, (_, index) =>
-    source.detail({ ...item, key: `367:paused-${index}`, eid: `paused-${index}` }),
-  );
-  const outcomes = Promise.allSettled(captures);
-  try {
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(collectDetail).toHaveBeenCalledOnce();
-    controller.abort(reason);
-    expect(await outcomes).toEqual(
-      Array.from({ length: 6 }, () => ({ status: "rejected", reason })),
+it.each(["parent", "details"])(
+  "%s暂停取消正在读取和等待开页的六个任务，之后不再打开详情",
+  async (mode) => {
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const reason = new Error("用户暂停采集");
+    vi.mocked(collectDetail).mockImplementation(
+      async (_page, _item, signal) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
     );
-    await vi.advanceTimersByTimeAsync(60000);
-    expect(collectDetail).toHaveBeenCalledOnce();
-  } finally {
-    controller.abort(reason);
-    await outcomes;
-    vi.useRealTimers();
-  }
-});
+    const makePage = () =>
+      ({ ...page, close: vi.fn().mockResolvedValue(undefined) }) as unknown as Page;
+    const source = createCrawlSource({
+      ...options(),
+      signal: controller.signal,
+      listPage: page,
+      detailPage: makePage(),
+      createDetailPage: async () => makePage(),
+    });
+    const captures = Array.from({ length: 6 }, (_, index) =>
+      source.detail({ ...item, key: `367:paused-${index}`, eid: `paused-${index}` }),
+    );
+    const outcomes = Promise.allSettled(captures);
+    try {
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(collectDetail).toHaveBeenCalledOnce();
+      if (mode === "parent") controller.abort(reason);
+      else await source.cancelDetails?.(reason);
+      expect(await outcomes).toEqual(
+        Array.from({ length: 6 }, () => ({ status: "rejected", reason })),
+      );
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(collectDetail).toHaveBeenCalledOnce();
+    } finally {
+      controller.abort(reason);
+      await outcomes;
+      vi.useRealTimers();
+    }
+  },
+);

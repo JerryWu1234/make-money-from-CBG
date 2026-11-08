@@ -329,16 +329,21 @@ export function createCrawlSource({
       local.addEventListener("abort", cancel, { once: true });
       if (local.aborted) cancel();
       active.set(control, close);
-      const timer = setTimeout(
-        () => control.abort(new CaptureDeadlineError(detailTimeoutMs, stage)),
-        detailTimeoutMs,
-      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         local.throwIfAborted();
         return await collectRole(page, item, {
           signal: local,
           savedRecord,
-          waitForDetailOpen,
+          waitForDetailOpen: async (openingSignal) => {
+            await waitForDetailOpen(openingSignal);
+            openingSignal.throwIfAborted();
+            // Initial queueing is not reading time; later retries share this one deadline.
+            timer ??= setTimeout(
+              () => control.abort(new CaptureDeadlineError(detailTimeoutMs, stage)),
+              detailTimeoutMs,
+            );
+          },
           log,
           onDetailProgress: (message) => {
             stage = message;
