@@ -172,6 +172,9 @@ export class CrawlStore {
       .prepare("UPDATE crawl_state SET page_reviews_json=? WHERE id=1")
       .run(JSON.stringify(remaining));
   }
+  hasListing(key: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM listings WHERE key=?").get(key);
+  }
   observe(item: Listing, lane: CrawlLane = "old"): boolean {
     if (lane !== "new" && lane !== "old") throw new Error("采集任务来源无效");
     const now = new Date().toISOString();

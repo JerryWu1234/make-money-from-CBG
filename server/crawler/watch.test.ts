@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { CrawlStore } from "./store";
 import { crawl } from "./runner";
+import { watchCrawl } from "./watch";
 import { CAPTURE_VERSION } from "./compact";
 import { collectCompleteCapture, IncompleteCaptureError } from "./capture-readiness";
 import {
@@ -97,6 +98,79 @@ afterEach(() => {
 });
 
 describe("持续发现新号和历史详情共享采集池", () => {
+  it.each(["complete", "pending", "failed", "unavailable"] as const)(
+    "URL 已登记为 %s 时跳过悬停，保留原资料及未完成任务",
+    async (status) => {
+      const db = memory(),
+        original = item(1),
+        duplicate = { ...item(1, 2000), price: "200", ordersn: "changed" },
+        src = source([[duplicate]]),
+        active = holdDetails(src),
+        control = new AbortController();
+      db.observe(original, "old");
+      if (status === "complete") db.save(original, detail(original));
+      if (status === "failed") db.fail(original.key, "原失败原因");
+      if (status === "unavailable") db.markUnavailable(original.key, "官方确认下架");
+      const before = db.db.prepare("SELECT * FROM listings WHERE key=?").get(original.key);
+      const outcome = watchCrawl(src, db, control.signal, vi.fn(), { concurrency: 2 }, undefined, {
+        saved: 0,
+        failed: status === "failed" ? 1 : 0,
+        failedItems: status === "failed" ? [original] : [],
+      }).catch((error: unknown) => error);
+      try {
+        await flush();
+        expect(src.hover).not.toHaveBeenCalled();
+        expect(readSaved(db, original.key)).toMatchObject({ status, listing: original });
+        expect(db.captureLane(original.key)).toBe("old");
+        if (status === "pending") {
+          expect(src.detail).toHaveBeenCalledExactlyOnceWith(expect.objectContaining(original));
+          active.get(original.key)!();
+          await flush();
+          expect(readSaved(db, original.key)?.status).toBe("complete");
+        } else {
+          expect(src.detail).not.toHaveBeenCalled();
+          expect(db.db.prepare("SELECT * FROM listings WHERE key=?").get(original.key)).toEqual(
+            before,
+          );
+        }
+      } finally {
+        control.abort(new Error("暂停"));
+        active.forEach((release) => release());
+        await outcome;
+      }
+    },
+  );
+
+  it("跨页重现的在途 URL 直接跳过，新 URL 仍核验并采集", async () => {
+    const db = memory(),
+      original = item(1),
+      fresh = item(2),
+      duplicate = { ...original, price: "200", ordersn: "changed" },
+      src = source([[original], [duplicate, fresh]]),
+      active = holdDetails(src),
+      control = new AbortController();
+    const outcome = crawl(src, db, control.signal, vi.fn(), { watch: true, concurrency: 2 }).catch(
+      (error: unknown) => error,
+    );
+    try {
+      await flush();
+      expect(vi.mocked(src.hover).mock.calls.map(([row]) => row.key)).toEqual([
+        original.key,
+        fresh.key,
+      ]);
+      expect([...active.keys()]).toEqual([original.key, fresh.key]);
+      active.forEach((release) => release());
+      await flush();
+      expect(db.count()).toBe(2);
+      expect(readSaved(db, original.key)?.listing).toMatchObject(original);
+      expect(src.detail).toHaveBeenCalledTimes(2);
+    } finally {
+      control.abort(new Error("暂停"));
+      active.forEach((release) => release());
+      await outcome;
+    }
+  });
+
   it.each(["selling_time DESC", "expire_time DESC"])(
     "%s 从第一页顺扫至20页，刷新后自然接第2页，不跳回断点且保留在途任务",
     async (order) => {
@@ -156,9 +230,19 @@ describe("持续发现新号和历史详情共享采集池", () => {
         await flush();
         expect(active.has(fresh.key)).toBe(true);
         expect(active.has(previousActive[1]!)).toBe(true);
-        expect(events.slice(events.indexOf("reload"))).toEqual(["reload", "page:2:false"]);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(events.slice(events.indexOf("reload"))).toEqual([
+          "reload",
+          ...Array.from({ length: 19 }, (_, index) => `page:${index + 2}:false`),
+        ]);
         expect(src.page).not.toHaveBeenCalledWith(1);
-        expect(src.page).toHaveBeenCalledTimes(20);
+        expect(src.page).toHaveBeenCalledTimes(38);
+        expect(
+          vi
+            .mocked(src.hover)
+            .mock.calls.map(([row]) => row.key)
+            .sort(),
+        ).toEqual([...pages[19]!.map((row) => row.key), fresh.key].sort());
       } finally {
         control.abort(new Error("暂停"));
         active.forEach((release) => release());
@@ -490,7 +574,10 @@ describe("持续发现新号和历史详情共享采集池", () => {
       expect([...active.keys()].every((key) => db.captureLane(key) === "new")).toBe(true);
       active.get(fresh[2]!.key)!();
       await flush();
-      expect(active.has(old[4]!.key)).toBe(true);
+      // 重扫遇到尚未登记的尾部 URL 属于新发现，先于保留在老队列的任务派发。
+      expect(active.has(old[8]!.key)).toBe(true);
+      expect(db.captureLane(old[4]!.key)).toBe("old");
+      expect(readSaved(db, old[4]!.key)?.status).toBe("pending");
       expect(active.size).toBe(4);
       expect(maximumPending).toBe(12);
       expect(
@@ -1316,15 +1403,20 @@ describe("持续发现新号和历史详情共享采集池", () => {
       fresh.forEach((row) => active.get(row.key)!());
       await flush();
       expect([...active.keys()].sort()).toEqual(added.map((row) => row.key).sort());
-      if (sameSecond) expect(db.headCheckpoint()).toBeUndefined();
       added.slice(0, 2).forEach((row) => active.get(row.key)!());
       await flush();
-      expect(old.filter((row) => active.has(row.key))).toHaveLength(2);
       expect(added.slice(2).every((row) => active.has(row.key))).toBe(true);
       expect(src.page).toHaveBeenCalledWith(3);
       expect(src.page).toHaveBeenCalledWith(4);
       expect(db.detail(tail.key)).not.toBeNull();
       if (sameSecond) expect(db.headCheckpoint()?.keys).toHaveLength(8);
+      for (let round = 0; round < 8 && db.count() < 13; round++) {
+        active.forEach((release) => release());
+        await flush();
+      }
+      expect(db.count()).toBe(13);
+      expect(src.detail).toHaveBeenCalledTimes(13);
+      expect(src.hover).toHaveBeenCalledTimes(13);
       expect(
         vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old[0]!.key),
       ).toHaveLength(1);
@@ -1635,8 +1727,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
     }
   });
 
-  // 失败方式：失败排除只看 key，重上架仍不派发；解除过宽使同版本或仅改价反复重试。
-  it("失败商品同版本不重试，真正重上架后重新采集并解除历史失败门槛", async () => {
+  it("列表重现不改写失败任务，同 URL 改价或时间均不触发重试，新 eid 正常采集", async () => {
     vi.useFakeTimers();
     const db = memory(),
       old = item(20, 999),
@@ -1661,16 +1752,21 @@ describe("持续发现新号和历史详情共享采集池", () => {
     await vi.advanceTimersByTimeAsync(200);
     await flush();
     expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old.key)).toHaveLength(1);
-    expect(readSaved(db, old.key)?.listing.price).toBe("200");
-    const relisted = { ...item(20, 1001), price: "200" };
-    pages[0] = [relisted, fresh];
+    expect(readSaved(db, old.key)?.listing.price).toBe("100");
+    pages[0] = [{ ...item(20, 1001), price: "200" }, fresh];
     await vi.advanceTimersByTimeAsync(100);
     await flush();
-    expect(readSaved(db, old.key)?.status).toBe("complete");
-    expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old.key)).toHaveLength(2);
-    expect(db.backfillComplete()).toBe(true);
+    expect(readSaved(db, old.key)).toMatchObject({ status: "failed", listing: old });
+    expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old.key)).toHaveLength(1);
+    const relisted = { ...item(21, 1002), price: "200" };
+    pages[0] = [relisted, fresh];
     await vi.advanceTimersByTimeAsync(100);
-    expect(vi.mocked(src.detail).mock.calls.filter(([row]) => row.key === old.key)).toHaveLength(2);
+    expect(readSaved(db, relisted.key)?.status).toBe("complete");
+    expect(vi.mocked(src.hover).mock.calls.map(([row]) => row.key)).toEqual([
+      fresh.key,
+      relisted.key,
+    ]);
+    expect(db.backfillComplete()).toBe(false);
     control.abort(new Error("暂停"));
     expect(await outcome).toMatchObject({ message: "暂停" });
   });
@@ -1883,7 +1979,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
   );
 
   it.each(["sellingTime", "price"] as const)(
-    "同 key 在途期间观察到 %s 改变时暂停，旧详情不得覆盖记录",
+    "同 URL 在途期间列表 %s 改变时不再悬停，原任务正常完成",
     async (field) => {
       vi.useFakeTimers();
       const db = memory(),
@@ -1910,11 +2006,14 @@ describe("持续发现新号和历史详情共享采集池", () => {
       await vi.advanceTimersByTimeAsync(100);
       await flush();
       expect(db.count()).toBe(0);
+      expect(src.hover).toHaveBeenCalledTimes(1);
       active.forEach((release) => release());
-      expect(await outcome).toBeInstanceOf(ListingChangedError);
-      expect(db.count()).toBe(0);
+      await flush();
+      expect(db.count()).toBe(1);
       expect(db.checkpoint()).toBeUndefined();
-      expect(readSaved(db, original.key)?.status).toBe("pending");
+      expect(readSaved(db, original.key)).toMatchObject({ status: "complete", listing: original });
+      control.abort(new Error("暂停"));
+      expect(await outcome).toMatchObject({ message: "暂停" });
     },
   );
 

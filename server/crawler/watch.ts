@@ -61,7 +61,6 @@ export async function watchCrawl(
   const headRefresh = { ...(options.headRefresh ?? DEFAULT_HEAD_REFRESH) };
   const running = { new: 0, old: 0 };
   const inFlight = new Map<string, Promise<void>>();
-  const runningItems = new Map<string, Listing>();
   const failedVersions = new Map<string, Listing["sellingTime"]>(
     seed.failedItems.map((item) => [item.key, item.sellingTime]),
   );
@@ -237,20 +236,26 @@ export async function watchCrawl(
         })
         .finally(() => {
           inFlight.delete(item.key);
-          runningItems.delete(item.key);
           running[lane]--;
           pump();
           wake?.();
         });
       inFlight.set(item.key, task);
-      runningItems.set(item.key, item);
     }
     report();
+  };
+  const skipKnown = (item: Listing) => {
+    // key 来自列表 URL 的 serverId:eid；已有任务保持原状态，不重复悬停或登记。
+    if (!inFlight.has(item.key) && !store.hasListing(item.key)) return false;
+    skipped++;
+    publish({ skipped });
+    return true;
   };
   const observe = async (listed: Listing, lane: CrawlLane) => {
     try {
       while (true) {
         check();
+        if (skipKnown(listed)) return;
         // 两侧分别有界，老号排队不能阻止刚发现的新号登记。
         while (queued()[lane].length >= concurrency) {
           pump();
@@ -261,10 +266,9 @@ export async function watchCrawl(
         }
         const item = await source.hover(listed);
         check();
+        // 悬停期间若已有同一 URL 的任务登记，仍由原任务负责。
+        if (item.key === listed.key && skipKnown(listed)) return;
         if (item.key !== listed.key || item.sellingTime !== listed.sellingTime)
-          throw new ListingChangedError();
-        const active = runningItems.get(item.key);
-        if (active && (active.sellingTime !== item.sellingTime || active.price !== item.price))
           throw new ListingChangedError();
         if (store.observe(item, lane)) {
           skipped++;
@@ -282,7 +286,12 @@ export async function watchCrawl(
         failure ??= { error, preserveCompleted: timeout || !!crawlAccessFailure(error) };
         // 发现阶段失败也必须登记为任务；不能把未核验的列表资料发布为完整商品。
         // 已在途或完整的同版本商品由原任务负责，避免覆盖其有效资料。
-        if (timeout && !inFlight.has(listed.key) && !store.observe(listed, lane)) {
+        if (
+          timeout &&
+          !inFlight.has(listed.key) &&
+          !store.hasListing(listed.key) &&
+          !store.observe(listed, lane)
+        ) {
           store.fail(listed.key, error.message);
           failedVersions.set(listed.key, listed.sellingTime);
           failed++;
@@ -354,7 +363,7 @@ export async function watchCrawl(
     phase: "collecting",
     current: undefined,
     detailProgress: undefined,
-    message: "从第一页顺序检查角色，未加入的登记待采，已完整的跳过；刷新后重新顺扫…",
+    message: "从第一页按商品 URL 查重，已登记的跳过，未加入的核验后登记待采；刷新后重新顺扫…",
   });
   try {
     beginScan(await source.prepare(order));
@@ -406,10 +415,9 @@ export async function watchCrawl(
           try {
             for (; itemIndex < page.items.length; itemIndex++) {
               const listed = page.items[itemIndex]!;
-              const lane =
-                historyPage === 1 || ((historyPass > 1 || hadBackfill) && !store.detail(listed.key))
-                  ? "new"
-                  : "old";
+              // 在队列限流和悬停核对之前查重，已见商品不占用发现名额。
+              if (skipKnown(listed)) continue;
+              const lane = historyPage === 1 || historyPass > 1 || hadBackfill ? "new" : "old";
               // 复用现有有界队列；满时保留本页位置，等空位或下一次刷新，不重复点击分页。
               if (queued()[lane].length >= concurrency) {
                 pump();
@@ -421,6 +429,7 @@ export async function watchCrawl(
                   };
               }
               const item = await observe(listed, lane);
+              if (!item) continue;
               if (store.captureLane(item.key) === "old" && !inFlight.has(item.key))
                 historyPoints.set(item.key, {
                   index: historyIndex++,

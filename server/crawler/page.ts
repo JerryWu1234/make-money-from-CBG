@@ -301,6 +301,7 @@ export async function refreshList(
   page: Page,
   signal: AbortSignal,
   order?: string,
+  reportOrder?: (state: { expected: string; observed: string; restored?: string }) => void,
 ): Promise<ListingPage> {
   checkAborted(signal);
   await assertAvailable(page);
@@ -309,7 +310,47 @@ export async function refreshList(
   await assertAvailable(page);
   await waitList(page, 1);
   const result = await readListings(page);
-  if (order && result.order !== order) throw new Error("刷新后列表排序发生变化，已暂停采集");
+  if (!order || result.order === order) return result;
+  reportOrder?.({ expected: order, observed: result.order });
+  const field =
+    order === "selling_time DESC"
+      ? "selling_time"
+      : order === "expire_time DESC"
+        ? "expire_time"
+        : null;
+  if (!field) throw new Error("刷新后列表排序发生变化，已暂停采集");
+  const restored = await ensureListOrder(page, signal, field);
+  reportOrder?.({ expected: order, observed: result.order, restored: restored.order });
+  return restored;
+}
+
+// 首次准备和刷新恢复共用网站原有排序控件，最多两次点击，不额外点击第一页。
+async function ensureListOrder(
+  page: Page,
+  signal: AbortSignal,
+  field: "selling_time" | "expire_time",
+): Promise<ListingPage> {
+  const expected = `${field} DESC`;
+  const option = page.locator(`#order_menu a[data_attr_name="${field}"]`);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    checkAborted(signal);
+    const current = await readListings(page);
+    if (current.order === expected) return current;
+    if (!(await option.count())) break;
+    await pace(signal);
+    await observeListNavigation(page);
+    try {
+      await clickForInspection(option, signal);
+      await waitList(page, 1, true);
+    } finally {
+      await clearListNavigation(page).catch(() => {});
+    }
+  }
+  const result = await readListings(page);
+  if (result.order !== expected)
+    throw new Error(
+      `未能恢复${field === "selling_time" ? "上架时间倒序" : "到期时间倒序"}（实际排序：${result.order || "网站默认"}），已暂停采集`,
+    );
   return result;
 }
 
@@ -321,7 +362,12 @@ export async function prepareList(
   await ensureWorkViewport(page);
   const selling = page.locator('#order_menu a[data_attr_name="selling_time"]');
   const expiry = page.locator('#order_menu a[data_attr_name="expire_time"]');
-  const preferred = /^(selling_time|expire_time) DESC$/.exec(preferredOrder || "")?.[1];
+  const preferred =
+    preferredOrder === "selling_time DESC"
+      ? "selling_time"
+      : preferredOrder === "expire_time DESC"
+        ? "expire_time"
+        : undefined;
   if (
     preferredOrder === "selling_time DESC" &&
     !(await selling.count()) &&
@@ -338,20 +384,7 @@ export async function prepareList(
           : (await expiry.count())
             ? "expire_time"
             : null;
-  if (field) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const current = await readListings(page);
-      if (current.order === `${field} DESC`) break;
-      await pace(signal);
-      await observeListNavigation(page);
-      try {
-        await clickForInspection(page.locator(`#order_menu a[data_attr_name="${field}"]`), signal);
-        await waitList(page, 1, true);
-      } finally {
-        await clearListNavigation(page).catch(() => {});
-      }
-    }
-  }
+  if (field) await ensureListOrder(page, signal, field);
   const result = await gotoPage(page, 1, signal, true);
   if (preferredOrder === "selling_time DESC" && result.order !== preferredOrder)
     throw new Error("未能确认上架时间倒序，已暂停采集");
