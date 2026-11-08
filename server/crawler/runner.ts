@@ -16,17 +16,20 @@ import { CAPTURE_VERSION, hasUnconfirmedEmptyEquipment } from "./compact";
 import { MAIN_TABS } from "./detail";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { watchCrawl } from "./watch";
+import { validateHeadRefreshSettings, type HeadRefreshSettings } from "./head-refresh";
 import { browserConnectionFailure } from "../browser-connection";
 import { pageSignature, readPageReview, refreshRepeatedPage } from "./repeated-pages";
 export interface CrawlOptions {
   concurrency?: number;
   watch?: boolean;
   headIntervalMs?: number;
+  headRefresh?: HeadRefreshSettings;
   backfillOnly?: boolean;
   keys?: string[];
   refresh?: boolean;
 }
 export function validateCrawlOptions(options: CrawlOptions) {
+  if (options.headRefresh !== undefined) validateHeadRefreshSettings(options.headRefresh);
   if (
     options.concurrency !== undefined &&
     (!Number.isSafeInteger(options.concurrency) ||

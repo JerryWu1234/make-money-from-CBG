@@ -77,6 +77,9 @@ for (const cancel of [false, true]) {
             openCalls++;
             body = browser();
             break;
+          case "/api/crawl/head-refresh":
+            body = { intervalSeconds: 60, random: false };
+            break;
           case "/api/crawl/settings":
             body = { analyzeEquipment: false };
             break;

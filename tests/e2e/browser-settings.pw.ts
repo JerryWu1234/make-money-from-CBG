@@ -128,6 +128,9 @@ async function mount(
           state.crawlRunning = true;
           body = crawlStatus(true, true);
           break;
+        case "/api/crawl/head-refresh":
+          body = { intervalSeconds: 60, random: false };
+          break;
         case "/api/crawl/settings":
           body = { analyzeEquipment: false };
           break;

@@ -91,11 +91,64 @@ function holdDetails(src: CrawlSource) {
   return active;
 }
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
   for (const store of stores.splice(0)) store.close();
 });
 
 describe("持续发现新号和历史详情共享采集池", () => {
+  it.each([false, true])(
+    "首页按%s随机设置排期，每次完成后重抽且在等待期间不重抽",
+    async (random) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(0);
+      const draw = vi
+        .spyOn(Math, "random")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0.5)
+        .mockReturnValue(0.99999);
+      const src = source([[]]),
+        control = new AbortController();
+      const settings = { intervalSeconds: 10, random };
+      const states: Partial<CrawlStatus>[] = [];
+      let runError: unknown;
+      const finished = crawl(src, memory(), control.signal, (state) => states.push(state), {
+        watch: true,
+        headRefresh: settings,
+      }).catch((error: unknown) => {
+        runError = error;
+        return error;
+      });
+      try {
+        await flush();
+        expect(runError).toBeUndefined();
+        expect(src.prepare).toHaveBeenCalledTimes(1);
+        const first = random ? 1000 : 10_000;
+        expect(
+          states.filter((state) => state.headRefreshDelayMs !== undefined).at(-1)
+            ?.headRefreshDelayMs,
+        ).toBe(first);
+        settings.intervalSeconds = 1; // 运行中的配置快照不随外部修改变化。
+        await vi.advanceTimersByTimeAsync(first - 1);
+        expect(src.prepare).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(1);
+        await flush();
+        expect(src.prepare).toHaveBeenCalledTimes(2);
+        const second = random ? 6000 : 10_000;
+        expect(
+          states.filter((state) => state.headRefreshDelayMs !== undefined).at(-1)
+            ?.headRefreshDelayMs,
+        ).toBe(second);
+        await vi.advanceTimersByTimeAsync(second);
+        await flush();
+        expect(src.prepare).toHaveBeenCalledTimes(3);
+        expect(draw).toHaveBeenCalledTimes(random ? 3 : 0);
+      } finally {
+        control.abort(new Error("结束测试"));
+        await finished;
+      }
+    },
+  );
   it("浏览器断连不把在途角色记为单品失败，部分资料留待补采且不推进断点", async () => {
     const db = memory(),
       fresh = [item(1), item(2), item(3), item(4), item(5)];

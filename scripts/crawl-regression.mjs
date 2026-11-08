@@ -68,12 +68,14 @@ const { CrawlStore } = await import(
 );
 const { crawl } = await import(
   await moduleUrl("server/crawler/runner.ts", {
+    "./head-refresh": await moduleUrl("server/crawler/head-refresh.ts"),
     "./resume": await moduleUrl("server/crawler/resume.ts"),
     "./types": typesUrl,
     "./compact": compactUrl,
     "./detail": detailUrl,
     "./capture-readiness": readinessUrl,
     "./watch": await moduleUrl("server/crawler/watch.ts", {
+      "./head-refresh": await moduleUrl("server/crawler/head-refresh.ts"),
       "./compact": compactUrl,
       "./capture-readiness": readinessUrl,
       "./resume": await moduleUrl("server/crawler/resume.ts"),

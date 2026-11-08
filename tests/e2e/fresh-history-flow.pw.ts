@@ -239,6 +239,9 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
         case "/api/browser/status":
           body = browserStatus;
           break;
+        case "/api/crawl/head-refresh":
+          body = { intervalSeconds: 60, random: false };
+          break;
         case "/api/crawl/settings":
           body = { analyzeEquipment: false };
           break;

@@ -62,6 +62,8 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
         );
       } else if (url.pathname === "/api/crawl/status") {
         body = crawlStatus(running, ready);
+      } else if (url.pathname === "/api/crawl/head-refresh") {
+        body = { intervalSeconds: 60, random: false };
       } else if (url.pathname === "/api/crawl/settings") {
         body = { analyzeEquipment: false };
       } else if (url.pathname === "/api/scan/status") {
