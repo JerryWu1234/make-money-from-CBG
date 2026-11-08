@@ -5,7 +5,7 @@ import { collectDetail, isOnShelf } from "./detail";
 import { saveCaptureFailure } from "./capture-failure";
 import { SellingOrderUnavailableError, type Listing, type RoleDetail } from "./types";
 import { captureBrowserStep } from "../browser-evidence";
-import { prepareList, gotoPage, hoverListing } from "./page";
+import { prepareList, gotoPage, hoverListing, refreshList } from "./page";
 import { CAPTURE_VERSION } from "./compact";
 import { IncompleteCaptureError } from "./capture-readiness";
 
@@ -17,6 +17,7 @@ vi.mock("./detail", () => ({
 vi.mock("./page", () => ({
   pace: vi.fn().mockResolvedValue(undefined),
   prepareList: vi.fn(),
+  refreshList: vi.fn(),
   gotoPage: vi.fn(),
   hoverListing: vi.fn(),
 }));
@@ -170,6 +171,22 @@ it("完整详情通过校验后才记录读取完成", async () => {
     opts.signal,
   );
   expect(saveCaptureFailure).not.toHaveBeenCalled();
+});
+
+it("巡检复用刷新后第一页，不额外准备或点击第一页", async () => {
+  const listing = { page: 1, totalPages: 3, order: "expire_time DESC", items: [item] };
+  vi.mocked(refreshList).mockResolvedValue(listing);
+  const opts = options();
+  const source = createCrawlSource({ ...opts, listPage: page, detailPage: page });
+  await expect(source.refresh!(listing.order)).resolves.toBe(listing);
+  expect(refreshList).toHaveBeenCalledWith(page, opts.signal, listing.order);
+  expect(prepareList).not.toHaveBeenCalled();
+  expect(gotoPage).not.toHaveBeenCalled();
+  expect(captureBrowserStep).toHaveBeenCalledWith(
+    page,
+    { flow: "collection", stage: "列表刷新后读取第一页完成", key: undefined },
+    opts.signal,
+  );
 });
 
 it("列表准备、切页、悬停及上架核验均在业务动作完成后截图", async () => {

@@ -296,6 +296,23 @@ export async function gotoPage(
     await clearListNavigation(page).catch(() => {});
   }
 }
+/** 官网刷新后自然回到第一页，直接读取新列表，不再额外点击第一页。 */
+export async function refreshList(
+  page: Page,
+  signal: AbortSignal,
+  order?: string,
+): Promise<ListingPage> {
+  checkAborted(signal);
+  await assertAvailable(page);
+  await page.reload({ waitUntil: "domcontentloaded", timeout: 45000 });
+  checkAborted(signal);
+  await assertAvailable(page);
+  await waitList(page, 1);
+  const result = await readListings(page);
+  if (order && result.order !== order) throw new Error("刷新后列表排序发生变化，已暂停采集");
+  return result;
+}
+
 export async function prepareList(
   page: Page,
   signal: AbortSignal,
