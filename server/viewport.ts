@@ -14,26 +14,65 @@ export async function ensureWorkViewport(page: Page) {
     await page.setViewportSize(WORK_VIEWPORT);
   }
 }
-/** Use the verified locator directly in the main world, without adopting a node handle. */
+/** Check the target in the main world, then send browser mouse input without a node handle. */
 export async function clickForInspection(element: Locator, signal?: AbortSignal) {
   // Keep page loading and data reads outside this shared click queue.
-  const click = inspectionClickTail.then(() => {
+  const click = inspectionClickTail.then(async () => {
     signal?.throwIfAborted();
-    return element.evaluateAll((elements) => {
-      if (elements.length !== 1) return false;
-      (elements[0] as HTMLElement).click();
-      return true;
-    });
+    const page = element.page();
+    await ensureWorkViewport(page);
+    const token = `${Date.now()}:${Math.random()}`;
+    const point = (mark: boolean) =>
+      element.evaluateAll(
+        (elements, { token, mark }) => {
+          if (elements.length !== 1) return null;
+          const el = elements[0];
+          const marker = Symbol.for("cbg.inspection-click-target");
+          if (
+            !el.isConnected ||
+            !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
+            el.closest(':disabled, [aria-disabled="true"], [inert]')
+          )
+            return null;
+          if (mark) {
+            Reflect.set(el, marker, token);
+            el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+          } else if (Reflect.get(el, marker) !== token) return null;
+          const rect = el.getBoundingClientRect();
+          const left = Math.max(0, rect.left),
+            right = Math.min(window.innerWidth, rect.right),
+            top = Math.max(0, rect.top),
+            bottom = Math.min(window.innerHeight, rect.bottom);
+          if (right <= left || bottom <= top) return null;
+          const x = (left + right) / 2,
+            y = (top + bottom) / 2;
+          if (!el.contains(document.elementFromPoint(x, y))) return null;
+          return { x, y, left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+        },
+        { token, mark },
+      );
+    const changed = () =>
+      Object.assign(new Error("待读取标签或分页目标不可点击或已变化，未执行点击"), {
+        name: "IncompleteDetailError",
+      });
+    const before = await point(true);
+    if (!before) throw changed();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    signal?.throwIfAborted();
+    const stable = await point(false);
+    if (!stable || JSON.stringify(before) !== JSON.stringify(stable)) throw changed();
+    await page.mouse.move(stable.x, stable.y);
+    const afterHover = await point(false);
+    if (!afterHover || JSON.stringify(stable) !== JSON.stringify(afterHover)) throw changed();
+    signal?.throwIfAborted();
+    // A failure after input may already have changed the page: never replay the click here.
+    await page.mouse.click(afterHover.x, afterHover.y);
   });
   inspectionClickTail = click.then(
     () => {},
     () => {},
   );
-  const clicked = await click;
-  if (!clicked)
-    throw Object.assign(new Error("待读取标签或分页目标已变化，未执行点击"), {
-      name: "IncompleteDetailError",
-    });
+  await click;
 }
 export async function hoverForInspection(
   page: Page,

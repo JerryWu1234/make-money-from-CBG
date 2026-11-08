@@ -22,6 +22,7 @@ import { saveCaptureFailure } from "./capture-failure";
 import { captureBrowserStep } from "../browser-evidence";
 import { classifyBrowserFailure } from "../browser-connection";
 import { roleIdentityIssues } from "./role-identity";
+import { createDetailOpenQueue } from "./detail-open-queue";
 
 interface SourceOptions {
   listPage: Page;
@@ -44,7 +45,10 @@ export async function collectRole(
     savedRecord,
     onDetailProgress,
     log,
-  }: Pick<SourceOptions, "signal" | "savedRecord" | "onDetailProgress" | "log">,
+    waitForDetailOpen,
+  }: Pick<SourceOptions, "signal" | "savedRecord" | "onDetailProgress" | "log"> & {
+    waitForDetailOpen?: (signal: AbortSignal) => Promise<void>;
+  },
 ) {
   signal.throwIfAborted();
   const previous = savedRecord?.(item.key);
@@ -96,6 +100,9 @@ export async function collectRole(
       stage = "开始读取角色详情";
       try {
         await pace(signal, 1800, 1700);
+        await waitForDetailOpen?.(signal);
+        signal.throwIfAborted();
+        log("detail.open", { key: item.key, attempt });
         const detail = await collectDetail(detailPage, item, signal, report);
         const issues = captureIssues(detail, true, true, item);
         if (issues.length)
@@ -187,6 +194,7 @@ export function createCrawlSource({
   detailTimeoutMs = 180_000,
 }: SourceOptions): CrawlSource {
   const available = [detailPage];
+  const waitForDetailOpen = createDetailOpenQueue();
   const active = new Map<AbortController, () => Promise<void>>();
   const step = async <T>(page: Page, stage: string, read: () => Promise<T>, key?: string) => {
     try {
@@ -245,6 +253,7 @@ export function createCrawlSource({
         "角色上架状态读取",
         async () => {
           await pace(signal, 600, 400);
+          await waitForDetailOpen(signal);
           const onShelf = await isOnShelf(detailPage, item, signal);
           log("anchor.checked", { key: item.key, onShelf });
           return onShelf;
@@ -329,6 +338,7 @@ export function createCrawlSource({
         return await collectRole(page, item, {
           signal: local,
           savedRecord,
+          waitForDetailOpen,
           log,
           onDetailProgress: (message) => {
             stage = message;

@@ -376,3 +376,115 @@ it("明确刷新不提供savedRecord时始终重新读取，不能被默认复�
   await expect(collectRole(page, item, options())).resolves.toBe(full);
   expect(collectDetail).toHaveBeenCalledOnce();
 });
+
+it("六个在途详情共用五秒开页间隔，读取仍可并行，补位也遵守同一间隔", async () => {
+  vi.useFakeTimers();
+  const starts: number[] = [];
+  const beginning = Date.now();
+  let finish!: () => void;
+  const reading = new Promise<void>((resolve) => (finish = resolve));
+  vi.mocked(collectDetail).mockImplementation(async (_page, listing) => {
+    starts.push(Date.now() - beginning);
+    await reading;
+    return {
+      ...reusableDetail(),
+      valuation: {
+        ...reusableDetail().valuation!,
+        source: { serverId: listing.serverId, eid: listing.eid },
+      },
+    };
+  });
+  const makePage = () =>
+    ({ ...page, close: vi.fn().mockResolvedValue(undefined) }) as unknown as Page;
+  const source = createCrawlSource({
+    ...options(),
+    listPage: page,
+    detailPage: makePage(),
+    createDetailPage: async () => makePage(),
+  });
+  const captures = Array.from({ length: 6 }, (_, index) =>
+    source.detail({ ...item, key: `367:role-${index}`, eid: `role-${index}` }),
+  );
+  try {
+    await vi.advanceTimersByTimeAsync(25000);
+    expect(starts).toEqual([0, 5000, 10000, 15000, 20000, 25000]);
+    finish();
+    await Promise.all(captures);
+    const next = source.detail({ ...item, key: "367:replacement", eid: "replacement" });
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(starts).toHaveLength(6);
+    await vi.advanceTimersByTimeAsync(1);
+    await next;
+    expect(starts[6]).toBe(30000);
+  } finally {
+    finish();
+    await source.cancelDetails?.(new Error("cleanup"));
+    await Promise.allSettled(captures);
+    vi.useRealTimers();
+  }
+});
+
+it("详情导航重试仍等待同一个开页队列，复用完整资料不申请开页", async () => {
+  const waitForDetailOpen = vi.fn().mockResolvedValue(undefined);
+  const reset = vi.fn().mockResolvedValue(undefined);
+  const error = Object.assign(new Error("page.goto: Timeout 45000ms exceeded"), {
+    name: "TimeoutError",
+  });
+  vi.mocked(collectDetail).mockRejectedValueOnce(error).mockResolvedValueOnce(reusableDetail());
+  const retryPage = { ...page, goto: reset } as unknown as Page;
+  await expect(
+    collectRole(retryPage, item, { ...options(), waitForDetailOpen }),
+  ).resolves.toBeTruthy();
+  expect(waitForDetailOpen).toHaveBeenCalledTimes(2);
+  expect(reset).toHaveBeenCalledOnce();
+  await collectRole(retryPage, item, {
+    ...options(),
+    waitForDetailOpen,
+    savedRecord: () => ({
+      listing: item,
+      detail: reusableDetail(),
+      status: "complete",
+      error: null,
+    }),
+  });
+  expect(waitForDetailOpen).toHaveBeenCalledTimes(2);
+});
+
+it("暂停取消正在读取和等待开页的六个任务，之后不再打开详情", async () => {
+  vi.useFakeTimers();
+  const controller = new AbortController();
+  const reason = new Error("用户暂停采集");
+  vi.mocked(collectDetail).mockImplementation(
+    async (_page, _item, signal) =>
+      new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      }),
+  );
+  const makePage = () =>
+    ({ ...page, close: vi.fn().mockResolvedValue(undefined) }) as unknown as Page;
+  const source = createCrawlSource({
+    ...options(),
+    signal: controller.signal,
+    listPage: page,
+    detailPage: makePage(),
+    createDetailPage: async () => makePage(),
+  });
+  const captures = Array.from({ length: 6 }, (_, index) =>
+    source.detail({ ...item, key: `367:paused-${index}`, eid: `paused-${index}` }),
+  );
+  const outcomes = Promise.allSettled(captures);
+  try {
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(collectDetail).toHaveBeenCalledOnce();
+    controller.abort(reason);
+    expect(await outcomes).toEqual(
+      Array.from({ length: 6 }, () => ({ status: "rejected", reason })),
+    );
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(collectDetail).toHaveBeenCalledOnce();
+  } finally {
+    controller.abort(reason);
+    await outcomes;
+    vi.useRealTimers();
+  }
+});
