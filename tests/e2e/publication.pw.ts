@@ -42,6 +42,9 @@ test("单一商品列表排除未完整记录，兼容旧任务链接并保留�
         case "/api/crawl/status":
           body = crawlStatus(false, true);
           break;
+        case "/api/crawl/head-refresh":
+          body = { intervalSeconds: 60, random: false };
+          break;
         case "/api/crawl/settings":
           body = { analyzeEquipment: false };
           break;

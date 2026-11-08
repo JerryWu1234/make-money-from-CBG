@@ -17,6 +17,9 @@ test("首页装备总开关默认关闭、持久保存，保存失败不伪装�
     if (url.pathname.startsWith("/api/")) {
       let body: unknown;
       switch (url.pathname) {
+        case "/api/crawl/head-refresh":
+          body = { intervalSeconds: 60, random: false };
+          break;
         case "/api/crawl/settings":
           body = { analyzeEquipment: enabled };
           break;

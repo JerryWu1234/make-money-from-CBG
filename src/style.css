@@ -1151,6 +1151,53 @@ body {
   color: var(--text-primary);
   font: inherit;
 }
+.head-refresh-settings {
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+}
+.head-refresh-settings h3 {
+  margin: 0 0 12px;
+}
+.head-refresh-fields {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.head-refresh-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.head-refresh-fields .btn-secondary {
+  align-self: flex-end;
+  min-height: 44px;
+  font: inherit;
+}
+.head-refresh-fields input,
+.head-refresh-fields select {
+  padding: 9px;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--text-primary);
+  font: inherit;
+}
+.head-refresh-fields input {
+  width: 120px;
+}
+.head-refresh-random {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+.head-refresh-random input {
+  width: 18px;
+  height: 18px;
+}
 .saved-list {
   max-height: 220px;
   overflow: auto;

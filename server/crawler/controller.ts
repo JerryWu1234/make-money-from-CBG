@@ -16,6 +16,7 @@ import { loadProfile, saveProfile } from "../analysis/profile";
 import { assertServiceOpen } from "../service-lifecycle";
 import { showBrowserWorkPages } from "../config";
 import { BrowserConnectionError, browserConnectionFailure } from "../browser-connection";
+import { headRefreshSettings } from "./head-refresh-settings";
 
 type CrawlRuntime = {
   storage?: CrawlStore;
@@ -137,6 +138,7 @@ export async function startCrawl(
   options: CrawlOptions = {},
 ): Promise<CrawlStartResult> {
   assertServiceOpen();
+  options = { ...options, headRefresh: options.headRefresh ?? headRefreshSettings() };
   validateCrawlOptions(options);
   if (options.refresh) store().retryItems(options.keys, true);
   if (isCrawling()) return { status: crawlStatus(), started: false, activity: cache.activeRun };

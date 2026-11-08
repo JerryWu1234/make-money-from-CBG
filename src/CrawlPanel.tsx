@@ -6,6 +6,8 @@ import { SavedRoleList, displayTime } from "./SavedRoleList";
 import { ScanSchedulePanel } from "./ScanSchedulePanel";
 import { RunRecordSettings } from "./RunRecordSettings";
 import { SqliteDataCleanup } from "./SqliteDataCleanup";
+import { HeadRefreshSettings } from "./HeadRefreshSettings";
+import { describeHeadRefresh } from "../server/crawler/head-refresh";
 import { replaceSavedRecordKey, replaceSavedRecordsPage, savedRecordKey } from "./saved-view-state";
 
 type Status = CrawlStatus & {
@@ -213,6 +215,7 @@ export function CrawlPanel({
             </button>
           </div>
         </div>
+        <HeadRefreshSettings />
         {waitingForReady && (
           <p role="status" className="status-note">
             正在恢复 Chrome 连接和角色列表；如需授权或扫码，请按页面提示完成，之后自动继续采集。
@@ -260,6 +263,12 @@ export function CrawlPanel({
                 {status.headCheckedAt ? ` · 上次检查：${displayTime(status.headCheckedAt)}` : ""}
                 {status.headPage ? ` · 新号检查至第 ${status.headPage} 页` : ""}
                 {status.historyPage ? ` · 老号回补至第 ${status.historyPage} 页` : ""}
+                {status.headRefresh
+                  ? ` · 本轮设置：${describeHeadRefresh(status.headRefresh)}`
+                  : ""}
+                {status.headRefreshDelayMs
+                  ? ` · 本次间隔：${status.headRefreshDelayMs / 1000}秒`
+                  : ""}
               </p>
             )}
             <p>
@@ -348,8 +357,8 @@ export function CrawlPanel({
             并发数只支持正偶数，默认 {DEFAULT_CRAWL_CONCURRENCY}
             个。开始或继续时，先用全部并发名额补采已保存的未完成任务，不分新老；补采结束后再发现商品。
             持续采集时，有新号排队就优先派发新号，没有新号待派时用老号补空位；已经在途的老号继续完成。
-            失败任务独立保留，完整入库后才发布为商品并进入分析。列表首页约每 60
-            秒检查一次，同时逐页核对历史列表。修改后在下次开始或继续采集时生效。
+            失败任务独立保留，完整入库后才发布为商品并进入分析。列表首页按保存的固定或随机间隔检查，
+            同时逐页核对历史列表。修改后在下次开始或继续采集时生效。
           </p>
         </section>
         <section className="crawl-options" aria-label="运行记录与数据维护">

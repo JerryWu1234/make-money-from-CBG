@@ -187,6 +187,9 @@ async function fixture(page: Page, testInfo: TestInfo) {
         case "/api/runtime/settings":
           body = { saveScreenshots: false };
           break;
+        case "/api/crawl/head-refresh":
+          body = { intervalSeconds: 60, random: false };
+          break;
         case "/api/crawl/settings":
           body = { analyzeEquipment: false };
           break;

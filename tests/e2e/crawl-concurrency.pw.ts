@@ -58,6 +58,9 @@ test("新号优先状态显示实际在途，10并发上限不会显示成已满
         case "/api/browser/status":
           body = browserStatus;
           break;
+        case "/api/crawl/head-refresh":
+          body = { intervalSeconds: 60, random: false };
+          break;
         case "/api/crawl/settings":
           body = { analyzeEquipment: false };
           break;
@@ -432,6 +435,9 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
       switch (url.pathname) {
         case "/api/browser/status":
           body = browserStatus;
+          break;
+        case "/api/crawl/head-refresh":
+          body = { intervalSeconds: 60, random: false };
           break;
         case "/api/crawl/settings":
           body = { analyzeEquipment: false };

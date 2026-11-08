@@ -6,6 +6,7 @@ import { ScheduleConfigError } from "./crawler/schedule-time";
 import { validateSampleSelection } from "./analysis/sample-selection";
 import { analysisConcurrency } from "./analysis/types";
 import type { SavedListingScope } from "./crawler/types";
+import { HeadRefreshSettingsError } from "./crawler/head-refresh";
 import {
   browserControl,
   browserBusyError,
@@ -18,6 +19,7 @@ const getRoutes = new Set([
   "/api/browser/settings",
   "/api/crawl/status",
   "/api/crawl/settings",
+  "/api/crawl/head-refresh",
   "/api/crawl/detail",
   "/api/crawl/records",
   "/api/scan/status",
@@ -38,6 +40,7 @@ const postRoutes = new Set([
   "/api/browser/settings/save",
   "/api/crawl/start",
   "/api/crawl/settings/save",
+  "/api/crawl/head-refresh/save",
   "/api/crawl/backfill",
   "/api/crawl/stop",
   "/api/crawl/clear",
@@ -461,6 +464,20 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
       return;
     }
 
+    if (pathname === "/api/crawl/head-refresh" || pathname === "/api/crawl/head-refresh/save") {
+      const settings = await import("./crawler/head-refresh-settings");
+      try {
+        const result = pathname.endsWith("/save")
+          ? settings.saveHeadRefreshSettings(body)
+          : settings.headRefreshSettings();
+        res.end(JSON.stringify(result));
+      } catch (error) {
+        if (!(error instanceof HeadRefreshSettingsError)) throw error;
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: error.message }));
+      }
+      return;
+    }
     const crawler = await import("./crawler/controller");
     if (pathname.startsWith("/api/crawl/")) {
       const params = new URL(req.url!, expectedOrigin).searchParams;

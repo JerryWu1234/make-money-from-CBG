@@ -59,6 +59,9 @@ test("定时计划选择、清空、删除时间并保存刷新", async ({ page,
         case "/api/browser/status":
           body = browserStatus;
           break;
+        case "/api/crawl/head-refresh":
+          body = { intervalSeconds: 60, random: false };
+          break;
         case "/api/crawl/settings":
           body = { analyzeEquipment: false };
           break;

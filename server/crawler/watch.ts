@@ -6,6 +6,7 @@ import { IncompleteCaptureError } from "./capture-readiness";
 import { locateCheckpoint } from "./resume";
 import { browserConnectionFailure } from "../browser-connection";
 import { pageSignature, readPageReview, refreshRepeatedPage } from "./repeated-pages";
+import { DEFAULT_HEAD_REFRESH, headRefreshDelayMs } from "./head-refresh";
 import {
   DEFAULT_CRAWL_CONCURRENCY,
   crawlAccessFailure,
@@ -59,7 +60,7 @@ export async function watchCrawl(
 ) {
   const ordered = order === ORDER;
   const concurrency = options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
-  const interval = options.headIntervalMs ?? 60000;
+  const headRefresh = { ...(options.headRefresh ?? DEFAULT_HEAD_REFRESH) };
   const running = { new: 0, old: 0 };
   const inFlight = new Map<string, Promise<void>>();
   const runningItems = new Map<string, Listing>();
@@ -318,7 +319,7 @@ export async function watchCrawl(
         ? legacyPoint.time
         : undefined;
     const boundary = previous?.time ?? (catchUp ? legacyBoundary : top);
-    const keys = new Set<string>(previous?.time === top ? previous.keys : []);
+    const keys = new Set<string>(previous && previous.time === top ? previous.keys : []);
     let page = first,
       signature = "",
       previousLastTime: string | undefined;
@@ -362,6 +363,16 @@ export async function watchCrawl(
       store.setHeadCheckpoint({ time: top, keys: [...keys] });
     publish({ headCheckedAt: new Date().toISOString() });
   };
+  const scheduleHeadCheck = () => {
+    // 每一轮只抽取一次，详情完成、状态轮询等事件不会重置已经排定的时间。
+    const delay = options.headIntervalMs ?? headRefreshDelayMs(headRefresh);
+    nextHeadCheck = Date.now() + delay;
+    publish({
+      headRefresh,
+      headRefreshDelayMs: delay,
+      nextHeadCheckAt: new Date(nextHeadCheck).toISOString(),
+    });
+  };
   const waitForWork = (detailsOnly = false) =>
     new Promise<void>((resolve) => {
       const finish = () => {
@@ -393,7 +404,7 @@ export async function watchCrawl(
       await discoverHead(first);
       return first;
     });
-    nextHeadCheck = Date.now() + interval;
+    scheduleHeadCheck();
     const point = store.checkpoint();
     if (store.pageReviews().length) historyDone = false;
     if (ordered && !historyDone && point && !store.pageReviews().length)
@@ -414,7 +425,7 @@ export async function watchCrawl(
           await discoverHead(refreshed);
           return refreshed;
         });
-        nextHeadCheck = Date.now() + interval;
+        scheduleHeadCheck();
         const headSignature = refreshed.items.map((item) => item.key).join("|");
         // 首页商品确有位移时，历史重叠页才需重建比较；相同首页不能掩盖重复页。
         if (

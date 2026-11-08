@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   current: vi.fn(),
   enqueue: vi.fn(),
   getBrowser: vi.fn(),
+  headRefresh: vi.fn(),
   detailPage: { close: vi.fn(), setDefaultTimeout: vi.fn() },
 }));
 vi.mock("./store", () => ({
@@ -27,6 +28,7 @@ vi.mock("./store", () => ({
   },
 }));
 vi.mock("./runner", () => ({ crawl: mocks.crawl, validateCrawlOptions: vi.fn() }));
+vi.mock("./head-refresh-settings", () => ({ headRefreshSettings: mocks.headRefresh }));
 vi.mock("../cbg", () => ({ checkCbgStatus: mocks.current }));
 vi.mock("../session", () => ({
   getCbgPage: () => ({}),
@@ -45,9 +47,21 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   mocks.acquire.mockReturnValue(true);
+  mocks.headRefresh.mockReturnValue({ intervalSeconds: 600, random: true });
   mocks.current.mockResolvedValue({ isLoggedIn: true, running: false, workflowStep: "completed" });
   mocks.getBrowser.mockResolvedValue({ isConnected: () => true });
   initial = undefined;
+});
+
+it.each(["manual", "scheduled"] as const)("%s 启动将已保存的刷新配置传给采集器", async (origin) => {
+  mocks.crawl.mockResolvedValue(undefined);
+  const controller = await import("./controller");
+  initial = controller;
+  const result = await controller.startCrawl(origin);
+  await result.activity!.completion;
+  expect(mocks.crawl.mock.calls[0][4]).toMatchObject({
+    headRefresh: { intervalSeconds: 600, random: true },
+  });
 });
 
 it("浏览器检查期间开始关停，不会在检查返回后启动采集", async () => {

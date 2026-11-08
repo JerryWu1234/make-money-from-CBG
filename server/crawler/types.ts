@@ -207,6 +207,8 @@ export interface PageReview {
   detectedAt: string;
 }
 export interface CrawlStatus {
+  headRefresh?: import("./head-refresh").HeadRefreshSettings;
+  headRefreshDelayMs?: number;
   concurrency?: number;
   captureStrategy?: "new-first";
   newRunning?: number;

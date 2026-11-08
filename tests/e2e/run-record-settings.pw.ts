@@ -31,6 +31,7 @@ async function mount(page: Page, runtime: (route: Route, pathname: string) => Pr
       const responses: Record<string, unknown> = {
         "/api/browser/status": browserStatus,
         "/api/crawl/settings": { analyzeEquipment: false },
+        "/api/crawl/head-refresh": { intervalSeconds: 60, random: false },
         "/api/crawl/status": crawlStatus(true, true),
         "/api/crawl/records": { page: 1, total: 0, totalPages: 1, items: [] },
         "/api/scan/status": {
