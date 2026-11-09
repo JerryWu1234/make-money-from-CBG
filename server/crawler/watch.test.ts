@@ -1249,40 +1249,47 @@ describe("持续发现新号和历史详情共享采集池", () => {
     await outcome;
   });
 
-  it("单件同URL导航连续中断仅隔离该角色，其他完整详情仍保存并继续发现新号", async () => {
-    vi.useFakeTimers();
-    const db = memory(),
-      fresh = [item(1), item(2), item(3)],
-      pages = [fresh],
-      src = source(pages),
-      control = new AbortController();
-    const broken = fresh[1];
-    const read = vi.fn(async () => {
-      throw new Error(
-        `page.goto: Navigation to "${broken.url}" is interrupted by another navigation to "${broken.url}"`,
+  it.each(["同URL导航中断", "导航网络变化"])(
+    "单件%s耗尽仅隔离该角色，其他完整详情仍保存并继续发现新号",
+    async (kind) => {
+      vi.useFakeTimers();
+      const db = memory(),
+        fresh = [item(1), item(2), item(3)],
+        pages = [fresh],
+        src = source(pages),
+        control = new AbortController();
+      const broken = fresh[1];
+      const read = vi.fn(async () => {
+        throw new Error(
+          kind === "导航网络变化"
+            ? `page.goto: net::ERR_NETWORK_CHANGED at ${broken.url}`
+            : `page.goto: Navigation to "${broken.url}" is interrupted by another navigation to "${broken.url}"`,
+        );
+      });
+      src.detail = vi.fn(async (row) =>
+        row.key === broken.key
+          ? collectCompleteCapture(read, control.signal, vi.fn())
+          : detail(row),
       );
-    });
-    src.detail = vi.fn(async (row) =>
-      row.key === broken.key ? collectCompleteCapture(read, control.signal, vi.fn()) : detail(row),
-    );
-    const outcome = crawl(src, db, control.signal, vi.fn(), {
-      watch: true,
-      concurrency: 4,
-      headIntervalMs: 100,
-    }).catch((error: unknown) => error);
-    await flush();
-    expect(read).toHaveBeenCalledTimes(3);
-    expect(readSaved(db, broken.key)?.status).toBe("failed");
-    expect(db.count()).toBe(2);
-    const added = item(0, 1001);
-    pages[0] = [added, ...fresh];
-    await vi.advanceTimersByTimeAsync(100);
-    await flush();
-    expect(readSaved(db, added.key)?.status).toBe("complete");
-    expect(read).toHaveBeenCalledTimes(3);
-    control.abort(new Error("暂停"));
-    await outcome;
-  });
+      const outcome = crawl(src, db, control.signal, vi.fn(), {
+        watch: true,
+        concurrency: 4,
+        headIntervalMs: 100,
+      }).catch((error: unknown) => error);
+      await flush();
+      expect(read).toHaveBeenCalledTimes(3);
+      expect(readSaved(db, broken.key)?.status).toBe("failed");
+      expect(db.count()).toBe(2);
+      const added = item(0, 1001);
+      pages[0] = [added, ...fresh];
+      await vi.advanceTimersByTimeAsync(100);
+      await flush();
+      expect(readSaved(db, added.key)?.status).toBe("complete");
+      expect(read).toHaveBeenCalledTimes(3);
+      control.abort(new Error("暂停"));
+      await outcome;
+    },
+  );
   it("单件缺项只处理一次并保留快照，其他商品及后续新号继续入库", async () => {
     vi.useFakeTimers();
     const db = memory(),

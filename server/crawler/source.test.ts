@@ -343,6 +343,43 @@ const reusableDetail = (): RoleDetail => ({
   },
   petCapture: { version: 1, collectedAt: "saved-at", complete: true, issues: [] },
 });
+it("初次导航网络变化先重置旧文档再重试，重试仍经过开页队列", async () => {
+  const original = new Error(
+    "page.goto: net::ERR_NETWORK_CHANGED at https://xyq.cbg.163.com/equip?s=367&eid=abc",
+  );
+  const goto = vi.fn().mockResolvedValue(undefined);
+  const localPage = { ...page, goto } as unknown as Page;
+  const full = reusableDetail();
+  const waitForDetailOpen = vi.fn().mockResolvedValue(undefined);
+  vi.mocked(collectDetail).mockReset().mockRejectedValueOnce(original).mockResolvedValueOnce(full);
+  await expect(collectRole(localPage, item, { ...options(), waitForDetailOpen })).resolves.toBe(
+    full,
+  );
+  expect(collectDetail).toHaveBeenCalledTimes(2);
+  expect(waitForDetailOpen).toHaveBeenCalledTimes(2);
+  expect(goto).toHaveBeenCalledExactlyOnceWith("about:blank", {
+    waitUntil: "commit",
+    timeout: 5000,
+  });
+  expect(goto.mock.invocationCallOrder[0]).toBeLessThan(
+    vi.mocked(collectDetail).mock.invocationCallOrder[1]!,
+  );
+});
+it("网络变化已携带资料时不重置页面，保留已读资料", async () => {
+  const partial = reusableDetail();
+  const original = new IncompleteCaptureError(
+    "已读后中断",
+    partial,
+    new Error("page.goto: net::ERR_NETWORK_CHANGED"),
+  );
+  const goto = vi.fn();
+  vi.mocked(collectDetail).mockReset().mockRejectedValue(original);
+  await expect(
+    collectRole({ ...page, goto } as unknown as Page, item, options()),
+  ).rejects.toMatchObject({ detail: partial, cause: original });
+  expect(collectDetail).toHaveBeenCalledOnce();
+  expect(goto).not.toHaveBeenCalled();
+});
 it("同一上架版本已完整的商品直接复用，不打开详情也不刷新宝宝装备", async () => {
   const detail = reusableDetail();
   const opts = options();

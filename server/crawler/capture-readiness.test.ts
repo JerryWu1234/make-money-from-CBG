@@ -1,6 +1,11 @@
 import { expect, it, vi } from "vite-plus/test";
 import { CAPTURE_VERSION } from "./compact";
-import { captureIssues, collectCompleteCapture, IncompleteCaptureError } from "./capture-readiness";
+import {
+  captureIssues,
+  collectCompleteCapture,
+  IncompleteCaptureError,
+  isRetryableDetailNavigation,
+} from "./capture-readiness";
 import { CrawlStore } from "./store";
 import { analysisRecord } from "../../tests/fixtures/analysis";
 import type { RoleDetail } from "./types";
@@ -128,6 +133,62 @@ it("登录或安全验证不自动重试，停止采集而不越过访问限制"
   expect(read).toHaveBeenCalledOnce();
 });
 const detailUrl = "https://xyq.cbg.163.com/equip?s=962&eid=202609301400113-962-FKBHP23OIEVM";
+const networkChanged = () => new Error(`page.goto: net::ERR_NETWORK_CHANGED at ${detailUrl}`);
+
+// 失败方式：网络变化直接终止整轮、无限重试、已有资料被重开丢弃、暂停后继续、误吞其他错误。
+it("初次导航网络变化后重试，完整资料通过核验再返回", async () => {
+  const read = vi.fn().mockRejectedValueOnce(networkChanged()).mockResolvedValueOnce(complete());
+  const report = vi.fn();
+  await expect(collectCompleteCapture(read, new AbortController().signal, report)).resolves.toEqual(
+    complete(),
+  );
+  expect(read).toHaveBeenCalledTimes(2);
+  expect(report).toHaveBeenCalledOnce();
+});
+it("导航网络变化最多尝试三次，耗尽后保留原因为单件未完成", async () => {
+  const original = networkChanged();
+  const read = vi.fn().mockRejectedValue(original);
+  const report = vi.fn();
+  await expect(
+    collectCompleteCapture(read, new AbortController().signal, report),
+  ).rejects.toMatchObject({ name: "IncompleteDetailError", cause: original });
+  expect(read).toHaveBeenCalledTimes(3);
+  expect(report).toHaveBeenCalledTimes(2);
+});
+it("网络变化携带部分资料时保留快照，不重新打开详情", async () => {
+  const partial = complete();
+  const original = new IncompleteCaptureError("读取中断", partial, networkChanged());
+  const read = vi.fn().mockRejectedValue(original);
+  expect(isRetryableDetailNavigation(original)).toBe(false);
+  const error = await collectCompleteCapture(read, new AbortController().signal, vi.fn()).catch(
+    (error: unknown) => error,
+  );
+  expect(error).toMatchObject({ name: "IncompleteDetailError", detail: partial, cause: original });
+  expect(read).toHaveBeenCalledOnce();
+});
+it("网络变化重试期间收到暂停，不启动下一次读取", async () => {
+  const control = new AbortController();
+  const reason = new Error("用户暂停采集");
+  const read = vi.fn().mockRejectedValue(networkChanged());
+  await expect(
+    collectCompleteCapture(read, control.signal, () => control.abort(reason)),
+  ).rejects.toBe(reason);
+  expect(read).toHaveBeenCalledOnce();
+});
+it.each([
+  "page.evaluate: net::ERR_NETWORK_CHANGED",
+  "page.goto: net::ERR_NETWORK_CHANGED_OTHER",
+  "网站提示 page.goto: net::ERR_NETWORK_CHANGED",
+  "page.goto: net::ERR_CONNECTION_CLOSED",
+  `page.goto: net::ERR_NETWORK_CHANGED at ${detailUrl}\n网站要求安全验证`,
+])("网络恢复不吞掉其他错误或安全验证：%s", async (message) => {
+  const original = new Error(message);
+  const read = vi.fn().mockRejectedValue(original);
+  await expect(collectCompleteCapture(read, new AbortController().signal, vi.fn())).rejects.toBe(
+    original,
+  );
+  expect(read).toHaveBeenCalledOnce();
+});
 const interruptedNavigation = (from = detailUrl, to = from) =>
   new Error(
     `page.goto: Navigation to "${from}" is interrupted by another navigation to "${to}"\nCall log:\n  - navigating to "${from}", waiting until "domcontentloaded"\n`,

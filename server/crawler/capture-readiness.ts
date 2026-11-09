@@ -67,7 +67,9 @@ export function isRetryableDetailNavigation(error: unknown): boolean {
   return (
     cause instanceof Error &&
     ((cause.name === "TimeoutError" && cause.message.startsWith("page.goto:")) ||
-      isSameDetailNavigationInterrupted(cause))
+      isSameDetailNavigationInterrupted(cause) ||
+      (!(error instanceof IncompleteCaptureError) &&
+        /^page\.goto: net::ERR_NETWORK_CHANGED(?: at |\r?\n|$)/.test(cause.message)))
   );
 }
 
@@ -180,7 +182,7 @@ export async function collectCompleteCapture(
         !(cause instanceof Error) ||
         /登录|验证码|安全验证|频繁|繁忙|权限|禁止/i.test(cause.message) ||
         (!["IncompleteDetailError", "TimeoutError"].includes(cause.name) &&
-          !isSameDetailNavigationInterrupted(cause))
+          !isRetryableDetailNavigation(cause))
       )
         throw cause;
       last = error instanceof Error ? error : cause;
