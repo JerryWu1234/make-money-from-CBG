@@ -179,7 +179,17 @@ it("巡检复用刷新后第一页，不额外准备或点击第一页", async (
   const opts = options();
   const source = createCrawlSource({ ...opts, listPage: page, detailPage: page });
   await expect(source.refresh!(listing.order)).resolves.toBe(listing);
-  expect(refreshList).toHaveBeenCalledWith(page, opts.signal, listing.order);
+  expect(refreshList).toHaveBeenCalledWith(page, opts.signal, listing.order, expect.any(Function));
+  vi.mocked(refreshList).mock.calls[0]![3]!({
+    expected: listing.order,
+    observed: "",
+    restored: listing.order,
+  });
+  expect(opts.log).toHaveBeenCalledWith("list.refresh_order", {
+    expected: listing.order,
+    observed: "",
+    restored: listing.order,
+  });
   expect(prepareList).not.toHaveBeenCalled();
   expect(gotoPage).not.toHaveBeenCalled();
   expect(captureBrowserStep).toHaveBeenCalledWith(

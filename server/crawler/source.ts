@@ -235,7 +235,9 @@ export function createCrawlSource({
       }),
     refresh: (order) =>
       step(listPage, "列表刷新后读取第一页", () =>
-        refreshList(listPage, signal, order ?? preferredOrder),
+        refreshList(listPage, signal, order ?? preferredOrder, (state) =>
+          log("list.refresh_order", state),
+        ),
       ),
     page: (number, refresh = false) =>
       step(listPage, `列表翻页至第 ${number} 页`, async () => {
