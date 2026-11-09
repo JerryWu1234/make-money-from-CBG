@@ -3,6 +3,7 @@ export type CrawlLane = "new" | "old";
 export interface HeadCheckpoint {
   time: string;
   keys: string[];
+  mode?: "latest-only";
 }
 
 export interface Listing {

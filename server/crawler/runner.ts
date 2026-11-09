@@ -254,9 +254,9 @@ export async function crawl(
       signal.throwIfAborted();
       if (!(error instanceof SellingOrderUnavailableError)) throw error;
       const notice =
-        "网站没有上架时间排序入口：从第一页顺序核对完整列表，刷新后重新顺扫；优先派发新发现的角色";
+        "网站没有上架时间排序入口：使用出售剩余时间倒序，并逐页核对真实上架时间；首次限定页数，之后检查新增至旧号边界，时间失序时暂停";
       publish({ phase: "locating", message: notice, strategy: notice });
-      // 到期排序不代表上架顺序：不用时间水位截断发现，也不据此跳过历史页。
+      // 不把到期时间当上架时间；watch 同时核验每页和跨页的真实 sellingTime，失序即暂停。
       return watchCrawl(source, store, signal, publish, options, "expire_time DESC", seed);
     }
   }

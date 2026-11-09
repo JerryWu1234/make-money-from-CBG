@@ -60,7 +60,11 @@ it("新旧来源不改变商品原文，历史观察不降级新号，两个进�
       store.db.prepare("SELECT listing_json FROM listings WHERE key=?").get(fresh.listing.key)!
         .listing_json,
     ).toBe(input);
-    const head = { time: "2026-10-23T01:00:00.000Z", keys: [fresh.listing.key] };
+    const head = {
+      time: "2026-10-23T01:00:00.000Z",
+      keys: [fresh.listing.key],
+      mode: "latest-only" as const,
+    };
     store.setHeadCheckpoint(head);
     expect(store.checkpoint()).toEqual(history);
     expect(store.backfillComplete()).toBe(false);

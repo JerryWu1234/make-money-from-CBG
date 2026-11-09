@@ -301,7 +301,7 @@ export function CrawlPanel({
                   )
                   .join("、")}
                 {status.pageReviews.length > 12 ? "等" : ""}
-                。重复页已跳过，将在本轮结束后复核；未核实的页会保留到续采。
+                。重复页已跳过，下轮经过对应页时复核；未核实的页会保留到续采。
               </p>
             )}
             {status.latestComplete && (

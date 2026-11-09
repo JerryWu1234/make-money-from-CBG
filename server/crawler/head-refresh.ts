@@ -1,9 +1,16 @@
 export interface HeadRefreshSettings {
   intervalSeconds: number;
   random: boolean;
+  initialPages?: number;
 }
 
-export const DEFAULT_HEAD_REFRESH: HeadRefreshSettings = { intervalSeconds: 60, random: false };
+export const DEFAULT_INITIAL_PAGES = 5;
+export const MAX_INITIAL_PAGES = 1000;
+export const DEFAULT_HEAD_REFRESH: HeadRefreshSettings = {
+  intervalSeconds: 60,
+  random: false,
+  initialPages: DEFAULT_INITIAL_PAGES,
+};
 // 保持在浏览器和 Node 定时器的安全范围内。
 export const MAX_HEAD_REFRESH_SECONDS = 7 * 24 * 60 * 60;
 
@@ -12,7 +19,11 @@ export class HeadRefreshSettingsError extends Error {}
 export function validateHeadRefreshSettings(value: unknown): HeadRefreshSettings {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new HeadRefreshSettingsError("首页刷新设置无效");
-  const { intervalSeconds, random } = value as Record<string, unknown>;
+  const {
+    intervalSeconds,
+    random,
+    initialPages = DEFAULT_INITIAL_PAGES,
+  } = value as Record<string, unknown>;
   if (
     typeof intervalSeconds !== "number" ||
     !Number.isSafeInteger(intervalSeconds) ||
@@ -21,7 +32,14 @@ export function validateHeadRefreshSettings(value: unknown): HeadRefreshSettings
   )
     throw new HeadRefreshSettingsError("刷新间隔必须在1秒至7天之间，且精确到秒");
   if (typeof random !== "boolean") throw new HeadRefreshSettingsError("随机刷新选项必须为布尔值");
-  return { intervalSeconds, random };
+  if (
+    typeof initialPages !== "number" ||
+    !Number.isSafeInteger(initialPages) ||
+    initialPages < 1 ||
+    initialPages > MAX_INITIAL_PAGES
+  )
+    throw new HeadRefreshSettingsError(`首次采集页数必须是1至${MAX_INITIAL_PAGES}的整数`);
+  return { intervalSeconds, random, initialPages };
 }
 
 export function headRefreshDelayMs(settings: HeadRefreshSettings, random = Math.random): number {

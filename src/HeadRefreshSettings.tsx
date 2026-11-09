@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   describeHeadRefresh,
+  DEFAULT_INITIAL_PAGES,
+  MAX_INITIAL_PAGES,
   MAX_HEAD_REFRESH_SECONDS,
   validateHeadRefreshSettings,
   type HeadRefreshSettings as Settings,
@@ -29,6 +31,7 @@ export function HeadRefreshSettings() {
   const [time, setTime] = useState("1");
   const [unit, setUnit] = useState(60);
   const [random, setRandom] = useState(false);
+  const [initialPages, setInitialPages] = useState(String(DEFAULT_INITIAL_PAGES));
   const [saved, setSaved] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -46,6 +49,7 @@ export function HeadRefreshSettings() {
       setUnit(nextUnit);
       setTime(String(settings.intervalSeconds / nextUnit));
       setRandom(settings.random);
+      setInitialPages(String(settings.initialPages ?? DEFAULT_INITIAL_PAGES));
     } catch (error) {
       if (!signal?.aborted)
         setError(error instanceof Error ? error.message : "无法读取首页刷新设置");
@@ -69,6 +73,7 @@ export function HeadRefreshSettings() {
       const settings = validateHeadRefreshSettings({
         intervalSeconds: Number(time) * unit,
         random,
+        initialPages: Number(initialPages),
       });
       const result = await requestSettings(settings);
       setSaved(result);
@@ -92,6 +97,21 @@ export function HeadRefreshSettings() {
         }}
       >
         <div className="head-refresh-fields">
+          <label>
+            首次采集页数
+            <input
+              type="number"
+              min={1}
+              max={MAX_INITIAL_PAGES}
+              step={1}
+              value={initialPages}
+              disabled={disabled}
+              onChange={(event) => {
+                setInitialPages(event.target.value);
+                setNotice("");
+              }}
+            />
+          </label>
           <label>
             刷新间隔
             <input
@@ -144,15 +164,17 @@ export function HeadRefreshSettings() {
           ? "勾选后，每轮从1秒到设定时长之间随机抽取等待时间。"
           : "未勾选时，每次按设定时长等待。"}
         例如设置10分钟并勾选随机，每轮等待1秒至10分钟。可设置1秒至7天。
-        首次开始会立即读取第一页，之后按间隔检查；列表忙时可能延后。
+        首次从第1页开始，最多检查设定页数；已有新增检查边界时不再补历史。
+        后续每次刷新回到第1页，检查到上轮旧号边界并核对完同秒商品后停止翻页。
+        列表检查与详情采集并行；本轮尚未检查完成时，刷新会延后。
       </p>
       <p className="status-note">
         {loading
           ? "正在读取刷新设置…"
           : saved
-            ? `当前已保存：${describeHeadRefresh(saved)}。`
+            ? `当前已保存：${describeHeadRefresh(saved)}，首次最多${saved.initialPages ?? DEFAULT_INITIAL_PAGES}页。`
             : "尚未读取到已保存的设置。"}
-        设置保存在本机，下次开始或继续采集时生效；当前任务保持原设置，只影响列表首页检查。
+        设置保存在本机，下次开始或继续采集时生效；当前任务保持原设置，用于列表发现，已保存的待采任务继续保留。
       </p>
       {notice && (
         <p role="status" className="status-note">
