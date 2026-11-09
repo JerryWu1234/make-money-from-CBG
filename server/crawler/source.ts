@@ -6,6 +6,7 @@ import {
   type CrawlSource,
   type Listing,
   type SavedRoleRecord,
+  type CrawlAccessError,
 } from "./types";
 import {
   collectCompleteCapture,
@@ -34,6 +35,7 @@ interface SourceOptions {
   onDetailProgress: (message: string) => void;
   log: (event: string, data?: Record<string, unknown>) => void;
   detailTimeoutMs?: number;
+  onAccessFailure?: (error: CrawlAccessError) => void;
 }
 
 /** 完整商品直接复用；新商品读取一次，未读到资料前的导航失败可有界恢复。 */
@@ -46,7 +48,11 @@ export async function collectRole(
     onDetailProgress,
     log,
     waitForDetailOpen,
-  }: Pick<SourceOptions, "signal" | "savedRecord" | "onDetailProgress" | "log"> & {
+    onAccessFailure,
+  }: Pick<
+    SourceOptions,
+    "signal" | "savedRecord" | "onDetailProgress" | "log" | "onAccessFailure"
+  > & {
     waitForDetailOpen?: (signal: AbortSignal) => Promise<void>;
   },
 ) {
@@ -123,6 +129,8 @@ export async function collectRole(
               ? new IncompleteCaptureError(access.message, error.detail, access)
               : access
             : classifyBrowserFailure(detailPage, error, signal);
+        const blocked = crawlAccessFailure(failure);
+        if (blocked) onAccessFailure?.(blocked);
         await saveCaptureFailure(
           detailPage,
           signal,
@@ -192,6 +200,7 @@ export function createCrawlSource({
   onDetailProgress,
   log,
   detailTimeoutMs = 180_000,
+  onAccessFailure,
 }: SourceOptions): CrawlSource {
   const available = [detailPage];
   const waitForDetailOpen = createDetailOpenQueue();
@@ -203,6 +212,8 @@ export function createCrawlSource({
       return result;
     } catch (error) {
       const failure = signal.aborted ? signal.reason : classifyBrowserFailure(page, error, signal);
+      const access = crawlAccessFailure(failure);
+      if (access) onAccessFailure?.(access);
       // This typed signal selects runner's existing full-list scan; it is not a failed action.
       // Keep throwing it so expiry order never inherits the selling-time watermark strategy.
       const orderFallback = error instanceof SellingOrderUnavailableError;
@@ -351,6 +362,7 @@ export function createCrawlSource({
             );
           },
           log,
+          onAccessFailure,
           onDetailProgress: (message) => {
             stage = message;
             local.throwIfAborted();

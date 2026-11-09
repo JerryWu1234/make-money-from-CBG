@@ -1,11 +1,9 @@
 import { afterAll, beforeAll, expect, it, vi } from "vite-plus/test";
 import { chromium, type Browser, type Page } from "playwright-core";
-import {
-  hasLoginRequiredDialog,
-  watchLoginRequiredDialog,
-  LoginRequiredDialogError,
-} from "./login-dialog";
+import { hasLoginRequiredDialog, watchLoginRequiredDialog } from "./login-dialog";
 import { assertAvailable } from "./page";
+import { watchCrawlAccess } from "./access-guard";
+import { CrawlAccessError } from "./types";
 import { clickForInspection, hoverForInspection } from "../viewport";
 import { createCrawlSource } from "./source";
 import { collectDetail } from "./detail";
@@ -162,9 +160,16 @@ it("全局取消后不再发送排队点击或悬停，保留原登录错误", a
   }
 });
 
-it.each(["list", "detail"])(
-  "%s 页触发后立即取消六个并发，完整资料和八条补采任务保留",
-  async (where) => {
+it.each([
+  ["list", "login"],
+  ["detail", "login"],
+  ["list", "verification"],
+  ["detail", "verification"],
+  ["list", "busy"],
+  ["detail", "busy"],
+] as const)(
+  "%s 页触发 %s 后立即取消六个并发，完整资料和八条补采任务保留",
+  async (where, issue) => {
     vi.mocked(collectDetail).mockClear();
     const listPage = await fixture();
     const pages: Page[] = [];
@@ -172,11 +177,11 @@ it.each(["list", "detail"])(
     const control = new AbortController();
     const db = new CrawlStore(":memory:");
     const log = vi.fn();
-    const notify = (error: LoginRequiredDialogError) => control.abort(error);
+    const notify = (error: CrawlAccessError) => control.abort(error);
     const makePage = async () => {
       const page = await fixture();
       pages.push(page);
-      disposers.push(await watchLoginRequiredDialog(page, control.signal, notify));
+      disposers.push(await watchCrawlAccess(page, control.signal, notify));
       return page;
     };
     vi.mocked(collectDetail).mockImplementation(
@@ -201,7 +206,7 @@ it.each(["list", "detail"])(
     expect(db.save(complete.listing, complete.detail!)).toBe(true);
     const queued = Array.from({ length: 8 }, (_, index) => analysisRecord(`pending-${index}`));
     queued.forEach((row) => db.observe(row.listing));
-    disposers.push(await watchLoginRequiredDialog(listPage, control.signal, notify));
+    disposers.push(await watchCrawlAccess(listPage, control.signal, notify));
     const source = createCrawlSource({
       listPage,
       detailPage: await makePage(),
@@ -225,10 +230,14 @@ it.each(["list", "detail"])(
       const before = vi.mocked(collectDetail).mock.calls.length;
       await (where === "list" ? listPage : pages[5]!).evaluate(
         (html) => document.body.insertAdjacentHTML("beforeend", html),
-        popup,
+        issue === "login"
+          ? popup
+          : issue === "verification"
+            ? '<div class="popupDialog">请完成安全验证</div>'
+            : "<div>访问过于频繁</div>",
       );
       const error = await outcome;
-      expect(error).toMatchObject({ kind: "login", code: "CBG_LOGIN_REQUIRED_DIALOG" });
+      expect(error).toMatchObject({ kind: issue });
       expect(pages.every((page) => page.isClosed())).toBe(true);
       expect(vi.mocked(collectDetail).mock.calls.length).toBe(before);
       expect(db.count()).toBe(1);

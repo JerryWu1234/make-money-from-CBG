@@ -92,10 +92,17 @@ export async function assertAvailable(page: Page) {
         LoginInfo?: { login?: number | boolean };
       };
       const visible = (selector: string) =>
-        Array.from(document.querySelectorAll(selector)).some((el) => el.checkVisibility());
+        Array.from(document.querySelectorAll(selector)).some((el) =>
+          el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }),
+        );
       if (
         globals.CaptchaCheck?.need_captcha ||
-        visible(".yidun_popup, .geetest_panel, #captcha_container")
+        visible(".yidun_popup, .geetest_panel, #captcha_container, #ajax_guard_ne_captcha") ||
+        Array.from(document.querySelectorAll(".popupDialog, .dialogWrap")).some(
+          (el) =>
+            el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+            /请完成安全验证/.test(el.textContent || ""),
+        )
       )
         return "verification" as const;
       if (

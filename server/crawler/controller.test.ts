@@ -40,10 +40,7 @@ vi.mock("../session", () => ({
   createHiddenPage: async () => mocks.detailPage,
 }));
 vi.mock("./source", () => ({ createCrawlSource: () => ({}) }));
-vi.mock("./login-dialog", async (original) => ({
-  ...(await original<typeof import("./login-dialog")>()),
-  watchLoginRequiredDialog: mocks.watchLogin,
-}));
+vi.mock("./access-guard", () => ({ watchCrawlAccess: mocks.watchLogin }));
 vi.mock("../analysis/controller", () => ({ appendCapturedAnalysis: mocks.enqueue }));
 vi.mock("../diagnostics", () => ({ diagnostics: { record: vi.fn() }, watchWorkPage: vi.fn() }));
 
@@ -108,7 +105,14 @@ it.each(["login", "verification", "busy"] as const)(
   },
 );
 
-it.each(["list", "detail"])("%s 页弹出登录提示立即取消整轮并保留登录原因", async (kind) => {
+it.each([
+  ["list", "login"],
+  ["detail", "login"],
+  ["list", "verification"],
+  ["detail", "verification"],
+  ["list", "busy"],
+  ["detail", "busy"],
+] as const)("%s 页发现 %s 立即取消整轮并保留访问原因", async (kind, issue) => {
   let readingSignal: AbortSignal | undefined;
   mocks.crawl.mockImplementation(async (_source, _store, signal: AbortSignal, publish) => {
     readingSignal = signal;
@@ -127,20 +131,48 @@ it.each(["list", "detail"])("%s 页弹出登录提示立即取消整轮并保留
   await vi.waitFor(() => expect(mocks.crawl).toHaveBeenCalledOnce());
   const target = kind === "list" ? mocks.listPage : mocks.detailPage;
   const call = mocks.watchLogin.mock.calls.find(([page]) => page === target)!;
-  call[2](new LoginRequiredDialogError());
+  const reason = issue === "login" ? new LoginRequiredDialogError() : new CrawlAccessError(issue);
+  call[2](reason);
   expect(readingSignal?.aborted).toBe(true);
   expect(mocks.listPage.close).toHaveBeenCalledOnce();
   expect(mocks.detailPage.close).toHaveBeenCalled();
   await expect(started.activity!.completion).resolves.toMatchObject({
     phase: "paused",
     running: false,
-    accessIssue: "login",
+    accessIssue: issue,
     page: 3,
     saved: 5,
-    message: expect.stringContaining("请登录后，再进行操作"),
+    message: reason.message,
     error: undefined,
   });
   expect(mocks.disposeLogin).toHaveBeenCalledTimes(2);
+  expect(mocks.release).toHaveBeenCalledOnce();
+});
+
+it("连续三件失败立即取消，保留失败原因和计数，不等待在途浏览器超时", async () => {
+  mocks.crawl.mockImplementation(async (_source, _store, signal: AbortSignal, publish) => {
+    publish({ page: 4, saved: 2, failed: 1 });
+    expect(signal.aborted).toBe(false);
+    publish({ failed: 2 });
+    expect(signal.aborted).toBe(false);
+    publish({ failed: 3 });
+    expect(signal.aborted).toBe(true);
+    throw new Error("Target page closed");
+  });
+  const controller = await import("./controller");
+  initial = controller;
+  const started = await controller.startCrawl();
+  await expect(started.activity!.completion).resolves.toMatchObject({
+    phase: "paused",
+    running: false,
+    page: 4,
+    saved: 2,
+    failed: 3,
+    message: expect.stringContaining("连续 3 件采集失败"),
+    error: undefined,
+  });
+  expect(mocks.listPage.close).toHaveBeenCalledOnce();
+  expect(mocks.detailPage.close).toHaveBeenCalled();
   expect(mocks.release).toHaveBeenCalledOnce();
 });
 
