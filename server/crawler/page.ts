@@ -11,6 +11,7 @@ import {
   type ListingPage,
 } from "./types";
 import { accessNavigationFailure } from "./access-navigation";
+import { hasLoginRequiredDialog, LoginRequiredDialogError } from "./login-dialog";
 
 export interface ListingHoverDiagnostic {
   event: "timeout" | "retry_recovered";
@@ -83,6 +84,7 @@ export async function assertAvailable(page: Page) {
   if (navigation) throw navigation;
   let issue: "login" | "verification" | "busy" | "";
   try {
+    if (await page.evaluate(hasLoginRequiredDialog)) throw new LoginRequiredDialogError();
     issue = await page.evaluate(() => {
       const globals = window as Window & {
         CaptchaCheck?: { need_captcha?: boolean };
@@ -276,6 +278,7 @@ export async function gotoPage(
 ): Promise<ListingPage> {
   checkAborted(signal);
   const current = await readListings(page);
+  checkAborted(signal);
   if (current.page === wanted && !refresh) return current;
   await pace(signal);
   await observeListNavigation(page);
@@ -305,6 +308,7 @@ export async function refreshList(
 ): Promise<ListingPage> {
   checkAborted(signal);
   await assertAvailable(page);
+  checkAborted(signal);
   await page.reload({ waitUntil: "domcontentloaded", timeout: 45000 });
   checkAborted(signal);
   await assertAvailable(page);

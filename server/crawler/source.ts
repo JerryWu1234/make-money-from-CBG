@@ -202,7 +202,7 @@ export function createCrawlSource({
       await captureBrowserStep(page, { flow: "collection", stage: stage + "完成", key }, signal);
       return result;
     } catch (error) {
-      const failure = classifyBrowserFailure(page, error, signal);
+      const failure = signal.aborted ? signal.reason : classifyBrowserFailure(page, error, signal);
       // This typed signal selects runner's existing full-list scan; it is not a failed action.
       // Keep throwing it so expiry order never inherits the selling-time watermark strategy.
       const orderFallback = error instanceof SellingOrderUnavailableError;

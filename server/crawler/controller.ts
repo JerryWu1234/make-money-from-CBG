@@ -17,6 +17,7 @@ import { assertServiceOpen } from "../service-lifecycle";
 import { showBrowserWorkPages } from "../config";
 import { BrowserConnectionError, browserConnectionFailure } from "../browser-connection";
 import { headRefreshSettings } from "./head-refresh-settings";
+import { watchLoginRequiredDialog, LoginRequiredDialogError } from "./login-dialog";
 
 type CrawlRuntime = {
   storage?: CrawlStore;
@@ -197,6 +198,33 @@ export async function startCrawl(
   }, 30000);
   const runningTask = (async () => {
     const detailPages: Page[] = [];
+    const guards: (() => Promise<void>)[] = [];
+    let closingLoginPages: Promise<unknown> | undefined;
+    const cancelLoginPages = () => {
+      if (!(control.signal.reason instanceof LoginRequiredDialogError)) return;
+      // Only this project's collection pages are closed. This interrupts native browser
+      // waits too; no background list action can outlive the lock or affect a later run.
+      closingLoginPages = Promise.allSettled(
+        [page, ...detailPages].map((target) => target.close()),
+      );
+    };
+    control.signal.addEventListener("abort", cancelLoginPages, { once: true });
+    const watchLogin = async (target: Page, kind: "list" | "detail") => {
+      const stop = (error: LoginRequiredDialogError) => {
+        if (control.signal.aborted) return;
+        cache.status = {
+          ...cache.status,
+          phase: "paused",
+          accessIssue: "login",
+          message: error.message,
+        };
+        // The source already closes every active detail page on this shared signal.
+        control.abort(error);
+        log("crawl.login_dialog", { kind, code: error.code });
+      };
+      guards.push(await watchLoginRequiredDialog(target, control.signal, stop));
+      control.signal.throwIfAborted();
+    };
     const createDetailPage = async () => {
       control.signal.throwIfAborted();
       let browser: Browser | undefined;
@@ -217,9 +245,11 @@ export async function startCrawl(
       watchWorkPage(detailPage, "detail");
       log("page.ready", { kind: "detail" });
       detailPage.setDefaultTimeout(15000);
+      await watchLogin(detailPage, "detail");
       return detailPage;
     };
     try {
+      await watchLogin(page, "list");
       const detailPage = await createDetailPage();
       await crawl(
         createCrawlSource({
@@ -253,13 +283,16 @@ export async function startCrawl(
         { ...options, watch: options.watch ?? !options.backfillOnly },
       );
     } finally {
-      if (!showBrowserWorkPages())
+      control.signal.removeEventListener("abort", cancelLoginPages);
+      await closingLoginPages;
+      await Promise.allSettled(guards.map((dispose) => dispose()));
+      if (!showBrowserWorkPages() || control.signal.reason instanceof LoginRequiredDialogError)
         await Promise.allSettled(detailPages.map((page) => page.close()));
     }
   })()
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      const access = crawlAccessFailure(error);
+      const access = crawlAccessFailure(control.signal.reason) || crawlAccessFailure(error);
       const connection = browserConnectionFailure(error);
       const paused = control.signal.aborted || !!access || !!connection;
       log(paused ? "crawl.paused" : "crawl.error", {
@@ -274,9 +307,9 @@ export async function startCrawl(
         ...cache.status,
         running: false,
         phase: paused ? "paused" : "error",
-        message: control.signal.aborted
-          ? "采集已暂停，断点已保留。"
-          : connection?.message || access?.message || message,
+        message:
+          access?.message ||
+          (control.signal.aborted ? "采集已暂停，断点已保留。" : connection?.message || message),
         error: paused ? undefined : message,
         accessIssue: access?.kind,
         browserIssue: connection?.kind,

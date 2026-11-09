@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
 import { beginServiceShutdown, resetServiceLifecycle } from "../service-lifecycle";
 import { CrawlAccessError } from "./types";
+import { LoginRequiredDialogError } from "./login-dialog";
 
 const mocks = vi.hoisted(() => ({
   createStore: vi.fn(),
@@ -11,6 +12,9 @@ const mocks = vi.hoisted(() => ({
   enqueue: vi.fn(),
   getBrowser: vi.fn(),
   headRefresh: vi.fn(),
+  watchLogin: vi.fn(),
+  disposeLogin: vi.fn(),
+  listPage: { close: vi.fn() },
   detailPage: { close: vi.fn(), setDefaultTimeout: vi.fn() },
 }));
 vi.mock("./store", () => ({
@@ -31,11 +35,15 @@ vi.mock("./runner", () => ({ crawl: mocks.crawl, validateCrawlOptions: vi.fn() }
 vi.mock("./head-refresh-settings", () => ({ headRefreshSettings: mocks.headRefresh }));
 vi.mock("../cbg", () => ({ checkCbgStatus: mocks.current }));
 vi.mock("../session", () => ({
-  getCbgPage: () => ({}),
+  getCbgPage: () => mocks.listPage,
   getBrowser: mocks.getBrowser,
   createHiddenPage: async () => mocks.detailPage,
 }));
 vi.mock("./source", () => ({ createCrawlSource: () => ({}) }));
+vi.mock("./login-dialog", async (original) => ({
+  ...(await original<typeof import("./login-dialog")>()),
+  watchLoginRequiredDialog: mocks.watchLogin,
+}));
 vi.mock("../analysis/controller", () => ({ appendCapturedAnalysis: mocks.enqueue }));
 vi.mock("../diagnostics", () => ({ diagnostics: { record: vi.fn() }, watchWorkPage: vi.fn() }));
 
@@ -50,6 +58,7 @@ beforeEach(() => {
   mocks.headRefresh.mockReturnValue({ intervalSeconds: 600, random: true });
   mocks.current.mockResolvedValue({ isLoggedIn: true, running: false, workflowStep: "completed" });
   mocks.getBrowser.mockResolvedValue({ isConnected: () => true });
+  mocks.watchLogin.mockResolvedValue(mocks.disposeLogin);
   initial = undefined;
 });
 
@@ -98,6 +107,42 @@ it.each(["login", "verification", "busy"] as const)(
     expect(mocks.release).toHaveBeenCalledOnce();
   },
 );
+
+it.each(["list", "detail"])("%s 页弹出登录提示立即取消整轮并保留登录原因", async (kind) => {
+  let readingSignal: AbortSignal | undefined;
+  mocks.crawl.mockImplementation(async (_source, _store, signal: AbortSignal, publish) => {
+    readingSignal = signal;
+    publish({ page: 3, saved: 5 });
+    await new Promise<void>((_resolve, reject) => {
+      // Closing a page may replace the browser error; controller must retain the login reason.
+      signal.addEventListener("abort", () => reject(new Error("Target page closed")), {
+        once: true,
+      });
+    });
+  });
+  vi.stubEnv("CBG_SHOW_WORK_PAGES", "1");
+  const controller = await import("./controller");
+  initial = controller;
+  const started = await controller.startCrawl();
+  await vi.waitFor(() => expect(mocks.crawl).toHaveBeenCalledOnce());
+  const target = kind === "list" ? mocks.listPage : mocks.detailPage;
+  const call = mocks.watchLogin.mock.calls.find(([page]) => page === target)!;
+  call[2](new LoginRequiredDialogError());
+  expect(readingSignal?.aborted).toBe(true);
+  expect(mocks.listPage.close).toHaveBeenCalledOnce();
+  expect(mocks.detailPage.close).toHaveBeenCalled();
+  await expect(started.activity!.completion).resolves.toMatchObject({
+    phase: "paused",
+    running: false,
+    accessIssue: "login",
+    page: 3,
+    saved: 5,
+    message: expect.stringContaining("请登录后，再进行操作"),
+    error: undefined,
+  });
+  expect(mocks.disposeLogin).toHaveBeenCalledTimes(2);
+  expect(mocks.release).toHaveBeenCalledOnce();
+});
 
 it("调试连接断开作为整轮暂停，保留计数并明确浏览器原因", async () => {
   mocks.crawl.mockImplementation(async (_source, _store, _signal, publish) => {
