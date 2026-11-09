@@ -387,6 +387,166 @@ for (const concurrency of [2, 6, 10]) {
 }
 
 // 失败方式：页面未传并发数、详情页串号、暂停后仍落库、续采丢失排队项、跨页重复入库。
+// 失败方式：网络变化终止整个队列、重试无上限、失败商品被误发布、续采丢失任务或重复完整商品。
+for (const persistent of [false, true]) {
+  test(`导航网络变化：${persistent ? "三次失败后其他商品继续，重开数据库续采" : "首次失败后恢复完整采集"}`, async ({
+    context,
+  }, testInfo) => {
+    test.setTimeout(120000);
+    const ids = ["a", "b", "c"];
+    const listings: Listing[] = ids.map((id) => ({
+      key: `367:${id}`,
+      serverId: "367",
+      eid: id,
+      ordersn: `order-${id}`,
+      url: `https://xyq.cbg.163.com/equip?s=367&eid=${id}`,
+      sellingTime: null,
+      createdTime: null,
+      orderTime: null,
+      name: `模拟角色${id}`,
+      price: "222",
+      attrs: {},
+      summary: null,
+    }));
+    const database = testInfo.outputPath("capture.sqlite");
+    await mkdir(path.dirname(database), { recursive: true });
+    let store = new CrawlStore(database);
+    const workers = await Promise.all([context.newPage(), context.newPage()]);
+    const listPage = await context.newPage();
+    const control = new AbortController();
+    const navigations: Array<{ phase: string; address: string; injected: boolean }> = [];
+    let phase = "initial";
+    let failures = 0;
+    const originals = workers.map((worker) => worker.goto.bind(worker));
+    workers.forEach((worker, index) => {
+      worker.goto = async (address, options) => {
+        const inject =
+          phase === "initial" && address === listings[0].url && (persistent || failures === 0);
+        navigations.push({ phase, address, injected: inject });
+        if (inject) {
+          failures++;
+          // Inject the exact Playwright error; do not change the machine's real network.
+          throw new Error(`page.goto: net::ERR_NETWORK_CHANGED at ${address}`);
+        }
+        return originals[index](address, options);
+      };
+    });
+    await context.route("**/*", (route) => {
+      const url = new URL(route.request().url());
+      if (url.origin !== "https://xyq.cbg.163.com" || url.pathname !== "/equip")
+        return route.abort();
+      return route.fulfill({
+        contentType: "text/html",
+        body: detailDocument(url.searchParams.get("eid")!),
+      });
+    });
+    const readRows = () =>
+      listings.map((item) => {
+        const record = store.detail(item.key) as SavedRoleRecord;
+        return {
+          key: item.key,
+          status: record.status,
+          error: record.error,
+          eid: record.detail?.valuation?.source.eid,
+          tabs: record.detail?.tabs.map((tab) => tab.name),
+          equipmentComplete: record.detail?.equipmentCapture?.complete,
+          petsComplete: record.detail?.petCapture?.complete,
+        };
+      });
+    const run = async () => {
+      const source = createCrawlSource({
+        listPage,
+        detailPage: workers[0],
+        createDetailPage: async () => workers[1],
+        signal: control.signal,
+        onDetailProgress: () => {},
+        log: () => {},
+      });
+      const updates: Array<Partial<CrawlStatus>> = [];
+      await crawl(source, store, control.signal, (update) => updates.push(update), {
+        backfillOnly: true,
+        concurrency: 2,
+      });
+      expect(updates.at(-1)?.phase).toBe("completed");
+      expect(updates[0]?.concurrency).toBe(2);
+      return updates.at(-1);
+    };
+    try {
+      listings.forEach((item) => store.observe(item));
+      const initialStatus = await run();
+      expect(failures).toBe(persistent ? 3 : 1);
+      const initialNavigations = navigations.filter(({ phase }) => phase === "initial");
+      expect(initialNavigations.filter(({ address }) => address === listings[0].url)).toHaveLength(
+        persistent ? 3 : 2,
+      );
+      expect(initialNavigations.filter(({ address }) => address === "about:blank")).toHaveLength(
+        failures,
+      );
+      store.close();
+      store = new CrawlStore(database);
+      const initialRows = readRows();
+      expect(store.count()).toBe(persistent ? 2 : 3);
+      expect(initialRows.slice(1).every((row) => row.status === "complete")).toBe(true);
+      if (persistent) {
+        expect(initialRows[0].status).toBe("failed");
+        expect(initialRows[0].error).toContain("ERR_NETWORK_CHANGED");
+        expect(store.retryItems().map(({ key }) => key)).toEqual([listings[0].key]);
+        phase = "resume";
+        await run();
+        expect(
+          navigations.filter(({ phase }) => phase === "resume").map(({ address }) => address),
+        ).toEqual([listings[0].url]);
+        store.close();
+        store = new CrawlStore(database);
+      }
+      const finalRows = readRows();
+      expect(store.count()).toBe(3);
+      expect(store.retryItems()).toEqual([]);
+      finalRows.forEach((row, index) => {
+        expect(row.status).toBe("complete");
+        expect(row.eid).toBe(ids[index]);
+        expect(row.tabs).toEqual(MAIN_TABS);
+        expect(row.equipmentComplete).toBe(true);
+        expect(row.petsComplete).toBe(true);
+      });
+      await writeFile(
+        testInfo.outputPath("verify.sql"),
+        "SELECT key,status,error FROM listings ORDER BY key;\nSELECT COUNT(*) AS complete FROM listings WHERE status='complete';\n",
+      );
+      await writeFile(
+        testInfo.outputPath("evidence.json"),
+        JSON.stringify(
+          {
+            fixture: true,
+            fault: "Injected page.goto ERR_NETWORK_CHANGED; not a real network switch",
+            persistent,
+            initialStatus,
+            initialRows,
+            finalRows,
+            navigations,
+            repeat:
+              "vp exec playwright test tests/e2e/crawl-concurrency.pw.ts --grep 导航网络变化 --workers=1",
+            verify: "sqlite3 capture.sqlite < verify.sql",
+          },
+          null,
+          2,
+        ),
+      );
+      await testInfo.attach("网络恢复采集回执", {
+        path: testInfo.outputPath("evidence.json"),
+        contentType: "application/json",
+      });
+    } finally {
+      control.abort(new Error("测试清理"));
+      workers.forEach((worker, index) => {
+        worker.goto = originals[index];
+      });
+      await Promise.all([...workers, listPage].map((page) => page.close()));
+      store.close();
+    }
+  });
+}
+
 test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", async ({ page, context }, testInfo) => {
   test.setTimeout(240000);
   const database = testInfo.outputPath("capture.sqlite");
