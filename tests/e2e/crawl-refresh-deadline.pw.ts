@@ -159,7 +159,7 @@ test("队列满且第2页未扫完→到点刷新→在途完成→暂停重开�
           body = status;
           break;
         case "/api/crawl/records":
-          body = store.records(Number(url.searchParams.get("page") || 1), 20);
+          body = store.records(Number(url.searchParams.get("page") || 1), 20, "complete");
           break;
         case "/api/scan/status":
           body = {
@@ -231,7 +231,10 @@ test("队列满且第2页未扫完→到点刷新→在途完成→暂停重开�
     await expect(queues).toContainText("上架范围 5 分钟 · 当前在途 2 个");
     await expect(queues).not.toContainText("老号");
     await expect(panel.getByText(/优先处理采集任务/)).toHaveCount(0);
-    await panel.screenshot({ path: testInfo.outputPath("before-refresh.png") });
+    await expect(panel.getByText(/共\s+1\s+条/)).toBeVisible();
+    await panel
+      .locator(".crawl-status")
+      .screenshot({ path: testInfo.outputPath("before-refresh.png") });
     await expect.poll(() => refreshes.length, { timeout: 10000 }).toBeGreaterThan(0);
     expect(refreshes[0]).toMatchObject({ page: 2, active: ["1:1", "1:2"] });
     await expect.poll(() => status.lastHeadRefreshAt).toBeTruthy();
@@ -240,7 +243,9 @@ test("队列满且第2页未扫完→到点刷新→在途完成→暂停重开�
     );
     await expect(panel.getByText(/下次计划刷新：.*最近实际刷新：/)).toBeVisible();
     await expect(panel.getByText(/当前检查第 1 页/)).toBeVisible();
-    await panel.screenshot({ path: testInfo.outputPath("refreshed-with-active-details.png") });
+    await panel
+      .locator(".crawl-status")
+      .screenshot({ path: testInfo.outputPath("refreshed-with-active-details.png") });
     gates.get("1:1")!();
     gates.get("1:2")!();
     await expect.poll(() => store.count(), { timeout: 20000 }).toBe(8);
@@ -249,7 +254,10 @@ test("队列满且第2页未扫完→到点刷新→在途完成→暂停重开�
     expect(calls).toHaveLength(8);
     expect(new Set(calls).size).toBe(8);
     await expect(queues).toContainText("当前在途 0 个 · 范围内排队 0 个");
-    await panel.screenshot({ path: testInfo.outputPath("completed-window.png") });
+    await expect(panel.getByText(/共\s+8\s+条/)).toBeVisible();
+    await panel
+      .locator(".crawl-status")
+      .screenshot({ path: testInfo.outputPath("completed-window.png") });
     await page.getByRole("button", { name: "暂停采集", exact: true }).click();
     expect(status.phase).toBe("paused");
     store.close();
