@@ -4,7 +4,7 @@ function nonRoleCategory(value: string) {
   const text = value.trim();
   if (/^(?:法宝|灵宝|神器|道具|材料|消耗品|召唤兽装备)(?:$|\s*·)/.test(text)) return text;
   if (/^(?:宝石|打造材料|合成材料|强化材料)$/.test(text)) return `材料 · ${text}`;
-  if (/^(?:技能书|召唤兽技能书|召唤兽内丹)$/.test(text)) return `道具 · ${text}`;
+  if (/^(?:技能书|召唤兽技能书|召唤兽内丹|儿童物品)$/.test(text)) return `道具 · ${text}`;
   return undefined;
 }
 
@@ -45,11 +45,22 @@ export function officialModelFromAttributes(
         declared.push(match[1].trim());
     }
     const categories = [...new Set(declared)];
-    const category = categories.length === 1 ? nonRoleCategory(categories[0]) : undefined;
+    const description = descriptions.join("\n");
+    // 镶嵌对象是官网结构化字段；自由用途文字不能证明物品不是装备。
+    const gemstone =
+      !categories.length &&
+      /(?:^|#r|\n)\s*【镶嵌装备】\s*[：:]?\s*[^#\r\n<\s：:]/.test(description) &&
+      !/【装备(?:条件|角色|对象)】/.test(description);
+    const category =
+      categories.length === 1
+        ? nonRoleCategory(categories[0])
+        : gemstone
+          ? "材料 · 宝石"
+          : undefined;
     return {
       modelId,
       ...(names.length === 1 ? { name: names[0] } : {}),
-      ...(descriptions.length ? { description: descriptions.join("\n") } : {}),
+      ...(descriptions.length ? { description } : {}),
       ...(category ? { category } : {}),
     };
   } catch {

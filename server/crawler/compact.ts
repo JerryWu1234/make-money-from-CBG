@@ -88,6 +88,9 @@ export function observedEquipmentCategory(category = "", location = "", modelId 
   if (modelId === "4002") return "材料 · 太阳石";
   if (modelId === "4003") return "材料 · 月亮石";
   if (modelId === "4004") return "材料 · 光芒石";
+  if (modelId === "4010") return "材料 · 黑宝石";
+  if (modelId === "4243") return "材料 · 元灵晶石";
+  if (modelId === "18126") return "材料 · 灵饰指南书";
   if (modelId === "3995") return "材料 · 附魔宝珠";
   if (modelId === "56973") return "道具 · 坐骑玄灵珠";
   if (modelId === "61719") return "材料 · 五色灵尘";
@@ -95,6 +98,7 @@ export function observedEquipmentCategory(category = "", location = "", modelId 
   if (modelId === "4034") return "材料 · 点化石";
   if (modelId === "17320") return "消耗品";
   if ([611, 18521, 56870].includes(Number(modelId))) return "道具 · 召唤兽技能书";
+  if (modelId === "906") return "道具 · 儿童物品";
   if (modelId === "4103") return "道具 · 召唤兽内丹";
   if (category.trim() && !/^(?:\d+|人物装备|装备|武器|灵饰)$/.test(category.trim()))
     return category;
