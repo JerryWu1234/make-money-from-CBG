@@ -12,6 +12,7 @@ import {
 } from "./types";
 import { accessNavigationFailure } from "./access-navigation";
 import { hasLoginRequiredDialog, LoginRequiredDialogError } from "./login-dialog";
+import { diagnostics, workPageDiagnostic } from "../diagnostics";
 
 export interface ListingHoverDiagnostic {
   event: "timeout" | "retry_recovered";
@@ -82,7 +83,11 @@ export async function assertAvailable(page: Page) {
   if (page.isClosed()) throw new Error("工作页已关闭，请重新连接后续采");
   const navigation = await accessNavigationFailure(page, undefined);
   if (navigation) throw navigation;
-  let issue: "login" | "verification" | "busy" | "";
+  let issue:
+    | "login"
+    | "verification"
+    | ""
+    | { kind: "busy"; matchedText: string; text: string; region: string };
   try {
     if (await page.evaluate(hasLoginRequiredDialog)) throw new LoginRequiredDialogError();
     issue = await page.evaluate(() => {
@@ -114,14 +119,39 @@ export async function assertAvailable(page: Page) {
         /show_login\.py/.test(location.pathname)
       )
         return "login" as const;
-      if (/系统繁忙|访问过于频繁|请求过于频繁/.test(document.body.innerText))
-        return "busy" as const;
+      const text = document.body.innerText;
+      const busy = /系统繁忙|访问过于频繁|请求过于频繁/.exec(text);
+      if (busy) {
+        let region = "body";
+        try {
+          region =
+            ["#query_result", ".popupDialog", ".dialogWrap"].find((selector) =>
+              Array.from(document.querySelectorAll<HTMLElement>(selector)).some(
+                (el) => el.checkVisibility() && el.innerText?.includes(busy[0]),
+              ),
+            ) || region;
+        } catch {
+          // Evidence lookup must not change the existing access decision.
+        }
+        return {
+          kind: "busy" as const,
+          matchedText: busy[0],
+          text: text.slice(Math.max(0, busy.index - 80), busy.index + busy[0].length + 120),
+          region,
+        };
+      }
       return "" as const;
     });
   } catch (error) {
     throw (await accessNavigationFailure(page, error)) || error;
   }
-  if (issue) throw new CrawlAccessError(issue);
+  if (issue) {
+    if (typeof issue === "object") {
+      diagnostics.record("crawl.access_evidence", { ...workPageDiagnostic(page), ...issue });
+      throw new CrawlAccessError(issue.kind);
+    }
+    throw new CrawlAccessError(issue);
+  }
 }
 export async function readListings(page: Page): Promise<ListingPage> {
   await assertAvailable(page);
@@ -351,7 +381,12 @@ async function ensureListOrder(
     await pace(signal);
     await observeListNavigation(page);
     try {
-      await clickForInspection(option, signal);
+      await clickForInspection(option, signal, {
+        field,
+        expectedOrder: expected,
+        observedOrder: current.order,
+        attempt: attempt + 1,
+      });
       await waitList(page, 1, true);
     } finally {
       await clearListNavigation(page).catch(() => {});

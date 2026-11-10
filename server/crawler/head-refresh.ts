@@ -1,15 +1,15 @@
 export interface HeadRefreshSettings {
   intervalSeconds: number;
   random: boolean;
-  initialPages?: number;
+  listingAgeMinutes?: number;
 }
 
-export const DEFAULT_INITIAL_PAGES = 5;
-export const MAX_INITIAL_PAGES = 1000;
+export const DEFAULT_LISTING_AGE_MINUTES = 10;
+export const MAX_LISTING_AGE_MINUTES = 7 * 24 * 60;
 export const DEFAULT_HEAD_REFRESH: HeadRefreshSettings = {
   intervalSeconds: 60,
   random: false,
-  initialPages: DEFAULT_INITIAL_PAGES,
+  listingAgeMinutes: DEFAULT_LISTING_AGE_MINUTES,
 };
 // 保持在浏览器和 Node 定时器的安全范围内。
 export const MAX_HEAD_REFRESH_SECONDS = 7 * 24 * 60 * 60;
@@ -22,7 +22,7 @@ export function validateHeadRefreshSettings(value: unknown): HeadRefreshSettings
   const {
     intervalSeconds,
     random,
-    initialPages = DEFAULT_INITIAL_PAGES,
+    listingAgeMinutes = DEFAULT_LISTING_AGE_MINUTES,
   } = value as Record<string, unknown>;
   if (
     typeof intervalSeconds !== "number" ||
@@ -33,13 +33,13 @@ export function validateHeadRefreshSettings(value: unknown): HeadRefreshSettings
     throw new HeadRefreshSettingsError("刷新间隔必须在1秒至7天之间，且精确到秒");
   if (typeof random !== "boolean") throw new HeadRefreshSettingsError("随机刷新选项必须为布尔值");
   if (
-    typeof initialPages !== "number" ||
-    !Number.isSafeInteger(initialPages) ||
-    initialPages < 1 ||
-    initialPages > MAX_INITIAL_PAGES
+    typeof listingAgeMinutes !== "number" ||
+    !Number.isSafeInteger(listingAgeMinutes) ||
+    listingAgeMinutes < 1 ||
+    listingAgeMinutes > MAX_LISTING_AGE_MINUTES
   )
-    throw new HeadRefreshSettingsError(`首次采集页数必须是1至${MAX_INITIAL_PAGES}的整数`);
-  return { intervalSeconds, random, initialPages };
+    throw new HeadRefreshSettingsError(`上架时间范围必须是1至${MAX_LISTING_AGE_MINUTES}分钟的整数`);
+  return { intervalSeconds, random, listingAgeMinutes };
 }
 
 export function headRefreshDelayMs(settings: HeadRefreshSettings, random = Math.random): number {
@@ -58,4 +58,9 @@ export function formatHeadRefreshTime(seconds: number): string {
 export function describeHeadRefresh(settings: HeadRefreshSettings): string {
   const time = formatHeadRefreshTime(settings.intervalSeconds);
   return settings.random ? `每轮在1秒至${time}之间随机` : `每${time}刷新一次`;
+}
+
+export function isRecentListing(sellingTime: string | null, minutes: number, now = Date.now()) {
+  const time = sellingTime ? Date.parse(sellingTime) : NaN;
+  return Number.isFinite(time) && time >= now - minutes * 60_000;
 }

@@ -1,5 +1,6 @@
 import type { Locator, Page } from "playwright-core";
 import { collectionPageSignal } from "./crawler/login-dialog";
+import { diagnostics, workPageDiagnostic } from "./diagnostics";
 
 const WORK_VIEWPORT = { width: 1440, height: 1080 };
 let inspectionClickTail = Promise.resolve();
@@ -16,7 +17,11 @@ export async function ensureWorkViewport(page: Page) {
   }
 }
 /** Check the target in the main world, then send browser mouse input without a node handle. */
-export async function clickForInspection(element: Locator, signal?: AbortSignal) {
+export async function clickForInspection(
+  element: Locator,
+  signal?: AbortSignal,
+  sort?: { field: string; expectedOrder: string; observedOrder: string; attempt: number },
+) {
   const page = element.page();
   const collectionSignal = collectionPageSignal(page);
   const check = () => {
@@ -75,7 +80,27 @@ export async function clickForInspection(element: Locator, signal?: AbortSignal)
     if (!afterHover || JSON.stringify(stable) !== JSON.stringify(afterHover)) throw changed();
     check();
     // A failure after input may already have changed the page: never replay the click here.
-    await page.mouse.click(afterHover.x, afterHover.y);
+    const recordClick = (phase: string, error?: unknown) => {
+      if (sort)
+        diagnostics.record("list.sort_click", {
+          ...workPageDiagnostic(page),
+          ...sort,
+          clickId: token,
+          method: "page.mouse.click",
+          phase,
+          x: afterHover.x,
+          y: afterHover.y,
+          error,
+        });
+    };
+    recordClick("dispatching");
+    try {
+      await page.mouse.click(afterHover.x, afterHover.y);
+      recordClick("completed");
+    } catch (error) {
+      recordClick("failed", error);
+      throw error;
+    }
   });
   inspectionClickTail = click.then(
     () => {},

@@ -322,6 +322,7 @@ it.each(["backfill", "scan", "watch"])(
       target = item(1),
       partial = detail(target);
     const failure = new BrowserConnectionError("disconnected");
+    if (mode === "watch") target.sellingTime = new Date().toISOString();
     target.orderTime = target.sellingTime;
     partial.equipmentCapture!.complete = false;
     if (mode === "backfill") db.observe(target);

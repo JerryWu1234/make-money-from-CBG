@@ -52,7 +52,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   mocks.acquire.mockReturnValue(true);
-  mocks.headRefresh.mockReturnValue({ intervalSeconds: 600, random: true, initialPages: 3 });
+  mocks.headRefresh.mockReturnValue({ intervalSeconds: 600, random: true, listingAgeMinutes: 3 });
   mocks.current.mockResolvedValue({ isLoggedIn: true, running: false, workflowStep: "completed" });
   mocks.getBrowser.mockResolvedValue({ isConnected: () => true });
   mocks.watchLogin.mockResolvedValue(mocks.disposeLogin);
@@ -66,7 +66,7 @@ it.each(["manual", "scheduled"] as const)("%s 启动将已保存的刷新配置�
   const result = await controller.startCrawl(origin);
   await result.activity!.completion;
   expect(mocks.crawl.mock.calls[0][4]).toMatchObject({
-    headRefresh: { intervalSeconds: 600, random: true, initialPages: 3 },
+    headRefresh: { intervalSeconds: 600, random: true, listingAgeMinutes: 3 },
   });
 });
 

@@ -14,7 +14,7 @@ import {
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
-import type { Page } from "playwright-core";
+import type { Page, Request } from "playwright-core";
 import type { OpenCbgResult } from "./types";
 
 // Never pass page snapshots, response bodies or browser credentials to the logger.
@@ -196,10 +196,113 @@ export function workflowDiagnostic(state: OpenCbgResult) {
   };
 }
 
-const watched = new WeakSet<Page>();
+type QueryEvidence = { requestId: string; started: number; phase: string };
+const watched = new WeakMap<Page, { pageId: string; query?: QueryEvidence }>();
+
+export function workPageDiagnostic(page: Page) {
+  const context = watched.get(page);
+  return context
+    ? {
+        pageId: context.pageId,
+        ...(context.query
+          ? {
+              lastQueryId: context.query.requestId,
+              lastQueryPhase: context.query.phase,
+              lastQueryAgeMs: Date.now() - context.query.started,
+            }
+          : {}),
+      }
+    : {};
+}
+
+/** Keep only response format and error fields, never the response body or role data. */
+export function listQueryResponseDiagnostic(text: string) {
+  if (Buffer.byteLength(text, "utf8") > 32 * 1024) return { format: "too-large" };
+  const wrapper = text.trim().match(/^([\w.$]+)\s*\(([\s\S]*)\)\s*;?$/);
+  try {
+    const value: unknown = JSON.parse(wrapper ? wrapper[2]! : text);
+    const result: Record<string, unknown> = { format: wrapper ? "jsonp" : "json" };
+    if (wrapper)
+      result.expectedCallback = /^Request\.JSONP\.request_map\.request_\d+$/.test(wrapper[1]!);
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const data = value as Record<string, unknown>;
+      for (const key of ["status", "status_code", "code", "msg", "message", "error"]) {
+        const field = data[key];
+        if (typeof field === "string") result[key] = cleanDiagnostic(field.slice(0, 240));
+        else if (typeof field === "number" || typeof field === "boolean") result[key] = field;
+      }
+    }
+    return result;
+  } catch {
+    return { format: "unrecognized" };
+  }
+}
+
 export function watchWorkPage(page: Page, kind: "list" | "detail") {
   if (watched.has(page)) return;
-  watched.add(page);
+  const context: { pageId: string; query?: QueryEvidence } = { pageId: randomUUID() };
+  watched.set(page, context);
+  const queries = new WeakMap<Request, QueryEvidence>();
+  const reportQuery = (request: Request, phase: string, extra: Record<string, unknown> = {}) => {
+    const query = queries.get(request);
+    if (!query) return;
+    query.phase = phase;
+    diagnostics.record("list.query", {
+      pageId: context.pageId,
+      requestId: query.requestId,
+      phase,
+      durationMs: Date.now() - query.started,
+      ...extra,
+    });
+  };
+  page.on("request", (request) => {
+    if (kind !== "list") return;
+    try {
+      const url = new URL(request.url());
+      if (
+        url.origin !== new URL(page.url()).origin ||
+        url.pathname !== "/cgi-bin/recommend.py" ||
+        !["script", "xhr", "fetch"].includes(request.resourceType()) ||
+        request.frame() !== page.mainFrame()
+      )
+        return;
+      const query = { requestId: randomUUID(), started: Date.now(), phase: "started" };
+      context.query = query;
+      queries.set(request, query);
+      const order = url.searchParams.get("order_by") || "";
+      const number = url.searchParams.get("page") || "";
+      reportQuery(request, "started", {
+        method: request.method(),
+        resourceType: request.resourceType(),
+        path: url.pathname,
+        order: /^(?:expire_time|selling_time) (?:ASC|DESC)$/.test(order) ? order : undefined,
+        page: /^\d{1,6}$/.test(number) ? Number(number) : undefined,
+      });
+    } catch {
+      // Detached frames and non-page requests are outside this evidence scope.
+    }
+  });
+  page.on("requestfinished", (request) => reportQuery(request, "finished"));
+  page.on("requestfailed", (request) =>
+    reportQuery(request, "failed", { error: request.failure()?.errorText }),
+  );
+  page.on("response", (response) => {
+    const request = response.request();
+    const query = queries.get(request);
+    if (!query) return;
+    reportQuery(request, "response", { httpStatus: response.status() });
+    const summary = (data: Record<string, unknown>) =>
+      diagnostics.record("list.query_result", {
+        pageId: context.pageId,
+        requestId: query.requestId,
+        httpStatus: response.status(),
+        ...data,
+      });
+    void response.text().then(
+      (text) => summary(listQueryResponseDiagnostic(text)),
+      () => summary({ format: "unavailable" }),
+    );
+  });
   page.on("pageerror", (error) => diagnostics.record("page.error", { kind, error }));
   page.on("requestfailed", (request) =>
     diagnostics.record("page.request_failed", {
@@ -217,5 +320,5 @@ export function watchWorkPage(page: Page, kind: "list" | "detail") {
         status: response.status(),
       });
   });
-  page.on("close", () => diagnostics.record("page.closed", { kind }));
+  page.on("close", () => diagnostics.record("page.closed", { kind, ...workPageDiagnostic(page) }));
 }

@@ -18,8 +18,9 @@ const memory = () => {
   stores.push(store);
   return store;
 };
+const fixtureNow = Date.now();
 const item = (id: number): Listing => {
-  const time = new Date((1000 - id) * 1000).toISOString();
+  const time = new Date(fixtureNow - id * 100).toISOString();
   return {
     key: `1:${id}`,
     serverId: "1",

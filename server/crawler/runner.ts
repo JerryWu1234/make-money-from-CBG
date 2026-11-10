@@ -16,7 +16,13 @@ import { CAPTURE_VERSION, hasUnconfirmedEmptyEquipment } from "./compact";
 import { MAIN_TABS } from "./detail";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { watchCrawl } from "./watch";
-import { validateHeadRefreshSettings, type HeadRefreshSettings } from "./head-refresh";
+import {
+  DEFAULT_HEAD_REFRESH,
+  DEFAULT_LISTING_AGE_MINUTES,
+  isRecentListing,
+  validateHeadRefreshSettings,
+  type HeadRefreshSettings,
+} from "./head-refresh";
 import { browserConnectionFailure } from "../browser-connection";
 import { pageSignature, readPageReview, refreshRepeatedPage } from "./repeated-pages";
 export interface CrawlOptions {
@@ -91,7 +97,12 @@ export async function crawl(
   let saved = 0,
     skipped = 0,
     failed = 0;
-  const retries = store.retryItems(options.keys, options.refresh);
+  const minutes =
+    validateHeadRefreshSettings(options.headRefresh ?? DEFAULT_HEAD_REFRESH).listingAgeMinutes ??
+    DEFAULT_LISTING_AGE_MINUTES;
+  const retries = store
+    .retryItems(options.keys, options.refresh)
+    .filter((item) => !options.watch || isRecentListing(item.sellingTime, minutes));
   const retryFailed = new Set<string>();
   if (retries.length) {
     const retryRunning = { new: 0, old: 0 };
@@ -121,8 +132,14 @@ export async function crawl(
     await captureConcurrently(retries, concurrency, signal, async (item, index) => {
       const lane = store.captureLane(item.key);
       signal.throwIfAborted();
-      store.beginRetry(item.key, options.refresh);
       retryQueued[lane]--;
+      if (options.watch && !isRecentListing(item.sellingTime, minutes)) {
+        skipped++;
+        publish({ skipped, retryCompleted: ++retryCompleted });
+        reportRetries();
+        return;
+      }
+      store.beginRetry(item.key, options.refresh);
       retryRunning[lane]++;
       reportRetries();
       publish({
@@ -253,10 +270,9 @@ export async function crawl(
     } catch (error) {
       signal.throwIfAborted();
       if (!(error instanceof SellingOrderUnavailableError)) throw error;
-      const notice =
-        "网站没有上架时间排序入口：首次限定页数，之后按出售剩余时间排序检查完整列表，仅采真实上架时间符合新增范围的未登记商品，遇到旧号继续翻页";
+      const notice = `网站没有上架时间排序入口：使用出售剩余时间排序，只采上架${minutes}分钟以内的商品，遇到超窗商品后等待刷新。`;
       publish({ phase: "locating", message: notice, strategy: notice });
-      // 到期排序不能推断上架顺序，watch 只逐件过滤旧时间，不用时间边界截断列表。
+      // 按用户指定的时间窗口停止，不再继续扫描后续历史页。
       return watchCrawl(source, store, signal, publish, options, "expire_time DESC", seed);
     }
   }

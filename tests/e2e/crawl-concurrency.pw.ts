@@ -152,8 +152,9 @@ test("新号优先状态显示实际在途，10并发上限不会显示成已满
   await expect(panel).not.toContainText("本轮并发上限");
   await panel.screenshot({ path: testInfo.outputPath("paused-for-login.png") });
 });
+const fixtureListingTime = new Date().toISOString();
 const listHtml = (number: number) =>
-  `<table id="soldList"><tr id="order_menu"><th><a data_attr_name="expire_time">剩余时间</a></th></tr>${pages[number].map((id) => `<tr><td><a class="soldImg" href="https://xyq.cbg.163.com/equip?s=367&eid=${id}"><img width="40" height="40" data_serverid="367" data_ordersn="order-${id}" data_equip_name="角色${id}" data_price="222" data_selling_time="2026-09-07 12:00:00"></a></td></tr>`).join("")}</table><div id="pager_bar">第${number}页, 共2页 <a href="javascript:goto(${number === 1 ? 2 : 1})">翻页</a></div>`;
+  `<table id="soldList"><tr id="order_menu"><th><a data_attr_name="expire_time">剩余时间</a></th></tr>${pages[number].map((id) => `<tr><td><a class="soldImg" href="https://xyq.cbg.163.com/equip?s=367&eid=${id}"><img width="40" height="40" data_serverid="367" data_ordersn="order-${id}" data_equip_name="角色${id}" data_price="222" data_selling_time="${fixtureListingTime}"></a></td></tr>`).join("")}</table><div id="pager_bar">第${number}页, 共2页 <a href="javascript:goto(${number === 1 ? 2 : 1})">翻页</a></div>`;
 const listDocument = `<meta charset="utf-8"><script>var IsLogin=1,LoginInfo={login:1},QueryArgs={server_type:'1,2,3',page:1,order_by:'expire_time DESC'},QueryResult=${JSON.stringify(pages[1].map(raw))};var records=${JSON.stringify(Object.fromEntries(Object.entries(pages).map(([n, ids]) => [n, ids.map(raw)])))};function goto(n){fetch('/mock-list?page='+n).then(r=>r.text()).then(html=>{document.getElementById('query_result').innerHTML=html;QueryArgs.page=n;QueryResult=records[n]})}</script><div id="query_result">${listHtml(1)}</div>`;
 const detailDocument = (id: string) => {
   const gear = `<div id="RoleEquip"><a data_equip_name="武器${id}" data_equip_category="武器" data_equip_desc="等级 100#r伤害 +420" data_tip_box="RoleEquipTipsBox"><img width="40" height="40" onmouseover="RoleEquipTipsBox.style.display='block';RoleEquipTipsBox.innerText='武器${id}\\n等级 100\\n伤害 +420'" onmouseout="RoleEquipTipsBox.style.display='none'"></a></div>`;
@@ -713,7 +714,7 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
     await start.click();
     // 首次准备列表及逐项悬停带有真实节流，等待条件成立后再检查实际在途数。
     await expect.poll(() => active, { timeout: 30000 }).toBe(4);
-    await expect(page.getByText(/定时检查首页新增/)).toBeVisible();
+    await expect(page.getByText(/仅采上架10分钟以内的商品/)).toBeVisible();
     await expect(page.getByLabel("采集双队列状态")).toContainText("新号优先 · 当前在途 4 个");
     expect(status.captureStrategy).toBe("new-first");
     expect(status.newLimit).toBeUndefined();
@@ -759,7 +760,7 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
         {
           fixture: true,
           repeat:
-            "vp run build && vp exec playwright test tests/e2e/crawl-concurrency.pw.ts --workers=1",
+            "vp run build && vp exec playwright test tests/e2e/crawl-concurrency.pw.ts --grep '配置并发抓取' --workers=1",
           runs,
           records,
           checkpoint: store.checkpoint(),

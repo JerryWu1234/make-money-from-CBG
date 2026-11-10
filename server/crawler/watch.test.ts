@@ -27,8 +27,9 @@ const memory = () => {
   return store;
 };
 const readSaved = (store: CrawlStore, key: string) => store.detail(key) as SavedRoleRecord | null;
+const listingTimeBase = Date.now() - 100_000;
 const item = (id: number, second = 1000 - id): Listing => {
-  const time = new Date(second * 1000).toISOString();
+  const time = new Date(listingTimeBase + second * 100).toISOString();
   return {
     key: `1:${id}`,
     serverId: "1",
@@ -170,87 +171,6 @@ describe("持续发现新号和历史详情共享采集池", () => {
       await outcome;
     }
   });
-
-  it.each(["selling_time DESC", "expire_time DESC"])(
-    "%s 首轮最多5页，刷新按各自排序检查新增并保留在途任务",
-    async (order) => {
-      vi.useFakeTimers();
-      const db = memory(),
-        control = new AbortController();
-      const pages = Array.from({ length: 20 }, (_, index) => [item(index + 1, 2000 - index)]);
-      for (const [index, rows] of pages.slice(0, 19).entries()) {
-        const row = rows[0]!;
-        db.observe(row);
-        db.save(row, detail(row), {
-          key: row.key,
-          time: row.orderTime,
-          order,
-          page: index + 1,
-          savedAt: "now",
-        });
-      }
-      pages[4] = Array.from({ length: 2 }, (_, index) => item(100 + index, 1900 - index));
-      const src = source(pages),
-        read = src.page,
-        active = holdDetails(src);
-      const events: string[] = [];
-      src.prepare = vi.fn(async (requested) => {
-        if (order === "expire_time DESC" && requested === "selling_time DESC")
-          throw new SellingOrderUnavailableError();
-        events.push("prepare");
-        return { ...(await read(1)), order };
-      });
-      src.page = vi.fn(async (number, refresh) => {
-        events.push(`page:${number}:${!!refresh}`);
-        return { ...(await read(number, refresh)), order };
-      });
-      const fresh = item(999, 3000);
-      src.refresh = vi.fn(async () => {
-        events.push("reload");
-        return { ...(await read(1)), order, items: [fresh, ...pages[0]!] };
-      });
-      const outcome = crawl(src, db, control.signal, vi.fn(), {
-        watch: true,
-        concurrency: 2,
-        headIntervalMs: 100,
-      }).catch((error: unknown) => error);
-      try {
-        await vi.advanceTimersByTimeAsync(0);
-        expect(events).toEqual([
-          "prepare",
-          ...Array.from({ length: 4 }, (_, index) => `page:${index + 2}:false`),
-        ]);
-        expect(active.size).toBe(2);
-        const previousActive = [...active.keys()];
-        await vi.advanceTimersByTimeAsync(100);
-        expect(src.refresh).toHaveBeenCalledOnce();
-        expect([...active.keys()]).toEqual(previousActive);
-        expect(readSaved(db, fresh.key)?.status).toBe("pending");
-        active.get(previousActive[0]!)!();
-        await flush();
-        expect(active.has(fresh.key)).toBe(true);
-        expect(active.has(previousActive[1]!)).toBe(true);
-        await vi.advanceTimersByTimeAsync(0);
-        const followupPages = order === "expire_time DESC" ? 19 : 1;
-        expect(events.slice(events.indexOf("reload"))).toEqual([
-          "reload",
-          ...Array.from({ length: followupPages }, (_, index) => `page:${index + 2}:false`),
-        ]);
-        expect(src.page).not.toHaveBeenCalledWith(1);
-        expect(src.page).toHaveBeenCalledTimes(4 + followupPages);
-        expect(
-          vi
-            .mocked(src.hover)
-            .mock.calls.map(([row]) => row.key)
-            .sort(),
-        ).toEqual([...pages[4]!.map((row) => row.key), fresh.key].sort());
-      } finally {
-        control.abort(new Error("暂停"));
-        active.forEach((release) => release());
-        await outcome;
-      }
-    },
-  );
   it.each([false, true])(
     "首页按%s随机设置排期，每次完成后重抽且在等待期间不重抽",
     async (random) => {
@@ -851,7 +771,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
     expect(db.retryItems()).toHaveLength(3);
   });
 
-  it("到期排序下允许上架时间非单调，检查完整列表并仅采新增", async () => {
+  it("到期排序允许范围内上架时间混排，已登记商品去重", async () => {
     vi.useFakeTimers();
     const db = memory(),
       saved = item(20),
@@ -899,15 +819,15 @@ describe("持续发现新号和历史详情共享采集池", () => {
       mode: "latest-only",
     });
     expect(publish).toHaveBeenCalledWith(
-      expect.objectContaining({ strategy: expect.stringContaining("真实上架时间") }),
+      expect.objectContaining({ strategy: expect.stringContaining("上架10分钟") }),
     );
     const added = item(3, 1);
     pages[1].items.push({ ...added, orderTime: null });
     await vi.advanceTimersByTimeAsync(100);
     await flush();
     expect(src.prepare).toHaveBeenCalledTimes(3);
-    expect(db.hasListing(added.key)).toBe(false);
-    expect(db.count()).toBe(3);
+    expect(db.hasListing(added.key)).toBe(true);
+    expect(db.count()).toBe(4);
     control.abort(new Error("暂停"));
     expect(await outcome).toMatchObject({ message: "暂停" });
   });
@@ -1435,7 +1355,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
       await flush();
       expect(added.slice(2).every((row) => active.has(row.key))).toBe(true);
       expect(src.page).toHaveBeenCalledWith(3);
-      expect(src.page).not.toHaveBeenCalledWith(4);
+      expect(src.page).toHaveBeenCalledWith(4);
       expect(db.detail(tail.key)).not.toBeNull();
       if (sameSecond) expect(db.headCheckpoint()?.keys).toHaveLength(8);
       for (let round = 0; round < 8 && db.count() < 13; round++) {
@@ -1802,7 +1722,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
     expect(await outcome).toMatchObject({ message: "暂停" });
   });
 
-  it("旧库缺上架时间的待补项不因空失败表被排除，页面仍使用可靠上架时间", async () => {
+  it("旧库缺上架时间的任务保留但不自动派发，正常列表继续采集", async () => {
     const db = memory(),
       old = item(20),
       src = source([[item(1)]]),
@@ -1817,8 +1737,8 @@ describe("持续发现新号和历史详情共享采集池", () => {
       (error: unknown) => error,
     );
     await flush();
-    expect(src.detail).toHaveBeenCalledWith(expect.objectContaining({ key: old.key }));
-    expect(readSaved(db, old.key)?.status).toBe("complete");
+    expect(src.detail).not.toHaveBeenCalledWith(expect.objectContaining({ key: old.key }));
+    expect(readSaved(db, old.key)?.status).toBe("pending");
     control.abort(new Error("暂停"));
     expect(await outcome).toMatchObject({ message: "暂停" });
   });

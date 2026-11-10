@@ -19,7 +19,7 @@ import { browserStatus } from "../fixtures/saved-role";
 
 const failureModes = [
   "新号排队时仍派发老号、没有新号待派时空着名额，或新号出现后打断老号在途任务",
-  "只查看首页或遇到一个旧商品就停止，漏掉跨页、同秒新增商品",
+  "范围内只查看首页，或把旧水位误作时间窗口边界，漏掉跨页、同秒新增商品",
   "跨页重复商品重复入库，详情或报价串到另一个商品",
   "暂停后仍然落库，重启后首页检查进度覆盖历史回补进度",
   "分析默认10未按7新3老分配，空侧不能借位，或旧任务一直没有名额",
@@ -56,19 +56,21 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
     },
     false,
   );
+  const fixtureNow = Date.now();
   const records = new Map<string, SavedRoleRecord>();
   for (const key of [
     ...Array.from({ length: 9 }, (_, i) => `n${i + 1}`),
     ...Array.from({ length: 6 }, (_, i) => `o${i + 1}`),
   ]) {
     const record = valuationRecord(key);
-    const time = key.startsWith("n")
+    const ageSeconds = key.startsWith("n")
       ? key === "n9"
-        ? "2026-10-23T02:02:00.000Z"
+        ? 0
         : Number(key.slice(1)) > 2
-          ? "2026-10-23T02:01:00.000Z"
-          : "2026-10-23T02:00:00.000Z"
-      : `2026-10-22T02:00:0${6 - Number(key.slice(1))}.000Z`;
+          ? 60
+          : 120
+      : 180 + Number(key.slice(1));
+    const time = new Date(fixtureNow - ageSeconds * 1000).toISOString();
     Object.assign(record.listing, {
       price: String((key.startsWith("n") ? 600 : 700) + Number(key.slice(1))),
       sellingTime: time,
@@ -113,8 +115,8 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
   let listKeys = [
     ["n1", "n2"],
     ["o1", "o2", "o3"],
-    // 先保留一个重复的历史待采项；其余历史商品在下一次列表更新中出现。
-    ["o3"],
+    // 历史待采项在首轮登记，跨页重复项仍需去重。
+    ["o3", "o4", "o5", "o6"],
   ];
   const listPage = await context.newPage();
   const analysisPage = await context.newPage();
@@ -375,8 +377,8 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
       fullPage: true,
     });
     listKeys = [
-      ["n3", "n4", "n5"],
-      ["n6", "n7", "n8", "n1", "n2"],
+      ["n3", "n4", "n5", "n6"],
+      ["n7", "n8", "n1", "n2"],
       ["o1", "o2", "o3"],
       ["o3", "o4", "o5", "o6"],
     ];
@@ -388,22 +390,26 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
       .poll(() => ({ new: status.newQueued, old: status.oldQueued }))
       .toEqual({
         new: 4,
-        old: 1,
+        old: 4,
       });
     expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
     await expect(page.getByLabel("采集双队列状态")).toContainText("新号排队 4");
     // 已在途老号继续；有新号排队时，空出的名额优先给新号。
     release("n1", captureGates, allowedCapture);
     await expect.poll(() => activeCapture.has("n3")).toBe(true);
-    await expect.poll(discoveredNew).toBe(7);
+    await expect.poll(discoveredNew).toBe(6);
     expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
     release("n2", captureGates, allowedCapture);
     await expect.poll(() => activeCapture.has("n4")).toBe(true);
-    await expect.poll(discoveredNew).toBe(8);
+    await expect.poll(discoveredNew).toBe(6);
     expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
     release("n3", captureGates, allowedCapture);
     await expect.poll(() => activeCapture.has("n5")).toBe(true);
     expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
+    // 当前调度先清空首页待派新号，再跨页发现；不抢占已经在途的老号。
+    release("n4", captureGates, allowedCapture);
+    await expect.poll(() => activeCapture.has("n6")).toBe(true);
+    await expect.poll(discoveredNew).toBe(8);
     expect(capturedCalls).not.toContain("o3");
     for (let number = 1; number <= 8; number++) release(`n${number}`, captureGates, allowedCapture);
     await expect.poll(() => store.count()).toBe(8);
@@ -540,7 +546,8 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
     expect(captureConfigurations).toEqual([4, 4]);
     expect(Math.max(...captureStates.map((state) => state.new + state.old))).toBe(4);
     expect(Math.max(...captureQueuedStates.map((state) => state.new))).toBe(4);
-    expect(Math.max(...captureQueuedStates.map((state) => state.old))).toBeLessThanOrEqual(4);
+    // 继续时先重放已登记任务，待补队列可包含全部6个老号。
+    expect(Math.max(...captureQueuedStates.map((state) => state.old))).toBeLessThanOrEqual(6);
     expect(
       Math.max(...captureQueuedStates.map((state) => state.new + state.old)),
     ).toBeLessThanOrEqual(8);
