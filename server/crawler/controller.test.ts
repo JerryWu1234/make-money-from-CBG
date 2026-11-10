@@ -52,7 +52,7 @@ beforeEach(() => {
   vi.resetModules();
   vi.clearAllMocks();
   mocks.acquire.mockReturnValue(true);
-  mocks.headRefresh.mockReturnValue({ intervalSeconds: 600, random: true, initialPages: 3 });
+  mocks.headRefresh.mockReturnValue({ intervalSeconds: 600, random: true, listingAgeMinutes: 3 });
   mocks.current.mockResolvedValue({ isLoggedIn: true, running: false, workflowStep: "completed" });
   mocks.getBrowser.mockResolvedValue({ isConnected: () => true });
   mocks.watchLogin.mockResolvedValue(mocks.disposeLogin);
@@ -66,7 +66,29 @@ it.each(["manual", "scheduled"] as const)("%s 启动将已保存的刷新配置�
   const result = await controller.startCrawl(origin);
   await result.activity!.completion;
   expect(mocks.crawl.mock.calls[0][4]).toMatchObject({
-    headRefresh: { intervalSeconds: 600, random: true, initialPages: 3 },
+    headRefresh: { intervalSeconds: 600, random: true, listingAgeMinutes: 3 },
+  });
+});
+
+it("重新开始使用当前分钟范围，不沿用上一轮的计划或实际刷新时间", async () => {
+  mocks.crawl.mockImplementationOnce(async (_source, _store, _signal, publish) => {
+    publish({
+      nextHeadCheckAt: "2026-11-10T05:23:10.000Z",
+      lastHeadRefreshAt: "2026-11-10T05:20:10.000Z",
+    });
+  });
+  const controller = await import("./controller");
+  initial = controller;
+  const first = await controller.startCrawl();
+  await first.activity!.completion;
+  mocks.headRefresh.mockReturnValue({ intervalSeconds: 180, random: false, listingAgeMinutes: 5 });
+  mocks.crawl.mockResolvedValueOnce(undefined);
+  const second = await controller.startCrawl();
+  await second.activity!.completion;
+  expect(controller.crawlStatus()).toMatchObject({
+    headRefresh: { intervalSeconds: 180, random: false, listingAgeMinutes: 5 },
+    nextHeadCheckAt: undefined,
+    lastHeadRefreshAt: undefined,
   });
 });
 

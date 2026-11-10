@@ -7,7 +7,7 @@ import { ScanSchedulePanel } from "./ScanSchedulePanel";
 import { RunRecordSettings } from "./RunRecordSettings";
 import { SqliteDataCleanup } from "./SqliteDataCleanup";
 import { HeadRefreshSettings } from "./HeadRefreshSettings";
-import { describeHeadRefresh } from "../server/crawler/head-refresh";
+import { DEFAULT_LISTING_AGE_MINUTES, describeHeadRefresh } from "../server/crawler/head-refresh";
 import { replaceSavedRecordKey, replaceSavedRecordsPage, savedRecordKey } from "./saved-view-state";
 
 type Status = CrawlStatus & {
@@ -249,20 +249,29 @@ export function CrawlPanel({
               <p aria-label="采集双队列状态">
                 {status.phase === "retrying"
                   ? "已保存任务优先补采 · "
-                  : status.captureStrategy === "new-first"
+                  : !status.headRefresh && status.captureStrategy === "new-first"
                     ? "新号优先 · "
                     : ""}
-                当前在途 {(status.newRunning ?? 0) + (status.oldRunning ?? 0)} 个 · 新号在途{" "}
-                {status.newRunning ?? 0} · 老号在途 {status.oldRunning ?? 0}
-                {` · 新号排队 ${status.newQueued ?? 0} · 老号排队 ${status.oldQueued ?? 0}`}
+                {status.headRefresh ? (
+                  <>
+                    上架范围 {status.headRefresh.listingAgeMinutes ?? DEFAULT_LISTING_AGE_MINUTES}{" "}
+                    分钟 · 当前在途 {(status.newRunning ?? 0) + (status.oldRunning ?? 0)} 个 ·
+                    范围内排队 {(status.newQueued ?? 0) + (status.oldQueued ?? 0)} 个
+                  </>
+                ) : (
+                  <>
+                    当前在途 {(status.newRunning ?? 0) + (status.oldRunning ?? 0)} 个 · 新号在途{" "}
+                    {status.newRunning ?? 0} · 老号在途 {status.oldRunning ?? 0}
+                    {` · 新号排队 ${status.newQueued ?? 0} · 老号排队 ${status.oldQueued ?? 0}`}
+                  </>
+                )}
               </p>
             )}
             {status.running && status.phase !== "retrying" && status.nextHeadCheckAt && (
               <p className="status-note">
-                首页下次检查：{displayTime(status.nextHeadCheckAt)}
-                {status.headCheckedAt ? ` · 上次检查：${displayTime(status.headCheckedAt)}` : ""}
-                {status.headPage ? ` · 新号检查至第 ${status.headPage} 页` : ""}
-                {status.historyPage ? ` · 顺序扫描至第 ${status.historyPage} 页` : ""}
+                下次计划刷新：{displayTime(status.nextHeadCheckAt)}
+                {` · 最近实际刷新：${status.lastHeadRefreshAt ? displayTime(status.lastHeadRefreshAt) : "尚未刷新"}`}
+                {` · 当前检查第 ${status.page} 页`}
                 {status.headRefresh
                   ? ` · 本轮设置：${describeHeadRefresh(status.headRefresh)}`
                   : ""}
@@ -275,7 +284,7 @@ export function CrawlPanel({
               第 {status.page} / {status.totalPages} 页 · 本轮保存 {status.saved} · 跳过{" "}
               {status.skipped} · 本轮待重试 {status.failed || 0} · 库内完整商品 {status.totalSaved}
             </p>
-            {!!status.retryTotal && (
+            {status.phase === "retrying" && !!status.retryTotal && (
               <p>
                 优先处理采集任务：{status.retryCompleted || 0} / {status.retryTotal} 条
               </p>
@@ -318,7 +327,7 @@ export function CrawlPanel({
             )}
             <p className="status-note">
               数据库：{status.database}
-              。继续采集会先处理已保存的采集任务；只有完整资料才能入商品库，排序无法证明有序时自动逐页核对。
+              。继续采集会先处理时间范围内已保存的任务；只有完整资料才能入商品库。遇到超出上架时间范围的商品后等待刷新。
             </p>
             {status.lastItemError && (
               <p className="status-note">最近待重试：{status.lastItemError}</p>
@@ -358,7 +367,7 @@ export function CrawlPanel({
             个。详情页至少间隔5秒打开，打开后并行读取。开始或继续时，先用全部并发名额补采已保存的未完成任务，不分新老；补采结束后再发现商品。
             持续采集时，有新号排队就优先派发新号，没有新号待派时用老号补空位；已经在途的老号继续完成。
             失败任务独立保留，完整入库后才发布为商品并进入分析。列表首页按保存的固定或随机间隔检查，
-            同时逐页核对历史列表。修改后在下次开始或继续采集时生效。
+            每轮只检查上架时间范围内的商品，遇到超窗商品后等待刷新。修改后在下次开始或继续采集时生效。
           </p>
         </section>
         <section className="crawl-options" aria-label="运行记录与数据维护">

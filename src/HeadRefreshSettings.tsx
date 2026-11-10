@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   describeHeadRefresh,
-  DEFAULT_INITIAL_PAGES,
-  MAX_INITIAL_PAGES,
+  DEFAULT_LISTING_AGE_MINUTES,
+  MAX_LISTING_AGE_MINUTES,
   MAX_HEAD_REFRESH_SECONDS,
   validateHeadRefreshSettings,
   type HeadRefreshSettings as Settings,
@@ -31,7 +31,7 @@ export function HeadRefreshSettings() {
   const [time, setTime] = useState("1");
   const [unit, setUnit] = useState(60);
   const [random, setRandom] = useState(false);
-  const [initialPages, setInitialPages] = useState(String(DEFAULT_INITIAL_PAGES));
+  const [listingAgeMinutes, setListingAgeMinutes] = useState(String(DEFAULT_LISTING_AGE_MINUTES));
   const [saved, setSaved] = useState<Settings | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -49,7 +49,7 @@ export function HeadRefreshSettings() {
       setUnit(nextUnit);
       setTime(String(settings.intervalSeconds / nextUnit));
       setRandom(settings.random);
-      setInitialPages(String(settings.initialPages ?? DEFAULT_INITIAL_PAGES));
+      setListingAgeMinutes(String(settings.listingAgeMinutes ?? DEFAULT_LISTING_AGE_MINUTES));
     } catch (error) {
       if (!signal?.aborted)
         setError(error instanceof Error ? error.message : "无法读取首页刷新设置");
@@ -73,7 +73,7 @@ export function HeadRefreshSettings() {
       const settings = validateHeadRefreshSettings({
         intervalSeconds: Number(time) * unit,
         random,
-        initialPages: Number(initialPages),
+        listingAgeMinutes: Number(listingAgeMinutes),
       });
       const result = await requestSettings(settings);
       setSaved(result);
@@ -98,16 +98,16 @@ export function HeadRefreshSettings() {
       >
         <div className="head-refresh-fields">
           <label>
-            首次采集页数
+            上架多少分钟以内
             <input
               type="number"
               min={1}
-              max={MAX_INITIAL_PAGES}
+              max={MAX_LISTING_AGE_MINUTES}
               step={1}
-              value={initialPages}
+              value={listingAgeMinutes}
               disabled={disabled}
               onChange={(event) => {
-                setInitialPages(event.target.value);
+                setListingAgeMinutes(event.target.value);
                 setNotice("");
               }}
             />
@@ -164,18 +164,18 @@ export function HeadRefreshSettings() {
           ? "勾选后，每轮从1秒到设定时长之间随机抽取等待时间。"
           : "未勾选时，每次按设定时长等待。"}
         例如设置10分钟并勾选随机，每轮等待1秒至10分钟。可设置1秒至7天。
-        首次从第1页开始，最多检查设定页数；已有新增检查边界时不再补历史。
-        后续每次刷新回到第1页；按上架时间倒序时，核对完上轮旧号边界同秒商品后停止翻页。
-        只有出售剩余时间排序时，逐页检查完整列表，只采新增，遇到旧号继续翻页。
-        列表检查与详情采集并行；本轮尚未检查完成时，刷新会延后。
+        每次从第1页检查，只采集上架时间在设定分钟范围内且尚未登记的商品。
+        遇到第一条超出范围的商品就结束本轮，等待下次刷新。
+        刷新到点后，完成当前列表动作就回首页，不等待本轮全部扫完；已开始的详情继续保存。
+        官网按出售剩余时间排序时，上架时间可能混排，停止后可能漏掉后页仍在时间范围内的商品。
       </p>
       <p className="status-note">
         {loading
           ? "正在读取刷新设置…"
           : saved
-            ? `当前已保存：${describeHeadRefresh(saved)}，首次最多${saved.initialPages ?? DEFAULT_INITIAL_PAGES}页。`
+            ? `当前已保存：${describeHeadRefresh(saved)}，只采上架${saved.listingAgeMinutes ?? DEFAULT_LISTING_AGE_MINUTES}分钟以内的商品。`
             : "尚未读取到已保存的设置。"}
-        设置保存在本机，下次开始或继续采集时生效；当前任务保持原设置，用于列表发现，已保存的待采任务继续保留。
+        设置保存在本机，下次开始或继续采集时生效；当前任务保持原设置，用于列表发现，超出时间范围的待采任务保留，本轮不派发。
       </p>
       {notice && (
         <p role="status" className="status-note">

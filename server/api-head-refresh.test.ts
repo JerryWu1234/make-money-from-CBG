@@ -34,26 +34,30 @@ async function invoke(method: string, body?: unknown) {
   return { status: res.statusCode, body: JSON.parse(res.end.mock.calls[0][0]) };
 }
 it("未连接浏览器时仍能读取和保存独立的刷新设置", async () => {
-  mocks.get.mockReturnValue({ intervalSeconds: 60, random: false, initialPages: 5 });
+  mocks.get.mockReturnValue({ intervalSeconds: 60, random: false, listingAgeMinutes: 10 });
   mocks.save.mockImplementation(validateHeadRefreshSettings);
   expect(await invoke("GET")).toEqual({
     status: 200,
-    body: { intervalSeconds: 60, random: false, initialPages: 5 },
+    body: { intervalSeconds: 60, random: false, listingAgeMinutes: 10 },
   });
-  expect(await invoke("POST", { intervalSeconds: 3600, random: true, initialPages: 5 })).toEqual({
+  expect(
+    await invoke("POST", { intervalSeconds: 3600, random: true, listingAgeMinutes: 10 }),
+  ).toEqual({
     status: 200,
-    body: { intervalSeconds: 3600, random: true, initialPages: 5 },
+    body: { intervalSeconds: 3600, random: true, listingAgeMinutes: 10 },
   });
 });
 it("无效配置返回400，写入失败返回500，不伪装成保存成功", async () => {
   mocks.save.mockImplementation(validateHeadRefreshSettings);
   expect(
-    (await invoke("POST", { intervalSeconds: 0, random: false, initialPages: 5 })).status,
+    (await invoke("POST", { intervalSeconds: 0, random: false, listingAgeMinutes: 10 })).status,
   ).toBe(400);
   mocks.save.mockImplementation(() => {
     throw new Error("写入失败");
   });
-  expect(await invoke("POST", { intervalSeconds: 60, random: true, initialPages: 5 })).toEqual({
+  expect(
+    await invoke("POST", { intervalSeconds: 60, random: true, listingAgeMinutes: 10 }),
+  ).toEqual({
     status: 500,
     body: { error: "写入失败" },
   });
