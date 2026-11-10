@@ -148,7 +148,7 @@ test("新号优先状态显示实际在途，10并发上限不会显示成已满
   };
   await expect(panel).toContainText("网站详情要求重新登录，采集已暂停");
   await expect(queues).toContainText("当前在途 0 个");
-  await expect(panel).not.toContainText("首页下次检查");
+  await expect(panel).not.toContainText("下次计划刷新");
   await expect(panel).not.toContainText("本轮并发上限");
   await panel.screenshot({ path: testInfo.outputPath("paused-for-login.png") });
 });
@@ -715,7 +715,9 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
     // 首次准备列表及逐项悬停带有真实节流，等待条件成立后再检查实际在途数。
     await expect.poll(() => active, { timeout: 30000 }).toBe(4);
     await expect(page.getByText(/仅采上架10分钟以内的商品/)).toBeVisible();
-    await expect(page.getByLabel("采集双队列状态")).toContainText("新号优先 · 当前在途 4 个");
+    await expect(page.getByLabel("采集双队列状态")).toContainText(
+      "上架范围 10 分钟 · 当前在途 4 个",
+    );
     expect(status.captureStrategy).toBe("new-first");
     expect(status.newLimit).toBeUndefined();
     expect(status.oldLimit).toBeUndefined();
@@ -734,8 +736,8 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
     await count.fill("2");
     await start.click();
     await expect.poll(() => store.count(), { timeout: 180000 }).toBe(5);
-    await expect(page.getByLabel("采集双队列状态")).toContainText("新号优先");
-    await expect(page.getByText(/首页下次检查/)).toBeVisible();
+    await expect(page.getByLabel("采集双队列状态")).toContainText("上架范围 10 分钟");
+    await expect(page.getByText(/下次计划刷新/)).toBeVisible();
     await page.getByRole("button", { name: "暂停采集", exact: true }).click();
     await completion;
     expect(status.phase).toBe("paused");

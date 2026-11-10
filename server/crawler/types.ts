@@ -220,6 +220,7 @@ export interface CrawlStatus {
   newLimit?: number;
   oldLimit?: number;
   headCheckedAt?: string;
+  lastHeadRefreshAt?: string;
   nextHeadCheckAt?: string;
   headPage?: number;
   historyPage?: number;

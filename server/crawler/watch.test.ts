@@ -444,12 +444,12 @@ describe("持续发现新号和历史详情共享采集池", () => {
     expect(src.detail).toHaveBeenCalledTimes(2);
   });
 
-  it("队列满时先完成本轮登记再刷新，刷新后新增优先派发且两侧队列有界", async () => {
+  it("队列满时到点刷新，保留在途老任务，新增优先派发且两侧队列有界", async () => {
     vi.useFakeTimers();
     const db = memory(),
       known = item(10, 1000),
       fresh = Array.from({ length: 6 }, (_, index) => item(index + 1, 2000 - index)),
-      old = Array.from({ length: 12 }, (_, index) => item(20 + index)),
+      old = Array.from({ length: 8 }, (_, index) => item(20 + index)),
       pages: Listing[][] = [[known], old],
       src = source(pages),
       active = holdDetails(src),
@@ -473,22 +473,18 @@ describe("持续发现新号和历史详情共享采集池", () => {
       pages[0] = fresh;
       await vi.advanceTimersByTimeAsync(100);
       await flush();
-      expect(src.prepare).toHaveBeenCalledTimes(1);
-      expect(fresh.every((row) => db.detail(row.key) === null)).toBe(true);
-      old.slice(0, 4).forEach((row) => active.get(row.key)!());
-      await flush();
       expect(src.prepare).toHaveBeenCalledTimes(2);
       expect(fresh.slice(0, 4).every((row) => readSaved(db, row.key)?.status === "pending")).toBe(
         true,
       );
       expect(db.detail(fresh[4]!.key)).toBeNull();
-      expect([...active.keys()]).toEqual(old.slice(4, 8).map((row) => row.key));
+      expect([...active.keys()]).toEqual(old.slice(0, 4).map((row) => row.key));
       for (let index = 0; index < 4; index++) {
-        active.get(old[index + 4]!.key)!();
+        active.get(old[index]!.key)!();
         await flush();
         expect(active.has(fresh[index]!.key)).toBe(true);
-        expect(old.slice(index + 5, 8).every((row) => active.has(row.key))).toBe(true);
-        expect(old.slice(8).every((row) => !active.has(row.key))).toBe(true);
+        expect(old.slice(index + 1, 4).every((row) => active.has(row.key))).toBe(true);
+        expect(old.slice(4).every((row) => !active.has(row.key))).toBe(true);
         expect(active.size).toBe(4);
       }
       active.get(fresh[0]!.key)!();
@@ -499,10 +495,10 @@ describe("持续发现新号和历史详情共享采集池", () => {
       expect([...active.keys()].every((key) => db.captureLane(key) === "new")).toBe(true);
       active.get(fresh[2]!.key)!();
       await flush();
-      // 边界之前已登记的首轮任务继续收尾，不重新发现更老的商品。
-      expect(active.has(old[8]!.key)).toBe(true);
-      expect(db.captureLane(old[8]!.key)).toBe("old");
-      expect(readSaved(db, old[8]!.key)?.status).toBe("pending");
+      // 首轮已登记任务在新号排队清空后继续，原队列分类保留。
+      expect(active.has(old[4]!.key)).toBe(true);
+      expect(db.captureLane(old[4]!.key)).toBe("old");
+      expect(readSaved(db, old[4]!.key)?.status).toBe("pending");
       expect(active.size).toBe(4);
       expect(maximumPending).toBe(12);
       expect(
@@ -870,7 +866,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
         fresh.unshift(added);
         await vi.advanceTimersByTimeAsync(100);
         await flush();
-        expect(db.hasListing(added.key)).toBe(false);
+        expect(db.hasListing(added.key)).toBe(true);
         expect(src.detail).toHaveBeenCalledTimes(pool);
         expect(publish).toHaveBeenCalledWith(
           expect.objectContaining({
@@ -883,9 +879,9 @@ describe("持续发现新号和历史详情共享采集池", () => {
         await flush();
         expect(active.size).toBe(pool);
         const remainingNew = [...active.keys()].filter((key) => db.captureLane(key) === "new");
-        expect(remainingNew).toHaveLength(2);
+        expect(remainingNew).toHaveLength(3);
         expect([...active.keys()].filter((key) => db.captureLane(key) === "old")).toHaveLength(
-          pool - 2,
+          pool - 3,
         );
         expect(db.hasListing(added.key)).toBe(true);
         active.get(remainingNew[0]!)!();
@@ -1290,13 +1286,11 @@ describe("持续发现新号和历史详情共享采集池", () => {
       pages[0] = [item(0, 1001), ...fresh];
       await vi.advanceTimersByTimeAsync(100);
       await flush();
-      expect(src.prepare).toHaveBeenCalledTimes(1);
+      expect(src.prepare).toHaveBeenCalledTimes(2);
       expect(db.detail("1:0")).toBeNull();
-      // 首轮尚未全部登记时不能刷新丢失尾部，释放名额后完成当前范围再刷新。
-      for (let round = 0; round < 8 && vi.mocked(src.prepare).mock.calls.length < 2; round++) {
-        active.forEach((release) => release());
-        await flush();
-      }
+      // 首页已刷新；新号队列仍有界，释放名额后登记刚出现的角色。
+      active.values().next().value!();
+      await flush();
       expect(src.prepare).toHaveBeenCalledTimes(2);
       expect(db.detail("1:0")).not.toBeNull();
       // 在途4个＋新号排队最多4个＋首轮保留队列最多4个。
@@ -1595,7 +1589,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
 
   // 失败方式：旧复核队列在刷新后触发远距离回跳，或刷新清掉尚未核验的记录。
   it.each(["selling_time DESC", "expire_time DESC"])(
-    "%s 短间隔等待本轮范围检查完再刷新，重复页不推进边界",
+    "%s 短间隔在当前翻页动作后刷新，未检查的复核页保留且不推进边界",
     async (order) => {
       vi.useFakeTimers();
       const db = memory(),
@@ -1638,8 +1632,9 @@ describe("持续发现新号和历史详情共享采集池", () => {
         expect(vi.mocked(src.page).mock.calls.every(([number]) => number >= 2 && number <= 5)).toBe(
           true,
         );
-        expect(src.page).toHaveBeenCalledWith(4);
-        expect(db.detail(tail.key)).not.toBeNull();
+        expect(vi.mocked(src.page).mock.calls.every(([number]) => number === 2)).toBe(true);
+        expect(src.page).not.toHaveBeenCalledWith(4);
+        expect(db.detail(tail.key)).toBeNull();
         expect(db.headCheckpoint()).toBeUndefined();
       } finally {
         control.abort(new Error("暂停"));

@@ -47,7 +47,12 @@ const detail = (item: Listing): RoleDetail => ({
   },
   petCapture: { version: 1, collectedAt: new Date().toISOString(), complete: true, issues: [] },
 });
-function start(pages: Listing[][], order = "selling_time DESC", db = new CrawlStore(":memory:")) {
+function start(
+  pages: Listing[][],
+  order = "selling_time DESC",
+  db = new CrawlStore(":memory:"),
+  intervalSeconds = 120,
+) {
   const read = (page: number) => ({
     page,
     totalPages: pages.length,
@@ -73,7 +78,7 @@ function start(pages: Listing[][], order = "selling_time DESC", db = new CrawlSt
     (outcome = crawl(source, db, control.signal, (state) => states.push(state), {
       watch: true,
       concurrency: 2,
-      headRefresh: { intervalSeconds: 120, random: false, listingAgeMinutes: 10 },
+      headRefresh: { intervalSeconds, random: false, listingAgeMinutes: 10 },
     }).catch((error: unknown) => error));
   const stop = async () => {
     control.abort(new Error("测试暂停"));
@@ -140,6 +145,93 @@ it("等待设定刷新时间后从首页采集新出现的角色，已保存商�
   expect(run.source.refresh).toHaveBeenCalledOnce();
   expect(run.db.count()).toBe(2);
   expect(run.source.detail).toHaveBeenCalledTimes(2);
+});
+
+it.each([4, 6])("首页有%d条角色且详情未完成，3分钟到点仍刷新，不丢已登记任务", async (count) => {
+  const run = start(
+    [Array.from({ length: count }, (_, index) => row(index + 1, 1)), [row(50, 1)]],
+    "expire_time DESC",
+    new CrawlStore(":memory:"),
+    180,
+  );
+  const release: Array<() => void> = [];
+  let headAtRefresh: ReturnType<CrawlStore["headCheckpoint"]>;
+  run.source.detail = vi.fn(async (item) => {
+    await new Promise<void>((resolve) => release.push(resolve));
+    return detail(item);
+  });
+  vi.mocked(run.source.refresh!).mockImplementation(async () => {
+    headAtRefresh = run.db.headCheckpoint();
+    vi.setSystemTime(Date.now() + 2000);
+    return { page: 1, totalPages: 100, order: "expire_time DESC", items: [row(90, 20)] };
+  });
+  try {
+    void run.run();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run.source.detail).toHaveBeenCalledTimes(2);
+    expect(run.db.retryItems()).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(179_999);
+    expect(run.source.refresh).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(run.source.refresh).toHaveBeenCalledOnce();
+    expect(run.source.page).not.toHaveBeenCalled();
+    expect(run.source.detail).toHaveBeenCalledTimes(2);
+    expect(run.db.backfillComplete()).toBe(false);
+    expect(headAtRefresh).toBeFalsy();
+    expect(run.states.some((state) => state.lastHeadRefreshAt === new Date().toISOString())).toBe(
+      true,
+    );
+    release.forEach((done) => done());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(run.db.count()).toBe(2);
+    expect(run.db.detail("1:3")).toMatchObject({ status: "pending" });
+  } finally {
+    const stopping = run.stop();
+    release.forEach((done) => done());
+    await stopping;
+  }
+});
+
+it("悬停跨过刷新时间后，不继续本页尾部，不把未检查范围推进为完成", async () => {
+  const run = start([[row(1, 1), row(2, 1), row(3, 1)], [row(4, 1)]]);
+  run.source.hover = vi.fn(async (item) => {
+    vi.setSystemTime(Date.now() + 70_000);
+    return item;
+  });
+  vi.mocked(run.source.refresh!).mockResolvedValue({
+    page: 1,
+    totalPages: 2,
+    order: "selling_time DESC",
+    items: [row(90, 20)],
+  });
+  void run.run();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(run.source.refresh).toHaveBeenCalledOnce();
+  expect(vi.mocked(run.source.hover).mock.calls.map(([item]) => item.key)).toEqual(["1:1", "1:2"]);
+  expect(run.source.page).not.toHaveBeenCalled();
+  expect(run.db.hasListing("1:3")).toBe(false);
+  expect(run.db.backfillComplete()).toBe(false);
+});
+
+it("翻页跨过刷新时间后直接回首页，不悬停新页或执行重复页重读", async () => {
+  const first = row(1, 1);
+  const run = start([[first], [first]], "expire_time DESC");
+  run.source.page = vi.fn(async () => {
+    vi.setSystemTime(Date.now() + 121_000);
+    return { page: 2, totalPages: 100, order: "expire_time DESC", items: [first] };
+  });
+  vi.mocked(run.source.refresh!).mockResolvedValue({
+    page: 1,
+    totalPages: 100,
+    order: "expire_time DESC",
+    items: [row(90, 20)],
+  });
+  void run.run();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(run.source.page).toHaveBeenCalledExactlyOnceWith(2);
+  expect(run.source.refresh).toHaveBeenCalledOnce();
+  expect(run.source.hover).toHaveBeenCalledTimes(1);
+  expect(run.db.pageReviews()).toHaveLength(0);
 });
 
 it("已有旧水位也执行时间窗口；范围内可以超过5页，第一条超窗处即停", async () => {

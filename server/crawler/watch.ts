@@ -289,6 +289,7 @@ export async function watchCrawl(
           publish({ detailProgress: "详情待采队列已满，先处理已发现商品，再继续扫描…" });
           await waitForWork(true);
           check();
+          if (Date.now() >= nextHeadCheck) return;
         }
         if (stopAtAgeLimit(listed)) return;
         const item = await source.hover(listed);
@@ -373,8 +374,8 @@ export async function watchCrawl(
       historyPage: 1,
       headPage: 1,
       totalPages,
-      strategy: `仅采上架${listingAgeMinutes}分钟以内的商品，遇到超窗商品停止本轮，等待刷新。`,
-      message: `从第1页检查上架${listingAgeMinutes}分钟以内的商品，已登记商品跳过。`,
+      strategy: `仅采上架${listingAgeMinutes}分钟以内的商品；遇到超窗商品等待刷新，到刷新时间完成当前列表动作后回首页。`,
+      message: `正在检查第1页的上架${listingAgeMinutes}分钟以内商品，已登记商品跳过。`,
     });
   };
   const scheduleHeadCheck = () => {
@@ -395,9 +396,7 @@ export async function watchCrawl(
         wake = undefined;
         resolve();
       };
-      const timer = detailsOnly
-        ? undefined
-        : setTimeout(finish, Math.max(0, nextHeadCheck - Date.now()));
+      const timer = setTimeout(finish, Math.max(0, nextHeadCheck - Date.now()));
       wake = finish;
       signal.addEventListener("abort", finish, { once: true });
       if (signal.aborted || failure || (detailsOnly && !inFlight.size)) finish();
@@ -417,12 +416,14 @@ export async function watchCrawl(
       // 先登记刷新后的第一页，避免旧队列抢在本页新号前派发。
       if (!(historyPage === 1 && itemIndex === 0 && currentPage)) pump();
       publish({ nextHeadCheckAt: new Date(nextHeadCheck).toISOString() });
-      // 当前范围全部登记后才刷新，避免短间隔反复重置扫描位置或提前推进边界。
-      if (historyDone && Date.now() >= nextHeadCheck) {
+      // 刷新不等待整轮扫描或详情结束；只在列表动作之间切回首页。
+      if (Date.now() >= nextHeadCheck) {
+        publish({ message: "刷新时间已到，正在回首页读取最新列表；在途详情继续完成。" });
         // 生产 Source 刷新页面后直接读取自然返回的第一页；兼容旧的 Source 实现。
         const first = source.refresh ? await source.refresh(order) : await source.prepare(order);
         check();
         beginScan(first);
+        publish({ lastHeadRefreshAt: new Date().toISOString() });
         scheduleHeadCheck();
       } else if (historyDone) {
         await waitForWork();
@@ -435,6 +436,7 @@ export async function watchCrawl(
             check();
             checkPage(page, historyPage, order);
             totalPages = page.totalPages;
+            if (Date.now() >= nextHeadCheck) return;
             const result = await refreshRepeatedPage(
               source,
               store,
@@ -456,9 +458,15 @@ export async function watchCrawl(
             itemIndex = 0;
           }
           const page = currentPage;
-          publish({ historyPage, page: historyPage, totalPages });
+          publish({
+            historyPage,
+            page: historyPage,
+            totalPages,
+            message: `正在检查第${historyPage}页的上架${listingAgeMinutes}分钟以内商品，已登记商品跳过。`,
+          });
           try {
             for (; itemIndex < page.items.length; itemIndex++) {
+              if (Date.now() >= nextHeadCheck) return;
               const listed = page.items[itemIndex]!;
               // 用户配置的是每轮上架时间窗口，两种官网排序都在第一条超窗商品处停止。
               if (stopAtAgeLimit(listed)) break;
@@ -476,6 +484,7 @@ export async function watchCrawl(
                   };
               }
               const item = await observe(listed, lane);
+              if (Date.now() >= nextHeadCheck) return;
               if (reachedBoundary) break;
               if (!item) continue;
               if (store.captureLane(item.key) === "old" && !inFlight.has(item.key))
@@ -504,11 +513,15 @@ export async function watchCrawl(
           if (historyPage === 1) publish({ headCheckedAt: new Date().toISOString() });
           return { signature, complete: true, lastTime: page.items.at(-1)?.sellingTime };
         });
+        // 到点中断的范围尚未核验完，不推进水位或清理未检查的列表页。
+        if (!discovered) continue;
         if (discovered.complete) {
           previousSignature = discovered.signature;
           previousLastTime = discovered.lastTime ?? undefined;
           reachedListEnd = !reachedBoundary && historyPage >= totalPages;
           historyDone = reachedBoundary || reachedListEnd;
+          if (historyDone && !reachedBoundary)
+            publish({ message: "本轮列表检查完成，等待下次刷新；在途详情继续完成。" });
           if (
             historyDone &&
             scanHead &&

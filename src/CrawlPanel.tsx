@@ -7,7 +7,7 @@ import { ScanSchedulePanel } from "./ScanSchedulePanel";
 import { RunRecordSettings } from "./RunRecordSettings";
 import { SqliteDataCleanup } from "./SqliteDataCleanup";
 import { HeadRefreshSettings } from "./HeadRefreshSettings";
-import { describeHeadRefresh } from "../server/crawler/head-refresh";
+import { DEFAULT_LISTING_AGE_MINUTES, describeHeadRefresh } from "../server/crawler/head-refresh";
 import { replaceSavedRecordKey, replaceSavedRecordsPage, savedRecordKey } from "./saved-view-state";
 
 type Status = CrawlStatus & {
@@ -249,20 +249,29 @@ export function CrawlPanel({
               <p aria-label="采集双队列状态">
                 {status.phase === "retrying"
                   ? "已保存任务优先补采 · "
-                  : status.captureStrategy === "new-first"
+                  : !status.headRefresh && status.captureStrategy === "new-first"
                     ? "新号优先 · "
                     : ""}
-                当前在途 {(status.newRunning ?? 0) + (status.oldRunning ?? 0)} 个 · 新号在途{" "}
-                {status.newRunning ?? 0} · 老号在途 {status.oldRunning ?? 0}
-                {` · 新号排队 ${status.newQueued ?? 0} · 老号排队 ${status.oldQueued ?? 0}`}
+                {status.headRefresh ? (
+                  <>
+                    上架范围 {status.headRefresh.listingAgeMinutes ?? DEFAULT_LISTING_AGE_MINUTES}{" "}
+                    分钟 · 当前在途 {(status.newRunning ?? 0) + (status.oldRunning ?? 0)} 个 ·
+                    范围内排队 {(status.newQueued ?? 0) + (status.oldQueued ?? 0)} 个
+                  </>
+                ) : (
+                  <>
+                    当前在途 {(status.newRunning ?? 0) + (status.oldRunning ?? 0)} 个 · 新号在途{" "}
+                    {status.newRunning ?? 0} · 老号在途 {status.oldRunning ?? 0}
+                    {` · 新号排队 ${status.newQueued ?? 0} · 老号排队 ${status.oldQueued ?? 0}`}
+                  </>
+                )}
               </p>
             )}
             {status.running && status.phase !== "retrying" && status.nextHeadCheckAt && (
               <p className="status-note">
-                首页下次检查：{displayTime(status.nextHeadCheckAt)}
-                {status.headCheckedAt ? ` · 上次检查：${displayTime(status.headCheckedAt)}` : ""}
-                {status.headPage ? ` · 新号检查至第 ${status.headPage} 页` : ""}
-                {status.historyPage ? ` · 顺序扫描至第 ${status.historyPage} 页` : ""}
+                下次计划刷新：{displayTime(status.nextHeadCheckAt)}
+                {` · 最近实际刷新：${status.lastHeadRefreshAt ? displayTime(status.lastHeadRefreshAt) : "尚未刷新"}`}
+                {` · 当前检查第 ${status.page} 页`}
                 {status.headRefresh
                   ? ` · 本轮设置：${describeHeadRefresh(status.headRefresh)}`
                   : ""}
@@ -275,7 +284,7 @@ export function CrawlPanel({
               第 {status.page} / {status.totalPages} 页 · 本轮保存 {status.saved} · 跳过{" "}
               {status.skipped} · 本轮待重试 {status.failed || 0} · 库内完整商品 {status.totalSaved}
             </p>
-            {!!status.retryTotal && (
+            {status.phase === "retrying" && !!status.retryTotal && (
               <p>
                 优先处理采集任务：{status.retryCompleted || 0} / {status.retryTotal} 条
               </p>

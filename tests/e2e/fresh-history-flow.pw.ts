@@ -369,9 +369,11 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
     await startCapture.click();
     await expect.poll(() => countLanes(activeCapture)).toEqual({ new: 2, old: 2 });
     await expect(crawlCount).toBeDisabled();
-    await expect(page.getByLabel("采集双队列状态")).toContainText("新号在途 2 · 老号在途 2");
+    await expect(page.getByLabel("采集双队列状态")).toContainText(
+      "上架范围 10 分钟 · 当前在途 4 个",
+    );
     expect(status.captureStrategy).toBe("new-first");
-    await expect(page.getByText(/首页下次检查：/)).toBeVisible();
+    await expect(page.getByText(/下次计划刷新：/)).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath("capture-new-priority-old-fill.png"),
       fullPage: true,
@@ -393,7 +395,7 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
         old: 4,
       });
     expect([...activeCapture.keys()]).toEqual(expect.arrayContaining(["o1", "o2"]));
-    await expect(page.getByLabel("采集双队列状态")).toContainText("新号排队 4");
+    await expect(page.getByLabel("采集双队列状态")).toContainText("范围内排队 8 个");
     // 已在途老号继续；有新号排队时，空出的名额优先给新号。
     release("n1", captureGates, allowedCapture);
     await expect.poll(() => activeCapture.has("n3")).toBe(true);
