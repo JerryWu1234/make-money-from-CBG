@@ -172,7 +172,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
   });
 
   it.each(["selling_time DESC", "expire_time DESC"])(
-    "%s 首轮最多5页，刷新从首页追新增至旧边界并保留在途任务",
+    "%s 首轮最多5页，刷新按各自排序检查新增并保留在途任务",
     async (order) => {
       vi.useFakeTimers();
       const db = memory(),
@@ -231,9 +231,13 @@ describe("持续发现新号和历史详情共享采集池", () => {
         expect(active.has(fresh.key)).toBe(true);
         expect(active.has(previousActive[1]!)).toBe(true);
         await vi.advanceTimersByTimeAsync(0);
-        expect(events.slice(events.indexOf("reload"))).toEqual(["reload", "page:2:false"]);
+        const followupPages = order === "expire_time DESC" ? 19 : 1;
+        expect(events.slice(events.indexOf("reload"))).toEqual([
+          "reload",
+          ...Array.from({ length: followupPages }, (_, index) => `page:${index + 2}:false`),
+        ]);
         expect(src.page).not.toHaveBeenCalledWith(1);
-        expect(src.page).toHaveBeenCalledTimes(5);
+        expect(src.page).toHaveBeenCalledTimes(4 + followupPages);
         expect(
           vi
             .mocked(src.hover)
@@ -847,7 +851,7 @@ describe("持续发现新号和历史详情共享采集池", () => {
     expect(db.retryItems()).toHaveLength(3);
   });
 
-  it("到期排序下上架时间失序时暂停，保留旧记录且不推进边界", async () => {
+  it("到期排序下允许上架时间非单调，检查完整列表并仅采新增", async () => {
     vi.useFakeTimers();
     const db = memory(),
       saved = item(20),
@@ -886,15 +890,26 @@ describe("持续发现新号和历史详情共享采集池", () => {
     expect(src.prepare).toHaveBeenLastCalledWith("expire_time DESC");
     expect(src.page).not.toHaveBeenCalledWith(1);
     expect(src.page).toHaveBeenCalledWith(2);
-    expect(src.detail).toHaveBeenCalledTimes(1);
-    expect(db.count()).toBe(2);
+    expect(src.detail).toHaveBeenCalledTimes(2);
+    expect(db.count()).toBe(3);
     expect(readSaved(db, saved.key)?.status).toBe("complete");
-    expect(db.headCheckpoint()).toBeUndefined();
+    expect(db.headCheckpoint()).toEqual({
+      time: newer.sellingTime,
+      keys: [newer.key],
+      mode: "latest-only",
+    });
     expect(publish).toHaveBeenCalledWith(
       expect.objectContaining({ strategy: expect.stringContaining("真实上架时间") }),
     );
-    expect(await outcome).toMatchObject({ message: expect.stringContaining("上架时间倒序") });
+    const added = item(3, 1);
+    pages[1].items.push({ ...added, orderTime: null });
+    await vi.advanceTimersByTimeAsync(100);
+    await flush();
+    expect(src.prepare).toHaveBeenCalledTimes(3);
+    expect(db.hasListing(added.key)).toBe(false);
+    expect(db.count()).toBe(3);
     control.abort(new Error("暂停"));
+    expect(await outcome).toMatchObject({ message: "暂停" });
   });
 
   it.each([undefined, 4, 6, 8, 10])(

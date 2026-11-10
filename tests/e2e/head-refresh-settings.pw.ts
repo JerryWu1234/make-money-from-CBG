@@ -174,6 +174,8 @@ test("首次采集页数默认5，可保存重载，拒绝零和小数，运行�
   await expect(pages).toHaveValue("7");
   await expect(panel).toContainText("首次最多7页");
   await expect(panel).toContainText("上轮旧号边界");
+  await expect(panel).toContainText("只有出售剩余时间排序时，逐页检查完整列表，只采新增");
+  await expect(panel).toContainText("遇到旧号继续翻页");
   expect(state.starts).toBe(0);
   await panel.screenshot({ path: testInfo.outputPath("initial-pages-settings.png") });
 });

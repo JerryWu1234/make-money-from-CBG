@@ -37,7 +37,8 @@ function checkPage(page: ListingPage, number: number, order = ORDER) {
     const time = item.sellingTime;
     if (!time || !Number.isFinite(Date.parse(time)) || (order === ORDER && item.orderTime !== time))
       throw new Error("列表缺少可靠的上架时间，已暂停以免漏采");
-    if (previous && time > previous) throw new Error("列表未按上架时间倒序，已暂停以免漏采");
+    if (order === ORDER && previous && time > previous)
+      throw new Error("列表未按上架时间倒序，已暂停以免漏采");
     previous = time;
   }
 }
@@ -81,6 +82,7 @@ export async function watchCrawl(
   let boundary: HeadCheckpoint | undefined;
   let reachedBoundary = false;
   let reachedListEnd = false;
+  let skippedHistory = false;
   let historyDone = false;
   let historyPass = 0;
   let currentPage: ListingPage | undefined;
@@ -120,6 +122,7 @@ export async function watchCrawl(
       !failure &&
       historyDone &&
       reachedListEnd &&
+      !skippedHistory &&
       !store.pageReviews().length &&
       !running.old &&
       !queues.old.length &&
@@ -317,6 +320,16 @@ export async function watchCrawl(
       }
     }
   };
+  const rememberHead = (items: Listing[]) => {
+    // 到期排序的首页首条不一定是本轮最新商品，边界取已检查范围内最大的真实上架时间。
+    for (const item of items) {
+      const time = item.sellingTime!;
+      if (!scanHead || time > scanHead.time)
+        scanHead = { time, keys: [item.key], mode: "latest-only" };
+      else if (time === scanHead.time && !scanHead.keys.includes(item.key))
+        scanHead.keys.push(item.key);
+    }
+  };
   const beginScan = (first: ListingPage) => {
     checkPage(first, 1, order);
     // 刷新已经回到第一页，直接复用返回的列表，不再跳回旧页或重取第一页。
@@ -325,19 +338,14 @@ export async function watchCrawl(
     historyDone = false;
     reachedBoundary = false;
     reachedListEnd = false;
+    skippedHistory = false;
     historyPass++;
     // 旧全表扫描水位不代表已经执行过首次限定页数采集，升级后先建立新的边界。
     const savedHead = store.headCheckpoint();
     boundary = savedHead?.mode === "latest-only" ? savedHead : undefined;
     currentPage = first;
-    const top = first.items[0]?.sellingTime;
-    scanHead = top
-      ? {
-          time: top,
-          keys: first.items.filter((item) => item.sellingTime === top).map((item) => item.key),
-          mode: "latest-only",
-        }
-      : undefined;
+    scanHead = undefined;
+    rememberHead(first.items);
     itemIndex = 0;
     previousSignature = "";
     previousLastTime = undefined;
@@ -347,8 +355,10 @@ export async function watchCrawl(
       headPage: 1,
       totalPages,
       strategy: boundary
-        ? "仅检查新增：从第1页顺扫至上轮旧号边界，同秒商品全部核对；已登记的商品跳过"
-        : `首次最多检查${initialPages}页，完成后仅检查新增；已保存的未完成任务保留补采`,
+        ? ordered
+          ? "仅检查新增：从第1页顺扫至上轮旧号边界，同秒商品全部核对；已登记的商品跳过"
+          : "出售剩余时间排序：逐页检查完整列表，只采新增；遇到旧号继续翻页"
+        : `首次最多检查${initialPages}页，完成后仅检查新增；${ordered ? "刷新至旧号边界停止" : "到期排序刷新后检查完整列表"}`,
     });
   };
   const scheduleHeadCheck = () => {
@@ -381,7 +391,7 @@ export async function watchCrawl(
     phase: "collecting",
     current: undefined,
     detailProgress: undefined,
-    message: `先完成首次最多${initialPages}页的发现，之后刷新从第1页检查新增，到旧号边界停止翻页…`,
+    message: `先完成首次最多${initialPages}页的发现，之后刷新从第1页检查新增；${ordered ? "到旧号边界停止翻页" : "到期排序逐页检查完整列表"}…`,
   });
   try {
     beginScan(await source.prepare(order));
@@ -424,7 +434,7 @@ export async function watchCrawl(
             if (result.deferred)
               return { signature: pageSignature(page), complete: true, lastTime: undefined };
             const firstTime = page.items[0]?.sellingTime;
-            if (previousLastTime && firstTime && firstTime > previousLastTime)
+            if (ordered && previousLastTime && firstTime && firstTime > previousLastTime)
               throw new Error("相邻列表页未保持上架时间倒序，已暂停以免漏采");
             currentPage = page;
             itemIndex = 0;
@@ -434,10 +444,16 @@ export async function watchCrawl(
           try {
             for (; itemIndex < page.items.length; itemIndex++) {
               const listed = page.items[itemIndex]!;
-              // 不能遇到任意一个库内旧号就停止；同秒新商品仍须登记，严格越过时间边界才停。
+              // 只有官网声明上架时间倒序才可提前停止；到期排序的后页仍可能存在新上架商品。
               if (boundary && listed.sellingTime! < boundary.time) {
-                reachedBoundary = true;
-                break;
+                skippedHistory = true;
+                if (ordered) {
+                  reachedBoundary = true;
+                  break;
+                }
+                skipped++;
+                publish({ skipped });
+                continue;
               }
               // 在队列限流和悬停核对之前查重，已见商品不占用发现名额。
               if (skipKnown(listed)) continue;
@@ -471,15 +487,7 @@ export async function watchCrawl(
             throw error;
           }
           const signature = pageSignature(page);
-          if (scanHead)
-            scanHead.keys = [
-              ...new Set([
-                ...scanHead.keys,
-                ...page.items
-                  .filter((item) => item.sellingTime === scanHead!.time)
-                  .map((item) => item.key),
-              ]),
-            ];
+          rememberHead(page.items);
           // 只在顺扫实际经过该页且与本轮前页不同后清除复核；不再为复核跳回旧页。
           if (historyPage > 1 && previousSignature && signature !== previousSignature) {
             store.resolvePageReview(order, historyPage);
