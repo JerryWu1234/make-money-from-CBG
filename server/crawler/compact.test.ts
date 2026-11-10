@@ -180,7 +180,7 @@ describe("有官网证据的角色装备分类", () => {
     },
   );
   it("元身目录未观察的型号及缺型号的名称不能凭范围或文字推断", () => {
-    expect(observedEquipmentCategory("人物装备", "仓库", "4243")).toBe("人物装备");
+    expect(observedEquipmentCategory("人物装备", "仓库", "4244")).toBe("人物装备");
     expect(itemFromAttributes({ data_equip_name: "剑·元身" }, 0).category).toBeUndefined();
   });
   it("保留技能官方ID、原类别与可见区块，cifu类别本身不代表未来或赐福", () => {

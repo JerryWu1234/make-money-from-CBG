@@ -6,7 +6,7 @@ const attrs = (records: unknown[], modelId = "90001") => ({
   data_official_model_metadata: JSON.stringify({ modelId, records }),
 });
 describe("官网精确型号元数据", () => {
-  it.each(["道具", "宝石", "召唤兽技能书"])(
+  it.each(["道具", "宝石", "召唤兽技能书", "儿童物品"])(
     "明确类别%s保留名称及完整描述，不套人物装备属性",
     (category) => {
       const item = itemFromAttributes(
@@ -48,6 +48,34 @@ describe("官网精确型号元数据", () => {
       ).toBe("official-containers");
     },
   );
+  it("官网明确给出镶嵌对象的宝石保留用途和等级，不按人物装备校验", () => {
+    const item = itemFromAttributes(
+      {
+        ...attrs([{ name: "官网镶嵌材料", desc: "【镶嵌装备】腰带、鞋子#r提高8点速度" }]),
+        data_equip_desc: "等级 6",
+      },
+      0,
+    );
+    expect(item.categorySource).toBe("official-model");
+    expect(isNonRoleEquipment(item)).toBe(true);
+    expect(item.description).toContain("提高8点速度");
+    expect(item.description).toContain("等级 6");
+  });
+  it.each([
+    { records: [{ name: "武器", desc: "以宝石和材料打造，供儿童使用。#r【装备条件】等级140" }] },
+    { records: [{ name: "武器", desc: "【镶嵌装备】腰带#r【装备条件】等级140" }] },
+    { records: [{ name: "武器", category: "人物装备", desc: "【镶嵌装备】腰带" }] },
+    {
+      records: [
+        { name: "冲突", category: "宝石" },
+        { name: "冲突", category: "人物装备", desc: "【镶嵌装备】腰带" },
+      ],
+    },
+    { records: [{ name: "未知", desc: "【镶嵌装备】" }] },
+    { records: [{ name: "未知", desc: "【镶嵌装备】：  #r没有有效镶嵌对象" }] },
+  ])("自由描述、装备条件、类别冲突和空镶嵌字段仍不能免除装备校验", ({ records }) => {
+    expect(isNonRoleEquipment(itemFromAttributes(attrs(records), 0))).toBe(false);
+  });
   it.each([
     attrs([{ name: "未知物品" }]),
     { ...attrs([{ name: "光芒石", desc: "等级 9" }]), data_equip_name: "光芒石" },
