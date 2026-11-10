@@ -1,4 +1,5 @@
 import type { Locator, Page } from "playwright-core";
+import { collectionPageSignal } from "./crawler/login-dialog";
 
 const WORK_VIEWPORT = { width: 1440, height: 1080 };
 let inspectionClickTail = Promise.resolve();
@@ -16,11 +17,17 @@ export async function ensureWorkViewport(page: Page) {
 }
 /** Check the target in the main world, then send browser mouse input without a node handle. */
 export async function clickForInspection(element: Locator, signal?: AbortSignal) {
+  const page = element.page();
+  const collectionSignal = collectionPageSignal(page);
+  const check = () => {
+    signal?.throwIfAborted();
+    collectionSignal?.throwIfAborted();
+  };
   // Keep page loading and data reads outside this shared click queue.
   const click = inspectionClickTail.then(async () => {
-    signal?.throwIfAborted();
-    const page = element.page();
+    check();
     await ensureWorkViewport(page);
+    check();
     const token = `${Date.now()}:${Math.random()}`;
     const point = (mark: boolean) =>
       element.evaluateAll(
@@ -58,13 +65,15 @@ export async function clickForInspection(element: Locator, signal?: AbortSignal)
     const before = await point(true);
     if (!before) throw changed();
     await new Promise((resolve) => setTimeout(resolve, 100));
-    signal?.throwIfAborted();
+    check();
     const stable = await point(false);
+    check();
     if (!stable || JSON.stringify(before) !== JSON.stringify(stable)) throw changed();
     await page.mouse.move(stable.x, stable.y);
+    check();
     const afterHover = await point(false);
     if (!afterHover || JSON.stringify(stable) !== JSON.stringify(afterHover)) throw changed();
-    signal?.throwIfAborted();
+    check();
     // A failure after input may already have changed the page: never replay the click here.
     await page.mouse.click(afterHover.x, afterHover.y);
   });
@@ -79,10 +88,14 @@ export async function hoverForInspection(
   element: Locator,
   recoveredActionability?: (stage: "scroll" | "visibility" | "handle" | "pointer") => void,
 ) {
+  const signal = collectionPageSignal(page);
+  signal?.throwIfAborted();
   await ensureWorkViewport(page);
+  signal?.throwIfAborted();
   // 移出上一个图标，触发网站自己的 mouseout；仅让提示框不拦截后续鼠标。
   // 不隐藏提示内容，不对验证码、登录框或其他遮罩使用 force。
   await page.mouse.move(1, 1);
+  signal?.throwIfAborted();
   await page.evaluate(() => {
     const boxes = new Set<Element>(document.querySelectorAll('[role="tooltip"], [id$="TipsBox"]'));
     for (const el of document.querySelectorAll("[data_tip_box], [data-tip-box]")) {
@@ -105,13 +118,17 @@ export async function hoverForInspection(
   // DOM.resolveNode；受控复现中，节点已可见仍会卡在这一步。
   // evaluateAll 在主上下文按当前定位器求值，不传回单个元素句柄。
   // 节点已消失时交给下面的原生 hover 正常定位，不能把滚动成功当作悬停成功。
+  signal?.throwIfAborted();
   await element.evaluateAll((elements) => {
     if (elements.length > 1) throw new Error("待悬停目标不唯一，已停止以免读取错误商品");
     elements[0]?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
   });
+  signal?.throwIfAborted();
   try {
     await element.hover({ timeout: 5000 });
+    signal?.throwIfAborted();
   } catch (error) {
+    signal?.throwIfAborted();
     if (!(error instanceof Error)) throw error;
     const pointerTimeout =
       error.name === "TimeoutError" &&
@@ -165,9 +182,12 @@ export async function hoverForInspection(
         );
       const before = await point(true);
       await new Promise((resolve) => setTimeout(resolve, 100));
+      signal?.throwIfAborted();
       const after = await point(false);
+      signal?.throwIfAborted();
       if (!before || !after || JSON.stringify(before) !== JSON.stringify(after)) throw error;
       await page.mouse.move(after.x, after.y);
+      signal?.throwIfAborted();
       if (
         !(await element.evaluateAll(
           (elements, { x, y, token }) =>
@@ -197,12 +217,15 @@ export async function hoverForInspection(
       const width = await page.evaluate(() =>
         Math.min(4096, Math.max(1440, document.documentElement.scrollWidth)),
       );
+      signal?.throwIfAborted();
       await page.setViewportSize({ width, height: 1080 });
     }
+    signal?.throwIfAborted();
     await element.evaluateAll((elements) => {
       if (elements.length > 1) throw new Error("待悬停目标不唯一，已停止以免读取错误商品");
       elements[0]?.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
     });
+    signal?.throwIfAborted();
     await element.hover({ timeout: 5000 });
   }
 }

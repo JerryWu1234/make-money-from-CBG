@@ -8,6 +8,7 @@ import { CrawlStore } from "./store";
 import {
   DEFAULT_CRAWL_CONCURRENCY,
   crawlAccessFailure,
+  type CrawlAccessError,
   type CrawlStatus,
   type SavedRoleRecord,
 } from "./types";
@@ -17,6 +18,8 @@ import { assertServiceOpen } from "../service-lifecycle";
 import { showBrowserWorkPages } from "../config";
 import { BrowserConnectionError, browserConnectionFailure } from "../browser-connection";
 import { headRefreshSettings } from "./head-refresh-settings";
+import { watchCrawlAccess } from "./access-guard";
+import { createCaptureFailureBudget, CrawlFailureLimitError } from "./failure-budget";
 
 type CrawlRuntime = {
   storage?: CrawlStore;
@@ -197,6 +200,41 @@ export async function startCrawl(
   }, 30000);
   const runningTask = (async () => {
     const detailPages: Page[] = [];
+    const guards: (() => Promise<void>)[] = [];
+    let closingAccessPages: Promise<unknown> | undefined;
+    const cancelAccessPages = () => {
+      if (
+        !crawlAccessFailure(control.signal.reason) &&
+        !(control.signal.reason instanceof CrawlFailureLimitError)
+      )
+        return;
+      // Only this project's collection pages are closed. This interrupts native browser
+      // waits too; no background list action can outlive the lock or affect a later run.
+      closingAccessPages = Promise.allSettled(
+        [page, ...detailPages].map((target) => target.close()),
+      );
+    };
+    control.signal.addEventListener("abort", cancelAccessPages, { once: true });
+    const stopForAccess = (error: CrawlAccessError) => {
+      if (control.signal.aborted) return;
+      cache.status = {
+        ...cache.status,
+        phase: "paused",
+        accessIssue: error.kind,
+        message: error.message,
+      };
+      // The source already closes every active detail page on this shared signal.
+      control.abort(error);
+      log("crawl.access_blocked", { accessIssue: error.kind, error });
+    };
+    const watchAccess = async (target: Page, kind: "list" | "detail") => {
+      const stop = (error: CrawlAccessError) => {
+        log("crawl.access_detected", { kind, accessIssue: error.kind, error });
+        stopForAccess(error);
+      };
+      guards.push(await watchCrawlAccess(target, control.signal, stop));
+      control.signal.throwIfAborted();
+    };
     const createDetailPage = async () => {
       control.signal.throwIfAborted();
       let browser: Browser | undefined;
@@ -217,10 +255,13 @@ export async function startCrawl(
       watchWorkPage(detailPage, "detail");
       log("page.ready", { kind: "detail" });
       detailPage.setDefaultTimeout(15000);
+      await watchAccess(detailPage, "detail");
       return detailPage;
     };
     try {
+      await watchAccess(page, "list");
       const detailPage = await createDetailPage();
+      const failureBudget = createCaptureFailureBudget();
       await crawl(
         createCrawlSource({
           listPage: page,
@@ -236,12 +277,18 @@ export async function startCrawl(
             cache.status = { ...cache.status, detailProgress: message };
           },
           log,
+          onAccessFailure: stopForAccess,
         }),
         db,
         control.signal,
         (update) => {
           const captured = (update.saved || 0) > cache.status.saved;
           cache.status = { ...cache.status, ...update };
+          const limit = failureBudget(update);
+          if (limit && !control.signal.aborted) {
+            cache.status = { ...cache.status, phase: "paused", message: limit.message };
+            control.abort(limit);
+          }
           if (captured) {
             void import("../analysis/controller")
               .then((analysis) => analysis.appendCapturedAnalysis())
@@ -253,13 +300,20 @@ export async function startCrawl(
         { ...options, watch: options.watch ?? !options.backfillOnly },
       );
     } finally {
-      if (!showBrowserWorkPages())
+      control.signal.removeEventListener("abort", cancelAccessPages);
+      await closingAccessPages;
+      await Promise.allSettled(guards.map((dispose) => dispose()));
+      if (
+        !showBrowserWorkPages() ||
+        crawlAccessFailure(control.signal.reason) ||
+        control.signal.reason instanceof CrawlFailureLimitError
+      )
         await Promise.allSettled(detailPages.map((page) => page.close()));
     }
   })()
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      const access = crawlAccessFailure(error);
+      const access = crawlAccessFailure(control.signal.reason) || crawlAccessFailure(error);
       const connection = browserConnectionFailure(error);
       const paused = control.signal.aborted || !!access || !!connection;
       log(paused ? "crawl.paused" : "crawl.error", {
@@ -274,9 +328,13 @@ export async function startCrawl(
         ...cache.status,
         running: false,
         phase: paused ? "paused" : "error",
-        message: control.signal.aborted
-          ? "采集已暂停，断点已保留。"
-          : connection?.message || access?.message || message,
+        message:
+          access?.message ||
+          (control.signal.reason instanceof CrawlFailureLimitError
+            ? control.signal.reason.message
+            : control.signal.aborted
+              ? "采集已暂停，断点已保留。"
+              : connection?.message || message),
         error: paused ? undefined : message,
         accessIssue: access?.kind,
         browserIssue: connection?.kind,

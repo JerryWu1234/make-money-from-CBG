@@ -3,7 +3,12 @@ import { beforeEach, expect, it, vi } from "vite-plus/test";
 import { collectRole, createCrawlSource } from "./source";
 import { collectDetail, isOnShelf } from "./detail";
 import { saveCaptureFailure } from "./capture-failure";
-import { SellingOrderUnavailableError, type Listing, type RoleDetail } from "./types";
+import {
+  CrawlAccessError,
+  SellingOrderUnavailableError,
+  type Listing,
+  type RoleDetail,
+} from "./types";
 import { captureBrowserStep } from "../browser-evidence";
 import { prepareList, gotoPage, hoverListing, refreshList } from "./page";
 import { CAPTURE_VERSION } from "./compact";
@@ -36,6 +41,18 @@ const options = () => ({
   signal: new AbortController().signal,
   log: vi.fn(),
   onDetailProgress: vi.fn(),
+});
+
+it("详情发现访问限制立即报告统一取消，不先截图或重开页面", async () => {
+  const control = new AbortController();
+  const reason = new CrawlAccessError("verification");
+  vi.mocked(collectDetail).mockRejectedValueOnce(reason);
+  const onAccessFailure = vi.fn((error) => control.abort(error));
+  await expect(
+    collectRole(page, item, { ...options(), signal: control.signal, onAccessFailure }),
+  ).rejects.toBe(reason);
+  expect(onAccessFailure).toHaveBeenCalledExactlyOnceWith(reason);
+  expect(collectDetail).toHaveBeenCalledOnce();
 });
 
 it("整件采集总预算到期会关闭独占详情页并保留部分资料，不在后台继续重读", async () => {
