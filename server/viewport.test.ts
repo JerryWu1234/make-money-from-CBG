@@ -2,6 +2,15 @@ import { expect, it, vi } from "vite-plus/test";
 import type { Locator, Page } from "playwright-core";
 import { clickForInspection, hoverForInspection } from "./viewport";
 
+vi.mock("./inspection-input", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./inspection-input")>()),
+  observeInspectionInput: vi.fn(async () => ({
+    read: async () => ({ events: ["mousedown", "mouseup", "click"], clicked: true }),
+    recover: vi.fn(),
+    dispose: async () => {},
+  })),
+}));
+
 function deferred() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => {
