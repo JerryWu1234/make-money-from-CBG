@@ -22,6 +22,7 @@ import { valuationRecord } from "../fixtures/analysis";
 // Use actual SQLite stores, profile persistence and runner; only site data/AI/network are fixtures.
 // Save failures to cover: blank condition blocked with visible ID; closing loses drafts;
 // concurrent edits silently overwrite; reloading discards input; reopen reads stale in-memory data.
+// A delayed recovery response must not leave inputs editable and overwrite new typing.
 test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", async ({ page }, testInfo) => {
   const crawl = new CrawlStore(testInfo.outputPath("conditions.sqlite"));
   const record = valuationRecord();
@@ -43,6 +44,8 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
   const promptFile = testInfo.outputPath("valuation.md");
   await writeFile(promptFile, template);
   let profile = createProfile(template, DEFAULT_SETTINGS);
+  let recoveryGate: Promise<void> | undefined;
+  let releaseRecovery: (() => void) | undefined;
   let calls = 0;
   const requests: unknown[] = [];
   const runner = new AnalysisRunner(store, async () => ({
@@ -139,6 +142,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
           };
           break;
         case "/api/analysis/settings":
+          if (recoveryGate) await recoveryGate;
           profile = loadProfile(crawl.db, promptFile);
           body = { profile, promptFile, servers: [] };
           break;
@@ -207,8 +211,27 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await settings.getByRole("button", { name: "关闭分析设置", exact: true }).click();
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
+    recoveryGate = new Promise<void>((resolve) => {
+      releaseRecovery = resolve;
+    });
     await settings.getByRole("button", { name: "重新读取并保留输入", exact: true }).click();
+    await expect(settings.getByLabel("C1条件", { exact: true })).toBeDisabled();
+    await expect(settings.getByLabel("估值 Prompt 全文", { exact: true })).toBeDisabled();
+    for (const control of await settings.locator("input, select, textarea, button").all())
+      await expect(control).toBeDisabled();
+    await page.screenshot({ path: testInfo.outputPath("M3-recovery-loading.png"), fullPage: true });
+    releaseRecovery!();
+    recoveryGate = undefined;
     await expect(settings.getByRole("alert")).toHaveCount(0);
+    await expect(settings.getByLabel("C1条件", { exact: true })).toBeEnabled();
+    await expect(settings.getByLabel("估值 Prompt 全文", { exact: true })).toBeEnabled();
+    await settings.getByLabel("C1条件", { exact: true }).fill("速度大于800，使用已采集资料");
+    await settings.getByRole("button", { name: "关闭分析设置", exact: true }).click();
+    await page.getByRole("button", { name: "分析设置", exact: true }).click();
+    await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue(
+      "速度大于800，使用已采集资料",
+    );
+    await settings.getByLabel("C1条件", { exact: true }).fill("速度大于800");
     await expect(settings.getByLabel("C3条件", { exact: true })).toHaveValue("烹饪技巧至少120级");
     await settings.getByRole("button", { name: "保存设置", exact: true }).scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("M2-restored-draft.png"), fullPage: true });
@@ -265,6 +288,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
       contentType: "application/json",
     });
   } finally {
+    releaseRecovery?.();
     await runner.pause();
     crawl.close();
   }

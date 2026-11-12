@@ -297,7 +297,7 @@ export function AnalysisSettings({
       )}
       {!source && !error && <p role="status">正在读取设置…</p>}
       {source && settings && (
-        <>
+        <fieldset disabled={busy} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
           <h3>计价方式</h3>
           <p className="analysis-pending-note">
             装备总开关：{settings.analyzeEquipment ? "已开启" : "已关闭，仅分析裸号"}。
@@ -562,7 +562,7 @@ export function AnalysisSettings({
               关闭
             </button>
           </div>
-        </>
+        </fieldset>
       )}
     </dialog>,
     document.body,
