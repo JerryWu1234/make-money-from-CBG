@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
 import type { Page } from "playwright-core";
+import {
+  createMarketDetailReader,
+  refreshMarketCandidates,
+  readMarketCandidatesOnPage,
+} from "./market-detail";
 import { createHiddenPage, getBrowser } from "../session";
 import { captureBrowserStep } from "../browser-evidence";
 import { assertAvailable, pace } from "../crawler/page";
@@ -1502,7 +1507,6 @@ const publicSearchError = (error: unknown) =>
 /** Separate work pages share the existing login; they never navigate the role list. */
 export function equipmentSourceFromPages(
   searchPage: Page,
-  detailPage: Page,
   signal: AbortSignal,
   serverId: string,
   onProgress?: (progress: PricingSearchProgress) => void,
@@ -1515,6 +1519,7 @@ export function equipmentSourceFromPages(
   ): ReturnType<typeof readEquipmentSearchForm>;
 } {
   assertMarketServerId(serverId);
+  const detailPages = createMarketDetailReader(searchPage, signal);
   const scopedUrl = (value: string) => {
     const safe = safeEquipmentUrl(value);
     if (!equipmentIdentity(safe).startsWith(serverId + ":"))
@@ -1555,7 +1560,7 @@ export function equipmentSourceFromPages(
     if (!closing) {
       signal.removeEventListener("abort", abort);
       marketScope?.close();
-      closing = Promise.allSettled([searchPage.close(), detailPage.close()]).then(() => {});
+      closing = Promise.allSettled([searchPage.close(), detailPages.close()]).then(() => {});
     }
     return closing;
   };
@@ -1573,35 +1578,24 @@ export function equipmentSourceFromPages(
       report({ retryCount: attempt });
       try {
         await pace(requestSignal, 600, 400);
-        const response = await navigate(
-          detailPage,
-          safe,
-          {
-            waitUntil: "domcontentloaded",
-            timeout: 15000,
-          },
-          "equipment.detail.opened",
-          requestSignal,
-          equipmentIdentity(safe),
-        );
-        requestSignal.throwIfAborted();
-        if ([401, 403, 429].includes(response?.status() || 0))
-          throw new Error(
-            "装备详情访问被拒绝（HTTP " + response!.status() + "），请核对登录或访问权限后继续",
+        return await detailPages.read(safe, requestSignal, async (detailPage) => {
+          await captureBrowserStep(
+            detailPage,
+            { flow: "analysis", stage: "equipment.detail.opened", key: equipmentIdentity(safe) },
+            requestSignal,
           );
-        if (equipmentIdentity(detailPage.url()) !== equipmentIdentity(safe))
-          throw new Error("装备详情跳转到另一商品，报价未采用");
-        const value = await equipmentPageSource(detailPage, requestSignal);
-        await captureBrowserStep(
-          detailPage,
-          { flow: "analysis", stage: "equipment.detail.read", key: equipmentIdentity(safe) },
-          requestSignal,
-        );
-        cache.set(safe, value.html);
-        return value.html;
+          const value = await equipmentPageSource(detailPage, requestSignal);
+          await captureBrowserStep(
+            detailPage,
+            { flow: "analysis", stage: "equipment.detail.read", key: equipmentIdentity(safe) },
+            requestSignal,
+          );
+          cache.set(safe, value.html);
+          return value.html;
+        });
       } catch (error) {
         await captureBrowserStep(
-          detailPage,
+          searchPage,
           {
             flow: "analysis",
             stage: "equipment.detail.failed",
@@ -2092,7 +2086,6 @@ export function equipmentSourceFromPages(
           }> = [];
           const seen = new Set(next.seen);
           const failed = new Map(next.failed.map((value) => [value.url, value.modeIndex]));
-          const attemptedDetails = new Set<string>();
           // Preserve official result order; each independently verified listing counts once.
           const closestSimilar = () => similar.slice(0, EQUIPMENT_QUOTE_LIMIT);
           const enoughSamples = () =>
@@ -2206,7 +2199,6 @@ export function equipmentSourceFromPages(
             };
           });
           const readCandidate = async (url: string, modeIndex: number) => {
-            attemptedDetails.add(url);
             details++;
             let candidate: EquipmentCandidate = {
               url,
@@ -2273,51 +2265,24 @@ export function equipmentSourceFromPages(
               return true;
             }
           };
-          // Re-read saved quotations once so verification after this call uses the same page cache.
-          stage = "saved_quotes";
-          if (savedCandidates.length) {
-            const query = "继续核验已保存的本服报价 / " + item.name;
-            queries.push(query);
-            itemQueries.push(query);
-            const broadMode = queryModes.findIndex(({ mode }) => mode === "similar");
-            let refreshed = 0;
-            for (const candidate of savedCandidates) {
-              if (details >= MAX_DETAILS || Date.now() >= deadline) break;
-              await readCandidate(safeEquipmentUrl(candidate.url), broadMode < 0 ? 0 : broadMode);
-              refreshed++;
-            }
-            if (refreshed < savedCandidates.length) {
-              records.push({
-                key: item.key,
-                reason: "candidate_refresh_budget",
-                details,
-                refreshed,
-                detailFailures,
-              });
-              results.push({
-                key: item.key,
-                ...(resolvedTargetKind ? { kindId: resolvedTargetKind } : {}),
-                ...(resolvedKindName ? { kindName: resolvedKindName } : {}),
-                candidates: savedCandidates,
-                searchState: "pending",
-                ...(item.searchCursor ? { searchCursor: item.searchCursor } : {}),
-                skipped: true,
-                note: "保存报价尚未全部重新核验，已保留上轮候选和查询位置，继续时重新核验",
-              });
-              continue equipmentItems;
-            }
+          const refresh = new Map(failed);
+          for (const candidate of savedCandidates) {
+            const url = safeEquipmentUrl(candidate.url);
+            const identity = equipmentIdentity(url);
+            const mode = queryModes.findIndex((_, index) => seen.has(index + "|" + identity));
+            refresh.set(
+              url,
+              mode >= 0
+                ? mode
+                : candidate.matchType === "similar"
+                  ? Math.max(
+                      0,
+                      queryModes.findIndex((step) => step.mode === "similar"),
+                    )
+                  : 0,
+            );
           }
-          // Failed detail URLs are retried once in this round; successful/ruled-out rows stay read.
-          if (failed.size) {
-            const retryQuery = "按已保存的本服筛选条件重试装备详情 / " + item.name;
-            queries.push(retryQuery);
-            itemQueries.push(retryQuery);
-            for (const [url, modeIndex] of failed) {
-              if (attemptedDetails.has(url)) continue;
-              if (details >= MAX_DETAILS || Date.now() >= deadline) break;
-              await readCandidate(safeEquipmentUrl(url), modeIndex);
-            }
-          }
+          for (const [url, mode] of refresh) failed.set(url, mode);
           let orderChanged = false;
           let historyValidated = !savedCursor?.pageHistory?.length;
           queryStages: for (let modeIndex = 0; modeIndex < queryModes.length; modeIndex++) {
@@ -2325,7 +2290,6 @@ export function equipmentSourceFromPages(
             const sampleLimit = EQUIPMENT_QUOTE_LIMIT;
             let inspected = [...seen].filter((key) => key.startsWith(modeIndex + "|")).length;
             let samplingComplete = false;
-            if (failed.size) break;
             if (
               count >= MAX_ROWS ||
               details >= MAX_DETAILS ||
@@ -2694,6 +2658,13 @@ export function equipmentSourceFromPages(
               roundPages++;
               uiPage = pageNumber;
               cachedListing = listing;
+              await readMarketCandidatesOnPage(
+                refresh,
+                modeIndex,
+                listing.rows,
+                (url) => readCandidate(url, modeIndex),
+                () => details < MAX_DETAILS && Date.now() < deadline,
+              );
               return listing;
             };
             // Validate every saved page, including exhausted earlier stages, before continuing.
@@ -2739,6 +2710,15 @@ export function equipmentSourceFromPages(
               break queryStages;
             }
             if ((next.historyIndex || 0) >= history.length) historyValidated = true;
+            await refreshMarketCandidates(
+              refresh,
+              modeIndex,
+              (number) => loadPage(number, !uiPage, true),
+              (url) => readCandidate(url, modeIndex),
+              () => roundPages < MAX_PAGES && details < MAX_DETAILS && Date.now() < deadline,
+              () => details < MAX_DETAILS && Date.now() < deadline,
+            );
+            if (refresh.size && [...refresh.values()].includes(modeIndex)) break queryStages;
             if (modeIndex < next.modeIndex) continue;
             if (enoughSamples()) break;
             if (roundPages >= MAX_PAGES) break;
@@ -2920,7 +2900,11 @@ export function equipmentSourceFromPages(
               samplingBasis: "first-candidates",
               detailFailures: detailFailures.filter((failure) => failure.modeIndex === modeIndex),
             });
-            if (next.modeIndex >= queryModes.length || next.modeIndex === modeIndex) break;
+            if (
+              !refresh.size &&
+              (next.modeIndex >= queryModes.length || next.modeIndex === modeIndex)
+            )
+              break;
           }
           const query = itemQueries.join("\n");
           item.query = query;
@@ -3045,13 +3029,11 @@ export async function createEquipmentSource(
 ) {
   assertMarketServerId(serverId);
   signal.throwIfAborted();
-  let searchPage: Page | undefined, detailPage: Page | undefined;
+  let searchPage: Page | undefined;
   try {
     const browser = await getBrowser(true);
     signal.throwIfAborted();
     searchPage = await createHiddenPage(browser);
-    signal.throwIfAborted();
-    detailPage = await createHiddenPage(browser);
     signal.throwIfAborted();
     const evidence = productKey
       ? (await import("./equipment-search-evidence")).equipmentSearchEvidence(
@@ -3060,7 +3042,7 @@ export async function createEquipmentSource(
           signal,
         )
       : undefined;
-    return equipmentSourceFromPages(searchPage, detailPage, signal, serverId, onProgress, evidence);
+    return equipmentSourceFromPages(searchPage, signal, serverId, onProgress, evidence);
   } catch (error) {
     if (searchPage)
       await captureBrowserStep(
@@ -3068,7 +3050,7 @@ export async function createEquipmentSource(
         { flow: "analysis", stage: "equipment.source.failed", key: productKey, error },
         signal,
       );
-    await Promise.allSettled([searchPage?.close(), detailPage?.close()]);
+    await searchPage?.close().catch(() => {});
     throw error;
   }
 }
