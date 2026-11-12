@@ -682,6 +682,8 @@ export class AnalysisStore {
         const sameBodyReview =
           !!profile &&
           !!savedProfile &&
+          !profile.settings.conditions &&
+          !savedProfile.settings.conditions &&
           !profile.equipmentSearch &&
           !profile.petSearch &&
           !savedProfile.equipmentSearch &&

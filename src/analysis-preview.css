@@ -1762,3 +1762,34 @@ body:has(.analysis-page) #root {
     border-top: 1px solid var(--card-border);
   }
 }
+
+.analysis-condition-group {
+  margin: 12px 0;
+  padding: 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+}
+.analysis-condition-row {
+  margin: 10px 0;
+  padding-left: 12px;
+  border-left: 3px solid #cbd5e1;
+}
+.analysis-condition-row textarea {
+  display: block;
+  width: 100%;
+  min-height: 65px;
+  box-sizing: border-box;
+}
+.analysis-condition-group button {
+  margin: 6px;
+}
+
+.analysis-condition-group select,
+.analysis-condition-row textarea {
+  font: inherit;
+  color: inherit;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: white;
+}

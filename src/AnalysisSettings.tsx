@@ -1,3 +1,4 @@
+import { AnalysisConditions } from "./AnalysisConditions";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { AnalysisProfile, ValuationSettings } from "../server/analysis/valuation-types";
@@ -439,6 +440,10 @@ export function AnalysisSettings({
             })}
             {!serverRows.length && <p>采集商品后会显示对应服务器。</p>}
           </details>
+          <AnalysisConditions
+            value={settings.conditions}
+            onChange={(value) => set("conditions", value)}
+          />
           <details className="analysis-settings-section">
             <summary>编辑完整 Prompt</summary>
             <p>

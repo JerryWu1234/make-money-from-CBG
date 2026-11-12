@@ -1,3 +1,4 @@
+import { ConditionReviewView } from "./AnalysisConditions";
 import type { Decision, ValuationResult } from "../server/analysis/valuation-types";
 import { EquipmentPricingView } from "./EquipmentPricingView";
 import type { CapturedAssetCounts } from "../server/analysis/types";
@@ -322,6 +323,7 @@ export function ValuationResultView({
           。市场售价未知。
         </p>
       )}
+      <ConditionReviewView review={result.condition_review} />
       <details className="analysis-valuation-details" open={expanded || !comparison}>
         <summary>查看估值依据与查价记录</summary>
         {comparison && <p>{result.reason}</p>}
