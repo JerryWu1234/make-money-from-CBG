@@ -126,6 +126,12 @@ const { equipmentSourceFromPages, equipmentPageSource } = await import(
     "./market-scope": await moduleUrl("server/analysis/market-scope.ts"),
     "./jade-query": jade,
     "./equipment-pricing": pricing,
+    "./market-detail": await moduleUrl("server/analysis/market-detail.ts", {
+      "../crawler/page": pacedPage,
+      "../viewport": viewport,
+      "../browser-evidence": browserEvidenceUrl,
+      "./equipment-pricing": pricing,
+    }),
   })
 );
 const { createHiddenPage } = await import(session);
@@ -256,12 +262,7 @@ try {
     const searchPage = await createHiddenPage(browser),
       detailPage = await createHiddenPage(browser);
     const control = new AbortController();
-    const source = equipmentSourceFromPages(
-      bounded(searchPage),
-      bounded(detailPage),
-      control.signal,
-      "1",
-    );
+    const source = equipmentSourceFromPages(bounded(searchPage), control.signal, "1");
     return { source, searchPage, detailPage, control };
   };
   const withSource = async (search, detail, run) => {
@@ -270,6 +271,7 @@ try {
       await run(current);
     } finally {
       await current.source.close();
+      await current.detailPage.close();
     }
   };
 

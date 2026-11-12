@@ -27,6 +27,11 @@ vi.mock("../crawler/page", () => ({
   pace: async (signal: AbortSignal) => signal.throwIfAborted(),
 }));
 
+vi.mock("./market-detail", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./market-detail")>()),
+  createMarketDetailReader: () => ({ close: async () => {} }),
+}));
+
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.getBrowser.mockResolvedValue({});

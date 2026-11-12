@@ -18,6 +18,7 @@ import { CrawlStore } from "../crawler/store";
 import { itemFromAttributes } from "../crawler/compact";
 
 const runtime = vi.hoisted(() => ({
+  popupPages: new WeakMap<object, Page>(),
   createHiddenPage: vi.fn(),
   getBrowser: vi.fn(),
   crawlDatabase: vi.fn(),
@@ -33,6 +34,32 @@ vi.mock("../crawler/page", () => ({
   assertAvailable: vi.fn(),
   pace: async (signal: AbortSignal) => signal.throwIfAborted(),
 }));
+
+// Source tests isolate parsing/query state. Real click/popup behavior is covered by market-detail E2E.
+vi.mock("./market-detail", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./market-detail")>();
+  return {
+    ...original,
+    createMarketDetailReader: (search: Page, signal: AbortSignal) => ({
+      close: async () => {},
+      read: async (
+        url: string,
+        requestSignal: AbortSignal,
+        read: (page: Page) => Promise<unknown>,
+      ) => {
+        AbortSignal.any([signal, requestSignal]).throwIfAborted();
+        const detail = runtime.popupPages.get(search);
+        if (!detail) throw new Error("测试未提供点击后新页");
+        await detail.goto(url);
+        return read(detail);
+      },
+    }),
+  };
+});
+function mockDetail(search: object, detail: object): Page {
+  runtime.popupPages.set(search, detail as Page);
+  return search as Page;
+}
 
 const config: EquipmentSearchConfig = {
   kinds: [
@@ -835,121 +862,6 @@ describe("官网列表前置排除", () => {
   });
 });
 
-describe("装备查价拥有页面的生命周期", () => {
-  const pages = () => {
-    const search = { close: vi.fn(async () => {}) };
-    const detail = { close: vi.fn(async () => {}), goto: vi.fn() };
-    const control = new AbortController();
-    const source = equipmentSourceFromPages(
-      search as unknown as Page,
-      detail as unknown as Page,
-      control.signal,
-      "1",
-    );
-    return { search, detail, control, source };
-  };
-
-  it("关闭只作用于交给查价的两页，重复关闭或之后取消不重复处理", async () => {
-    const { source, search, detail, control } = pages();
-    await source.close();
-    await source.close();
-    control.abort();
-    expect(search.close).toHaveBeenCalledOnce();
-    expect(detail.close).toHaveBeenCalledOnce();
-  });
-
-  it.each([401, 403, 429])("详情HTTP %i作为访问门禁上抛，不进入普通详情重试", async (status) => {
-    const { source, detail, control } = pages();
-    detail.goto.mockResolvedValueOnce({ status: () => status } as never);
-    try {
-      await expect(
-        source.readSource("https://xyq.cbg.163.com/equip?s=1&eid=blocked", control.signal),
-      ).rejects.toThrow("HTTP " + status);
-      expect(detail.goto).toHaveBeenCalledOnce();
-    } finally {
-      await source.close();
-    }
-  });
-  it("当前及保存候选的服务器不符时不导航，不回退其他服", async () => {
-    const { source, detail, control } = pages();
-    try {
-      await expect(
-        source.readSource("https://xyq.cbg.163.com/equip?s=2&eid=other", control.signal),
-      ).rejects.toThrow("目标服务器");
-      await expect(
-        source.readSource("https://xyq.cbg.163.com/equip/2/other", control.signal),
-      ).rejects.toThrow("目标服务器");
-      expect(detail.goto).not.toHaveBeenCalled();
-    } finally {
-      await source.close();
-    }
-  });
-  it("用户取消关闭两页，随后操作报告取消，不返回无匹配", async () => {
-    const { source, search, detail, control } = pages();
-    const reason = new Error("用户已暂停分析");
-    control.abort(reason);
-    await expect(source.findCandidates([item()], control.signal)).rejects.toBe(reason);
-    await expect(
-      source.readSource("https://xyq.cbg.163.com/equip?s=1&eid=test", control.signal),
-    ).rejects.toBe(reason);
-    expect(search.close).toHaveBeenCalledOnce();
-    expect(detail.close).toHaveBeenCalledOnce();
-    expect(detail.goto).not.toHaveBeenCalled();
-  });
-
-  it("一个页面关闭失败也尝试关闭另一页", async () => {
-    const { source, search, detail } = pages();
-    search.close.mockRejectedValueOnce(new Error("页面已经断开"));
-    await source.close();
-    expect(detail.close).toHaveBeenCalledOnce();
-  });
-
-  it("取消后再次关闭仍等待两页真正结束，不能提前报告清理完成", async () => {
-    const { source, search, detail, control } = pages();
-    let finishSearch!: () => void;
-    let finishDetail!: () => void;
-    search.close.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          finishSearch = resolve;
-        }),
-    );
-    detail.close.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          finishDetail = resolve;
-        }),
-    );
-    control.abort(new Error("用户暂停"));
-    let completed = false;
-    const pending = source.close().then(() => {
-      completed = true;
-    });
-    try {
-      await Promise.resolve();
-      await Promise.resolve();
-      expect(completed).toBe(false);
-    } finally {
-      finishSearch();
-      finishDetail();
-      await pending;
-    }
-    expect(completed).toBe(true);
-  });
-
-  it("不打开不安全网址，不访问任意外部站点", async () => {
-    const { source, detail, control } = pages();
-    try {
-      await expect(
-        source.readSource("https://example.com/equip?s=1&eid=test", control.signal),
-      ).rejects.toThrow();
-      expect(detail.goto).not.toHaveBeenCalled();
-    } finally {
-      await source.close();
-    }
-  });
-});
-
 describe("装备查价使用独立后台页", () => {
   let crawl: CrawlStore;
   beforeEach(() => {
@@ -1030,10 +942,22 @@ describe("装备查价使用独立后台页", () => {
     await source.close();
     await source.close();
     expect(runtime.getBrowser).toHaveBeenCalledExactlyOnceWith(true);
-    expect(runtime.createHiddenPage).toHaveBeenCalledTimes(2);
+    expect(runtime.createHiddenPage).toHaveBeenCalledTimes(1);
     expect(search.close).toHaveBeenCalledOnce();
-    expect(detail.close).toHaveBeenCalledOnce();
+    expect(detail.close).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+  it("列表页创建后取消会关闭该页，不预建详情页", async () => {
+    const { search } = pages();
+    const control = new AbortController();
+    runtime.getBrowser.mockResolvedValue({});
+    runtime.createHiddenPage.mockImplementationOnce(async () => {
+      control.abort(new Error("创建时取消"));
+      return search;
+    });
+    await expect(createEquipmentSource(control.signal, "1")).rejects.toThrow("创建时取消");
+    expect(runtime.createHiddenPage).toHaveBeenCalledOnce();
+    expect(search.close).toHaveBeenCalledOnce();
   });
   it("预先取消时不连接或创建页面", async () => {
     const control = new AbortController();
@@ -1042,29 +966,7 @@ describe("装备查价使用独立后台页", () => {
     expect(runtime.getBrowser).not.toHaveBeenCalled();
     expect(runtime.createHiddenPage).not.toHaveBeenCalled();
   });
-  it("第二页创建失败时关闭已创建的第一页", async () => {
-    const { search } = pages();
-    runtime.createHiddenPage
-      .mockResolvedValueOnce(search)
-      .mockRejectedValueOnce(new Error("详情页创建失败"));
-    await expect(createEquipmentSource(new AbortController().signal, "1")).rejects.toThrow(
-      "详情页创建失败",
-    );
-    expect(search.close).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
-  });
-  it("创建途中取消时清理两页", async () => {
-    const { search, detail } = pages();
-    const control = new AbortController();
-    runtime.createHiddenPage.mockResolvedValueOnce(search).mockImplementationOnce(async () => {
-      control.abort(new Error("停止"));
-      return detail;
-    });
-    await expect(createEquipmentSource(control.signal, "1")).rejects.toThrow("停止");
-    expect(search.close).toHaveBeenCalledOnce();
-    expect(detail.close).toHaveBeenCalledOnce();
-  });
-  it("暂停自动关闭两页，禁止后续查询", async () => {
+  it("暂停自动关闭列表页，禁止后续查询", async () => {
     const { search, detail } = pages();
     runtime.createHiddenPage.mockResolvedValueOnce(search).mockResolvedValueOnce(detail);
     const control = new AbortController();
@@ -1079,7 +981,7 @@ describe("装备查价使用独立后台页", () => {
     ).rejects.toThrow("用户暂停");
     expect(detail.goto).not.toHaveBeenCalled();
     expect(search.close).toHaveBeenCalledOnce();
-    expect(detail.close).toHaveBeenCalledOnce();
+    expect(detail.close).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
   });
 });
@@ -1186,12 +1088,7 @@ it("前件用完时间预算时后件候选和游标原样返回且标记未处�
   const search = { close: vi.fn(async () => {}), goto: vi.fn() };
   const detail = { close: vi.fn(async () => {}), goto: vi.fn() };
   const control = new AbortController();
-  const source = equipmentSourceFromPages(
-    search as unknown as Page,
-    detail as unknown as Page,
-    control.signal,
-    "1",
-  );
+  const source = equipmentSourceFromPages(mockDetail(search, detail), control.signal, "1");
   const cursor = {
     version: 1 as const,
     planHash: "saved",
@@ -1383,12 +1280,7 @@ describe("装备最终市场请求范围审计", () => {
     };
     const detail = { close: vi.fn(async () => {}), goto: vi.fn() };
     const control = new AbortController();
-    const source = equipmentSourceFromPages(
-      search as unknown as Page,
-      detail as unknown as Page,
-      control.signal,
-      "1",
-    );
+    const source = equipmentSourceFromPages(mockDetail(search, detail), control.signal, "1");
     return { search, detail, source, control, listeners };
   };
   it("官网未明确类型时保留读取失败，不以缺少类型的宽搜价格计价", async () => {
@@ -1758,38 +1650,13 @@ it("装备开页完成与后续页面错误按顺序留图，保留原始错误"
   } as unknown as Page;
   const detail = { close: vi.fn() } as unknown as Page;
   const signal = new AbortController().signal;
-  const source = equipmentSourceFromPages(search, detail, signal, "1");
+  const source = equipmentSourceFromPages(mockDetail(search, detail), signal, "1");
   try {
     await expect(source.discover(item(), signal)).rejects.toBe(failure);
     expect(runtime.captureBrowserStep.mock.calls.map((call) => call[1])).toEqual([
       { flow: "analysis", stage: "equipment.search.opened", key: "道具/法宝:0" },
       { flow: "analysis", stage: "equipment.discover.failed", key: "道具/法宝:0", error: failure },
     ]);
-  } finally {
-    await source.close();
-  }
-});
-
-it("装备详情导航失败先留图再传播原错，不将截图当作报价凭证", async () => {
-  runtime.captureBrowserStep.mockClear();
-  const failure = new Error("HTTP 403 Forbidden");
-  const search = { close: vi.fn() } as unknown as Page;
-  const detail = { goto: vi.fn().mockRejectedValue(failure), close: vi.fn() } as unknown as Page;
-  const signal = new AbortController().signal;
-  const source = equipmentSourceFromPages(search, detail, signal, "1");
-  try {
-    await expect(
-      source.readSource("https://xyq.cbg.163.com/equip?s=1&eid=fixture", signal),
-    ).rejects.toBe(failure);
-    expect(runtime.captureBrowserStep).toHaveBeenCalledWith(
-      detail,
-      expect.objectContaining({
-        flow: "analysis",
-        stage: "equipment.detail.opened.failed",
-        error: failure,
-      }),
-      expect.any(AbortSignal),
-    );
   } finally {
     await source.close();
   }

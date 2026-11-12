@@ -19,6 +19,7 @@ import { CrawlStore } from "../crawler/store";
 import { pageText } from "./equipment-pricing";
 import { petBlessingState, similarPetSkills } from "./pet-match";
 const runtime = vi.hoisted(() => ({
+  popupPages: new WeakMap<object, Page>(),
   createHiddenPage: vi.fn(),
   getBrowser: vi.fn(),
   crawlDatabase: vi.fn(),
@@ -32,6 +33,32 @@ vi.mock("../crawler/page", () => ({
   assertAvailable: vi.fn(),
   pace: async (signal: AbortSignal) => signal.throwIfAborted(),
 }));
+// Source tests isolate parsing/query state. Real click/popup behavior is covered by market-detail E2E.
+vi.mock("./market-detail", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./market-detail")>();
+  return {
+    ...original,
+    createMarketDetailReader: (search: Page, signal: AbortSignal) => ({
+      close: async () => {},
+      read: async (
+        url: string,
+        requestSignal: AbortSignal,
+        read: (page: Page) => Promise<unknown>,
+      ) => {
+        AbortSignal.any([signal, requestSignal]).throwIfAborted();
+        const detail = runtime.popupPages.get(search);
+        if (!detail) throw new Error("测试未提供点击后新页");
+        await detail.goto(url);
+        return read(detail);
+      },
+    }),
+  };
+});
+function mockDetail(search: object, detail: object): Page {
+  runtime.popupPages.set(search, detail as Page);
+  return search as Page;
+}
+
 const config: PetSearchConfig = {
   names: { 2001: "画魂", 2002: "画魂", 3001: "幽灵" },
   skills: [
@@ -1162,12 +1189,7 @@ describe("宝宝查询使用独立后台页", () => {
       calls,
       search,
       detail,
-      source: petSourceFromPages(
-        search as unknown as Page,
-        detail as unknown as Page,
-        control.signal,
-        "1",
-      ),
+      source: petSourceFromPages(mockDetail(search, detail), control.signal, "1"),
     };
   };
   it("严格查询空结果才顺序发起相似窗口，读取独立详情并保留真实查询级别", async () => {
@@ -1852,13 +1874,12 @@ describe("宝宝查询使用独立后台页", () => {
       expect(result.searchComplete).toBe(true);
       expect(result.searchAttempts!.at(-1)!.queries).toEqual(
         expect.arrayContaining([
-          expect.stringMatching(/仅重读.*独立宝宝详情/),
+          expect.stringMatching(/目标单服.*exact/),
           expect.stringMatching(/目标单服.*similar/),
         ]),
       );
       expect(result.searchAttempts!.at(-1)!.searchItems).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ kind: "saved_detail_refresh" }),
           expect.objectContaining({ matchType: "similar", exhausted: true }),
         ]),
       );
@@ -1958,10 +1979,22 @@ describe("宝宝查询使用独立后台页", () => {
     await source.close();
     await source.close();
     expect(runtime.getBrowser).toHaveBeenCalledExactlyOnceWith(true);
-    expect(runtime.createHiddenPage).toHaveBeenCalledTimes(2);
+    expect(runtime.createHiddenPage).toHaveBeenCalledTimes(1);
     expect(search.close).toHaveBeenCalledOnce();
-    expect(detail.close).toHaveBeenCalledOnce();
+    expect(detail.close).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+  it("列表页创建后取消会关闭该页，不预建详情页", async () => {
+    const { search } = pages();
+    const control = new AbortController();
+    runtime.getBrowser.mockResolvedValue({});
+    runtime.createHiddenPage.mockImplementationOnce(async () => {
+      control.abort(new Error("创建时取消"));
+      return search;
+    });
+    await expect(createPetSource(control.signal, "1")).rejects.toThrow("创建时取消");
+    expect(runtime.createHiddenPage).toHaveBeenCalledOnce();
+    expect(search.close).toHaveBeenCalledOnce();
   });
   it("预先取消时不连接或创建页面", async () => {
     const control = new AbortController();
@@ -1970,74 +2003,21 @@ describe("宝宝查询使用独立后台页", () => {
     expect(runtime.getBrowser).not.toHaveBeenCalled();
     expect(runtime.createHiddenPage).not.toHaveBeenCalled();
   });
-  it("第二页创建失败时关闭已创建的第一页", async () => {
-    const { search } = pages();
-    runtime.getBrowser.mockResolvedValue({});
-    runtime.createHiddenPage
-      .mockResolvedValueOnce(search)
-      .mockRejectedValueOnce(new Error("详情页失败"));
-    await expect(createPetSource(new AbortController().signal, "1")).rejects.toThrow("详情页失败");
-    expect(search.close).toHaveBeenCalledOnce();
-    expect(vi.getTimerCount()).toBe(0);
-  });
-  it("创建途中取消时清理两页", async () => {
-    const { search, detail } = pages();
-    const control = new AbortController();
-    runtime.getBrowser.mockResolvedValue({});
-    runtime.createHiddenPage.mockResolvedValueOnce(search).mockImplementationOnce(async () => {
-      control.abort(new Error("停止"));
-      return detail;
-    });
-    await expect(createPetSource(control.signal, "1")).rejects.toThrow("停止");
-    expect(search.close).toHaveBeenCalledOnce();
-    expect(detail.close).toHaveBeenCalledOnce();
-  });
-  it("取消自动清理两页，finally close幂等且禁止后续读取", async () => {
+  it("取消自动清理列表页，finally close幂等且禁止后续读取", async () => {
     const { source, control, search, detail } = await open();
     control.abort(new Error("暂停"));
     await source.close();
     await source.close();
     expect(search.close).toHaveBeenCalledOnce();
-    expect(detail.close).toHaveBeenCalledOnce();
+    expect(detail.close).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
     await expect(source.readSource(url, new AbortController().signal)).rejects.toThrow("暂停");
-  });
-  it("关闭等待两页实际结束，一个close失败仍关闭另一页", async () => {
-    const { search, detail } = pages(),
-      control = new AbortController();
-    let finish!: () => void;
-    search.close.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          finish = resolve;
-        }),
-    );
-    detail.close.mockRejectedValueOnce(new Error("断开"));
-    const source = petSourceFromPages(
-      search as unknown as Page,
-      detail as unknown as Page,
-      control.signal,
-      "1",
-    );
-    control.abort();
-    let done = false;
-    const cleanup = source.close().then(() => {
-      done = true;
-    });
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(done).toBe(false);
-    expect(detail.close).toHaveBeenCalledOnce();
-    finish();
-    await cleanup;
-    expect(done).toBe(true);
   });
   it("不读取任意外站，也不跟随另一商品重定向", async () => {
     const { search, detail } = pages();
     const target = { ...detail, url: () => "https://xyq.cbg.163.com/equip?s=1&eid=other" };
     const source = petSourceFromPages(
-      search as unknown as Page,
-      target as unknown as Page,
+      mockDetail(search, target),
       new AbortController().signal,
       "1",
     );

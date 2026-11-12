@@ -1,4 +1,5 @@
 import type { Page } from "playwright-core";
+import { createMarketDetailReader, refreshMarketCandidates } from "./market-detail";
 import { createHiddenPage, getBrowser } from "../session";
 import { captureBrowserStep } from "../browser-evidence";
 import { pace } from "../crawler/page";
@@ -323,14 +324,15 @@ async function readPetGearRows(page: Page, pageNumber: number) {
   });
 }
 
-export async function createPetGearSource(
+export async function petGearSourceFromPage(
+  page: Page,
   signal: AbortSignal,
   serverId: string,
   budgets: { maxPages?: number; maxDetails?: number } = {},
 ) {
   assertMarketServerId(serverId);
   signal.throwIfAborted();
-  let page: Page | undefined, detailPage: Page | undefined;
+  let detailPages: ReturnType<typeof createMarketDetailReader> | undefined;
   let scopeAudit: ReturnType<typeof createMarketScopeAudit> | undefined;
   const navigate = async (
     target: Page,
@@ -360,16 +362,14 @@ export async function createPetGearSource(
     scopeAudit?.close();
     await Promise.allSettled([
       page && !page.isClosed() ? page.close() : undefined,
-      detailPage && !detailPage.isClosed() ? detailPage.close() : undefined,
+      detailPages?.close(),
     ]);
   };
   const onAbort = () => {
     void close();
   };
   try {
-    const browser = await getBrowser(true);
-    signal.throwIfAborted();
-    page = await createHiddenPage(browser);
+    detailPages = createMarketDetailReader(page, signal);
     signal.addEventListener("abort", onAbort, { once: true });
     signal.throwIfAborted();
     const searchPage = page;
@@ -478,62 +478,64 @@ export async function createPetGearSource(
             failedUrls = new Map(
               next.failed.map(({ url, modeIndex }) => [safeEquipmentUrl(url), modeIndex]),
             );
-            const attempted = new Set<string>();
             const readCandidate = async (rawUrl: string, modeIndex: number) => {
               const url = safeEquipmentUrl(rawUrl),
                 identity = equipmentIdentity(url);
               if (identity.split(":")[0] !== serverId)
                 throw new Error("宝宝装备候选不属于目标单服，未采用报价");
-              attempted.add(identity);
               details++;
               try {
-                detailPage ||= await createHiddenPage(browser);
-                workSignal.throwIfAborted();
-                await navigate(detailPage, url, "pet_gear.detail.opened", workSignal, item.key);
-                await assertAvailable(detailPage);
-                if (equipmentIdentity(detailPage.url()) !== identity)
-                  throw new Error("宝宝装备详情跳转到另一商品，报价未采用");
-                await pace(workSignal);
-                const source = await equipmentPageSource(detailPage, workSignal, "pet-gear");
-                workSignal.throwIfAborted();
-                await assertAvailable(detailPage);
-                const description = source.html.match(
-                  /<pre data-cbg-equipment-description>([\s\S]*?)<\/pre>/,
-                )?.[1];
-                if (!description) throw new Error("主商品宝宝装备描述缺失，未采用报价");
-                const name = source.text.split("\n")[0];
-                const match = comparePetGear(item, name, pageText(description));
-                const selling = /(?:^|\n)在售(?:\n|$)/.test(source.text);
-                candidates.set(identity, {
-                  url,
-                  title: name,
-                  price: source.price,
-                  priceType: "listing",
-                  quote: source.text,
-                  verified: !!match.matchType && selling,
-                  reason: !selling
-                    ? "商品已下架，未采用报价"
-                    : match.reason || "同级同模型、套装及镶嵌类型一致，基础/附加属性差异已核对",
-                  ...(match.matchType
-                    ? {
-                        matchType: match.matchType,
-                        differences: match.differences,
-                        similarityScore: match.similarityScore,
-                      }
-                    : {}),
-                  fetchedAt: new Date().toISOString(),
-                  sourceHash: createHash("sha256").update(source.html).digest("hex"),
-                });
-                await captureBrowserStep(
-                  detailPage,
-                  { flow: "analysis", stage: "pet_gear.detail.read", key: item.key },
-                  workSignal,
-                );
-                failedUrls.delete(url);
-              } catch (error) {
-                if (detailPage)
+                await detailPages!.read(url, workSignal, async (detailPage) => {
                   await captureBrowserStep(
                     detailPage,
+                    { flow: "analysis", stage: "pet_gear.detail.opened", key: item.key },
+                    workSignal,
+                  );
+                  await assertAvailable(detailPage);
+                  if (equipmentIdentity(detailPage.url()) !== identity)
+                    throw new Error("宝宝装备详情跳转到另一商品，报价未采用");
+                  await pace(workSignal);
+                  const source = await equipmentPageSource(detailPage, workSignal, "pet-gear");
+                  workSignal.throwIfAborted();
+                  await assertAvailable(detailPage);
+                  const description = source.html.match(
+                    /<pre data-cbg-equipment-description>([\s\S]*?)<\/pre>/,
+                  )?.[1];
+                  if (!description) throw new Error("主商品宝宝装备描述缺失，未采用报价");
+                  const name = source.text.split("\n")[0];
+                  const match = comparePetGear(item, name, pageText(description));
+                  const selling = /(?:^|\n)在售(?:\n|$)/.test(source.text);
+                  candidates.set(identity, {
+                    url,
+                    title: name,
+                    price: source.price,
+                    priceType: "listing",
+                    quote: source.text,
+                    verified: !!match.matchType && selling,
+                    reason: !selling
+                      ? "商品已下架，未采用报价"
+                      : match.reason || "同级同模型、套装及镶嵌类型一致，基础/附加属性差异已核对",
+                    ...(match.matchType
+                      ? {
+                          matchType: match.matchType,
+                          differences: match.differences,
+                          similarityScore: match.similarityScore,
+                        }
+                      : {}),
+                    fetchedAt: new Date().toISOString(),
+                    sourceHash: createHash("sha256").update(source.html).digest("hex"),
+                  });
+                  await captureBrowserStep(
+                    detailPage,
+                    { flow: "analysis", stage: "pet_gear.detail.read", key: item.key },
+                    workSignal,
+                  );
+                  failedUrls.delete(url);
+                });
+              } catch (error) {
+                if (page)
+                  await captureBrowserStep(
+                    page,
                     { flow: "analysis", stage: "pet_gear.detail.failed", key: item.key, error },
                     workSignal,
                   );
@@ -542,34 +544,22 @@ export async function createPetGearSource(
                 throw error;
               }
             };
-            // Only a bounded nearest cohort is refreshed; old quotations never inherit a fresh timestamp.
+            const refresh = new Map(failedUrls);
             if (reusable) {
               for (const candidate of item.candidates.filter((value) => !value.verified))
                 candidates.set(equipmentIdentity(candidate.url), candidate);
-              const refresh = selectPetGearCandidates(item.candidates);
-              const refreshIds = new Set<string>();
-              for (const candidate of refresh) {
-                const identity = equipmentIdentity(safeEquipmentUrl(candidate.url));
-                if (refreshIds.has(identity)) continue;
-                if (details >= maxDetails || Date.now() >= deadline) break;
-                refreshIds.add(identity);
-                await readCandidate(candidate.url, next.modeIndex);
-              }
-              if (
-                refreshIds.size <
-                new Set(refresh.map((candidate) => equipmentIdentity(candidate.url))).size
-              ) {
-                refreshSkipped = true;
-                throw new Error("保存的宝宝装备报价尚未全部重新核验，本轮预算已结束");
+              for (const candidate of selectPetGearCandidates(item.candidates)) {
+                const url = safeEquipmentUrl(candidate.url);
+                const identity = equipmentIdentity(url);
+                const mode = [0, 1].find((index) => seen.has(index + "|" + identity));
+                refresh.set(url, mode ?? (candidate.matchType === "similar" ? 1 : 0));
               }
             }
-            for (const [url, modeIndex] of failedUrls) {
-              if (attempted.has(equipmentIdentity(url))) continue;
-              if (details >= maxDetails || Date.now() >= deadline) break;
-              await readCandidate(url, modeIndex);
-            }
-            queryStages: for (let modeIndex = next.modeIndex; modeIndex < 2; modeIndex++) {
-              if (budgetEnded() || failedUrls.size || (queried && enoughSamples())) break;
+            for (const [url, mode] of refresh) failedUrls.set(url, mode);
+            queryStages: for (let modeIndex = 0; modeIndex < 2; modeIndex++) {
+              if (budgetEnded() || (queried && enoughSamples() && !refresh.size)) break;
+              if (modeIndex < next.modeIndex && ![...refresh.values()].includes(modeIndex))
+                continue;
               let inspected = [...seen].filter((key) => key.startsWith(modeIndex + "|")).length;
               const sampling = {
                 mode: modeIndex === 1 ? "similar" : "exact",
@@ -672,6 +662,23 @@ export async function createPetGearSource(
                 );
                 return listing;
               };
+              await refreshMarketCandidates(
+                refresh,
+                modeIndex,
+                async (number) => {
+                  const listing = await loadPage(number, number === 1, true);
+                  pages++;
+                  return { rows: listing.rows, hasNext: number < listing.totalPages };
+                },
+                (url) => readCandidate(url, modeIndex),
+                () => !budgetEnded(),
+                () => details < maxDetails && Date.now() < deadline,
+              );
+              if ([...refresh.values()].includes(modeIndex)) {
+                refreshSkipped = true;
+                throw new Error("保存的宝宝装备候选未在预算内从列表重新找到，尚未完成核验");
+              }
+              if (modeIndex < next.modeIndex) continue;
               // The site's observed next-page control recreates the saved page without hidden API calls.
               const targetPage = next.pageNumber;
               let listing = await loadPage(1, true, targetPage > 1);
@@ -849,6 +856,25 @@ export async function createPetGearSource(
         signal,
       );
     await close();
+    throw error;
+  }
+}
+
+export async function createPetGearSource(
+  signal: AbortSignal,
+  serverId: string,
+  budgets: { maxPages?: number; maxDetails?: number } = {},
+) {
+  assertMarketServerId(serverId);
+  signal.throwIfAborted();
+  const browser = await getBrowser(true);
+  signal.throwIfAborted();
+  const page = await createHiddenPage(browser);
+  try {
+    signal.throwIfAborted();
+    return await petGearSourceFromPage(page, signal, serverId, budgets);
+  } catch (error) {
+    await page.close().catch(() => {});
     throw error;
   }
 }

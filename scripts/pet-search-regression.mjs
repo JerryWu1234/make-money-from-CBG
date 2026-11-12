@@ -136,6 +136,12 @@ const { petSourceFromPages, fillPetSearchForm, petQuery, petQueries, assertPetUI
       "../workflow": workflow,
       "../crawler/compact": compact,
       "./equipment-pricing": pricing,
+      "./market-detail": await moduleUrl("server/analysis/market-detail.ts", {
+        "../crawler/page": pacedPage,
+        "../viewport": viewport,
+        "../browser-evidence": browserEvidenceUrl,
+        "./equipment-pricing": pricing,
+      }),
       "./pricing-estimate": estimate,
       "./pricing-progress": progress,
       "./pet-pricing": petPricing,
@@ -283,17 +289,13 @@ try {
     const originalNow = Date.now;
     clockOffset = 0;
     if (search.expireAfterDetails) Date.now = () => originalNow() + clockOffset;
-    const source = petSourceFromPages(
-      bounded(searchPage),
-      bounded(detailPage),
-      control.signal,
-      "1",
-    );
+    const source = petSourceFromPages(bounded(searchPage), control.signal, "1");
     try {
       await run({ source, searchPage, detailPage, control });
     } finally {
       Date.now = originalNow;
       await source.close();
+      await detailPage.close();
     }
     assert.equal(searchPage.isClosed(), true);
     assert.equal(detailPage.isClosed(), true);

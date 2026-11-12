@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
 import type { Page } from "playwright-core";
+import {
+  createMarketDetailReader,
+  refreshMarketCandidates,
+  readMarketCandidatesOnPage,
+} from "./market-detail";
 import { captureBrowserStep } from "../browser-evidence";
 import {
   assertMarketServerId,
@@ -1563,11 +1568,11 @@ async function withPetStepEvidence<T>(
 /** Separate work pages share the existing login; they never navigate the role list. */
 export function petSourceFromPages(
   searchPage: Page,
-  detailPage: Page,
   signal: AbortSignal,
   serverId: string,
 ): PetSource & { close(): Promise<void>; discover(): Promise<PetSearchForm> } {
   assertMarketServerId(serverId);
+  const detailPages = createMarketDetailReader(searchPage, signal);
   const cache = new Map<string, string | UnverifiablePetAccessoryError>();
   const marketScope = createMarketScopeAudit(searchPage, serverId);
   const deadline = Date.now() + 240_000;
@@ -1576,7 +1581,7 @@ export function petSourceFromPages(
     if (!closing) {
       signal.removeEventListener("abort", abort);
       marketScope.close();
-      closing = Promise.allSettled([searchPage.close(), detailPage.close()]).then(() => {});
+      closing = Promise.allSettled([searchPage.close(), detailPages.close()]).then(() => {});
     }
     return closing;
   };
@@ -1595,32 +1600,33 @@ export function petSourceFromPages(
     const cached = cache.get(safe);
     if (cached instanceof UnverifiablePetAccessoryError) throw cached;
     if (cached !== undefined) return cached;
-    return withPetStepEvidence(detailPage, "宝宝候选读取失败", requestSignal, async () => {
-      await pace(requestSignal, 600, 400);
-      await detailPage.goto(safe, { waitUntil: "domcontentloaded", timeout: 15000 });
-      await captureBrowserStep(
-        detailPage,
-        { flow: "analysis", stage: "宝宝候选详情打开", key: equipmentIdentity(safe) },
-        requestSignal,
-      );
-      requestSignal.throwIfAborted();
-      if (equipmentIdentity(detailPage.url()) !== equipmentIdentity(safe))
-        throw new Error("宝宝详情跳转到另一商品，报价未采用");
-      let value: Awaited<ReturnType<typeof petPageSource>>;
-      try {
-        value = await petPageSource(detailPage, requestSignal);
-      } catch (error) {
-        if (error instanceof UnverifiablePetAccessoryError) cache.set(safe, error);
-        throw error;
-      }
-      cache.set(safe, value.html);
-      await captureBrowserStep(
-        detailPage,
-        { flow: "analysis", stage: "宝宝候选读取完成", key: equipmentIdentity(safe) },
-        requestSignal,
-      );
-      return value.html;
-    });
+    await pace(requestSignal, 600, 400);
+    return detailPages.read(safe, requestSignal, (detailPage) =>
+      withPetStepEvidence(detailPage, "宝宝候选读取失败", requestSignal, async () => {
+        await captureBrowserStep(
+          detailPage,
+          { flow: "analysis", stage: "宝宝候选详情打开", key: equipmentIdentity(safe) },
+          requestSignal,
+        );
+        requestSignal.throwIfAborted();
+        if (equipmentIdentity(detailPage.url()) !== equipmentIdentity(safe))
+          throw new Error("宝宝详情跳转到另一商品，报价未采用");
+        let value: Awaited<ReturnType<typeof petPageSource>>;
+        try {
+          value = await petPageSource(detailPage, requestSignal);
+        } catch (error) {
+          if (error instanceof UnverifiablePetAccessoryError) cache.set(safe, error);
+          throw error;
+        }
+        cache.set(safe, value.html);
+        await captureBrowserStep(
+          detailPage,
+          { flow: "analysis", stage: "宝宝候选读取完成", key: equipmentIdentity(safe) },
+          requestSignal,
+        );
+        return value.html;
+      }),
+    );
   };
   return {
     close,
@@ -1880,56 +1886,25 @@ export function petSourceFromPages(
               };
             }
           };
-          // Only a cursor bound to this exact inventory and query plan permits resuming saved quotes.
-          if (savedCursor) {
-            const refreshedDetails: Array<{
-              url: string;
-              modeIndex: number;
-              reason: "saved_quote" | "retry_failed";
-            }> = [];
+          const refresh = new Map(failed);
+          if (savedCursor)
             for (const candidate of item.candidates.filter((value) => value.verified)) {
-              if (details >= MAX_DETAILS || Date.now() >= deadline) break;
-              const modeIndex =
-                candidate.matchType === "similar"
-                  ? plans.findIndex((plan) => plan.matchType === "similar")
-                  : 0;
-              await readCandidate(
-                candidate.url,
-                candidate.title,
-                plans[modeIndex].matchType,
-                modeIndex,
+              const url = safeEquipmentUrl(candidate.url);
+              const identity = equipmentIdentity(url);
+              const mode = plans.findIndex((_, index) => seenRows.has(index + ":" + identity));
+              refresh.set(
+                url,
+                mode >= 0
+                  ? mode
+                  : candidate.matchType === "similar"
+                    ? Math.max(
+                        0,
+                        plans.findIndex((plan) => plan.matchType === "similar"),
+                      )
+                    : 0,
               );
-              refreshedDetails.push({
-                url: safeEquipmentUrl(candidate.url),
-                modeIndex,
-                reason: "saved_quote",
-              });
             }
-            for (const [url, modeIndex] of Array.from(failed)) {
-              if (details >= MAX_DETAILS || Date.now() >= deadline) break;
-              if (typeof cache.get(safeEquipmentUrl(url)) === "string") continue;
-              await readCandidate(url, item.name, plans[modeIndex].matchType, modeIndex);
-              refreshedDetails.push({
-                url: safeEquipmentUrl(url),
-                modeIndex,
-                reason: "retry_failed",
-              });
-            }
-            if (refreshedDetails.length) {
-              const refreshQuery =
-                "仅重读已保存的独立宝宝详情 / 目标单服 " + serverId + " / " + item.name;
-              queries.push(refreshQuery);
-              item.query = [item.query, refreshQuery].filter(Boolean).join("\n");
-              records.push({
-                key: item.key,
-                kind: "saved_detail_refresh",
-                planHash,
-                newMarketSearch: false,
-                details: refreshedDetails,
-                candidates: [...candidates, ...rejected],
-              });
-            }
-          }
+          for (const [url, mode] of refresh) failed.set(url, mode);
           await searchPage.evaluate(() => {
             const g = window as unknown as Record<string, any>;
             const original = g.ajax_with_recommend;
@@ -2213,6 +2188,13 @@ export function petSourceFromPages(
                     },
                     requestSignal,
                   );
+                  await readMarketCandidatesOnPage(
+                    refresh,
+                    modeIndex,
+                    listing.rows,
+                    (url) => readCandidate(url, item.name, matchType, modeIndex),
+                    () => details < MAX_DETAILS && Date.now() < deadline,
+                  );
                   return { listing, request };
                 },
               );
@@ -2257,6 +2239,19 @@ export function petSourceFromPages(
               break queryStages;
             }
             if ((next.historyIndex || 0) >= history.length) historyValidated = true;
+            await refreshMarketCandidates(
+              refresh,
+              modeIndex,
+              async (number) => {
+                const value = await loadPage(number, true);
+                uiReady = true;
+                return value.listing;
+              },
+              (url) => readCandidate(url, item.name, matchType, modeIndex),
+              () => stagePages < MAX_PAGES && details < MAX_DETAILS && Date.now() < deadline,
+              () => details < MAX_DETAILS && Date.now() < deadline,
+            );
+            if (refresh.size && [...refresh.values()].includes(modeIndex)) break queryStages;
             if (modeIndex < next.modeIndex) continue;
             if (enoughSamples() || stagePages >= MAX_PAGES) break;
             if (!uiReady && next.pageNumber > 1) {
@@ -2439,7 +2434,10 @@ export function petSourceFromPages(
               candidates: [...candidates, ...rejected],
               ...(!enoughSamples() && next.modeIndex === modeIndex ? { cursor: next } : {}),
             });
-            if (next.modeIndex >= plans.length || next.modeIndex === modeIndex || failed.size)
+            if (
+              !refresh.size &&
+              (next.modeIndex >= plans.length || next.modeIndex === modeIndex || failed.size)
+            )
               break;
           }
           const distinct = new Map<string, EquipmentCandidate>();
@@ -2488,17 +2486,15 @@ export function petSourceFromPages(
 export async function createPetSource(signal: AbortSignal, serverId: string) {
   assertMarketServerId(serverId);
   signal.throwIfAborted();
-  let searchPage: Page | undefined, detailPage: Page | undefined;
+  let searchPage: Page | undefined;
   try {
     const browser = await getBrowser(true);
     signal.throwIfAborted();
     searchPage = await createHiddenPage(browser);
     signal.throwIfAborted();
-    detailPage = await createHiddenPage(browser);
-    signal.throwIfAborted();
-    return petSourceFromPages(searchPage, detailPage, signal, serverId);
+    return petSourceFromPages(searchPage, signal, serverId);
   } catch (error) {
-    await Promise.allSettled([searchPage?.close(), detailPage?.close()]);
+    await searchPage?.close().catch(() => {});
     throw error;
   }
 }
