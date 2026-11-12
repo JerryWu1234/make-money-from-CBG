@@ -1,3 +1,4 @@
+import { normalizeConditions } from "./conditions";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -119,6 +120,7 @@ export function normalizeSettings(input: unknown): ValuationSettings {
     }),
   ) as EquipmentBaselinePrices;
   return {
+    ...(value.conditions == null ? {} : { conditions: normalizeConditions(value.conditions) }),
     analyzeEquipment: boolean("analyzeEquipment")!,
     pricingScope: choice("pricingScope", ["all", "equipment"] as const) || "all",
     ...(boolean("deferJade") ? { deferJade: true } : {}),

@@ -11,7 +11,7 @@ import { AnalysisStore, type AnalysisTask } from "./store";
 import { analysisConcurrency, analysisLaneLimits, DEFAULT_ANALYSIS_CONCURRENCY } from "./types";
 import type { AnalysisLane } from "./types";
 import type { PricingSearchProgress } from "./equipment-pricing";
-import { VALUATION_SCHEMA, validateValuation, recalculateValuation } from "./valuation-contract";
+import { valuationSchema, validateValuation, recalculateValuation } from "./valuation-contract";
 import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { CALCULATION_VERSION } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
@@ -703,6 +703,7 @@ export class AnalysisRunner {
       if (this.store.skipUnavailableTask(task, owner)) return;
       if (
         task.profile &&
+        !task.profile.settings.conditions &&
         task.previousResult?.inputHash === task.document.contentHash &&
         task.previousResult.productKey === task.document.productKey &&
         task.previousResult.valuation?.calculation_version === task.profile.calculationVersion
@@ -750,7 +751,7 @@ export class AnalysisRunner {
         const response = await pricingUntilAborted(
           (session?.analyze ?? client.analyze)(
             prompt,
-            task.profile ? VALUATION_SCHEMA : ANALYSIS_SCHEMA,
+            task.profile ? valuationSchema(task.profile) : ANALYSIS_SCHEMA,
             signal,
             ...(task.profile && !task.profile.equipmentSearch && !task.profile.petSearch
               ? [{ bareRoleReview: true }]

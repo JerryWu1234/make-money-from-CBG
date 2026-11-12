@@ -2,6 +2,7 @@ import type { Evidence } from "./types";
 
 export type Decision = "BUY" | "WATCH" | "PASS" | "NEED_INFO" | "OUT_OF_SCOPE";
 export type ValuationSettings = {
+  conditions?: import("./conditions").ConditionGroup;
   /** Homepage master switch. Missing legacy values default to bare-role analysis. */
   analyzeEquipment?: boolean;
   pricingScope?: "all" | "equipment";
@@ -64,6 +65,7 @@ export type ValuationFact = {
   quote: string;
 };
 export type ValuationResult = {
+  condition_review?: import("./conditions").ConditionReview;
   asset_scope?: "body";
   excluded_assets?: Array<{ key: string; name: string; reason: string }>;
   decision: Decision;
