@@ -17,10 +17,22 @@ import { valuationRecord } from "../fixtures/analysis";
 
 // Isolation failures: routes could bypass actual persistence/runner/validation; UI could
 // lose group IDs, omit a result, show current conditions in history, or reuse stale results.
+// Condition evidence could omit listing attrs/summary or non-pricing tabs; a fixture AI
+// could hide that omission by answering from the fixture instead of the actual request.
 // Use actual SQLite stores, profile persistence and runner; only site data/AI/network are fixtures.
 test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ page }, testInfo) => {
   const crawl = new CrawlStore(testInfo.outputPath("conditions.sqlite"));
   const record = valuationRecord();
+  record.listing.attrs["速度"] = "850";
+  record.listing.summary = { 测试备注: "条件证据列表摘要" };
+  record.detail!.tabs.push({
+    name: "技能",
+    text: "烹饪技巧：100",
+    fields: [{ name: "烹饪技巧", value: "100" }],
+    tables: [],
+    elements: [],
+    tooltips: [],
+  });
   crawl.observe(record.listing);
   crawl.save(record.listing, record.detail!);
   const store = new AnalysisStore(crawl.db);
@@ -37,6 +49,19 @@ test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ pag
       calls++;
       requests.push({ prompt, schema });
       expect(prompt).toContain("补充条件判断");
+      const evidence = JSON.parse(
+        prompt.split("【商品资料开始】\n")[1].split("\n【商品资料结束】")[0],
+      );
+      expect(evidence).toEqual({ listing: record.listing, detail: record.detail });
+      const speed = Number(evidence.listing.attrs["速度"]);
+      const skill = evidence.detail.tabs.find(
+        (tab: { name: string; text: string }) =>
+          tab.name === "技能" && tab.text.includes("烹饪技巧"),
+      );
+      expect(skill.fields).toContainEqual({ name: "烹饪技巧", value: "100" });
+      const cooking = Number(
+        skill.fields.find((field: { name: string }) => field.name === "烹饪技巧").value,
+      );
       const expected = calculateValuation(record, profile);
       return {
         text: JSON.stringify({
@@ -49,11 +74,22 @@ test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ pag
               node.id === "C2"
                 ? "unknown"
                 : node.id === "C3"
-                  ? "unmet"
-                  : node.id === "C1"
+                  ? cooking >= 120
                     ? "met"
+                    : "unmet"
+                  : node.id === "C1"
+                    ? speed > (calls === 1 ? 800 : 900)
+                      ? "met"
+                      : "unmet"
                     : "unknown",
-            reason: node.id === "C2" ? "模拟资料未提供完整配置，无法判断" : "模拟角色资料依据",
+            reason:
+              node.id === "C2"
+                ? "模拟资料未提供完整配置，无法判断"
+                : node.id === "C1"
+                  ? `已采集速度${speed}`
+                  : node.id === "C3"
+                    ? `已采集烹饪技巧${cooking}`
+                    : "模拟角色资料依据",
           })),
         }),
       };
@@ -128,12 +164,12 @@ test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ pag
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "估值与挂牌比较设置" });
     await settings.getByRole("button", { name: "添加分析条件" }).click();
-    await settings.getByLabel("C1条件", { exact: true }).fill("等级为175");
+    await settings.getByLabel("C1条件", { exact: true }).fill("速度大于800");
     await settings.getByRole("button", { name: "增加条件组", exact: true }).click();
     await settings.getByLabel("C2条件", { exact: true }).fill("养成完整");
     const subgroup = settings.getByRole("group", { name: "G2 条件组" });
     await subgroup.getByRole("button", { name: "增加条件", exact: true }).click();
-    await settings.getByLabel("C3条件", { exact: true }).fill("门派为化生寺");
+    await settings.getByLabel("C3条件", { exact: true }).fill("烹饪技巧至少120级");
     await page.screenshot({
       path: testInfo.outputPath("A1-conditions-settings.png"),
       fullPage: true,
@@ -148,6 +184,8 @@ test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ pag
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
     await expect(page.getByText("C2 养成完整：无法判断", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("条件匹配")).toContainText("C1 速度大于800：满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("已采集速度850");
     await page.screenshot({
       path: testInfo.outputPath("A3-condition-results.png"),
       fullPage: true,
@@ -156,18 +194,22 @@ test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ pag
     await page.reload();
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
-    await expect(page.getByLabel("条件匹配")).toContainText("C3 门派为化生寺：不满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("C3 烹饪技巧至少120级：不满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("已采集烹饪技巧100");
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
-    await settings.getByLabel("C1条件", { exact: true }).fill("等级为109");
+    await settings.getByLabel("C1条件", { exact: true }).fill("速度大于900");
     await settings.getByRole("button", { name: /保存/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
-    await expect(page.getByLabel("条件匹配")).toContainText("C1 等级为175");
+    await expect(page.getByLabel("条件匹配")).toContainText("C1 速度大于800");
     const oldDetail = store.detail(store.overview().records.items[0].taskId!, profile);
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: /分析新增或已更新商品|按新设置/ }).click();
     await expect.poll(() => calls).toBe(2);
     await expect.poll(() => store.overview().run?.completed).toBe(1);
+    await page.getByRole("tab", { name: /^全部商品/ }).click();
+    await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
+    await expect(page.getByLabel("条件匹配")).toContainText("C1 速度大于900：不满足");
     await writeFile(
       testInfo.outputPath("evidence.json"),
       JSON.stringify(
