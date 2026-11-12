@@ -1,6 +1,6 @@
 import type { Page } from "playwright-core";
 
-export type BrowserIssue = "disconnected" | "page_closed";
+export type BrowserIssue = "disconnected" | "page_closed" | "input_unavailable";
 export class BrowserConnectionError extends Error {
   constructor(
     readonly kind: BrowserIssue,
@@ -9,7 +9,9 @@ export class BrowserConnectionError extends Error {
     super(
       kind === "disconnected"
         ? "Chrome 调试连接已断开，采集已暂停；请重新连接并核对登录后继续，断点和已读资料已保留。"
-        : "采集工作页已关闭，采集已暂停；请重新查询角色列表后继续，断点和已读资料已保留。",
+        : kind === "input_unavailable"
+          ? "工作页未确认收到点击，采集已暂停以免重复操作；请重新查询后继续，断点和已读资料已保留。"
+          : "采集工作页已关闭，采集已暂停；请重新查询角色列表后继续，断点和已读资料已保留。",
       { cause },
     );
     this.name = "BrowserConnectionError";
@@ -20,7 +22,7 @@ export function browserConnectionFailure(error: unknown): BrowserConnectionError
     if (
       error.name === "BrowserConnectionError" &&
       "kind" in error &&
-      ["disconnected", "page_closed"].includes(String(error.kind))
+      ["disconnected", "page_closed", "input_unavailable"].includes(String(error.kind))
     )
       return error as BrowserConnectionError;
   return undefined;

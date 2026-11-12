@@ -198,27 +198,30 @@ it("连续三件失败立即取消，保留失败原因和计数，不等待在�
   expect(mocks.release).toHaveBeenCalledOnce();
 });
 
-it("调试连接断开作为整轮暂停，保留计数并明确浏览器原因", async () => {
-  mocks.crawl.mockImplementation(async (_source, _store, _signal, publish) => {
-    publish({ page: 3, saved: 5 });
-    throw Object.assign(new Error("Chrome 调试连接已断开，采集已暂停"), {
-      name: "BrowserConnectionError",
-      kind: "disconnected",
+it.each(["disconnected", "input_unavailable"])(
+  "浏览器%s作为整轮暂停，保留计数并明确原因",
+  async (kind) => {
+    mocks.crawl.mockImplementation(async (_source, _store, _signal, publish) => {
+      publish({ page: 3, saved: 5 });
+      throw Object.assign(new Error("Chrome 调试连接已断开，采集已暂停"), {
+        name: "BrowserConnectionError",
+        kind,
+      });
     });
-  });
-  const controller = await import("./controller");
-  initial = controller;
-  const started = await controller.startCrawl();
-  await expect(started.activity!.completion).resolves.toMatchObject({
-    phase: "paused",
-    running: false,
-    page: 3,
-    saved: 5,
-    error: undefined,
-    browserIssue: "disconnected",
-  });
-  expect(mocks.release).toHaveBeenCalledOnce();
-});
+    const controller = await import("./controller");
+    initial = controller;
+    const started = await controller.startCrawl();
+    await expect(started.activity!.completion).resolves.toMatchObject({
+      phase: "paused",
+      running: false,
+      page: 3,
+      saved: 5,
+      error: undefined,
+      browserIssue: kind,
+    });
+    expect(mocks.release).toHaveBeenCalledOnce();
+  },
+);
 
 it("已登录列表核验后连接消失，创建详情页时暂停且不自动重连", async () => {
   mocks.getBrowser.mockRejectedValueOnce(new Error("浏览器未连接"));

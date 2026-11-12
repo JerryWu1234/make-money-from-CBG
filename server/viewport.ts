@@ -1,6 +1,7 @@
 import type { Locator, Page } from "playwright-core";
 import { collectionPageSignal } from "./crawler/login-dialog";
 import { diagnostics, workPageDiagnostic } from "./diagnostics";
+import { observeInspectionInput, inputDeliveryError } from "./inspection-input";
 
 const WORK_VIEWPORT = { width: 1440, height: 1080 };
 let inspectionClickTail = Promise.resolve();
@@ -16,7 +17,7 @@ export async function ensureWorkViewport(page: Page) {
     await page.setViewportSize(WORK_VIEWPORT);
   }
 }
-/** Check the target in the main world, then send browser mouse input without a node handle. */
+/** Validate the target and confirm input delivery, with a guarded silent-input fallback. */
 export async function clickForInspection(
   element: Locator,
   signal?: AbortSignal,
@@ -79,7 +80,7 @@ export async function clickForInspection(
     const afterHover = await point(false);
     if (!afterHover || JSON.stringify(stable) !== JSON.stringify(afterHover)) throw changed();
     check();
-    // A failure after input may already have changed the page: never replay the click here.
+    // A command error or partial delivery has an unknown outcome: never replay it.
     const recordClick = (phase: string, error?: unknown) => {
       if (sort)
         diagnostics.record("list.sort_click", {
@@ -94,12 +95,42 @@ export async function clickForInspection(
         });
     };
     recordClick("dispatching");
+    const receipt = await observeInspectionInput(page, token, afterHover);
     try {
       await page.mouse.click(afterHover.x, afterHover.y);
-      recordClick("completed");
+      let delivered = await receipt.read();
+      if (!delivered?.clicked && delivered?.events.length === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        check();
+        delivered = await receipt.read();
+      }
+      if (delivered?.clicked) {
+        recordClick("completed");
+        return;
+      }
+      if (!delivered || delivered.events.length) throw inputDeliveryError();
+      check();
+      // Reuse the same login/verification/rate-limit checks as collection. Import
+      // lazily because page.ts itself uses this click helper.
+      const { assertAvailable } = await import("./crawler/page");
+      await assertAvailable(page);
+      check();
+      const current = await point(false);
+      check();
+      if (!current || JSON.stringify(current) !== JSON.stringify(afterHover))
+        throw inputDeliveryError();
+      if (!(await receipt.recover())) throw inputDeliveryError();
+      diagnostics.record("browser.click_compatibility", {
+        ...workPageDiagnostic(page),
+        method: "HTMLElement.click",
+        reason: "no_mouse_events",
+      });
+      recordClick("compatibility_completed");
     } catch (error) {
       recordClick("failed", error);
       throw error;
+    } finally {
+      await receipt.dispose();
     }
   });
   inspectionClickTail = click.then(
