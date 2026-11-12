@@ -711,6 +711,61 @@ describe("裸号估值的复算与可追溯输入", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+  it("保存只校验人工配置版本，自动行情变化不产生冲突，人工修改仍拒绝旧版本", () => {
+    const directory = mkdtempSync(join(tmpdir(), "cbg-config-save-"));
+    const file = join(directory, "prompt.md");
+    const crawl = new CrawlStore(":memory:");
+    try {
+      writeFileSync(file, template);
+      const record = completeRecord();
+      crawl.observe(record.listing);
+      crawl.save(record.listing, record.detail!);
+      const initial = loadProfile(crawl.db, file);
+      crawl.db.exec(
+        "CREATE TABLE IF NOT EXISTS analysis_market(id INTEGER PRIMARY KEY, snapshot_json TEXT)",
+      );
+      crawl.db.prepare("INSERT OR REPLACE INTO analysis_market VALUES(1,?)").run(
+        JSON.stringify({
+          fetchedAt: new Date().toISOString(),
+          servers: [
+            {
+              serverId: record.listing.serverId,
+              serverName: "测试服",
+              source: "auto",
+              age: "older",
+              rank: 5,
+              goldPrice: 210,
+              goldUnit: 30000000,
+              baselineUnitConfirmed: true,
+              fetchedAt: new Date().toISOString(),
+              sources: [],
+            },
+          ],
+        }),
+      );
+      const changedMarket = loadProfile(crawl.db, file);
+      expect(changedMarket.hash).not.toBe(initial.hash);
+      expect(changedMarket.configurationHash).toBe(initial.configurationHash);
+      const input = {
+        template,
+        settings: {
+          ...initial.settings,
+          conditions: { id: "G1", operator: "and", children: [{ id: "C1", text: "等级175" }] },
+        },
+        baseHash: initial.hash,
+        baseConfigurationHash: initial.configurationHash,
+      };
+      saveProfile(crawl.db, input, file);
+      expect(loadProfile(crawl.db, file).settings.conditions?.children[0]).toEqual({
+        id: "C1",
+        text: "等级175",
+      });
+      expect(() => saveProfile(crawl.db, input, file)).toThrow("已被修改");
+    } finally {
+      crawl.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it("旧的未设置规则改用建议方案，但不填造金价和额外费用", () => {
     const crawl = new CrawlStore(":memory:");
     try {
