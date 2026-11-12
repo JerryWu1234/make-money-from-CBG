@@ -20,7 +20,10 @@ import { valuationRecord } from "../fixtures/analysis";
 // Condition evidence could omit listing attrs/summary or non-pricing tabs; a fixture AI
 // could hide that omission by answering from the fixture instead of the actual request.
 // Use actual SQLite stores, profile persistence and runner; only site data/AI/network are fixtures.
-test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ page }, testInfo) => {
+// Save failures to cover: blank condition blocked with visible ID; closing loses drafts;
+// concurrent edits silently overwrite; reloading discards input; reopen reads stale in-memory data.
+// A delayed recovery response must not leave inputs editable and overwrite new typing.
+test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", async ({ page }, testInfo) => {
   const crawl = new CrawlStore(testInfo.outputPath("conditions.sqlite"));
   const record = valuationRecord();
   record.listing.attrs["速度"] = "850";
@@ -41,6 +44,8 @@ test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ pag
   const promptFile = testInfo.outputPath("valuation.md");
   await writeFile(promptFile, template);
   let profile = createProfile(template, DEFAULT_SETTINGS);
+  let recoveryGate: Promise<void> | undefined;
+  let releaseRecovery: (() => void) | undefined;
   let calls = 0;
   const requests: unknown[] = [];
   const runner = new AnalysisRunner(store, async () => ({
@@ -137,11 +142,17 @@ test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ pag
           };
           break;
         case "/api/analysis/settings":
+          if (recoveryGate) await recoveryGate;
+          profile = loadProfile(crawl.db, promptFile);
           body = { profile, promptFile, servers: [] };
           break;
         case "/api/analysis/settings/save":
-          profile = saveProfile(crawl.db, input, promptFile);
-          body = { profile };
+          try {
+            profile = saveProfile(crawl.db, input, promptFile);
+            body = { profile };
+          } catch (error) {
+            return route.fulfill({ status: 400, json: { error: (error as Error).message } });
+          }
           break;
         case "/api/analysis/start":
           body = store.run(
@@ -164,7 +175,16 @@ test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ pag
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "估值与挂牌比较设置" });
     await settings.getByRole("button", { name: "添加分析条件" }).click();
+    await settings.getByRole("button", { name: "保存设置", exact: true }).click();
+    await expect(settings.getByRole("alert")).toContainText("C1 条件须填写");
+    await expect(settings.getByRole("alert")).toBeInViewport();
+    await settings.getByRole("button", { name: "保存设置", exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("M1-save-error.png"), fullPage: true });
     await settings.getByLabel("C1条件", { exact: true }).fill("速度大于800");
+    await settings.getByRole("button", { name: "关闭分析设置", exact: true }).click();
+    await page.getByRole("button", { name: "分析设置", exact: true }).click();
+    await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
+    await expect(settings.getByText("已恢复未保存的输入。草稿仅在当前页面保留。")).toBeVisible();
     await settings.getByRole("button", { name: "增加条件组", exact: true }).click();
     await settings.getByLabel("C2条件", { exact: true }).fill("养成完整");
     const subgroup = settings.getByRole("group", { name: "G2 条件组" });
@@ -174,8 +194,53 @@ test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ pag
       path: testInfo.outputPath("A1-conditions-settings.png"),
       fullPage: true,
     });
-    await settings.getByRole("button", { name: /保存/ }).click();
+    profile = saveProfile(
+      crawl.db,
+      {
+        template,
+        settings: { ...profile.settings, sumAdvancedMounts: false },
+        baseHash: profile.hash,
+        baseConfigurationHash: profile.configurationHash,
+      },
+      promptFile,
+    );
+    await settings.getByRole("button", { name: "保存设置", exact: true }).click();
+    await expect(settings.getByRole("alert")).toContainText("分析设置已被修改");
+    await settings.getByRole("button", { name: "保存设置", exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("M3-conflict.png"), fullPage: true });
+    await settings.getByRole("button", { name: "关闭分析设置", exact: true }).click();
+    await page.getByRole("button", { name: "分析设置", exact: true }).click();
+    await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
+    recoveryGate = new Promise<void>((resolve) => {
+      releaseRecovery = resolve;
+    });
+    await settings.getByRole("button", { name: "重新读取并保留输入", exact: true }).click();
+    await expect(settings.getByLabel("C1条件", { exact: true })).toBeDisabled();
+    await expect(settings.getByLabel("估值 Prompt 全文", { exact: true })).toBeDisabled();
+    for (const control of await settings.locator("input, select, textarea, button").all())
+      await expect(control).toBeDisabled();
+    await page.screenshot({ path: testInfo.outputPath("M3-recovery-loading.png"), fullPage: true });
+    releaseRecovery!();
+    recoveryGate = undefined;
+    await expect(settings.getByRole("alert")).toHaveCount(0);
+    await expect(settings.getByLabel("C1条件", { exact: true })).toBeEnabled();
+    await expect(settings.getByLabel("估值 Prompt 全文", { exact: true })).toBeEnabled();
+    await settings.getByLabel("C1条件", { exact: true }).fill("速度大于800，使用已采集资料");
+    await settings.getByRole("button", { name: "关闭分析设置", exact: true }).click();
+    await page.getByRole("button", { name: "分析设置", exact: true }).click();
+    await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue(
+      "速度大于800，使用已采集资料",
+    );
+    await settings.getByLabel("C1条件", { exact: true }).fill("速度大于800");
+    await expect(settings.getByLabel("C3条件", { exact: true })).toHaveValue("烹饪技巧至少120级");
+    await settings.getByRole("button", { name: "保存设置", exact: true }).scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath("M2-restored-draft.png"), fullPage: true });
+    await settings.getByRole("button", { name: "保存设置", exact: true }).click();
     await expect(settings).not.toBeVisible();
+    expect(loadProfile(crawl.db, promptFile).settings.sumAdvancedMounts).toBe(false);
+    await page.getByRole("button", { name: "分析设置", exact: true }).click();
+    await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
+    await settings.getByRole("button", { name: "关闭分析设置", exact: true }).click();
     expect(loadProfile(crawl.db, promptFile).settings.conditions).toEqual(
       profile.settings.conditions,
     );
@@ -223,6 +288,7 @@ test("条件配置、分析、刷新与历史快照（模拟AI）", async ({ pag
       contentType: "application/json",
     });
   } finally {
+    releaseRecovery?.();
     await runner.pause();
     crawl.close();
   }

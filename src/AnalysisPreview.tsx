@@ -12,7 +12,7 @@ import {
 import { AiConnectionControl } from "./AiConnectionControl";
 import { AssetCounts, EquipmentSummary } from "./AssetCounts";
 import { AnalysisResultDrawer } from "./AnalysisResultDrawer";
-import { AnalysisSettings } from "./AnalysisSettings";
+import { AnalysisSettings, type AnalysisSettingsDraft } from "./AnalysisSettings";
 import { SqliteDataCleanup } from "./SqliteDataCleanup";
 import {
   valuationDecisionLabel,
@@ -116,6 +116,7 @@ export function AnalysisPreview() {
   const [taskId, setTaskId] = useState<string | null>(null);
   const [roleKey, setRoleKey] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsDraft, setSettingsDraft] = useState<AnalysisSettingsDraft | null>(null);
   const [settingsNotice, setSettingsNotice] = useState(false);
   const firstLoad = useRef(true);
   const operation = useRef(false);
@@ -1289,8 +1290,11 @@ export function AnalysisPreview() {
       </main>
       {settingsOpen && (
         <AnalysisSettings
+          draft={settingsDraft}
+          onDraftChange={setSettingsDraft}
           onClose={() => setSettingsOpen(false)}
           onSaved={() => {
+            setSettingsDraft(null);
             setSettingsOpen(false);
             setSettingsNotice(true);
             setRevision((value) => value + 1);

@@ -34,6 +34,8 @@ export type ValuationSettings = {
   }[];
 };
 export type AnalysisProfile = {
+  /** Revision of editable settings, independent of automatic market data. */
+  configurationHash?: string;
   /** Operator confirmation for this product and the exact five skill levels used by the formula. */
   ascendedSchoolFormulaConfirmations?: Record<string, number[]>;
   marketSources?: import("./market").MarketServer[];

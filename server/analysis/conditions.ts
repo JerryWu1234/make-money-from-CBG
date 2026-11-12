@@ -33,7 +33,7 @@ export function normalizeConditions(value: unknown): ConditionGroup | undefined 
         !Array.isArray(node.children) ||
         !node.children.length
       )
-        throw new Error("条件组须选择且或关系，并至少有一条条件");
+        throw new Error(`${node.id} 条件组须选择且或关系，并至少有一条条件`);
       return {
         id: node.id,
         operator: node.operator,
@@ -41,7 +41,7 @@ export function normalizeConditions(value: unknown): ConditionGroup | undefined 
       };
     }
     if (typeof node.text !== "string" || !node.text.trim() || node.text.length > 1000)
-      throw new Error("每条条件须填写1至1000字");
+      throw new Error(`${node.id} 条件须填写1至1000字，不能只填空格`);
     return { id: node.id, text: node.text.trim() };
   }
   const root = visit(value, 1);

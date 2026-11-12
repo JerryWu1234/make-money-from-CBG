@@ -163,6 +163,12 @@ export function createProfile(
   const promptHash = textHash(template),
     settingsHash = textHash(JSON.stringify(pricingSettings));
   return {
+    configurationHash: textHash(
+      JSON.stringify([
+        template,
+        { ...normalized, servers: normalized.servers.filter((row) => row.source !== "auto") },
+      ]),
+    ),
     version: "role-valuation-v1",
     equipmentSearch,
     petSearch,
@@ -268,8 +274,13 @@ export function saveProfile(db: DatabaseSync, input: unknown, file = PROMPT_FILE
   let replaced = false;
   try {
     previous = readFileSync(file, "utf8");
-    if (loadProfile(db, file).hash !== value.baseHash)
-      throw new Error("分析设置已被修改，请重新打开后保存");
+    const current = loadProfile(db, file);
+    if (
+      typeof value.baseConfigurationHash === "string"
+        ? current.configurationHash !== value.baseConfigurationHash
+        : current.hash !== value.baseHash
+    )
+      throw new Error("分析设置已被修改，请重新读取后核对并保存");
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(temporary, next.template, { flag: "wx", mode: 0o600 });
     renameSync(temporary, file);

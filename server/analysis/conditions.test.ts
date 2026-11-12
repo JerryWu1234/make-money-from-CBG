@@ -25,6 +25,9 @@ const results = ["G1", "C1", "G2", "C2"].map((id) => ({
 describe("补充分析条件", () => {
   it("接受分组，拒绝空条件、空组、重复编号与超出深度", () => {
     expect(normalizeConditions(tree)).toEqual(tree);
+    expect(() => normalizeConditions({ ...tree, children: [{ id: "C7", text: "  " }] })).toThrow(
+      "C7 条件须填写",
+    );
     for (const value of [
       { ...tree, children: [] },
       { ...tree, children: [{ id: "C1", text: " " }] },

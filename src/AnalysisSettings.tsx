@@ -1,3 +1,4 @@
+import { normalizeConditions } from "../server/analysis/conditions";
 import { AnalysisConditions } from "./AnalysisConditions";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -63,14 +64,27 @@ type SettingsResponse = {
   market?: import("../server/analysis/market").MarketServer[];
   servers: { serverId: string; serverName: string }[];
 };
+export type AnalysisSettingsDraft = {
+  template: string;
+  settings: ValuationSettings;
+  baseline: AnalysisProfile;
+  error: string | null;
+};
+
 export function AnalysisSettings({
   onClose,
   onSaved,
+  draft,
+  onDraftChange,
 }: {
   onClose: () => void;
   onSaved: () => void;
+  draft: AnalysisSettingsDraft | null;
+  onDraftChange: (draft: AnalysisSettingsDraft | null) => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const initialDraft = useRef(draft);
+  const [notice, setNotice] = useState(draft ? "已恢复未保存的输入。草稿仅在当前页面保留。" : "");
   const [source, setSource] = useState<SettingsResponse | null>(null);
   const [template, setTemplate] = useState("");
   const [settings, setSettings] = useState<ValuationSettings | null>(null);
@@ -88,9 +102,11 @@ export function AnalysisSettings({
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "无法读取分析设置");
         if (!controller.signal.aborted) {
-          setSource(data);
-          setTemplate(data.profile.template);
-          setSettings(data.profile.settings);
+          const savedDraft = initialDraft.current;
+          setSource({ ...data, profile: savedDraft?.baseline ?? data.profile });
+          setTemplate(savedDraft?.template ?? data.profile.template);
+          setSettings(savedDraft?.settings ?? data.profile.settings);
+          setError(savedDraft?.error ?? null);
         }
       })
       .catch((failure) => {
@@ -104,6 +120,40 @@ export function AnalysisSettings({
       if (previous?.isConnected) previous.focus();
     };
   }, []);
+  useEffect(() => {
+    if (!source || !settings) return;
+    const dirty =
+      template !== source.profile.template ||
+      JSON.stringify(settings) !== JSON.stringify(source.profile.settings);
+    onDraftChange(dirty ? { template, settings, baseline: source.profile, error } : null);
+  }, [source, settings, template, error, onDraftChange]);
+
+  async function reloadSettings() {
+    if (!source || !settings || busy) return;
+    setBusy(true);
+    try {
+      const response = await fetch("/api/analysis/settings", { cache: "no-store" });
+      const latest = (await response.json()) as SettingsResponse & { error?: string };
+      if (!response.ok) throw new Error(latest.error || "无法重新读取设置");
+      // Keep edited fields; take untouched fields from the newly saved configuration.
+      const edits = Object.fromEntries(
+        Object.entries(settings).filter(
+          ([key, value]) =>
+            JSON.stringify(value) !==
+            JSON.stringify(source.profile.settings[key as keyof ValuationSettings]),
+        ),
+      );
+      setSettings({ ...latest.profile.settings, ...edits });
+      if (template === source.profile.template) setTemplate(latest.profile.template);
+      setSource(latest);
+      setError(null);
+      setNotice("已重新读取。你修改的字段保留当前输入，其他字段使用最新设置。请核对后再保存。");
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "重新读取失败");
+    } finally {
+      setBusy(false);
+    }
+  }
   const set = (key: keyof ValuationSettings, value: unknown) =>
     setSettings((current) => (current ? { ...current, [key]: value } : current));
   const choice = (
@@ -183,13 +233,24 @@ export function AnalysisSettings({
       setError("普通装备默认价须为大于0的梦幻币整数；留空表示未计价。");
       return;
     }
+    try {
+      normalizeConditions(settings.conditions);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "条件格式错误");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const response = await fetch("/api/analysis/settings/save", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ template, settings, baseHash: source.profile.hash }),
+        body: JSON.stringify({
+          template,
+          settings,
+          baseHash: source.profile.hash,
+          baseConfigurationHash: source.profile.configurationHash,
+        }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "保存失败");
@@ -229,14 +290,14 @@ export function AnalysisSettings({
         每次开始分析都会冻结这份 Prompt
         和参数。新批次使用新设置，历史结果保留。采集始终保存完整角色和资产资料，装备开关只控制分析时是否核价；区服金价和热度自动匹配。
       </p>
-      {error && (
+      {!source && error && (
         <p role="alert" className="analysis-pending-note">
           {error}
         </p>
       )}
       {!source && !error && <p role="status">正在读取设置…</p>}
       {source && settings && (
-        <>
+        <fieldset disabled={busy} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }}>
           <h3>计价方式</h3>
           <p className="analysis-pending-note">
             装备总开关：{settings.analyzeEquipment ? "已开启" : "已关闭，仅分析裸号"}。
@@ -465,6 +526,26 @@ export function AnalysisSettings({
               当前 Prompt 的计价部分已修改，复算规则尚未同步。
             </p>
           )}
+          {notice && (
+            <p role="status" className="analysis-pending-note">
+              {notice}
+            </p>
+          )}
+          {error && (
+            <p role="alert" className="analysis-pending-note">
+              保存未完成：{error}。输入仍保留在当前页面。
+            </p>
+          )}
+          {error?.includes("分析设置已被修改") && (
+            <button
+              type="button"
+              className="analysis-button analysis-button-outline"
+              disabled={busy}
+              onClick={() => void reloadSettings()}
+            >
+              重新读取并保留输入
+            </button>
+          )}
           <div className="analysis-detail-links">
             <button
               className="analysis-button analysis-button-primary"
@@ -481,7 +562,7 @@ export function AnalysisSettings({
               关闭
             </button>
           </div>
-        </>
+        </fieldset>
       )}
     </dialog>,
     document.body,
