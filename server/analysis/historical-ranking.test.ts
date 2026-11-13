@@ -61,7 +61,7 @@ function fixture() {
   crawl.db.prepare("UPDATE analysis_tasks SET status='completed',result_json=?,completed_at=?").run(
     JSON.stringify({
       score: 80,
-      valuation: { bare_role_value: 2000, decision: "PASS", price_difference_ratio: 1 },
+      valuation: { bare_role_value: 1000, decision: "PASS", price_difference_ratio: 0 },
     }),
     fetchedAt,
   );
@@ -140,7 +140,7 @@ it("17件推荐全部隐藏时仍返回符合条件和隐藏数量，不把失�
         "UPDATE analysis_tasks SET status='completed',result_json=?,completed_at=? WHERE run_id=?",
       )
       .run(
-        JSON.stringify({ valuation: { bare_role_value: 2000, decision: "PASS" } }),
+        JSON.stringify({ valuation: { bare_role_value: 1000, decision: "PASS" } }),
         x.fetchedAt,
         runId,
       );

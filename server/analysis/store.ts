@@ -1887,7 +1887,16 @@ export class AnalysisStore {
           cached = {
             signature: fingerprint,
             ...(!item.profileChanged
-              ? { recommendation: recommendationFor(record, item.valuation) }
+              ? {
+                  recommendation: recommendationFor(
+                    record,
+                    item.valuation,
+                    row.profile_json
+                      ? (JSON.parse(String(row.profile_json)) as AnalysisProfile).settings
+                          .conditions
+                      : undefined,
+                  ),
+                }
               : {}),
           };
         }

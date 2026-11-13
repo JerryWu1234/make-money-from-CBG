@@ -730,29 +730,10 @@ export function AnalysisPreview() {
                 <div className="analysis-list-intro">
                   <span>查看详情和复制不会隐藏商品；点击“确认隐藏”后才移出默认榜单。</span>
                   <span>
-                    挂牌价低于裸号预估价直接入榜，无需装备或宝宝配置门槛；其他商品沿用金额阶梯和配置条件，不限制差额百分比
+                    按本批次保存的入榜条件判断，且／或从上到下依次计算；未设置时默认挂牌价等于裸号估值。
                   </span>
+                  <span>条件满足才入榜；无法判断的商品可在全部商品查看依据。</span>
                   <span>差额 = 挂牌价 − 裸号估值</span>
-                  <span>
-                    原配置规则：有等级相差不超过 10 级的非野生宝宝，或至少 3 件带宝石装备（含灵饰）
-                  </span>
-                  <span>
-                    ≤100元：基础条件；100～200元：1类配置；200～300元：2类；300～500元：3类
-                  </span>
-                  <span>
-                    500～800元：3类且1类较强；800～1000元：3类且2类较强；差额超过1000元不展示
-                  </span>
-                  <details>
-                    <summary>查看配置条件（每类只计一次）</summary>
-                    <p>宝石装备：3件≥4段，较强为3件≥6段；同名套装：3个不同部位，较强为5个。</p>
-                    <p>
-                      灵饰：1件精炼≥4段且有2条有效附加属性，较强为2件；攻击属性按已采集的属性保存方案匹配，方案不明只认通用生存、速度属性。
-                    </p>
-                    <p>
-                      宝宝：等级符合且当前技能、资质、成长资料完整，较强为2只。资料完整不代表实战强度。边界归较低一档，较强配置同时满足普通条件。
-                    </p>
-                    <p>这些是筛选条件，不代表装备或宝宝已估价，也不证明资产能够补足差额。</p>
-                  </details>
                 </div>
                 {listReady && !!snapshot && !snapshot.rankingDeferred && !data?.ranking.length && (
                   <div className="analysis-start-empty">
@@ -807,14 +788,15 @@ export function AnalysisPreview() {
                           {displayTime(item.collectedAt)}
                         </p>
                         {item.recommendation && (
-                          <p>
-                            差额 {valuationMoney(item.recommendation.gap)} ·{" "}
-                            {item.recommendation.factors.length} 类配置，
-                            {item.recommendation.strongerFactors.length} 类较强
-                          </p>
+                          <p>差额 {valuationMoney(item.recommendation.gap)}</p>
                         )}
-                        {item.recommendation?.basis === "bare-role-discount" && (
-                          <p>入榜依据：挂牌低于裸号预估价</p>
+                        {item.recommendation?.basis && (
+                          <p>
+                            入榜依据：
+                            {item.recommendation.basis === "default-price"
+                              ? "默认条件：挂牌价等于裸号估值"
+                              : "本批次入榜条件全部计算后满足"}
+                          </p>
                         )}
                         <div className="analysis-rank-assets" aria-label="装备和宝宝简要信息">
                           {item.assetSummary ? (

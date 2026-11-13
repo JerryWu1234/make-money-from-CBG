@@ -43,10 +43,10 @@ test("推荐榜复制保留条目，确认后隐藏并持久保存，分页始�
         ...analysisResponse(record),
         valuation: {
           ...calculateValuation(record, createProfile("fixture")),
-          ...compareListingPrice(1200, Number(record.listing.price)),
+          ...compareListingPrice(1000, Number(record.listing.price)),
           asset_scope: "body",
-          bare_role_value: 1200,
-          model_value: 1200,
+          bare_role_value: 1000,
+          model_value: 1000,
         },
       };
       crawl.db
