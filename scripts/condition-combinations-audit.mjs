@@ -120,7 +120,9 @@ try {
       if (
         /人物装备|灵饰/.test(category) ||
         /^role_using_equip_(?:[1-6]|18[7-9]|190)$/.test(item.location || "") ||
-        /【装备角色】/.test(official)
+        /【装备角色】/.test(official) ||
+        /【装备条件】\s*等级\s*[:：]?\s*\d+/.test(official) ||
+        /^等级\s*[:：]?\s*\d+$/.test(item.attributes?.装备条件 || "")
       ) {
         counts.roleAndJewelry++;
         continue;

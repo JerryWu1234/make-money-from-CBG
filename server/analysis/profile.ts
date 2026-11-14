@@ -1,4 +1,4 @@
-import { normalizeConditions, type ConditionNode } from "./conditions";
+import { CONDITION_REVIEW_VERSION, normalizeConditions, type ConditionNode } from "./conditions";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -20,6 +20,8 @@ export const PROMPT_FILE = resolve("prompts/role-valuation.md");
 export const CALCULATION_VERSION = "price-comparison-v39";
 // Update alongside the calculator when changing pricing sections III through VIII.
 const PRICING_HASH = "9d3bb4e828a36b125661c30c1aeccde3626e908e9bb1acbea464fac84b8745c9";
+// Refined proof checks revalidate current-policy reviews without discarding valid AI work.
+const CONDITION_PROOF_VERSION = "source-classification-v2";
 export const DEFAULT_SETTINGS: ValuationSettings = {
   analyzeEquipment: false,
   pricingScope: "all",
@@ -172,6 +174,8 @@ export function createProfile(
     configurationHash: textHash(
       JSON.stringify([
         template,
+        CONDITION_REVIEW_VERSION,
+        CONDITION_PROOF_VERSION,
         {
           ...normalized,
           ...(normalized.conditions
@@ -197,6 +201,8 @@ export function createProfile(
         settingsHash,
         CALCULATION_VERSION,
         "valuation-schema-v4",
+        CONDITION_REVIEW_VERSION,
+        CONDITION_PROOF_VERSION,
         "pricing-progress-v1",
         "final-assets-v1",
         "pet-region-v2",

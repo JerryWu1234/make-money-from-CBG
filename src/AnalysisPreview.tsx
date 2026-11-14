@@ -154,6 +154,7 @@ export function AnalysisPreview() {
   const hiddenRecommendations = data?.rankingPagination?.hiddenTotal || 0;
   const sameCalculation =
     !run?.calculationVersion || run.calculationVersion === data?.profile?.calculationVersion;
+  const sameProfile = !run?.profileHash || run.profileHash === data?.profile?.hash;
   const sameMarket = !run?.marketExpired;
   const selectedModel = selectedModels[provider];
   const effectiveModel = selectedModel || defaultModels[provider];
@@ -310,6 +311,7 @@ export function AnalysisPreview() {
       setResultsPage(1);
       if (
         sameCalculation &&
+        sameProfile &&
         sameMarket &&
         sameModel &&
         run?.provider === selected &&
@@ -327,7 +329,7 @@ export function AnalysisPreview() {
           model: selectedModels[selected] || undefined,
         });
     },
-    [run, mutate, sameCalculation, sameMarket, sameModel, selectedModels],
+    [run, mutate, sameCalculation, sameProfile, sameMarket, sameModel, selectedModels],
   );
   const changeProvider = (selected: AiProvider) => {
     setProvider(selected);
@@ -405,7 +407,7 @@ export function AnalysisPreview() {
         ? "按新模型开始分析"
         : run && !sameMarket
           ? "刷新行情并重新分析"
-          : run && !sameCalculation
+          : run && (!sameCalculation || !sameProfile)
             ? "按新规则开始分析"
             : run?.status === "paused"
               ? "继续分析"
@@ -572,7 +574,7 @@ export function AnalysisPreview() {
                       ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
                       : run && !sameMarket
                         ? "本批次区服行情已过期。重新分析将刷新行情并使用新批次，已有结果保留。"
-                        : run && !sameCalculation
+                        : run && (!sameCalculation || !sameProfile)
                           ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
                           : run?.status === "paused"
                             ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续时沿用原计价设置，并发数使用当前输入。`

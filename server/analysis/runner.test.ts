@@ -138,6 +138,96 @@ function untilAborted(signal: AbortSignal): Promise<never> {
 }
 
 describe("持久化的商品分析队列", () => {
+  it("条件自动修正等待会话清理时不被另一并发槽重复领取", async () => {
+    const { crawl, store, runner, analyze, connect } = setup(["a", "b", "c"], valuationRecord);
+    const record = crawl.detail("a") as SavedRoleRecord;
+    const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), {
+      ...DEFAULT_SETTINGS,
+      conditions: {
+        id: "G1",
+        operator: "and",
+        evaluation: "sequence",
+        children: [{ id: "C1", text: "人物名称已采集" }],
+      },
+      servers: [{ serverId: record.listing.serverId, age: "three", rank: 10 }],
+    });
+    let unblock!: () => void, entered!: () => void;
+    const cleanupGate = new Promise<void>((r) => {
+      unblock = r;
+    });
+    const cleanupStarted = new Promise<void>((r) => {
+      entered = r;
+    });
+    const calls = { a: 0, b: 0, c: 0 };
+    analyze.mockImplementation(async (prompt) => {
+      const key = ["a", "b", "c"].find((k) =>
+        prompt.includes(`商品 ID：${k}。`),
+      )! as keyof typeof calls;
+      calls[key]++;
+      if (key === "b") await cleanupStarted;
+      const source = crawl.detail(key) as SavedRoleRecord;
+      return {
+        text: JSON.stringify({
+          decision: calculateValuation(source, profile).decision,
+          reason: "核对名称",
+          extracted_facts: [],
+          condition_results: [
+            {
+              id: "C1",
+              sourceText: "人物名称已采集",
+              matched: true,
+              reason: "名称已采集",
+              observations: [
+                {
+                  label: "名称",
+                  path: "/listing/name",
+                  quote: source.listing.name,
+                  numericValue: null,
+                },
+              ],
+              calculation:
+                key === "a" && calls.a === 1
+                  ? { operation: "count", inputs: [0], result: 1 }
+                  : null,
+              comparison: null,
+            },
+          ],
+        }),
+      };
+    });
+    connect.mockImplementation(async () => ({
+      model: "test-model",
+      analyze,
+      acquireSession: async () => {
+        let repairing = false;
+        return {
+          analyze: async (...args) => {
+            repairing = args[0].includes("商品 ID：a。") && calls.a === 0;
+            return analyze(...args);
+          },
+          release: async () => {
+            if (repairing) {
+              entered();
+              await cleanupGate;
+            }
+          },
+        };
+      },
+    }));
+    try {
+      const id = await runner.start("codex", true, profile, true, "test-model", 3, undefined, 2);
+      await cleanupStarted;
+      await vi.waitFor(() => expect(calls.c).toBe(1));
+      expect(calls.a).toBe(1);
+      unblock();
+      await runner.settled();
+      expect(store.run(id)).toMatchObject({ completed: 3, failed: 0 });
+      expect(calls).toEqual({ a: 2, b: 1, c: 1 });
+    } finally {
+      unblock();
+    }
+  });
+
   it.each([true, false])("条件响应最多自动修正一次，成功=%s，保留两次原文", async (success) => {
     const { crawl, store, runner, analyze } = setup(["a"], valuationRecord);
     const record = crawl.detail("a") as SavedRoleRecord;
@@ -1173,7 +1263,7 @@ describe("持久化的商品分析队列", () => {
       .prepare(
         "UPDATE listings SET detail_json=json_set(detail_json,'$.raw.large',?) WHERE key='a'",
       )
-      .run("大".repeat(100_000));
+      .run("大".repeat(400_000));
     const large = await runner.start("codex");
     await runner.settled();
     expect(store.run(large)).toMatchObject({ failed: 1, completed: 0, total: 1 });
@@ -1181,7 +1271,7 @@ describe("持久化的商品分析队列", () => {
     const item = store
       .overview({ runId: large })
       .records.items.find((item) => item.state === "failed")!;
-    expect(store.detail(item.taskId!)?.inputText).toContain("大".repeat(100_000));
+    expect(store.detail(item.taskId!)?.inputText).toContain("大".repeat(400_000));
   });
   it("空库试分析不连接 AI，分页查询覆盖全部记录，暂停后清空同时删除分析历史", async () => {
     const { crawl, store, runner, connect } = setup([]);
