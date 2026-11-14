@@ -60,6 +60,7 @@ const postRoutes = new Set([
   "/api/analysis/pet/check",
   "/api/analysis/pet-gear/check",
   "/api/analysis/settings/save",
+  "/api/analysis/conditions/compile",
   "/api/analysis/school-formula/confirm",
   "/api/analysis/recommendation/view",
 ]);
@@ -171,7 +172,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
       req.method === "POST"
         ? await verifyRequestBody(
             req,
-            pathname === "/api/analysis/settings/save" ? 128 * 1024 : 4096,
+            pathname === "/api/analysis/settings/save" ||
+              pathname === "/api/analysis/conditions/compile"
+              ? 256 * 1024
+              : 4096,
           )
         : {};
     if (browserUseRoutes.has(pathname) && browserControl.changing) throw browserBusyError();
@@ -300,6 +304,22 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
         case "/api/analysis/settings":
           result = await analysis.analysisSettings();
           break;
+        case "/api/analysis/conditions/compile": {
+          const controller = new AbortController();
+          const cancel = () => controller.abort(new Error("条件解析请求已取消"));
+          const deadline = setTimeout(
+            () => controller.abort(new Error("条件解析超时，请重试")),
+            120_000,
+          );
+          res.once("close", cancel);
+          try {
+            result = await analysis.compileAnalysisConditions(input, controller.signal);
+          } finally {
+            clearTimeout(deadline);
+            res.removeListener("close", cancel);
+          }
+          break;
+        }
         case "/api/analysis/settings/save":
           result = analysis.saveAnalysisSettings(input);
           break;

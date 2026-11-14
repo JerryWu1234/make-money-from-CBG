@@ -1,11 +1,7 @@
 import type { SavedRoleRecord } from "../crawler/types";
 import type { ValuationResult } from "./valuation-types";
-import {
-  defaultConditions,
-  evaluateConditions,
-  normalizeConditions,
-  type ConditionGroup,
-} from "./conditions";
+import { defaultConditions, type ConditionGroup } from "./conditions";
+import { evaluateDirectConditions } from "./direct-condition-review";
 
 export type Recommendation = {
   status: "recommended" | "manual" | "excluded";
@@ -13,7 +9,7 @@ export type Recommendation = {
   gap: number | null;
   factors: string[];
   strongerFactors: string[];
-  conditionReview?: ReturnType<typeof evaluateConditions>;
+  conditionReview?: ReturnType<typeof evaluateDirectConditions>;
 };
 
 export function recommendationFor(
@@ -40,14 +36,7 @@ export function recommendationFor(
     return result;
   result.gap = (Math.round(asking * 100) - Math.round(bare * 100)) / 100;
   const tree = conditions || defaultConditions();
-  // Only evidence from this exact saved configuration can satisfy text conditions.
-  const evidence =
-    conditions &&
-    JSON.stringify(normalizeConditions(value?.condition_review?.tree)) ===
-      JSON.stringify(normalizeConditions(conditions))
-      ? value?.condition_review?.results
-      : [];
-  const review = evaluateConditions(tree, evidence, { asking, bare });
+  const review = evaluateDirectConditions(tree, record, { asking, bare }, value?.condition_review);
   result.conditionReview = review;
   const status = review.results.find((entry) => entry.id === tree.id)?.status;
   result.status = status === "met" ? "recommended" : status === "unknown" ? "manual" : "excluded";

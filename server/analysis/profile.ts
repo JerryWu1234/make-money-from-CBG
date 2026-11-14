@@ -1,4 +1,4 @@
-import { normalizeConditions } from "./conditions";
+import { normalizeConditions, type ConditionNode } from "./conditions";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -160,13 +160,25 @@ export function createProfile(
     end > start &&
     textHash(template.slice(start, end).replace(/\s/g, "")) === PRICING_HASH;
   const { b: _b, a: _a, budget: _budget, extraCost: _extraCost, ...pricingSettings } = normalized;
+  function conditionConfiguration(node: ConditionNode): ConditionNode {
+    if ("children" in node) return { ...node, children: node.children.map(conditionConfiguration) };
+    const copy = { ...node };
+    delete copy.rule;
+    return copy;
+  }
   const promptHash = textHash(template),
     settingsHash = textHash(JSON.stringify(pricingSettings));
   return {
     configurationHash: textHash(
       JSON.stringify([
         template,
-        { ...normalized, servers: normalized.servers.filter((row) => row.source !== "auto") },
+        {
+          ...normalized,
+          ...(normalized.conditions
+            ? { conditions: conditionConfiguration(normalized.conditions) }
+            : {}),
+          servers: normalized.servers.filter((row) => row.source !== "auto"),
+        },
       ]),
     ),
     version: "role-valuation-v1",
@@ -206,6 +218,13 @@ function initialize(db: DatabaseSync) {
     "CREATE TABLE IF NOT EXISTS analysis_settings (id INTEGER PRIMARY KEY CHECK(id=1), settings_json TEXT NOT NULL)",
   );
 }
+function savedConditionRules(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const node = { ...(value as Record<string, unknown>) };
+  if (Array.isArray(node.children)) node.children = node.children.map(savedConditionRules);
+  delete node.rule;
+  return node;
+}
 export function loadProfile(
   db: DatabaseSync,
   file = PROMPT_FILE,
@@ -230,7 +249,11 @@ export function loadProfile(
       : stored || DEFAULT_SETTINGS;
   // Historical views retain market identity; execution requires fresh data by default.
   const market = marketServers(db, Date.now(), options.allowExpiredMarket);
-  const manual = normalizeSettings(settings).servers.filter(
+  const normalized = normalizeSettings({
+    ...settings,
+    ...(settings.conditions ? { conditions: savedConditionRules(settings.conditions) } : {}),
+  });
+  const manual = normalized.servers.filter(
     (row: ValuationSettings["servers"][number]) => row.source !== "auto",
   );
   const listed = new Set(
@@ -247,7 +270,7 @@ export function loadProfile(
       !manual.some((item: ValuationSettings["servers"][number]) => item.serverId === row.serverId),
   );
   const profile = createProfile(readFileSync(file, "utf8"), {
-    ...settings,
+    ...normalized,
     servers: [...manual, ...available],
   });
   const confirmations = loadAscendedSchoolFormulaConfirmations(db);

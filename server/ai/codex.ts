@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import { Codex, type WebSearchItem, type ThreadItem } from "@openai/codex-sdk";
-import type { CodexLogin } from "./types";
+import type { AnalysisRequestOptions, CodexLogin } from "./types";
 import { codexHomeEnv } from "./codex-home";
 import { CODEX_HTTP_OVERRIDES } from "./codex-provider";
 import {
@@ -397,7 +397,7 @@ function runCodexRequest(...args: Parameters<typeof runCodexRequestRaw>) {
 async function runCodexRequestRaw(
   prompt: string,
   signal: AbortSignal,
-  options?: { model: string; outputSchema: unknown; bareRoleReview?: boolean },
+  options?: { model: string; outputSchema: unknown } & AnalysisRequestOptions,
   search = false,
   probe = false,
 ) {
@@ -405,6 +405,7 @@ async function runCodexRequestRaw(
   const request = new AbortController();
   const cancel = () => request.abort(signal.reason);
   signal.addEventListener("abort", cancel, { once: true });
+  const structuredReview = options?.bareRoleReview || options?.conditionReview;
   try {
     signal.throwIfAborted();
     const codex = new Codex({
@@ -422,7 +423,7 @@ async function runCodexRequestRaw(
           plugins: false,
           skip_host_skill_discovery: true,
           shell_snapshot: false,
-          ...(probe || search || options?.bareRoleReview
+          ...(probe || search || structuredReview
             ? {
                 shell_tool: false,
                 unified_exec: false,
@@ -442,15 +443,16 @@ async function runCodexRequestRaw(
       sandboxMode: "read-only",
       approvalPolicy: "never",
       webSearchMode: search ? "live" : "disabled",
-      modelReasoningEffort:
-        !probe && !search && !options?.bareRoleReview && options?.model === "gpt-6-luna"
+      modelReasoningEffort: options?.conditionReview
+        ? "high"
+        : !probe && !search && !options?.bareRoleReview && options?.model === "gpt-6-luna"
           ? "max"
           : "low",
     });
-    if (probe || options?.bareRoleReview) {
+    if (probe || structuredReview) {
       const { events } = await thread.runStreamed(prompt, {
         signal: request.signal,
-        ...(options?.bareRoleReview ? { outputSchema: options.outputSchema } : {}),
+        ...(structuredReview ? { outputSchema: options!.outputSchema } : {}),
       });
       let finalResponse = "";
       let streamError = "";
@@ -485,19 +487,20 @@ async function runCodexRequestRaw(
 export async function requestCodex(
   prompt: string,
   signal: AbortSignal,
-  options?: { model: string; outputSchema: unknown; bareRoleReview?: boolean },
+  options?: { model: string; outputSchema: unknown } & AnalysisRequestOptions,
 ) {
   const result = await runCodexRequest(prompt, signal, options);
   return {
     text: result.finalResponse.trim(),
-    usage: options?.bareRoleReview
-      ? {
-          ...result.usage,
-          input_scope: "body",
-          reasoning_effort: "low",
-          completion_mode: "turn.completed",
-        }
-      : (result.usage ?? null),
+    usage:
+      options?.bareRoleReview || options?.conditionReview
+        ? {
+            ...result.usage,
+            input_scope: options.conditionReview ? "role-conditions" : "body",
+            reasoning_effort: options.conditionReview ? "high" : "low",
+            completion_mode: "turn.completed",
+          }
+        : (result.usage ?? null),
   };
 }
 

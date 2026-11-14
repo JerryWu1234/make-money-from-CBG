@@ -1,3 +1,11 @@
+import {
+  assertConditionsCompiled,
+  conditionNodes,
+  normalizeConditions,
+  type ConditionGroup,
+} from "./conditions";
+import { compileConditionTexts } from "./condition-compiler";
+import { aiProvider } from "../ai-connection";
 import { prepareAnalysisClient } from "../ai-connection";
 import type { AiProvider } from "../ai/types";
 import { crawlDatabase, crawlStatus } from "../crawler/controller";
@@ -112,9 +120,47 @@ export async function analysisSettings() {
   };
 }
 export function saveAnalysisSettings(input: unknown) {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("分析设置格式错误");
   const profile = saveProfile(service().store.db, input);
   return { profile };
 }
+export async function compileAnalysisConditions(
+  input: Record<string, unknown>,
+  signal: AbortSignal,
+) {
+  assertServiceOpen();
+  const tree = normalizeConditions(input.conditions);
+  if (!tree) throw new Error("请先输入文字条件");
+  const provider = aiProvider(input.provider ?? "codex");
+  if (
+    input.model !== undefined &&
+    (typeof input.model !== "string" || !input.model.trim() || input.model.length > 200)
+  )
+    throw new Error("请选择有效的解析模型");
+  const textNodes = conditionNodes(tree).filter((node) => !("children" in node) && !node.price);
+  if (!textNodes.length) return { conditions: tree };
+  const compiled = await compileConditionTexts(
+    textNodes.map((node) => ({ id: node.id, text: (node as { text: string }).text })),
+    {
+      provider,
+      model: input.model as string | undefined,
+      signal,
+    },
+  );
+  signal.throwIfAborted();
+  const rules = new Map(compiled.map((entry) => [entry.id, entry.rule]));
+  const attach = (group: ConditionGroup): ConditionGroup => ({
+    ...group,
+    children: group.children.map((node) =>
+      "children" in node ? attach(node) : node.price ? node : { ...node, rule: rules.get(node.id) },
+    ),
+  });
+  const conditions = normalizeConditions(attach(tree));
+  assertConditionsCompiled(conditions);
+  return { conditions };
+}
+
 export function confirmSchoolFormula(productKeys: unknown, confirmed: unknown) {
   assertServiceOpen();
   return confirmAscendedSchoolFormula(service().store.db, productKeys, confirmed);
@@ -149,7 +195,8 @@ export async function startAnalysis(
   } catch {
     /* 缺失行情仍可分析，结果明确列出缺项。 */
   }
-  const currentProfile = loadProfile(service().store.db);
+  assertServiceOpen();
+  const currentProfile = loadProfile(analysis.store.db);
   const profile = equipmentOnly
     ? {
         ...createProfile(currentProfile.template, currentProfile.settings, true, false),
@@ -186,7 +233,9 @@ export async function resumeAnalysis(id: string, retry = false, concurrency?: nu
   assertServiceOpen();
   if (concurrency !== undefined) analysisConcurrency(concurrency);
   const analysis = service();
-  if (analysis.store.run(id)?.marketExpired) throw new Error(EXPIRED_MARKET_NOTICE);
+  const run = analysis.store.run(id);
+  if (!run) throw new Error("分析批次不存在");
+  if (run.marketExpired) throw new Error(EXPIRED_MARKET_NOTICE);
   if (!analysis.runner.isRunning()) {
     const row = analysis.store.db.prepare("SELECT id FROM analysis_runs WHERE id=?").get(id);
     if (!row) throw new Error("分析批次不存在");

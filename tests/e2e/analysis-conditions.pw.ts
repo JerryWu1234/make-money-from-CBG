@@ -11,7 +11,6 @@ import {
   saveProfile,
   loadProfile,
 } from "../../server/analysis/profile";
-import { aiConditionNodes } from "../../server/analysis/conditions";
 import { calculateValuation } from "../../server/analysis/valuation-calculator";
 import { valuationRecord } from "../fixtures/analysis";
 
@@ -66,64 +65,69 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
   );
   let recoveryGate: Promise<void> | undefined;
   let releaseRecovery: (() => void) | undefined;
+  const clientRequests: Array<{ provider: string; model?: string }> = [];
   let calls = 0;
   const requests: unknown[] = [];
-  const runner = new AnalysisRunner(store, async () => ({
-    model: "fixture-model",
-    analyze: async (prompt, schema) => {
-      calls++;
-      requests.push({ prompt, schema });
-      expect(prompt).toContain("补充条件判断");
-      const evidence = JSON.parse(
-        prompt.split("【商品资料开始】\n")[1].split("\n【商品资料结束】")[0],
-      );
-      expect(evidence).toEqual({ listing: record.listing, detail: record.detail });
-      const speed = Number(evidence.listing.attrs["速度"]);
-      const skill = evidence.detail.tabs.find(
-        (tab: { name: string; text: string }) =>
-          tab.name === "技能" && tab.text.includes("烹饪技巧"),
-      );
-      expect(skill.fields).toContainEqual({ name: "烹饪技巧", value: "100" });
-      const cooking = Number(
-        skill.fields.find((field: { name: string }) => field.name === "烹饪技巧").value,
-      );
-      const expected = calculateValuation(record, profile);
-      expect(
-        expected.bare_role_value,
-        JSON.stringify({ missing: expected.missing_fields, pending: expected.pending_rules }),
-      ).toBeGreaterThan(0);
-      return {
-        text: JSON.stringify({
-          decision: expected.decision,
-          reason: expected.reason,
-          extracted_facts: [],
-          condition_results: aiConditionNodes(profile.settings.conditions!).map((node) => ({
+  const runner = new AnalysisRunner(store, async (provider, model) => {
+    clientRequests.push({ provider, model });
+    return {
+      model: model || "fixture-model",
+      analyze: async (prompt, schema) => {
+        calls++;
+        requests.push({ prompt, schema });
+        expect(schema).toHaveProperty("properties.condition_results");
+        expect(prompt).toContain("条件证据列表摘要");
+        const expected = calculateValuation(record, profile);
+        expect(expected.bare_role_value).toBeGreaterThan(0);
+        const conditionResults = [];
+        for (const node of profile.settings.conditions?.children || []) {
+          if ("children" in node || node.price) continue;
+          if (node.text.startsWith("养成")) {
+            conditionResults.push({
+              id: node.id,
+              sourceText: node.text,
+              matched: null,
+              reason: "养成完整缺少可核实标准",
+              observations: [],
+              calculation: null,
+              comparison: null,
+            });
+            continue;
+          }
+          const speed = node.text.startsWith("速度");
+          const actual = speed ? 850 : 109;
+          const target = Number(node.text.match(/\d+/)![0]);
+          const levelIndex = record.detail!.tabs[0].fields.findIndex(
+            (field) => field.name === "级别",
+          );
+          conditionResults.push({
             id: node.id,
-            status:
-              node.id === "C2"
-                ? "unknown"
-                : node.id === "C3"
-                  ? cooking >= 120
-                    ? "met"
-                    : "unmet"
-                  : node.id === "C1"
-                    ? speed > (calls === 1 ? 800 : 900)
-                      ? "met"
-                      : "unmet"
-                    : "unknown",
-            reason:
-              node.id === "C2"
-                ? "模拟资料未提供完整配置，无法判断"
-                : node.id === "C1"
-                  ? `已采集速度${speed}`
-                  : node.id === "C3"
-                    ? `已采集烹饪技巧${cooking}`
-                    : "模拟角色资料依据",
-          })),
-        }),
-      };
-    },
-  }));
+            sourceText: node.text,
+            matched: speed ? actual > target : actual >= target,
+            reason: "根据本商品原始资料逐条判断",
+            observations: [
+              {
+                label: speed ? "人物速度" : "人物等级",
+                path: speed ? "/listing/attrs/速度" : `/detail/tabs/0/fields/${levelIndex}/value`,
+                quote: String(actual),
+                numericValue: actual,
+              },
+            ],
+            calculation: { operation: "identity", inputs: [0], result: actual },
+            comparison: { operator: speed ? "gt" : "gte", target },
+          });
+        }
+        return {
+          text: JSON.stringify({
+            decision: expected.decision,
+            reason: expected.reason,
+            extracted_facts: [],
+            condition_results: conditionResults,
+          }),
+        };
+      },
+    };
+  });
   try {
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
@@ -154,22 +158,36 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
         case "/api/ai/status":
           body = {
             codex: { state: "configured", account: { plan: "Plus" } },
-            deepseek: { state: "unconfigured" },
+            deepseek: { state: "configured", model: "fixture-deepseek-default" },
             deepseekModels: [],
           };
           break;
-        case "/api/ai/models":
-          body = {
-            provider: "codex",
-            defaultModel: "fixture-model",
-            models: [{ id: "fixture-model", name: "模拟模型" }],
-          };
+        case "/api/ai/models": {
+          const selectedProvider = url.searchParams.get("provider") || "codex";
+          body =
+            selectedProvider === "deepseek"
+              ? {
+                  provider: "deepseek",
+                  defaultModel: "fixture-deepseek-default",
+                  models: [
+                    { id: "fixture-deepseek-default", name: "模拟DeepSeek默认" },
+                    { id: "fixture-deepseek-custom", name: "模拟DeepSeek自选" },
+                  ],
+                }
+              : {
+                  provider: "codex",
+                  defaultModel: "fixture-model",
+                  models: [{ id: "fixture-model", name: "模拟模型" }],
+                };
           break;
+        }
         case "/api/analysis/settings":
           if (recoveryGate) await recoveryGate;
           profile = loadProfile(crawl.db, promptFile);
           body = { profile, promptFile, servers: [] };
           break;
+        case "/api/analysis/conditions/compile":
+          throw new Error("简单条件界面不应请求手动解析接口");
         case "/api/analysis/settings/save":
           try {
             profile = saveProfile(crawl.db, input, promptFile);
@@ -179,8 +197,9 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
           }
           break;
         case "/api/analysis/start":
+          profile = loadProfile(crawl.db, promptFile);
           body = store.run(
-            await runner.start("codex", input.force, profile, false, "fixture-model"),
+            await runner.start(input.provider, input.force, profile, false, input.model),
           );
           break;
         case "/api/analysis/status":
@@ -196,10 +215,13 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
       return route.fulfill({ json: body });
     });
     await page.goto("http://conditions.test/analysis-preview");
+    await page.getByLabel("分析 Agent", { exact: true }).selectOption("deepseek");
+    await expect(page.getByLabel("分析模型", { exact: true })).toBeEnabled();
+    await page.getByLabel("分析模型", { exact: true }).selectOption("fixture-deepseek-custom");
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "估值与挂牌比较设置" });
     await expect(
-      settings.getByText("未自定义时，默认：挂牌价等于裸号估值。", { exact: true }),
+      settings.getByText("未自定义时，默认：价格不限制。", { exact: true }),
     ).toBeVisible();
     await expect(settings.getByRole("button", { name: "增加条件组", exact: true })).toHaveCount(0);
     await settings.getByLabel("C1条件类型", { exact: true }).selectOption("text");
@@ -213,30 +235,32 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
     await expect(settings.getByText("已恢复未保存的输入。草稿仅在当前页面保留。")).toBeVisible();
-    await settings.getByRole("button", { name: "增加文字条件", exact: true }).click();
+    await settings.getByRole("button", { name: "添加条件", exact: true }).click();
     await settings.getByLabel("C2条件", { exact: true }).fill("养成完整");
     await settings.getByLabel("C2连接关系", { exact: true }).selectOption("or");
-    await settings.getByRole("button", { name: "增加文字条件", exact: true }).click();
-    await settings.getByLabel("C3条件", { exact: true }).fill("烹饪技巧至少120级");
-    await settings.getByRole("button", { name: "增加价格条件", exact: true }).click();
+    await settings.getByRole("button", { name: "添加条件", exact: true }).click();
+    await settings.getByLabel("C3条件", { exact: true }).fill("人物等级至少120级");
+    await settings.getByRole("button", { name: "添加条件", exact: true }).click();
+    await settings.getByLabel("C4条件类型", { exact: true }).selectOption("price");
     await settings.getByLabel("C4价格比较", { exact: true }).selectOption("lt");
-    await settings.getByLabel("C4估值调整", { exact: true }).selectOption("plus");
-    await settings.getByLabel("C4调整数值", { exact: true }).fill("10");
-    await settings.getByLabel("C4调整单位", { exact: true }).selectOption("percent");
-    await expect(settings.getByText("挂牌价小于裸号估值加上10%", { exact: true })).toBeVisible();
-    await page.screenshot({
-      path: testInfo.outputPath("A1-conditions-settings.png"),
-      fullPage: true,
-    });
-    await page.setViewportSize({ width: 390, height: 844 });
-    await settings.getByLabel("C4价格比较", { exact: true }).scrollIntoViewIfNeeded();
-    expect(
-      await settings
-        .getByLabel("入榜条件设置", { exact: true })
-        .evaluate((element) => element.scrollWidth <= element.clientWidth),
-    ).toBe(true);
-    await page.screenshot({ path: testInfo.outputPath("A2-conditions-mobile.png") });
-    await page.setViewportSize({ width: 1100, height: 1000 });
+    await settings.getByLabel("C4价格百分比", { exact: true }).fill("10");
+    await expect(settings.getByText(/裸号估值 × 90%/)).toBeVisible();
+    await settings.getByLabel("C4价格比较", { exact: true }).selectOption("gt");
+    await expect(settings.getByLabel("C4价格百分比", { exact: true })).toHaveValue("10");
+    await expect(settings.getByText(/裸号估值 × 110%/)).toBeVisible();
+    await settings.getByLabel("C4价格比较", { exact: true }).selectOption("none");
+    await expect(settings.getByLabel("C4价格百分比", { exact: true })).toHaveCount(0);
+    await settings.getByLabel("C4价格比较", { exact: true }).selectOption("lt");
+    await settings.getByLabel("C4价格百分比", { exact: true }).fill("10");
+    await expect(settings.getByLabel("C4价格比较", { exact: true }).locator("option")).toHaveCount(
+      3,
+    );
+    await expect(settings.getByLabel("C4估值调整", { exact: true })).toHaveCount(0);
+    await expect(settings.getByText(/裸号估值 × 90%/)).toBeVisible();
+    await expect(settings.getByRole("button", { name: "解析文字条件", exact: true })).toHaveCount(
+      0,
+    );
+    expect(calls).toBe(0);
     profile = saveProfile(
       crawl.db,
       {
@@ -275,27 +299,66 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
       "速度大于800，使用已采集资料",
     );
     await settings.getByLabel("C1条件", { exact: true }).fill("速度大于800");
-    await expect(settings.getByLabel("C3条件", { exact: true })).toHaveValue("烹饪技巧至少120级");
+    await expect(settings.getByLabel("C3条件", { exact: true })).toHaveValue("人物等级至少120级");
     await settings.getByRole("button", { name: "保存设置", exact: true }).scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("M2-restored-draft.png"), fullPage: true });
     await settings.getByRole("button", { name: "保存设置", exact: true }).click();
     await expect(settings).not.toBeVisible();
     expect(loadProfile(crawl.db, promptFile).settings.sumAdvancedMounts).toBe(false);
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
+    await expect(settings.getByLabel("C4价格百分比", { exact: true })).toHaveValue("10");
+    await settings.locator(".analysis-price-condition").scrollIntoViewIfNeeded();
+    await settings.locator(".analysis-price-condition").screenshot({
+      path: testInfo.outputPath("price-percentage-desktop.png"),
+    });
     await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
+    await expect(settings.getByRole("alert")).toHaveCount(0);
+    await page.setViewportSize({ width: 1100, height: 1400 });
+    await settings
+      .getByLabel("入榜条件设置", { exact: true })
+      .evaluate((element) => element.scrollIntoView({ block: "start" }));
+    await settings.screenshot({ path: testInfo.outputPath("A1-conditions-settings.png") });
+    await page.setViewportSize({ width: 390, height: 1000 });
+    await settings.locator(".analysis-price-condition").scrollIntoViewIfNeeded();
+    await settings.locator(".analysis-price-condition").screenshot({
+      path: testInfo.outputPath("price-percentage-mobile.png"),
+    });
+    await settings.getByLabel("C2连接关系", { exact: true }).scrollIntoViewIfNeeded();
+    expect(
+      await settings
+        .getByLabel("入榜条件设置", { exact: true })
+        .evaluate((element) => element.scrollWidth <= element.clientWidth),
+    ).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("A2-conditions-mobile.png") });
+    await page.setViewportSize({ width: 1100, height: 1000 });
     await settings.getByRole("button", { name: "关闭分析设置", exact: true }).click();
     expect(loadProfile(crawl.db, promptFile).settings.conditions).toEqual(
       profile.settings.conditions,
     );
-    await page.getByRole("button", { name: "开始分析已有商品", exact: true }).click();
+    expect(
+      loadProfile(crawl.db, promptFile).settings.conditions?.children.find(
+        (node) => node.id === "C4",
+      ),
+    ).toMatchObject({
+      price: { comparison: "lt", adjustment: "minus", unit: "percent", value: 10 },
+    });
+    expect(calls).toBe(0);
+    await page
+      .getByRole("button", {
+        name: /^(开始分析已有商品|分析新增或已更新商品|按新规则开始分析|按新模型开始分析)$/,
+      })
+      .click();
+    await expect
+      .poll(() => clientRequests[0])
+      .toEqual({ provider: "deepseek", model: "fixture-deepseek-custom" });
     await expect.poll(() => store.overview().run?.completed).toBe(1);
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
-    await expect(page.getByText("C2 养成完整：无法判断", { exact: true })).toBeVisible();
-    await expect(page.getByLabel("条件匹配")).toContainText("C1 速度大于800：满足");
-    await expect(page.getByLabel("条件匹配")).toContainText("已采集速度850");
-    await expect(page.getByLabel("条件匹配")).toContainText("G1 入榜条件（从上到下计算）：不满足");
-    await expect(page.getByLabel("条件匹配")).toContainText("C4 挂牌价小于裸号估值加上10%：满足");
+    await expect(page.getByText("条件 2 养成完整：无法判断", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("条件匹配")).toContainText("条件 1 速度大于800：满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("850");
+    await expect(page.getByLabel("条件匹配")).toContainText("最终结果（从上到下计算）：不满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("条件 4 挂牌价比裸号估值低10%：满足");
     expect(store.overview().ranking).toHaveLength(0);
     await page.screenshot({
       path: testInfo.outputPath("A3-condition-results.png"),
@@ -305,26 +368,49 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await page.reload();
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
-    await expect(page.getByLabel("条件匹配")).toContainText("C3 烹饪技巧至少120级：不满足");
-    await expect(page.getByLabel("条件匹配")).toContainText("已采集烹饪技巧100");
+    await expect(page.getByLabel("条件匹配")).toContainText("条件 3 人物等级至少120级：不满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("109");
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     await settings.getByLabel("C1条件", { exact: true }).fill("速度大于900");
-    await settings.getByRole("button", { name: /保存/ }).click();
-    await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
-    await expect(page.getByLabel("条件匹配")).toContainText("C1 速度大于800");
-    const oldDetail = store.detail(store.overview().records.items[0].taskId!, profile);
-    await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: /分析新增或已更新商品|按新设置/ }).click();
+    await settings.getByRole("button", { name: "保存设置", exact: true }).click();
+    expect(calls).toBe(1);
+    await page
+      .getByRole("button", {
+        name: /^(开始分析已有商品|分析新增或已更新商品|按新规则开始分析|按新模型开始分析)$/,
+      })
+      .click();
     await expect.poll(() => calls).toBe(2);
     await expect.poll(() => store.overview().run?.completed).toBe(1);
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
-    await expect(page.getByLabel("条件匹配")).toContainText("C1 速度大于900：不满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("条件 1 速度大于900：不满足");
+    expect(calls).toBe(2);
+    const storedResult = crawl.db
+      .prepare(
+        "SELECT result_json FROM analysis_tasks WHERE listing_key=? AND status='completed' ORDER BY completed_at ASC LIMIT 1",
+      )
+      .get(record.listing.key)!;
+    expect(String(storedResult.result_json)).toContain("速度大于800");
+    expect(String(storedResult.result_json)).not.toContain("速度大于900");
+    const oldDetail = store.detail(store.overview().records.items[0].taskId!, profile);
+    await page.keyboard.press("Escape");
+    await page.reload();
+    await page.getByRole("tab", { name: /^全部商品/ }).click();
+    await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
+    await expect(page.getByLabel("条件匹配")).toContainText("条件 1 速度大于900：不满足");
+    expect(calls).toBe(2);
     await writeFile(
       testInfo.outputPath("evidence.json"),
       JSON.stringify(
-        { fixture: true, calls, requests, oldDetail, current: store.overview() },
+        {
+          fixture: true,
+          calls,
+          clientRequests,
+          requests,
+          oldDetail,
+          current: store.overview(),
+        },
         null,
         2,
       ),
