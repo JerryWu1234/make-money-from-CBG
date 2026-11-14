@@ -159,7 +159,7 @@ await test("穿戴34段加独立背包铠甲11段合计45，类别不明时保�
   );
 });
 
-await test("已知18段但背包装备宝石字段缺失时，不能按0判定总数低于20", () => {
+await test("完整无宝石按0，18+0低于20；标签存在但未读取数值仍未知", () => {
   const record = fixture();
   record.detail.tabs[1].items = [
     {
@@ -174,6 +174,11 @@ await test("已知18段但背包装备宝石字段缺失时，不能按0判定�
       description: "等级100\n防御200",
     },
   ];
+  const zero = directConditionOracle(record);
+  assert.equal(zero.gemTotal, 18);
+  assert.equal(zero.gemUnknownCount, 0);
+  assert.equal(expectedDirectAuditChecks(zero).C1.matched, false);
+  record.detail.tabs[1].items[1].description += "\n锻炼等级 未读取";
   const oracle = directConditionOracle(record);
   assert.equal(oracle.gemKnownLowerBound, 18);
   assert.equal(oracle.gemUnknownCount, 1);

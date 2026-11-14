@@ -5,7 +5,7 @@ import {
 } from "./condition-rule-types";
 
 export type ConditionOperator = "and" | "or";
-export const CONDITION_REVIEW_VERSION = "ai-per-condition-v2";
+export const CONDITION_REVIEW_VERSION = "ai-per-condition-v3";
 export type PriceCondition = {
   comparison: "none" | "eq" | "lt" | "lte" | "gt" | "gte";
   adjustment: "none" | "minus" | "plus";

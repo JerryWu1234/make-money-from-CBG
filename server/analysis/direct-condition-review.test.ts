@@ -96,6 +96,47 @@ function proof(sourceText = "人物名称已采集"): DirectConditionOutput {
 const copy = <T>(input: T): T => structuredClone(input);
 
 describe("逐商品逐条条件输入与协议", () => {
+  it("完整装备无宝石的0段可引用真实详情，不能把其他缺失或冲突值伪造为0", () => {
+    const record = fixture(),
+      ti = record.detail!.tabs.length - 1;
+    record.detail!.tabs[ti].items = [
+      {
+        index: 0,
+        name: "测试武器",
+        kind: "equipment",
+        category: "人物装备 · 武器",
+        description: "等级80\n伤害100\n耐久300",
+      },
+    ];
+    const output: DirectConditionOutput = {
+      id: "C1",
+      sourceText: "总宝石数量等于0",
+      matched: true,
+      reason: "完整详情未显示宝石，按0段。",
+      observations: [
+        {
+          label: "未镶嵌宝石（按0段）",
+          path: `/detail/tabs/${ti}/items/0/description`,
+          quote: "等级80\n伤害100\n耐久300",
+          numericValue: 0,
+        },
+      ],
+      calculation: { operation: "sum", inputs: [0], result: 0 },
+      comparison: { operator: "eq", target: 0 },
+    };
+    const validate = () =>
+      validateDirectConditionResults([output], tree(output.sourceText), record, prices);
+    expect(validate().results[0]).toMatchObject({ matched: true, calculation: { result: 0 } });
+    record.detail!.equipmentCapture!.complete = false;
+    expect(validate).toThrow("条件观察数值不在引用原文中");
+    record.detail!.equipmentCapture!.complete = true;
+    record.detail!.tabs[ti].items[0].tooltip = "等级80\n锻炼等级5";
+    expect(validate).toThrow("条件观察数值不在引用原文中");
+    record.detail!.tabs[ti].items[0].tooltip = undefined;
+    output.observations[0].label = "缺少的伤害按0";
+    expect(validate).toThrow("条件观察数值不在引用原文中");
+  });
+
   it("保持原文和源路径，提供全部语义资料而不限定字段目录", () => {
     const conditions = tree("总宝石数量大于等于20", "角色修为大于等于27");
     conditions.children.unshift(defaultConditions().children[0]);
@@ -249,7 +290,7 @@ describe("逐商品逐条条件输入与协议", () => {
     expect(review.results[0]).toMatchObject({ matched, calculation: null, comparison: null });
     expect(review.results[0].reason).toContain("已知至少7，另1项缺少数值");
     const prompt = directConditionPrompt(tree(sourceText), record, prices);
-    expect(prompt).toContain("没有锻炼等级字段不是0");
+    expect(prompt).toContain("装备详情已完整读取且没有宝石／锻炼等级信息时，按未镶嵌、0段计入合计");
     expect(prompt).toContain("若已知下界不能确定结论，返回matched=null");
   });
 
@@ -575,6 +616,71 @@ describe("逐条条件结果校验及失效", () => {
     expect(() =>
       validateDirectConditionResults([output], tree(output.sourceText), fixture(), prices),
     ).toThrow("与原文不一致");
+  });
+
+  it.each([
+    ["装备数量大于等于8", 8, true],
+    ["装备数量大于7", 8, true],
+    ["装备数量大于8", 8, false],
+    ["装备数量大于等于9", 8, false],
+    ["装备数量大于等于8", 7, false],
+    ["总宝石数量大于等于8", 8, false],
+  ] as const)("计数下界按已分类实物去重，不计未知项：%s，已知%d", (sourceText, count, accepted) => {
+    const record = fixture(),
+      ti = record.detail!.tabs.length - 1;
+    record.detail!.tabs[ti].items = [
+      ...Array.from({ length: count }, (_, index) => ({
+        index,
+        name: `已分类装备${index}`,
+        kind: "equipment" as const,
+        category: "人物装备 · 武器",
+        description: "等级 80",
+      })),
+      {
+        index: count,
+        name: "类别待核实物品",
+        kind: "equipment" as const,
+        description: "尚无明确装备对象",
+      },
+    ];
+    const output: DirectConditionOutput = {
+      ...proof(sourceText),
+      reason: `已知至少${count}件人物装备，另1项类别待核实。`,
+      observations: [
+        ...Array.from({ length: count }, (_, index) => [
+          {
+            label: "实物名称",
+            path: `/detail/tabs/${ti}/items/${index}/name`,
+            quote: `已分类装备${index}`,
+            numericValue: null,
+          },
+          {
+            label: "同一实物类别",
+            path: `/detail/tabs/${ti}/items/${index}/category`,
+            quote: "人物装备 · 武器",
+            numericValue: null,
+          },
+        ]).flat(),
+        {
+          label: "类别待核实",
+          path: `/detail/tabs/${ti}/items/${count}/name`,
+          quote: "类别待核实物品",
+          numericValue: null,
+        },
+      ],
+    };
+    const validate = () =>
+      validateDirectConditionResults([output], tree(sourceText), record, prices);
+    if (accepted) {
+      const review = validate();
+      expect(review.results[0]).toMatchObject({
+        matched: true,
+        calculation: null,
+        comparison: null,
+      });
+      expect(review.results[0].reason).toContain(`已知至少${count}`);
+      expect(hasCurrentDirectReview(tree(sourceText), record, prices, review)).toBe(true);
+    } else expect(validate).toThrow("明确数值比较必须提供计算与比较依据");
   });
 
   it("无充分非负下界的简单比较不能伪装成不完整资料而跳过计算", () => {

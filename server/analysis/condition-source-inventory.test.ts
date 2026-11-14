@@ -67,7 +67,7 @@ it("穿戴47段和同名背包7段分别保留，绑定和不受交易支持的�
   expect(inventory.gemSummary).toMatchObject({ knownSum: 54, total: 54 });
 });
 
-it("缺少锻炼字段保留未知，明确0参与清单，法宝和宝石材料不混入", () => {
+it("完整详情未显示宝石按0段，明确0参与清单，法宝和宝石材料不混入", () => {
   const record = fixture([
     character(0, 6),
     character(1, null),
@@ -77,21 +77,38 @@ it("缺少锻炼字段保留未知，明确0参与清单，法宝和宝石材料
   ]);
   const inventory = conditionSourceInventory(record);
   expect(inventory.equipment).toHaveLength(3);
-  expect(inventory.gemSummary).toMatchObject({ knownSum: 6, total: null });
-  expect(inventory.gemSummary.missingItems).toEqual([
-    { name: "合成测试装备1", path: "/detail/tabs/2/items/1", reason: "宝石段数未读取或有冲突" },
-  ]);
+  expect(inventory.gemSummary).toMatchObject({ knownSum: 6, total: 6, missingItems: [] });
+  expect(inventory.equipment[1].gemLevel).toBe(0);
+  expect(inventory.equipment[1].gemEvidence[0]).toMatchObject({
+    path: "/detail/tabs/2/items/1/description",
+  });
   expect(inventory.equipment[2].gemLevel).toBe(0);
 });
 
-it("缺少类别证据的装备显式列为未确认，不按名称猜类别或补零", () => {
+it.each([
+  { description: undefined, tooltip: undefined },
+  { description: "只有物品名称" },
+  { description: "等级70\n伤害100\n锻炼等级 未读取" },
+  { description: "等级70\n伤害100\n镶嵌宝石 未读取" },
+])("真正未读取或有宝石标签但无数值，不补0：%j", (patch) => {
+  const record = fixture([character(0, null, patch)]);
+  expect(conditionSourceInventory(record).equipment[0].gemLevel).toBeNull();
+});
+
+it("整体采集不完整时，缺少宝石信息仍保留未知", () => {
+  const record = fixture([character(0, null)]);
+  record.detail!.equipmentCapture!.complete = false;
+  expect(conditionSourceInventory(record).equipment[0].gemLevel).toBeNull();
+});
+
+it("类别未确认不猜类型，但完整详情明确无宝石时贡献0段", () => {
   const record = fixture([
     character(0, null, { attributes: {}, name: "名字看似头盔", category: undefined }),
   ]);
   const inventory = conditionSourceInventory(record);
   expect(inventory.equipment).toHaveLength(0);
   expect(inventory.unclassified).toHaveLength(1);
-  expect(inventory.gemSummary).toMatchObject({ total: null, classificationComplete: false });
+  expect(inventory.gemSummary).toMatchObject({ total: 0, classificationComplete: false });
 });
 
 it("原文冲突与未采齐均不会提供准确总数", () => {

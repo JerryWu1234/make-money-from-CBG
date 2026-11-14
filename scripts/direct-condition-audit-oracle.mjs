@@ -20,6 +20,38 @@ const uniqueNumber = (values) => {
 
 export function directConditionOracle(record) {
   const detail = record.detail;
+  const complete =
+    detail?.captureMode !== "body" &&
+    detail?.equipmentCapture?.complete === true &&
+    !detail.equipmentCapture.issues?.length;
+  function gemStage(item) {
+    const texts = [item.description, item.tooltip].filter(Boolean);
+    const values = texts.flatMap((raw) =>
+      [...raw.matchAll(/(?:锻炼等级|宝石等级)\s*[:：]?\s*(\d+)/g)].map((match) => Number(match[1])),
+    );
+    if (
+      texts.some(
+        (raw) => /锻炼等级|宝石等级/.test(raw) && !/(?:锻炼等级|宝石等级)\s*[:：]?\s*\d+/.test(raw),
+      )
+    )
+      values.push(null);
+    for (const key of ["锻炼等级", "宝石等级"]) {
+      const raw = item.attributes?.[key];
+      if (raw?.trim()) values.push(/^\d+$/.test(raw.trim()) ? Number(raw.trim()) : null);
+    }
+    if (texts.some((raw) => /未镶嵌宝石|没有镶嵌宝石/.test(raw))) values.push(0);
+    if (values.length) return uniqueNumber(values);
+    if (
+      complete &&
+      !texts.some((raw) => /锻炼等级|宝石等级|镶嵌宝石/.test(raw)) &&
+      texts.some(
+        (raw) =>
+          /等级\s*[:：]?\s*\d+/.test(raw) && /耐久|伤害|防御|命中|灵力|敏捷|气血|魔法/.test(raw),
+      )
+    )
+      return 0;
+    return null;
+  }
   const training = Object.fromEntries(trainingNames.map((name) => [name, []]));
   for (const [ti, tab] of (detail?.tabs || []).entries()) {
     if (!/^(人物|角色)(?:\/|$)/.test(tab.name)) continue;
@@ -103,30 +135,25 @@ export function directConditionOracle(record) {
           item.kind === "equipment" ||
           /锻炼等级|镶嵌宝石/.test(raw)
         ) {
-          classificationKnown = false;
+          const gemLevel = gemStage(item);
+          if (gemLevel !== 0) classificationKnown = false;
           unclassifiedEquipment.push({
             name: item.name,
             path: `/detail/tabs/${ti}/items/${ii}`,
+            gemLevel,
           });
         }
         continue;
       }
-      const stages = [...raw.matchAll(/锻炼等级\s*[:：]?\s*(\d+)/g)].map((match) =>
-        Number(match[1]),
-      );
       equipment.push({
         name: item.name,
         index: item.index,
-        gemLevel: uniqueNumber(stages),
+        gemLevel: gemStage(item),
         path: `/detail/tabs/${ti}/items/${ii}`,
         raw,
       });
     }
   }
-  const complete =
-    detail?.captureMode !== "body" &&
-    detail?.equipmentCapture?.complete === true &&
-    !detail.equipmentCapture.issues?.length;
   return {
     training: levels,
     trainingTotal: sum(trainingNames.map((name) => levels[name].current)),
@@ -138,7 +165,8 @@ export function directConditionOracle(record) {
       ? equipment.reduce((total, item) => total + (item.gemLevel ?? 0), 0)
       : null,
     gemUnknownCount: complete
-      ? equipment.filter((item) => item.gemLevel === null).length + unclassifiedEquipment.length
+      ? equipment.filter((item) => item.gemLevel === null).length +
+        unclassifiedEquipment.filter((item) => item.gemLevel !== 0).length
       : null,
   };
 }

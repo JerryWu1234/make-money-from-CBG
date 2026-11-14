@@ -372,6 +372,9 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await expect(page.getByLabel("条件匹配")).toContainText("109");
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
+    crawl.db
+      .prepare("UPDATE analysis_runs SET status='paused' WHERE id=?")
+      .run(store.overview().run!.id);
     await settings.getByLabel("C1条件", { exact: true }).fill("速度大于900");
     await settings.getByRole("button", { name: "保存设置", exact: true }).click();
     expect(calls).toBe(1);
