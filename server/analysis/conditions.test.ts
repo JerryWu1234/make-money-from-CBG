@@ -82,6 +82,33 @@ describe("价格条件百分比", () => {
     },
   );
 
+  it.each([
+    ["lt", 5346.65, 10, 4811.98, "met", "4811.99"],
+    ["lt", 5346.65, 10, 4811.99, "unmet", "4811.99"],
+    ["gt", 5346.65, 10, 5881.32, "unmet", "5881.32"],
+    ["gt", 5346.65, 10, 5881.33, "met", "5881.32"],
+    ["lt", 1000, 0.00050000000001, 999.99, "unmet", "999.99"],
+    ["lt", 1000, 0.0005, 999.99, "met", "1000.00"],
+    ["lt", 1000, 0.00049999999999, 999.99, "met", "1000.00"],
+    ["gt", 1000, 0.00049999999999, 1000.01, "met", "1000.00"],
+    ["gt", 1000, 0.0005, 1000.01, "unmet", "1000.01"],
+    ["gt", 1000, 0.00050000000001, 1000.01, "unmet", "1000.01"],
+    ["lt", 10000000, 1e-7, 9999999.98, "met", "9999999.99"],
+    ["lt", 10000000, 1e-7, 9999999.99, "unmet", "9999999.99"],
+    ["gt", 10000000, 1e-7, 10000000.01, "unmet", "10000000.01"],
+    ["gt", 10000000, 1e-7, 10000000.02, "met", "10000000.01"],
+  ] as const)(
+    "百分比十进制精确舍入 %s 裸号%s 幅度%s%% 挂牌%s => %s",
+    (comparison, bare, value, asking, status, target) => {
+      const tree = normalizeConditions(percentage(comparison, value))!;
+      const review = evaluateConditions(tree, [], { asking, bare });
+      expect(review.results.find((result) => result.id === "C1")).toMatchObject({ status });
+      expect(review.results.find((result) => result.id === "C1")?.reason).toContain(
+        `比较目标${target}元`,
+      );
+    },
+  );
+
   it("下浮最多100%，非有限值和负数不能保存，上浮可超过100%", () => {
     expect(normalizeConditions(percentage("lt", 100))).toBeDefined();
     expect(normalizeConditions(percentage("gt", 150))).toBeDefined();

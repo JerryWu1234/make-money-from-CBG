@@ -238,6 +238,25 @@ function combine(
       : "unknown";
 }
 
+function decimalRatio(value: number): [bigint, bigint] {
+  const [coefficient, exponent = "0"] = value.toString().split("e");
+  const [whole, fraction = ""] = coefficient.split(".");
+  const numerator = BigInt(whole + fraction);
+  const scale = fraction.length - Number(exponent);
+  return scale > 0 ? [numerator, 10n ** BigInt(scale)] : [numerator * 10n ** BigInt(-scale), 1n];
+}
+
+/** Validated percentages produce a nonnegative target; round once at the final cent. */
+function percentageTargetCents(bare: number, price: PriceCondition) {
+  const [amount, amountScale] = decimalRatio(bare);
+  const [percent, percentScale] = decimalRatio(price.value);
+  // Multiplication by 100 cents cancels the percent divisor of 100.
+  const numerator =
+    amount * (100n * percentScale + (price.adjustment === "minus" ? -percent : percent));
+  const denominator = amountScale * percentScale;
+  return Number((2n * numerator + denominator) / (2n * denominator));
+}
+
 export function evaluateConditions(
   tree: ConditionGroup,
   _evidence: ConditionResult[] = [],
@@ -297,7 +316,10 @@ export function evaluateConditions(
         const p = node.price;
         const offset =
           p.adjustment === "none" ? 0 : p.unit === "percent" ? (bare * p.value) / 100 : p.value;
-        const target = Math.round((bare + (p.adjustment === "minus" ? -offset : offset)) * 100);
+        const target =
+          p.unit === "percent" && p.adjustment !== "none"
+            ? percentageTargetCents(bare, p)
+            : Math.round((bare + (p.adjustment === "minus" ? -offset : offset)) * 100);
         const actual = Math.round(asking * 100);
         const met =
           p.comparison === "eq"
