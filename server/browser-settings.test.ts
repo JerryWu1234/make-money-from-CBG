@@ -1,8 +1,9 @@
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, expect, it } from "vite-plus/test";
+import { afterEach, expect, it, vi } from "vite-plus/test";
 import { BrowserSettingsStore } from "./browser-settings";
+import { showBrowserWorkPages } from "./config";
 
 const directories: string[] = [];
 const temporary = () => {
@@ -11,8 +12,55 @@ const temporary = () => {
   return path.join(directory, "browser-settings.json");
 };
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   for (const directory of directories.splice(0))
     rmSync(directory, { recursive: true, force: true });
+});
+
+it("显示操作过程选择持久保存，切换浏览器方式不会覆盖它", () => {
+  const file = temporary();
+  const store = new BrowserSettingsStore(file);
+  store.save("dedicated", true);
+  expect(new BrowserSettingsStore(file).get()).toEqual({
+    mode: "dedicated",
+    modes: ["dedicated"],
+    showWorkPages: true,
+  });
+  store.save("daily");
+  expect(new BrowserSettingsStore(file).get()).toEqual({
+    mode: "daily",
+    modes: ["daily"],
+    showWorkPages: true,
+  });
+  store.save("daily", false);
+  expect(new BrowserSettingsStore(file).get().showWorkPages).toBe(false);
+});
+
+it.each([null, "true", "false", 0, 1, {}, []])("拒绝无效显示开关 %j，保留原设置", (value) => {
+  const file = temporary();
+  const store = new BrowserSettingsStore(file);
+  store.save("dedicated", true);
+  expect(() => store.save("daily", value)).toThrow("必须为布尔值");
+  expect(new BrowserSettingsStore(file).get()).toEqual({
+    mode: "dedicated",
+    modes: ["dedicated"],
+    showWorkPages: true,
+  });
+});
+
+it("保存的显示选择优先于环境变量；未保存时保留环境变量兼容", () => {
+  const read = vi.spyOn(BrowserSettingsStore.prototype, "get");
+  read.mockReturnValue({ mode: "dedicated" });
+  vi.stubEnv("CBG_SHOW_WORK_PAGES", "0");
+  expect(showBrowserWorkPages()).toBe(false);
+  vi.stubEnv("CBG_SHOW_WORK_PAGES", "1");
+  expect(showBrowserWorkPages()).toBe(true);
+  read.mockReturnValue({ mode: "dedicated", showWorkPages: false });
+  expect(showBrowserWorkPages()).toBe(false);
+  vi.stubEnv("CBG_SHOW_WORK_PAGES", "0");
+  read.mockReturnValue({ mode: "dedicated", showWorkPages: true });
+  expect(showBrowserWorkPages()).toBe(true);
 });
 
 it("默认只启用保存登录的专用浏览器，读取不创建配置且不影响截图配置", () => {

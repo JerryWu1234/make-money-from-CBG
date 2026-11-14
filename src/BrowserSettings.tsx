@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export type BrowserMode = "dedicated" | "daily";
-type Settings = { mode: BrowserMode; connected: boolean; busy: boolean };
+type Settings = { mode: BrowserMode; showWorkPages: boolean; connected: boolean; busy: boolean };
 
-async function request(body?: { mode: BrowserMode }, signal?: AbortSignal): Promise<Settings> {
+async function request(
+  body?: { mode: BrowserMode; showWorkPages: boolean },
+  signal?: AbortSignal,
+): Promise<Settings> {
   const response = await fetch(body ? "/api/browser/settings/save" : "/api/browser/settings", {
     ...(body
       ? {
@@ -20,14 +23,15 @@ async function request(body?: { mode: BrowserMode }, signal?: AbortSignal): Prom
   const data = await response.json().catch(() => {
     throw new Error("浏览器设置服务响应无效，请重新读取设置");
   });
-  if (!response.ok) throw new Error(data.error || "浏览器运行方式保存失败");
+  if (!response.ok) throw new Error(data.error || "浏览器设置保存失败");
   if (
     !["dedicated", "daily"].includes(data.mode) ||
+    (data.showWorkPages !== undefined && typeof data.showWorkPages !== "boolean") ||
     typeof data.connected !== "boolean" ||
     typeof data.busy !== "boolean"
   )
     throw new Error("无法确认浏览器运行方式，请重新读取设置");
-  return data as Settings;
+  return { ...data, showWorkPages: data.showWorkPages ?? false } as Settings;
 }
 
 export function BrowserSettings({
@@ -46,6 +50,7 @@ export function BrowserSettings({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const mode = useRef<BrowserMode | null>(null);
+  const visibility = useRef<boolean | null>(null);
   const pending = useRef(false);
   const generation = useRef(0);
 
@@ -61,8 +66,11 @@ export function BrowserSettings({
       try {
         const data = await request(undefined, signal);
         if (id !== generation.current || signal?.aborted) return;
-        const changed = mode.current !== null && data.mode !== mode.current;
+        const changed =
+          mode.current !== null &&
+          (data.mode !== mode.current || data.showWorkPages !== visibility.current);
         mode.current = data.mode;
+        visibility.current = data.showWorkPages;
         setSettings(data);
         onMode(data.mode);
         setError("");
@@ -95,18 +103,20 @@ export function BrowserSettings({
     };
   }, [active, load, saving, settings]);
 
-  const save = async (next: BrowserMode) => {
+  const save = async (next: BrowserMode, showWorkPages = visibility.current ?? false) => {
     if (pending.current || active || settings?.busy) return;
-    if (next === mode.current) return;
+    if (next === mode.current && showWorkPages === visibility.current) return;
     ++generation.current;
     pending.current = true;
     setSaving(true);
     onBusy(true);
     setError("");
     try {
-      const data = await request({ mode: next });
-      if (data.mode !== next) throw new Error("浏览器运行方式未保存，请重试");
+      const data = await request({ mode: next, showWorkPages });
+      if (data.mode !== next || data.showWorkPages !== showWorkPages)
+        throw new Error("浏览器设置未保存，请重试");
       mode.current = data.mode;
+      visibility.current = data.showWorkPages;
       setSettings(data);
       onMode(data.mode);
       await onSaved(data.mode);
@@ -142,6 +152,23 @@ export function BrowserSettings({
               </small>
             </span>
           </label>
+          <label>
+            <input
+              type="checkbox"
+              checked={settings?.showWorkPages ?? false}
+              onChange={(event) => {
+                if (settings) void save(settings.mode, event.target.checked);
+              }}
+            />
+            <span>
+              <strong>显示操作过程（实时预览）</strong>
+              <small>
+                开启后在 Chrome
+                窗口查看查询、采集和网页查价过程。选择会保存，修改后重新开始查询生效。
+                运行时请避免手动操作工作页。
+              </small>
+            </span>
+          </label>
         </div>
       </fieldset>
       <p className="status-note" role="status">
@@ -150,8 +177,8 @@ export function BrowserSettings({
           : saving
             ? "正在保存并更新浏览器状态…"
             : active || settings?.busy
-              ? "查询、采集或分析正在运行，请先暂停任务再修改启用方式。"
-              : "一次只使用一个浏览器和一个扫码入口。切换后重新开始查询，已有浏览器登录资料会保留。"}
+              ? "查询、采集或分析正在运行，请先暂停任务再修改浏览器设置。"
+              : `${settings?.showWorkPages ? "已开启操作过程显示。" : "操作过程默认隐藏。"}切换后重新开始查询，已有浏览器登录资料会保留。`}
       </p>
       {error && (
         <p className="error-message" role="alert">

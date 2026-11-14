@@ -54,17 +54,17 @@ vp dev
 
 专用模式使用 [Playwright 持久上下文](https://playwright.dev/docs/api/class-browsertype#browser-type-launch-persistent-context)，固定配置目录为 `data/browser-profile/`，默认无前台窗口；在主页扫码后，后续角色查询、采集和资产分析共享同一个浏览器连接。暂停任务保留连接，服务正常关闭会保存配置，下次启动复用持久 Cookie 和 localStorage。网站登录过期或要求额外确认时仍需重新扫码；保存配置不代表永久登录。不要让多个服务同时占用这个目录，也不要将其提交或清理为运行日志。
 
-浏览器方式保存在独立的 `data/browser-settings.json`，不影响截图设置或估价规则。查询、扫码、采集、分析或连接请求仍在执行时禁止切换；切换后旧角色列表就绪状态清空，需重新开始查询。保存配置失败保留原模式；关闭旧连接失败会报告错误，不继续使用已失效的旧工作页。
+浏览器方式和 **显示操作过程（实时预览）** 开关保存在独立的 `data/browser-settings.json`，不影响截图设置或估价规则。开关默认关闭；开启后可在实际 Chrome 窗口实时查看查询、采集和网页查价过程，重启服务后保留选择。查询、扫码、采集、分析或连接请求仍在执行时禁止修改；修改后旧角色列表就绪状态清空，需重新开始查询。切换显示方式会关闭旧会话，保留登录资料。保存配置失败保留原设置；关闭旧连接失败会报告错误并回滚设置，不继续使用已失效的旧工作页。
 
 选择 **连接日常 Chrome** 时，先在日常 Chrome 的 `chrome://inspect/#remote-debugging` 启用远程调试。这个模式支持 macOS，默认读取 `~/Library/Application Support/Google/Chrome/DevToolsActivePort`；自定义用户数据目录可设置 `CBG_CHROME_USER_DATA_DIR`。这里只读取调试地址，不复制日常浏览器配置；新调试会话仍可能弹出允许提示。旧 `.chrome-cbg-profile` 不再使用。
 
-排查原始网页时，可设置 `CBG_SHOW_WORK_PAGES=1` 后启动服务，例如 `CBG_SHOW_WORK_PAGES=1 pnpm dev:stable`。程序会在 Chrome 的独立窗口显示列表，详情进入该窗口的标签栏；停止采集后保留这些页面，便于人工查看错误。运行中请避免手动修改工作页筛选条件；检查结束后可手动关闭标签。取消该环境变量或设为 `0` 后重新启动服务，即恢复默认隐藏模式。
+排查原始网页时，可在首页开启 **显示操作过程（实时预览）**。程序会在 Chrome 窗口显示列表及详情标签；正常停止采集后保留页面，便于人工查看错误，登录或访问受限时仍按原有保护规则关闭工作页。运行中请避免手动修改工作页筛选条件；检查结束后可手动关闭标签。关闭开关后重新开始查询，即恢复隐藏模式。尚未保存开关时，仍可用 `CBG_SHOW_WORK_PAGES=1 pnpm dev:stable` 设置初始值；界面保存的 `showWorkPages` 优先于该环境变量。
 
 日常 Chrome 请正常启动，不要添加 `--remote-debugging-port` 或 `--remote-debugging-pipe`。新版 Chrome 使用默认用户目录时，这些旧参数会阻止调试服务及界面开关生效；需要完全退出后去掉参数重新打开。程序会检查调试地址对应的端口，区分旧地址失效、连接权限错误和授权握手失败；修复后再次点击开始会重新读取地址。
 
 日常模式采用 [Playwright connectOverCDP](https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp)。使用 Chrome 默认用户上下文创建隐藏工作页，并在 [Target.createTarget](https://chromedevtools.github.io/devtools-protocol/tot/Target/#method-createTarget) 时设置 `hidden: true`、`background: true` 和 `forTab: false`，保留创建会话以维持工作页生命周期。隐藏工作页不出现在标签栏，也没有可见浏览器窗口。Chrome 授权提示本身仍需要用户允许，说明见 [Chrome 官方文档](https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session)。
 
-`GET /api/browser/settings` 只读取当前方式、连接和忙状态，不启动或重连浏览器。`POST /api/browser/settings/save` 接受 `{ "mode": "dedicated" }` 或 `{ "mode": "daily" }`。日志新增 `browser.disconnected`、`browser.transport_closed`（关闭码与原因）和 `browser.launch_error`，用于区分连接中断、专用浏览器启动失败和网站读取超时。
+`GET /api/browser/settings` 只读取当前方式、`showWorkPages`、连接和忙状态，不启动或重连浏览器。`POST /api/browser/settings/save` 接受 `{ "mode": "dedicated" }`、`{ "mode": "daily" }` 或 `{ "showWorkPages": true }`，也可同时保存方式与显示开关；仅保存方式会保留显示选择。日志新增 `browser.disconnected`、`browser.transport_closed`（关闭码与原因）和 `browser.launch_error`，用于区分连接中断、专用浏览器启动失败和网站读取超时。
 
 ## 状态与错误
 

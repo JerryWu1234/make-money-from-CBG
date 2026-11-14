@@ -204,10 +204,10 @@ export function App() {
                       : "开始查询角色"}
             </button>
             <p className="status-note">
-              {browserMode === "dedicated"
-                ? "查询在项目专用浏览器中运行，本页显示二维码、进度与查询结果。"
-                : result?.workPagesVisible
-                  ? "已开启原始工作页显示，可在 Chrome 窗口查看列表和详情；停止后保留页面供检查。"
+              {result?.workPagesVisible
+                ? "已开启操作过程显示，可在 Chrome 窗口实时查看查询、采集和网页查价过程。"
+                : browserMode === "dedicated"
+                  ? "查询在项目专用浏览器中运行，本页显示二维码、进度与查询结果。"
                   : "藏宝阁在隐藏工作页中运行，本页显示二维码、进度与查询结果。"}
               {browserMode === "dedicated"
                 ? "使用项目专用浏览器保存登录；首次使用或登录过期时仍需扫码。"
