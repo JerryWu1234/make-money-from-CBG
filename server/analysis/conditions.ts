@@ -186,7 +186,7 @@ export function assertConditionsCompiled(root?: ConditionGroup) {
   if (!root) return;
   for (const node of conditionNodes(root)) {
     if (!("children" in node) && !node.price && !node.rule)
-      throw new Error(`${node.id} 请先解析文字条件，再核对口径并保存`);
+      throw new Error(`${node.id} 条件尚未准备完成，请重新开始分析`);
   }
 }
 
@@ -304,7 +304,7 @@ export function evaluateConditions(
       result = resolve?.(node) || {
         id: node.id,
         status: "unknown",
-        reason: "文字条件须先解析为可执行规则，旧AI满足状态不作为入榜依据",
+        reason: "条件已更新，点击开始分析后查看判断结果",
       };
     results.push(result);
     return result;

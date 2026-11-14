@@ -57,7 +57,7 @@ describe("自由文字条件编译与本地执行", () => {
       children: [{ id: "C1", text: "数量大于8" }],
     };
     expect(normalizeConditions(tree)).toEqual(tree);
-    expect(() => assertConditionsCompiled(tree)).toThrow("先解析");
+    expect(() => assertConditionsCompiled(tree)).toThrow("条件尚未准备完成");
     expect(
       validateConditionResults(
         [{ id: "C1", status: "met", reason: "实际只有3件" }],

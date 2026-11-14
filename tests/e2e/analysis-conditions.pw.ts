@@ -11,7 +11,11 @@ import {
   saveProfile,
   loadProfile,
 } from "../../server/analysis/profile";
-import type { Condition, ConditionGroup } from "../../server/analysis/conditions";
+import { prepareConditionRules } from "../../server/analysis/condition-rule-cache";
+import type {
+  ConditionTextInput,
+  ConditionCompilerOptions,
+} from "../../server/analysis/condition-compiler";
 import {
   RULE_ENGINE_VERSION,
   type CompiledConditionRule,
@@ -70,9 +74,6 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
   );
   let recoveryGate: Promise<void> | undefined;
   let releaseRecovery: (() => void) | undefined;
-  let compileGate: Promise<void> | undefined;
-  let releaseCompile: (() => void) | undefined;
-  let failCompile = false;
   let compileCalls = 0;
   const compileRequests: Array<{ provider: string; model?: string }> = [];
   let calls = 0;
@@ -97,6 +98,53 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
       };
     },
   }));
+  async function compileFixture(
+    input: readonly ConditionTextInput[],
+    options: ConditionCompilerOptions,
+  ) {
+    compileCalls++;
+    compileRequests.push({ provider: options.provider, model: options.model });
+    return input.map((node) => {
+      const rule: CompiledConditionRule = node.text.startsWith("速度大于")
+        ? {
+            version: RULE_ENGINE_VERSION,
+            sourceText: node.text.trim(),
+            status: "ready",
+            issues: [],
+            expression: {
+              op: "gt",
+              args: [
+                { op: "field", path: "role.speed" },
+                { op: "literal", value: Number(node.text.match(/\d+/)![0]) },
+              ],
+            },
+            explanation: "人物速度阈值",
+          }
+        : node.text.startsWith("人物等级")
+          ? {
+              version: RULE_ENGINE_VERSION,
+              sourceText: node.text.trim(),
+              status: "ready",
+              issues: [],
+              expression: {
+                op: "gte",
+                args: [
+                  { op: "field", path: "role.level" },
+                  { op: "literal", value: 120 },
+                ],
+              },
+              explanation: "人物等级至少120",
+            }
+          : {
+              version: RULE_ENGINE_VERSION,
+              sourceText: node.text.trim(),
+              status: "unsupported",
+              issues: ["请说明养成完整的可核实标准"],
+              explanation: "缺少可核实标准",
+            };
+      return { id: node.id, rule };
+    });
+  }
   try {
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
@@ -127,7 +175,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
         case "/api/ai/status":
           body = {
             codex: { state: "configured", account: { plan: "Plus" } },
-            deepseek: { state: "unconfigured" },
+            deepseek: { state: "configured", model: "fixture-deepseek-default" },
             deepseekModels: [],
           };
           break;
@@ -155,64 +203,8 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
           profile = loadProfile(crawl.db, promptFile);
           body = { profile, promptFile, servers: [] };
           break;
-        case "/api/analysis/conditions/compile": {
-          compileCalls++;
-          compileRequests.push({ provider: input.provider, model: input.model });
-          if (compileCalls === 1)
-            expect(input).toMatchObject({ provider: "deepseek", model: "fixture-deepseek-custom" });
-          if (compileGate) await compileGate;
-          if (failCompile)
-            return route.fulfill({ status: 503, json: { error: "模拟解析服务暂时不可用" } });
-          const conditions = input.conditions as ConditionGroup;
-          function compileNode(node: Condition): Condition {
-            if (node.price) return node;
-            const rule: CompiledConditionRule = node.text.startsWith("速度大于")
-              ? {
-                  version: RULE_ENGINE_VERSION,
-                  sourceText: node.text.trim(),
-                  status: "ready",
-                  issues: [],
-                  expression: {
-                    op: "gt",
-                    args: [
-                      { op: "field", path: "role.speed" },
-                      { op: "literal", value: Number(node.text.match(/\d+/)![0]) },
-                    ],
-                  },
-                  explanation: `人物速度 > ${node.text.match(/\d+/)![0]}`,
-                }
-              : node.text.startsWith("人物等级")
-                ? {
-                    version: RULE_ENGINE_VERSION,
-                    sourceText: node.text.trim(),
-                    status: "ready",
-                    issues: [],
-                    expression: {
-                      op: "gte",
-                      args: [
-                        { op: "field", path: "role.level" },
-                        { op: "literal", value: 120 },
-                      ],
-                    },
-                    explanation: "人物等级 ≥ 120",
-                  }
-                : {
-                    version: RULE_ENGINE_VERSION,
-                    sourceText: node.text.trim(),
-                    status: "unsupported",
-                    issues: ["请说明养成完整的可核实标准"],
-                    explanation: "缺少可执行的衡量标准",
-                  };
-            return { ...node, rule };
-          }
-          body = {
-            conditions: {
-              ...conditions,
-              children: conditions.children.map((node) => compileNode(node as Condition)),
-            },
-          };
-          break;
-        }
+        case "/api/analysis/conditions/compile":
+          throw new Error("简单条件界面不应请求手动解析接口");
         case "/api/analysis/settings/save":
           try {
             profile = saveProfile(crawl.db, input, promptFile);
@@ -222,8 +214,17 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
           }
           break;
         case "/api/analysis/start":
+          profile = await prepareConditionRules(
+            crawl.db,
+            {
+              provider: input.provider,
+              model: input.model,
+              profileFile: promptFile,
+            },
+            compileFixture,
+          );
           body = store.run(
-            await runner.start("codex", input.force, profile, false, "fixture-model"),
+            await runner.start(input.provider, input.force, profile, false, input.model),
           );
           break;
         case "/api/analysis/status":
@@ -259,78 +260,23 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
     await expect(settings.getByText("已恢复未保存的输入。草稿仅在当前页面保留。")).toBeVisible();
-    await settings.getByRole("button", { name: "增加文字条件", exact: true }).click();
+    await settings.getByRole("button", { name: "添加条件", exact: true }).click();
     await settings.getByLabel("C2条件", { exact: true }).fill("养成完整");
     await settings.getByLabel("C2连接关系", { exact: true }).selectOption("or");
-    await settings.getByRole("button", { name: "增加文字条件", exact: true }).click();
+    await settings.getByRole("button", { name: "添加条件", exact: true }).click();
     await settings.getByLabel("C3条件", { exact: true }).fill("人物等级至少120级");
-    await settings.getByRole("button", { name: "增加价格条件", exact: true }).click();
+    await settings.getByRole("button", { name: "添加条件", exact: true }).click();
+    await settings.getByLabel("C4条件类型", { exact: true }).selectOption("price");
     await settings.getByLabel("C4价格比较", { exact: true }).selectOption("lt");
     await expect(settings.getByLabel("C4价格比较", { exact: true }).locator("option")).toHaveCount(
       3,
     );
     await expect(settings.getByLabel("C4估值调整", { exact: true })).toHaveCount(0);
     await expect(settings.getByText("挂牌价小于裸号估值", { exact: true }).last()).toBeVisible();
-    await settings.getByRole("button", { name: "解析文字条件", exact: true }).click();
-    await expect(settings.getByLabel("C1执行口径", { exact: true })).toContainText(
-      "人物速度 > 800",
+    await expect(settings.getByRole("button", { name: "解析文字条件", exact: true })).toHaveCount(
+      0,
     );
-    await expect(settings.getByLabel("C2执行口径", { exact: true })).toContainText(
-      "暂无法自动判断",
-    );
-    await expect(settings.getByLabel("C3执行口径", { exact: true })).toContainText(
-      "人物等级 ≥ 120",
-    );
-    await page.screenshot({
-      path: testInfo.outputPath("A1-conditions-settings.png"),
-      fullPage: true,
-    });
-    await page.setViewportSize({ width: 390, height: 844 });
-    await settings.getByLabel("C4价格比较", { exact: true }).scrollIntoViewIfNeeded();
-    expect(
-      await settings
-        .getByLabel("入榜条件设置", { exact: true })
-        .evaluate((element) => element.scrollWidth <= element.clientWidth),
-    ).toBe(true);
-    await page.screenshot({ path: testInfo.outputPath("A2-conditions-mobile.png") });
-    await page.setViewportSize({ width: 1100, height: 1000 });
-    failCompile = true;
-    await settings.getByRole("button", { name: "解析文字条件", exact: true }).click();
-    await expect(
-      settings.getByRole("alert").filter({ hasText: "模拟解析服务暂时不可用" }),
-    ).toBeVisible();
-    await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
-    failCompile = false;
-    compileGate = new Promise<void>((resolve) => {
-      releaseCompile = resolve;
-    });
-    const nextCompile = compileCalls + 1;
-    await settings.getByRole("button", { name: "解析文字条件", exact: true }).click();
-    await expect.poll(() => compileCalls).toBe(nextCompile);
-    await settings.getByRole("button", { name: "关闭分析设置", exact: true }).click();
-    await page.getByRole("button", { name: "分析设置", exact: true }).click();
-    await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
-    releaseCompile!();
-    compileGate = undefined;
-    await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
-    compileGate = new Promise<void>((resolve) => {
-      releaseCompile = resolve;
-    });
-    await settings.getByRole("button", { name: "解析文字条件", exact: true }).click();
-    await expect(settings.getByRole("button", { name: "保存设置", exact: true })).toBeDisabled();
-    await settings.getByLabel("C1条件", { exact: true }).fill("速度大于801");
-    await expect(
-      settings.getByText("条件或解析服务已修改，已取消旧解析；请按当前输入重新解析。"),
-    ).toBeVisible();
-    releaseCompile!();
-    compileGate = undefined;
-    await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于801");
-    await expect(settings.getByLabel("C1执行口径", { exact: true })).toContainText(
-      "尚未解析当前文字",
-    );
-    await settings.getByLabel("C1条件", { exact: true }).fill("速度大于800");
-    await settings.getByRole("button", { name: "解析文字条件", exact: true }).click();
-    await expect(settings.getByLabel("C1执行口径", { exact: true })).toContainText("可执行");
+    expect(compileCalls).toBe(0);
     profile = saveProfile(
       crawl.db,
       {
@@ -369,10 +315,6 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
       "速度大于800，使用已采集资料",
     );
     await settings.getByLabel("C1条件", { exact: true }).fill("速度大于800");
-    await settings.getByRole("button", { name: "保存设置", exact: true }).click();
-    await expect(settings.getByRole("alert")).toContainText("尚未解析");
-    await settings.getByRole("button", { name: "解析文字条件", exact: true }).click();
-    await expect(settings.getByLabel("C1执行口径", { exact: true })).toContainText("可执行");
     await expect(settings.getByLabel("C3条件", { exact: true })).toHaveValue("人物等级至少120级");
     await settings.getByRole("button", { name: "保存设置", exact: true }).scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("M2-restored-draft.png"), fullPage: true });
@@ -381,20 +323,42 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     expect(loadProfile(crawl.db, promptFile).settings.sumAdvancedMounts).toBe(false);
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
+    await expect(settings.getByRole("alert")).toHaveCount(0);
+    await page.setViewportSize({ width: 1100, height: 1400 });
+    await settings
+      .getByLabel("入榜条件设置", { exact: true })
+      .evaluate((element) => element.scrollIntoView({ block: "start" }));
+    await settings.screenshot({ path: testInfo.outputPath("A1-conditions-settings.png") });
+    await page.setViewportSize({ width: 390, height: 1000 });
+    await settings.getByLabel("C2连接关系", { exact: true }).scrollIntoViewIfNeeded();
+    expect(
+      await settings
+        .getByLabel("入榜条件设置", { exact: true })
+        .evaluate((element) => element.scrollWidth <= element.clientWidth),
+    ).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("A2-conditions-mobile.png") });
+    await page.setViewportSize({ width: 1100, height: 1000 });
     await settings.getByRole("button", { name: "关闭分析设置", exact: true }).click();
     expect(loadProfile(crawl.db, promptFile).settings.conditions).toEqual(
       profile.settings.conditions,
     );
-    await page.getByLabel("分析 Agent", { exact: true }).selectOption("codex");
-    await page.getByRole("button", { name: "开始分析已有商品", exact: true }).click();
+    expect(compileCalls).toBe(0);
+    await page
+      .getByRole("button", {
+        name: /^(开始分析已有商品|分析新增或已更新商品|按新规则开始分析|按新模型开始分析)$/,
+      })
+      .click();
+    await expect
+      .poll(() => compileRequests[0])
+      .toEqual({ provider: "deepseek", model: "fixture-deepseek-custom" });
     await expect.poll(() => store.overview().run?.completed).toBe(1);
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
-    await expect(page.getByText("C2 养成完整：无法判断", { exact: true })).toBeVisible();
-    await expect(page.getByLabel("条件匹配")).toContainText("C1 速度大于800：满足");
+    await expect(page.getByText("条件 2 养成完整：无法判断", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("条件匹配")).toContainText("条件 1 速度大于800：满足");
     await expect(page.getByLabel("条件匹配")).toContainText("850");
-    await expect(page.getByLabel("条件匹配")).toContainText("G1 入榜条件（从上到下计算）：不满足");
-    await expect(page.getByLabel("条件匹配")).toContainText("C4 挂牌价小于裸号估值：满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("最终结果（从上到下计算）：不满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("条件 4 挂牌价小于裸号估值：满足");
     expect(store.overview().ranking).toHaveLength(0);
     await page.screenshot({
       path: testInfo.outputPath("A3-condition-results.png"),
@@ -404,18 +368,22 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await page.reload();
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
-    await expect(page.getByLabel("条件匹配")).toContainText("C3 人物等级至少120级：不满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("条件 3 人物等级至少120级：不满足");
     await expect(page.getByLabel("条件匹配")).toContainText("109");
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     await settings.getByLabel("C1条件", { exact: true }).fill("速度大于900");
-    await settings.getByRole("button", { name: "解析文字条件", exact: true }).click();
-    await expect(settings.getByLabel("C1执行口径", { exact: true })).toContainText(
-      "人物速度 > 900",
-    );
     await settings.getByRole("button", { name: "保存设置", exact: true }).click();
+    expect(compileCalls).toBe(1);
+    await page
+      .getByRole("button", {
+        name: /^(开始分析已有商品|分析新增或已更新商品|按新规则开始分析|按新模型开始分析)$/,
+      })
+      .click();
+    await expect.poll(() => compileCalls).toBe(2);
+    await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
-    await expect(page.getByLabel("条件匹配")).toContainText("C1 速度大于900：不满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("条件 1 速度大于900：不满足");
     expect(calls).toBe(1);
     const storedResult = crawl.db
       .prepare("SELECT result_json FROM analysis_tasks WHERE listing_key=? AND status='completed'")
@@ -427,7 +395,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await page.reload();
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
-    await expect(page.getByLabel("条件匹配")).toContainText("C1 速度大于900：不满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("条件 1 速度大于900：不满足");
     expect(calls).toBe(1);
     await writeFile(
       testInfo.outputPath("evidence.json"),
@@ -451,7 +419,6 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     });
   } finally {
     releaseRecovery?.();
-    releaseCompile?.();
     await runner.pause();
     crawl.close();
   }

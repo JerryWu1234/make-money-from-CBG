@@ -240,6 +240,130 @@ describe("采集证据驱动的通用执行器", () => {
     expect(evaluate(compare("eq", count(["petEquipment"]), lit(2)), record).status).toBe("met");
     expect(evaluate(compare("eq", total, lit(4)), record).status).toBe("met");
   });
+  it("随身宝宝装备按明确类别、官网容器或装备对象计入，不重复计为人物装", () => {
+    const record = fixture(0, [
+      {
+        index: 0,
+        name: "嵌宝金环",
+        kind: "equipment",
+        category: "召唤兽装备",
+        description: "等级 95\n速度 24",
+      },
+      {
+        index: 1,
+        name: "琅琊衣",
+        kind: "equipment",
+        location: "RolePetEquips",
+        description: "等级 105\n防御 15",
+      },
+      {
+        index: 2,
+        name: "镂空银镯",
+        kind: "equipment",
+        modelId: "9308",
+        location: "202610272000113-1000-SWOQYYURHQB",
+        attributes: { 装备对象: "召唤兽", 等级: "95", 速度: "24" },
+      },
+    ]);
+    const result = evaluate(compare("eq", count(["petEquipment"]), lit(3)), record);
+    expect(result.status).toBe("met");
+    expect(result.evidence).toContainEqual({
+      path: `/detail/tabs/${record.detail!.tabs.findIndex((tab) => tab.name === "道具/法宝")}/items/2`,
+      label: "计入数量",
+      value: "pet-gear:202610272000113-1000-SWOQYYURHQB",
+    });
+    expect(evaluate(compare("eq", count(["equipment", "jewelry"]), lit(0)), record).status).toBe(
+      "met",
+    );
+    expect(evaluate(compare("eq", total, lit(3)), record).status).toBe("met");
+    expect(
+      evaluate(
+        compare(
+          "eq",
+          count(["petEquipment"], compare("gte", field("item.level"), lit(100))),
+          lit(1),
+        ),
+        record,
+      ).status,
+    ).toBe("met");
+  });
+  it("随身饰品和材料不计宝宝装备，不按名字或模型猜类别", () => {
+    const record = fixture(0, [
+      {
+        index: 0,
+        name: "雷龙饰品",
+        kind: "equipment",
+        location: "RolePetShipin",
+        category: "召唤兽装备",
+        attributes: { 装备对象: "召唤兽" },
+      },
+      {
+        index: 1,
+        name: "宝宝饰品",
+        kind: "equipment",
+        category: "召唤兽装备 · 饰品",
+        description: "等级 85\n防御 50",
+      },
+      {
+        index: 2,
+        name: "精魄灵石",
+        kind: "equipment",
+        modelId: "4036",
+        attributes: { 装备对象: "召唤兽" },
+      },
+      {
+        index: 3,
+        name: "宝宝铠甲",
+        kind: "equipment",
+        modelId: "9308",
+        description: "等级 85\n防御 50",
+      },
+    ]);
+    expect(evaluate(compare("eq", count(["petEquipment"]), lit(0)), record).status).toBe("met");
+  });
+  it("同一明确宝宝装备标识跨随身和穿戴只计一次，相同内容不同标识分别计数", () => {
+    const item: DetailItem = {
+      index: 0,
+      name: "宝宝铠甲",
+      kind: "equipment",
+      category: "召唤兽装备",
+      location: "202610272000113-1000-SWOQYYURHQB",
+      description: "等级 85\n防御 50",
+    };
+    const record = fixture(1, [item, { ...item, index: 1, location: "store_equip_tips2" }]);
+    record.detail!.tabs.find((tab) => tab.name === "召唤兽/孩子")!.pets![0].equipment.push(item);
+    expect(evaluate(compare("eq", count(["petEquipment"]), lit(2)), record).status).toBe("met");
+    expect(evaluate(compare("eq", total, lit(3)), record).status).toBe("met");
+  });
+  it("宝宝装备的相同DOM提示位置不当作物品身份，不同采集索引分别计数", () => {
+    const item: DetailItem = {
+      index: 0,
+      name: "宝宝铠甲",
+      kind: "equipment",
+      category: "召唤兽装备",
+      location: "store_equip_tips1",
+      description: "等级 85\n防御 50",
+    };
+    const record = fixture(0, [item, { ...item, index: 1 }]);
+    expect(evaluate(compare("eq", count(["petEquipment"]), lit(2)), record).status).toBe("met");
+  });
+  it("宝宝装备相同标识属性冲突或随身库存未采齐时保持无法判断", () => {
+    const item: DetailItem = {
+      index: 0,
+      name: "宝宝铠甲",
+      kind: "equipment",
+      category: "召唤兽装备",
+      location: "202610272000113-1000-SWOQYYURHQB",
+      description: "等级 85\n防御 50",
+    };
+    const record = fixture(0, [item, { ...item, index: 1, description: "等级 85\n防御 80" }]);
+    expect(evaluate(compare("eq", count(["petEquipment"]), lit(1)), record).status).toBe("unknown");
+    const incomplete = fixture(0, [item]);
+    incomplete.detail!.equipmentCapture!.complete = false;
+    expect(evaluate(compare("eq", count(["petEquipment"]), lit(1)), incomplete).status).toBe(
+      "unknown",
+    );
+  });
   it("两件内容相同但标识不同的装备都算，重复同一标识仅算一次", () => {
     const item = gear();
     const record = fixture(0, [item, { ...item }, { ...item, index: 1 }]);

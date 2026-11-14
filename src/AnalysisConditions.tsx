@@ -1,9 +1,6 @@
-import { useEffect, useRef, useState } from "react";
-import type { AiProvider } from "../server/ai/types";
 import { RULE_ENGINE_VERSION } from "../server/analysis/condition-rule-types";
 import {
   defaultConditions,
-  normalizeConditions,
   priceConditionLabel,
   type Condition,
   type ConditionGroup,
@@ -24,132 +21,14 @@ function nextId(root: ConditionGroup) {
   return "C" + index;
 }
 
-function conditionInputKey(node: ConditionNode): string {
-  if ("children" in node)
-    return JSON.stringify({
-      id: node.id,
-      join: node.join,
-      operator: node.operator,
-      evaluation: node.evaluation,
-      children: node.children.map(conditionInputKey),
-    });
-  return JSON.stringify({
-    id: node.id,
-    join: node.join,
-    text: node.text.trim(),
-    price: node.price,
-  });
-}
-
-const ruleStatusLabels = {
-  ready: "可执行",
-  ambiguous: "需明确口径",
-  unsupported: "暂无法自动判断",
-};
-
 export function AnalysisConditions({
   value,
   onChange,
-  onCompilingChange,
-  compileProvider = "codex",
-  compileModel,
 }: {
   value?: ConditionGroup;
   onChange: (value?: ConditionGroup) => void;
-  onCompilingChange?: (compiling: boolean) => void;
-  compileProvider?: AiProvider;
-  compileModel?: string;
 }) {
   const current = value || defaultConditions();
-  const request = useRef<{ controller: AbortController; key: string; inputKey: string } | null>(
-    null,
-  );
-  const [compiling, setCompiling] = useState(false);
-  const [compileError, setCompileError] = useState<string | null>(null);
-  const [compileNotice, setCompileNotice] = useState("");
-  const inputKey = conditionInputKey(current);
-  const currentKey = JSON.stringify([compileProvider, compileModel || null, inputKey]);
-  const latestKey = useRef(currentKey);
-  latestKey.current = currentKey;
-  useEffect(() => {
-    const active = request.current;
-    if (active && active.key !== currentKey) {
-      active.controller.abort();
-      request.current = null;
-      setCompiling(false);
-      onCompilingChange?.(false);
-      setCompileNotice("条件或解析服务已修改，已取消旧解析；请按当前输入重新解析。");
-    }
-  }, [currentKey, onCompilingChange]);
-  useEffect(
-    () => () => {
-      request.current?.controller.abort();
-      request.current = null;
-      onCompilingChange?.(false);
-    },
-    [onCompilingChange],
-  );
-  async function compile() {
-    if (request.current) return;
-    const textNodes = current.children.filter(
-      (node) => !("children" in node) && !node.price,
-    ) as Condition[];
-    if (textNodes.some((node) => !node.text.trim())) {
-      setCompileError("请先填写每条文字条件，再解析执行口径。");
-      return;
-    }
-    const controller = new AbortController();
-    const active = { controller, key: currentKey, inputKey };
-    request.current = active;
-    setCompiling(true);
-    onCompilingChange?.(true);
-    setCompileError(null);
-    setCompileNotice("");
-    try {
-      const response = await fetch("/api/analysis/conditions/compile", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          conditions: current,
-          provider: compileProvider,
-          ...(compileModel ? { model: compileModel } : {}),
-        }),
-        signal: controller.signal,
-      });
-      const data = await response.json();
-      if (
-        controller.signal.aborted ||
-        request.current !== active ||
-        latestKey.current !== active.key
-      )
-        return;
-      if (!response.ok) throw new Error(data.error || "条件解析失败，请重试");
-      const compiled = normalizeConditions(data.conditions);
-      if (!compiled || conditionInputKey(compiled) !== active.inputKey)
-        throw new Error("解析结果与当前输入不一致，请重新解析");
-      for (const node of compiled.children) {
-        if ("children" in node || node.price) continue;
-        if (
-          !node.rule ||
-          node.rule.version !== RULE_ENGINE_VERSION ||
-          node.rule.sourceText !== node.text.trim()
-        )
-          throw new Error(`${node.id} 的解析结果缺失或已过期，请重新解析`);
-      }
-      request.current = null;
-      onChange(compiled);
-      setCompileNotice("解析已完成。请核对每条执行口径，再保存设置；解析不会自动保存。");
-    } catch (failure) {
-      if (!controller.signal.aborted && request.current === active)
-        setCompileError(failure instanceof Error ? failure.message : "条件解析失败，请重试");
-    } finally {
-      if (request.current === active || request.current === null) {
-        if (request.current === active) request.current = null;
-        setCompiling(false);
-        onCompilingChange?.(false);
-      }
-    }
-  }
   const legacy = current.evaluation !== "sequence";
   function update(id: string, patch: Partial<Condition>) {
     onChange({
@@ -157,7 +36,7 @@ export function AnalysisConditions({
       children: current.children.map((node) => (node.id === id ? { ...node, ...patch } : node)),
     });
   }
-  function add(price = false) {
+  function add() {
     onChange({
       ...current,
       children: [
@@ -166,7 +45,6 @@ export function AnalysisConditions({
           id: nextId(current),
           text: "",
           join: "and",
-          ...(price ? { price: (defaultConditions().children[0] as Condition).price } : {}),
         },
       ],
     });
@@ -189,15 +67,8 @@ export function AnalysisConditions({
   return (
     <section className="analysis-settings-section" aria-label="入榜条件设置">
       <h3>入榜条件</h3>
-      <p>
-        从上到下依次计算，每一步将前面的结果与下一条按“且／或”合并。最终满足才入榜，无法判断不入榜，可在全部商品查看依据。不限制的价格条目不参与且／或计算。
-      </p>
-      <p>
-        文字可自由输入。先解析并核对执行口径，再由程序根据已采集资料计算；价格条件按分比较。不改变裸号估值公式。
-      </p>
-      <p>
-        未解析、口径不明确或资料不足的条件不会被当作满足。只分析裸号价格时，条件仍可核对已采集的装备和宝宝资料。
-      </p>
+      <p>从上到下按“且／或”依次计算，最终满足才入榜。价格“不限制”不参与计算。</p>
+      <p>填写并保存后，开始分析即可查看每条条件是否满足及依据；资料不足时显示“无法判断”。</p>
       {legacy ? (
         <>
           <p role="status">
@@ -253,11 +124,15 @@ export function AnalysisConditions({
                           }
                         >
                           <option value="price">挂牌价与裸号估值比较</option>
-                          <option value="text">自由文字条件</option>
+                          <option value="text">文字条件</option>
                         </select>
                       </label>
-                      <button type="button" onClick={() => remove(node.id)}>
-                        删除{node.id}
+                      <button
+                        type="button"
+                        aria-label={`删除条件 ${index + 1}`}
+                        onClick={() => remove(node.id)}
+                      >
+                        删除
                       </button>
                     </div>
                     {node.price ? (
@@ -298,7 +173,7 @@ export function AnalysisConditions({
                     ) : (
                       <div>
                         <label>
-                          {node.id} 条件
+                          条件内容
                           <textarea
                             aria-label={`${node.id}条件`}
                             maxLength={1000}
@@ -309,33 +184,6 @@ export function AnalysisConditions({
                             }
                           />
                         </label>
-                        <div
-                          className={`analysis-rule-preview is-${node.rule?.status || "pending"}`}
-                          aria-label={`${node.id}执行口径`}
-                        >
-                          {node.rule &&
-                          node.rule.sourceText === node.text.trim() &&
-                          node.rule.version === RULE_ENGINE_VERSION ? (
-                            <>
-                              <strong>{ruleStatusLabels[node.rule.status]}</strong>
-                              <p>{node.rule.explanation}</p>
-                              {node.rule.issues.length > 0 && (
-                                <ul>
-                                  {node.rule.issues.map((issue, issueIndex) => (
-                                    <li key={issueIndex}>{issue}</li>
-                                  ))}
-                                </ul>
-                              )}
-                              {node.rule.status !== "ready" && (
-                                <p>
-                                  本条将显示“无法判断”。请补充口径或改用可核实的条件后重新解析。
-                                </p>
-                              )}
-                            </>
-                          ) : (
-                            <p>尚未解析当前文字，不能自动判为满足。</p>
-                          )}
-                        </div>
                       </div>
                     )}
                   </div>
@@ -344,31 +192,13 @@ export function AnalysisConditions({
             })}
           </ol>
           <div className="analysis-condition-actions">
-            {current.children.some((node) => !("children" in node) && !node.price) && (
-              <button
-                className="analysis-button analysis-button-primary"
-                type="button"
-                disabled={compiling}
-                onClick={() => void compile()}
-              >
-                {compiling ? "正在解析条件…" : "解析文字条件"}
-              </button>
-            )}
             <button
               className="analysis-button analysis-button-outline"
               type="button"
               disabled={current.children.length >= 59}
               onClick={() => add()}
             >
-              增加文字条件
-            </button>
-            <button
-              className="analysis-button analysis-button-outline"
-              type="button"
-              disabled={current.children.length >= 59}
-              onClick={() => add(true)}
-            >
-              增加价格条件
+              添加条件
             </button>
             {value && (
               <button type="button" onClick={() => onChange(undefined)}>
@@ -376,16 +206,6 @@ export function AnalysisConditions({
               </button>
             )}
           </div>
-          {compileNotice && (
-            <p role="status" className="analysis-pending-note">
-              {compileNotice}
-            </p>
-          )}
-          {compileError && (
-            <p role="alert" className="analysis-pending-note">
-              {compileError}。原输入已保留。
-            </p>
-          )}
         </>
       )}
     </section>
@@ -402,9 +222,16 @@ export function ConditionReviewView({ review }: { review?: ConditionReview }) {
       </section>
     );
   const results = new Map(review.results.map((result) => [result.id, result]));
-  function render(node: ConditionNode) {
+  function render(node: ConditionNode, index = 0) {
     const result = results.get(node.id);
-    const title = `${node.id} ${"children" in node ? (node.evaluation === "sequence" ? "入榜条件（从上到下计算）" : node.operator === "and" ? "全部满足（且）" : "任意满足（或）") : node.price ? priceConditionLabel(node.price) : node.text}`;
+    const title =
+      "children" in node
+        ? node.evaluation === "sequence"
+          ? "最终结果（从上到下计算）"
+          : node.operator === "and"
+            ? "全部满足（且）"
+            : "任意满足（或）"
+        : `条件 ${index + 1} ${node.price ? priceConditionLabel(node.price) : node.text}`;
     const description = (
       <>
         <strong>
@@ -453,7 +280,7 @@ export function ConditionReviewView({ review }: { review?: ConditionReview }) {
                   : "且"}
               </strong>
             )}
-            {render(child)}
+            {render(child, index)}
           </div>
         ))}
       </details>
@@ -468,7 +295,7 @@ export function ConditionReviewView({ review }: { review?: ConditionReview }) {
       <h3>条件匹配</h3>
       {review.engineVersion !== RULE_ENGINE_VERSION && (
         <p role="status" className="analysis-pending-note">
-          历史条件记录，不作为当前入榜依据；当前榜单使用已解析规则重新计算。
+          历史条件记录，不作为当前入榜依据；当前榜单会按保存的条件重新判断。
         </p>
       )}
       {render(review.tree)}

@@ -5,6 +5,7 @@ import {
   type ConditionGroup,
 } from "./conditions";
 import { compileConditionTexts } from "./condition-compiler";
+import { prepareConditionRules } from "./condition-rule-cache";
 import { aiProvider } from "../ai-connection";
 import { prepareAnalysisClient } from "../ai-connection";
 import type { AiProvider } from "../ai/types";
@@ -122,8 +123,6 @@ export async function analysisSettings() {
 export function saveAnalysisSettings(input: unknown) {
   if (!input || typeof input !== "object" || Array.isArray(input))
     throw new Error("分析设置格式错误");
-  const value = input as { settings?: { conditions?: unknown } };
-  assertConditionsCompiled(normalizeConditions(value.settings?.conditions));
   const profile = saveProfile(service().store.db, input);
   return { profile };
 }
@@ -197,7 +196,9 @@ export async function startAnalysis(
   } catch {
     /* 缺失行情仍可分析，结果明确列出缺项。 */
   }
-  const currentProfile = loadProfile(service().store.db);
+  assertServiceOpen();
+  // Interpret saved text once, then use the same evidence checks for every product.
+  const currentProfile = await prepareConditionRules(analysis.store.db, { provider, model });
   const profile = equipmentOnly
     ? {
         ...createProfile(currentProfile.template, currentProfile.settings, true, false),
@@ -234,7 +235,10 @@ export async function resumeAnalysis(id: string, retry = false, concurrency?: nu
   assertServiceOpen();
   if (concurrency !== undefined) analysisConcurrency(concurrency);
   const analysis = service();
-  if (analysis.store.run(id)?.marketExpired) throw new Error(EXPIRED_MARKET_NOTICE);
+  const run = analysis.store.run(id);
+  if (!run) throw new Error("分析批次不存在");
+  if (run.marketExpired) throw new Error(EXPIRED_MARKET_NOTICE);
+  await prepareConditionRules(analysis.store.db, { provider: run.provider, model: run.model });
   if (!analysis.runner.isRunning()) {
     const row = analysis.store.db.prepare("SELECT id FROM analysis_runs WHERE id=?").get(id);
     if (!row) throw new Error("分析批次不存在");

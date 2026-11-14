@@ -22,7 +22,9 @@ const mocks = vi.hoisted(() => ({
   status: vi.fn(),
   crawling: vi.fn(),
   stopCrawl: vi.fn(),
+  prepareRules: vi.fn(),
 }));
+vi.mock("./condition-rule-cache", () => ({ prepareConditionRules: mocks.prepareRules }));
 vi.mock("../crawler/controller", () => ({
   crawlDatabase: mocks.database,
   captureRetryItems: mocks.retries,
@@ -56,6 +58,7 @@ beforeEach(() => {
   crawl.save(record.listing, record.detail!);
   mocks.database.mockReturnValue(crawl.db);
   mocks.profile.mockReturnValue(createProfile("reload test", undefined, false));
+  mocks.prepareRules.mockImplementation(async () => mocks.profile());
   mocks.retries.mockImplementation((keys?: string[]) => crawl.retryItems(keys));
   mocks.crawling.mockReturnValue(false);
   mocks.status.mockReturnValue(undefined);
@@ -67,8 +70,37 @@ it("行情等待期间开始关停，不会在返回后启动模型批次", asyn
   });
   const controller = await import("./controller");
   await expect(controller.startAnalysis("codex")).rejects.toThrow("正在关闭");
+  expect(mocks.prepareRules).not.toHaveBeenCalled();
   expect(mocks.connect).not.toHaveBeenCalled();
   expect(crawl.db.prepare("SELECT count(*) AS n FROM analysis_runs").get()?.n).toBe(0);
+});
+
+it("开始分析前自动准备条件，准备失败不会建立商品分析批次", async () => {
+  mocks.prepareRules.mockRejectedValueOnce(new Error("条件服务暂不可用"));
+  const controller = await import("./controller");
+  await expect(controller.startAnalysis("deepseek", false, false, "chosen-model")).rejects.toThrow(
+    "条件服务暂不可用",
+  );
+  expect(mocks.prepareRules).toHaveBeenCalledWith(crawl.db, {
+    provider: "deepseek",
+    model: "chosen-model",
+  });
+  expect(mocks.connect).not.toHaveBeenCalled();
+  expect(crawl.db.prepare("SELECT count(*) n FROM analysis_runs").get()!.n).toBe(0);
+});
+
+it("继续分析使用该批次的服务和模型自动准备当前条件", async () => {
+  const { AnalysisStore } = await import("./store");
+  const store = new AnalysisStore(crawl.db);
+  const id = store.createRun("codex", "saved-model", false, mocks.profile());
+  mocks.prepareRules.mockRejectedValueOnce(new Error("条件服务暂不可用"));
+  const controller = await import("./controller");
+  await expect(controller.resumeAnalysis(id)).rejects.toThrow("条件服务暂不可用");
+  expect(mocks.prepareRules).toHaveBeenCalledWith(crawl.db, {
+    provider: "codex",
+    model: "saved-model",
+  });
+  expect(mocks.connect).not.toHaveBeenCalled();
 });
 
 it("整轮采集错误独立于单件失败数，分析页仍能读取暂停原因", async () => {

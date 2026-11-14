@@ -16,13 +16,15 @@ import {
   RULE_ENGINE_VERSION,
   type RuleExpression,
 } from "../../server/analysis/condition-rule-types";
-import type { Condition, ConditionGroup } from "../../server/analysis/conditions";
+import type { ConditionGroup } from "../../server/analysis/conditions";
+import { prepareConditionRules } from "../../server/analysis/condition-rule-cache";
 import type { ValuationResult } from "../../server/analysis/valuation-types";
 import { analysisRecord, analysisResponse } from "../fixtures/analysis";
 
 // Reproduce the production false positive with complete source data, an old AI met result,
-// and its contradictory reason. Parsing uses a fixture; persistence/evaluation/UI are real.
-test("自由文字解析后本地重算，排除0装备3宝宝的旧AI误入榜（不重新分析）", async ({
+// and its contradictory reason. Automatic interpretation uses a fixture; cache,
+// persistence/evaluation/UI are real. Saving alone never calls the model.
+test("保存后开始分析自动判断，排除0装备3宝宝旧AI误入榜（不重新估值）", async ({
   page,
 }, testInfo) => {
   const crawl = new CrawlStore(testInfo.outputPath("old-ai-false-positive.sqlite"));
@@ -152,39 +154,8 @@ test("自由文字解析后本地重算，排除0装备3宝宝的旧AI误入榜�
           profile = loadProfile(crawl.db, promptFile);
           body = { profile, promptFile, servers: [] };
           break;
-        case "/api/analysis/conditions/compile": {
-          compileCalls++;
-          const expression: RuleExpression = {
-            op: "gt",
-            args: [
-              { op: "count", collections: ["equipment", "jewelry", "petEquipment", "pets"] },
-              { op: "literal", value: 8 },
-            ],
-          };
-          const current = input.conditions as ConditionGroup;
-          body = {
-            conditions: {
-              ...current,
-              children: current.children.map((child) => {
-                const node = child as Condition;
-                return node.price
-                  ? node
-                  : {
-                      ...node,
-                      rule: {
-                        version: RULE_ENGINE_VERSION,
-                        sourceText: node.text,
-                        status: "ready",
-                        expression,
-                        explanation: describeRule(expression),
-                        issues: [],
-                      },
-                    };
-              }),
-            },
-          };
-          break;
-        }
+        case "/api/analysis/conditions/compile":
+          throw new Error("界面不应调用手动解析接口");
         case "/api/analysis/settings/save":
           profile = saveProfile(crawl.db, input, promptFile);
           body = { profile };
@@ -197,8 +168,39 @@ test("自由文字解析后本地重算，排除0装备3宝宝的旧AI误入榜�
           body = store.detail(url.searchParams.get("taskId")!, profile);
           break;
         case "/api/analysis/start":
-          analysisCalls++;
-          throw new Error("本地条件重算不应启动商品AI分析");
+          profile = await prepareConditionRules(
+            crawl.db,
+            {
+              provider: input.provider,
+              model: input.model,
+              profileFile: promptFile,
+            },
+            async (entries) => {
+              compileCalls++;
+              const expression: RuleExpression = {
+                op: "gt",
+                args: [
+                  { op: "count", collections: ["equipment", "jewelry", "petEquipment", "pets"] },
+                  { op: "literal", value: 8 },
+                ],
+              };
+              return entries.map((entry) => ({
+                id: entry.id,
+                rule: {
+                  version: RULE_ENGINE_VERSION,
+                  sourceText: entry.text,
+                  status: "ready" as const,
+                  expression,
+                  explanation: describeRule(expression),
+                  issues: [],
+                },
+              }));
+            },
+          );
+          // Existing source-bound valuations can be recomputed locally; this fixture
+          // deliberately has no product AI client. Controller coverage checks wiring.
+          body = store.run(runId);
+          break;
         default:
           throw new Error("未模拟接口：" + url.pathname);
       }
@@ -207,17 +209,20 @@ test("自由文字解析后本地重算，排除0装备3宝宝的旧AI误入榜�
     await page.goto("http://rules.test/analysis-preview");
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "估值与挂牌比较设置" });
-    await expect(settings.getByLabel("C2执行口径", { exact: true })).toContainText("尚未解析");
-    await settings.getByRole("button", { name: "解析文字条件", exact: true }).click();
-    const preview = settings.getByLabel("C2执行口径", { exact: true });
-    await expect(preview).toContainText("可执行");
-    await expect(preview).toContainText("人物装备＋灵饰＋宝宝装备");
-    await expect(preview).toContainText("召唤兽（含0级和野生）");
-    await expect(preview).toContainText("> 8");
-    await preview.scrollIntoViewIfNeeded();
-    await settings.screenshot({ path: testInfo.outputPath("rule-interpretation.png") });
+    await expect(settings.getByRole("button", { name: "解析文字条件", exact: true })).toHaveCount(
+      0,
+    );
+    await expect(settings.getByLabel("C2条件", { exact: true })).toHaveValue(text);
+    await settings.screenshot({ path: testInfo.outputPath("simple-conditions.png") });
     await settings.getByRole("button", { name: "保存设置", exact: true }).click();
     await expect(settings).not.toBeVisible();
+    expect(compileCalls).toBe(0);
+    await page
+      .getByRole("button", {
+        name: /^(开始分析已有商品|分析新增或已更新商品|按新规则开始分析|按新模型开始分析)$/,
+      })
+      .click();
+    await expect.poll(() => compileCalls).toBe(1);
     await page.getByRole("tab", { name: /^推荐榜/ }).click();
     await expect(page.getByRole("tabpanel", { name: "推荐榜" }).getByRole("article")).toHaveCount(
       0,
@@ -226,8 +231,8 @@ test("自由文字解析后本地重算，排除0装备3宝宝的旧AI误入榜�
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).click();
     const review = page.getByLabel("条件匹配");
-    await expect(review).toContainText("C1 挂牌价小于或等于裸号估值：满足");
-    await expect(review).toContainText(`C2 ${text}：不满足`);
+    await expect(review).toContainText("条件 1 挂牌价小于或等于裸号估值：满足");
+    await expect(review).toContainText(`条件 2 ${text}：不满足`);
     await expect(review).toContainText("3");
     await expect(review).toContainText("8");
     await review.scrollIntoViewIfNeeded();

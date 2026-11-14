@@ -136,7 +136,7 @@ export function evaluateCompiledRule(
     collections = {
       equipment: empty(gearComplete, gear.issues),
       jewelry: empty(gearComplete, gear.issues),
-      petEquipment: empty(pets.captureComplete, pets.issues),
+      petEquipment: empty(pets.captureComplete && gearComplete, [...pets.issues, ...gear.issues]),
       pets: empty(pets.captureComplete, pets.issues),
     };
     const attributes = (raw: string, key: string) => {
@@ -154,6 +154,83 @@ export function evaluateCompiledRule(
       fields[key] =
         parsed === undefined ? missing(`缺少${label}`) : known(parsed, `${label}=${parsed}`);
     }
+    function petAccessory(item: DetailItem) {
+      return (
+        item.location === "RolePetShipin" ||
+        /(?:宝宝|召唤兽).*饰品|饰品.*(?:宝宝|召唤兽)/.test(item.category || "")
+      );
+    }
+    function loosePetEquipment(item: DetailItem) {
+      if (item.kind === "skill" || item.kind === "innerSkill" || petAccessory(item)) return false;
+      const category = observedEquipmentCategory(item.category, item.location, item.modelId);
+      if (/法宝|灵宝|神器|道具|材料|消耗品|上古玉魄|元身/.test(category)) return false;
+      return (
+        /^(?:召唤兽|宝宝)装备(?:$|[·/\s])/.test(category) ||
+        item.location === "RolePetEquips" ||
+        item.attributes?.装备对象?.trim() === "召唤兽"
+      );
+    }
+    function addPetEquipment(
+      item: DetailItem,
+      fallbackKey: string,
+      path: string,
+      description: string,
+    ) {
+      // Model/name/stat equality is not an item identity: two identical items still count twice.
+      // Only an observed item ID can join observations from different containers.
+      const location = item.location || "";
+      const identity = /^\d{14,}-\d+-[a-zA-Z0-9]+$/.test(location)
+        ? `pet-gear:${location}`
+        : fallbackKey;
+      const fields: Record<string, Observed> = {
+        "item.name": known(item.name, `名称=${item.name}`),
+        "item.category": known("召唤兽装备", "类别=召唤兽装备"),
+      };
+      const parsed = parseEquipmentAttributes(description).fields;
+      const level =
+        parsed.等级?.length === 1
+          ? number(parsed.等级[0])
+          : number(item.attributes?.等级 ?? item.level);
+      numericItemField(fields, "item.level", level, "等级");
+      for (const [field, name] of Object.entries({
+        damage: "伤害",
+        defense: "防御",
+        speed: "速度",
+        hp: "气血",
+      }))
+        numericItemField(
+          fields,
+          "item." + field,
+          attributes(description, name) ?? item.attributes?.[name],
+          name,
+        );
+      const target = collections!.petEquipment;
+      const existing = target.items.find((value) => value.key === identity);
+      if (existing) {
+        if (JSON.stringify(existing.fields) !== JSON.stringify(fields)) {
+          target.complete = false;
+          target.issues.push("同一宝宝装备标识出现不同属性");
+        }
+      } else target.items.push({ key: identity, path, fields });
+    }
+    for (const [tabIndex, tab] of detail.tabs.entries()) {
+      if (!/^道具\/法宝(?:\s*\/|$)/.test(tab.name)) continue;
+      for (const [itemIndex, item] of (tab.items || []).entries()) {
+        if (!loosePetEquipment(item)) continue;
+        const description =
+          item.description ||
+          item.tooltip ||
+          Object.entries(item.attributes || {})
+            .map(([name, value]) => `${name}：${value}`)
+            .join("\n");
+        addPetEquipment(
+          item,
+          `${tab.name}:${item.index}`,
+          `/detail/tabs/${tabIndex}/items/${itemIndex}`,
+          description,
+        );
+      }
+    }
     for (const item of gear.items.filter((item) => !/上古玉魄|元身/.test(item.category))) {
       const source = paths.get(item.key);
       if (!source) {
@@ -161,6 +238,7 @@ export function evaluateCompiledRule(
         collections.equipment.issues.push("装备缺少采集来源");
         continue;
       }
+      if (loosePetEquipment(source.raw) || petAccessory(source.raw)) continue;
       const category = observedEquipmentCategory(
         source.raw.category,
         source.raw.location,
@@ -256,36 +334,15 @@ export function evaluateCompiledRule(
       // Count physical gear even when its pet is zero-level, wild, bound or excluded
       // from market pricing. Accessories remain a different item category.
       for (const [index, item] of raw.equipment.entries()) {
-        if (item.location === "RolePetShipin") continue;
+        if (petAccessory(item)) continue;
         const normalized = pet.equipment[index];
         if (!normalized || normalized.accessory) continue;
-        const itemPath = `${path}/equipment/${index}`;
-        const key = `${pet.key}:gear:${item.index}`;
-        const description = normalized.description;
-        const gearFields: Record<string, Observed> = {
-          "item.name": known(item.name, `名称=${item.name}`),
-          "item.category": known("召唤兽装备", "类别=召唤兽装备"),
-        };
-        const parsed = parseEquipmentAttributes(description).fields;
-        const level =
-          parsed.等级?.length === 1
-            ? number(parsed.等级[0])
-            : number(description.match(/(?:^|\n)等级\s*[:：]?\s*(\d+)/)?.[1]);
-        numericItemField(gearFields, "item.level", level, "等级");
-        for (const [field, name] of Object.entries({
-          damage: "伤害",
-          defense: "防御",
-          speed: "速度",
-          hp: "气血",
-        }))
-          numericItemField(gearFields, "item." + field, attributes(description, name), name);
-        const existing = collections.petEquipment.items.find((value) => value.key === key);
-        if (existing) {
-          if (JSON.stringify(existing.fields) !== JSON.stringify(gearFields)) {
-            collections.petEquipment.complete = false;
-            collections.petEquipment.issues.push("同一宝宝装备标识出现不同属性");
-          }
-        } else collections.petEquipment.items.push({ key, path: itemPath, fields: gearFields });
+        addPetEquipment(
+          item,
+          `${pet.key}:gear:${item.index}`,
+          `${path}/equipment/${index}`,
+          normalized.description,
+        );
       }
     }
     return collections;
@@ -371,7 +428,9 @@ export function evaluateCompiledRule(
           path:
             name === "equipment" || name === "jewelry"
               ? "/detail/equipmentCapture/complete"
-              : "/detail/petCapture/complete",
+              : name === "petEquipment"
+                ? "/detail"
+                : "/detail/petCapture/complete",
           label: RULE_COLLECTION_LABELS[name] + "采集完整",
           value: collection.complete,
         });
@@ -510,7 +569,7 @@ export function evaluateCompiledRule(
     const result = evaluate(rule.expression);
     return {
       status: result.value === true ? "met" : result.value === false ? "unmet" : "unknown",
-      reason: `${describeRule(rule.expression)}；${result.trace}`.slice(0, 1900),
+      reason: result.trace.slice(0, 1900),
       evidence,
     };
   } catch {

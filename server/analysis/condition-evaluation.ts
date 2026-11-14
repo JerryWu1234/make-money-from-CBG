@@ -13,7 +13,7 @@ export function evaluateSavedConditions(
       return {
         id: node.id,
         status: "unknown",
-        reason: "条件未解析或文字已变化，请先解析并保存；不采用旧AI满足状态",
+        reason: "条件已更新，点击开始分析后查看判断结果",
       };
     try {
       return { id: node.id, ...evaluateCompiledRule(node.rule, record, prices) };
@@ -21,7 +21,7 @@ export function evaluateSavedConditions(
       return {
         id: node.id,
         status: "unknown",
-        reason: "条件规则无效，请重新解析；未将缺失或异常资料视为满足",
+        reason: "本条条件暂时无法判断，请重新开始分析",
       };
     }
   });

@@ -543,7 +543,7 @@ export function AnalysisPreview() {
             )}
             {settingsNotice && (
               <p className="analysis-start-hint" role="status">
-                设置已保存。入榜条件会用现有完整资料重新计算；估值参数有变化时需重新分析，历史结果保留。
+                设置已保存。点击开始分析，查看每条条件的判断结果；已有有效估值会复用，历史结果保留。
               </p>
             )}
             {data?.profile && !data.profile.calculationCompatible && (
@@ -1272,8 +1272,6 @@ export function AnalysisPreview() {
       </main>
       {settingsOpen && (
         <AnalysisSettings
-          conditionProvider={provider}
-          conditionModel={effectiveModel || undefined}
           draft={settingsDraft}
           onDraftChange={setSettingsDraft}
           onClose={() => setSettingsOpen(false)}

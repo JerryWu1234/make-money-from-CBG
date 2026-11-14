@@ -767,13 +767,19 @@ export class AnalysisStore {
               equipment,
               pets,
             );
-            if (
-              isDeepStrictEqual(
-                JSON.parse(JSON.stringify(replayed)),
-                JSON.parse(String(row.result_json)),
-              )
-            )
-              return { ...row, proof_id: attempt.id, proof_task_id: attempt.task_id };
+            const replayedComparison = JSON.parse(JSON.stringify(replayed)) as ProductAnalysis;
+            const savedComparison = JSON.parse(String(row.result_json)) as ProductAnalysis;
+            // Eligibility uses the current conditions. Its local review may change
+            // while every source, pricing snapshot and AI proof remains identical.
+            if (replayedComparison.valuation) delete replayedComparison.valuation.condition_review;
+            if (savedComparison.valuation) delete savedComparison.valuation.condition_review;
+            if (isDeepStrictEqual(replayedComparison, savedComparison))
+              return {
+                ...row,
+                result_json: JSON.stringify(replayed),
+                proof_id: attempt.id,
+                proof_task_id: attempt.task_id,
+              };
           } catch {
             // Pricing may have changed since the review; reuse facts only after
             // checking the original response and both archived source versions below.

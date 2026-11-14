@@ -244,4 +244,4 @@ vp run test:e2e
 
 ### 自由文字入榜规则
 
-文字条件先解析并核对执行口径，再由程序根据采集证据判断；旧AI满足状态不直接用于入榜。详见[使用与执行边界](docs/condition-rules.md)和[实库多维验证](docs/condition-rules-validation.md)。
+填写条件并保存，开始分析后逐条查看满足情况和实际依据，无需手动解析。且／或按从上到下计算，旧AI满足状态不直接用于入榜。详见[使用与执行边界](docs/condition-rules.md)和[实库多维验证](docs/condition-rules-validation.md)。

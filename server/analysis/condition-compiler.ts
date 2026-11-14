@@ -217,7 +217,7 @@ export function validateConditionCompilation(
   try {
     parsed = JSON.parse(response);
   } catch {
-    throw new Error("条件编译结果不是有效JSON，请重新解析条件");
+    throw new Error("条件处理结果无效，请重新开始分析");
   }
   const root = object(parsed, "条件编译结果格式错误");
   onlyKeys(root, ["conditions"], "条件编译结果包含额外字段");
