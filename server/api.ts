@@ -176,10 +176,21 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
         : {};
     if (browserUseRoutes.has(pathname) && browserControl.changing) throw browserBusyError();
     if (pathname === "/api/browser/settings" || pathname === "/api/browser/settings/save") {
-      const { mode, modes } = body as Record<string, unknown>;
+      const { mode, modes, showWorkPages } = body as Record<string, unknown>;
       if (
         pathname.endsWith("/save") &&
-        !(modes === undefined ? isBrowserMode(mode) : isBrowserModes(modes))
+        showWorkPages !== undefined &&
+        typeof showWorkPages !== "boolean"
+      ) {
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: "显示操作过程选项必须为布尔值" }));
+        return;
+      }
+      if (
+        pathname.endsWith("/save") &&
+        !(modes === undefined
+          ? isBrowserMode(mode) || (mode === undefined && typeof showWorkPages === "boolean")
+          : isBrowserModes(modes))
       ) {
         res.statusCode = 400;
         res.end(JSON.stringify({ error: "浏览器运行方式无效" }));
@@ -196,7 +207,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
         workflow.isBrowserWorkflowRunning() ||
         capture.isCrawling() ||
         analysis.isAnalyzing();
-      if (pathname.endsWith("/save") && modes !== undefined)
+      if (pathname.endsWith("/save") && typeof showWorkPages === "boolean")
+        await session.changeBrowserModes(
+          (modes ?? [mode ?? session.getActiveBrowserMode()]) as ("daily" | "dedicated")[],
+          busy,
+          workflow.resetBrowserWorkflow,
+          showWorkPages,
+        );
+      else if (pathname.endsWith("/save") && modes !== undefined)
         await session.changeBrowserModes(
           modes as ("daily" | "dedicated")[],
           busy,

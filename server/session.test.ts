@@ -107,6 +107,68 @@ describe("项目专用浏览器会话", () => {
     expect(openDedicatedBrowser).toHaveBeenCalledTimes(2);
   });
 
+  it("修改显示方式关闭旧会话并重置查询，只在下一次主动开始时重新启动", async () => {
+    const { context } = dedicated();
+    let selected = { mode: "dedicated" as const, showWorkPages: false };
+    vi.mocked(browserSettings).mockImplementation(() => selected);
+    vi.mocked(saveBrowserSettings).mockImplementation((_modes, showWorkPages) => {
+      selected = { ...selected, showWorkPages: showWorkPages ?? selected.showWorkPages };
+      return selected;
+    });
+    const session = await import("./session");
+    await session.getBrowser(true);
+    const reset = vi.fn();
+    await expect(
+      session.changeBrowserModes(["dedicated"], () => true, reset, true),
+    ).rejects.toThrow("请先暂停");
+    expect(selected.showWorkPages).toBe(false);
+    expect(context.close).not.toHaveBeenCalled();
+    await session.changeBrowserModes(["dedicated"], () => false, reset, true);
+    expect(selected.showWorkPages).toBe(true);
+    expect(session.browserSessionSettings()).toMatchObject({
+      connected: false,
+      showWorkPages: true,
+    });
+    expect(context.close).toHaveBeenCalledOnce();
+    expect(reset).toHaveBeenCalledOnce();
+    expect(openDedicatedBrowser).toHaveBeenCalledOnce();
+    await expect(session.getBrowser()).rejects.toThrow("浏览器未连接");
+    await session.getBrowser(true);
+    expect(openDedicatedBrowser).toHaveBeenCalledTimes(2);
+  });
+
+  it("修改显示方式写盘失败保留旧会话，关闭失败回滚显示选择", async () => {
+    const { context, browser } = dedicated();
+    let selected = { mode: "dedicated" as const, showWorkPages: false };
+    vi.mocked(browserSettings).mockImplementation(() => selected);
+    vi.mocked(saveBrowserSettings).mockImplementation((_modes, showWorkPages) => {
+      selected = { ...selected, showWorkPages: showWorkPages ?? selected.showWorkPages };
+      return selected;
+    });
+    const session = await import("./session");
+    await session.getBrowser(true);
+    const reset = vi.fn();
+    vi.mocked(saveBrowserSettings).mockImplementationOnce(() => {
+      throw new Error("磁盘已满");
+    });
+    await expect(
+      session.changeBrowserModes(["dedicated"], () => false, reset, true),
+    ).rejects.toThrow("磁盘已满");
+    expect(selected.showWorkPages).toBe(false);
+    expect(await session.getBrowser()).toBe(browser);
+    expect(context.close).not.toHaveBeenCalled();
+    expect(reset).not.toHaveBeenCalled();
+    context.close.mockRejectedValueOnce(new Error("关闭失败"));
+    browser.close.mockRejectedValueOnce(new Error("兜底关闭失败"));
+    await expect(
+      session.changeBrowserModes(["dedicated"], () => false, reset, true),
+    ).rejects.toThrow("关闭失败");
+    expect(selected.showWorkPages).toBe(false);
+    expect(browserControl.changing).toBe(false);
+    await expect(session.getBrowser()).rejects.toThrow("浏览器未连接");
+    await session.shutdownBrowserSession();
+  });
+
   it("忙时拒绝切换，保存失败保留旧连接，切换期间不让新请求取得旧连接", async () => {
     const { browser, context } = dedicated();
     const session = await import("./session");
@@ -467,7 +529,8 @@ describe("日常浏览器连接", () => {
   it.each([false, true])(
     "创建工作页（可见=%s），沿用默认用户上下文，只复用自己的页面",
     async (visible) => {
-      vi.stubEnv("CBG_SHOW_WORK_PAGES", visible ? "1" : "0");
+      vi.mocked(browserSettings).mockReturnValue({ mode: "daily", showWorkPages: visible });
+      vi.stubEnv("CBG_SHOW_WORK_PAGES", visible ? "0" : "1");
       const { createBackgroundPage, getCbgPage } = await import("./session");
       const oldPage = { isClosed: () => false } as Page;
       const pages = [oldPage];

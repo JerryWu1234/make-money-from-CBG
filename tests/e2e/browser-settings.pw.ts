@@ -16,6 +16,7 @@ async function mount(
   page: Page,
   options: {
     mode?: BrowserMode;
+    showWorkPages?: boolean;
     modes?: BrowserMode[];
     ready?: boolean;
     busy?: boolean;
@@ -26,6 +27,7 @@ async function mount(
 ) {
   const state = {
     mode: options.mode ?? ("dedicated" as BrowserMode),
+    showWorkPages: options.showWorkPages ?? false,
     modes: options.modes ?? [options.mode ?? "dedicated"],
     ready: options.ready ?? false,
     busy: options.busy ?? false,
@@ -40,6 +42,7 @@ async function mount(
     opens: 0,
     captureStarts: 0,
     saves: [] as BrowserMode[][],
+    visibilitySaves: [] as boolean[],
     saveGate: undefined as Promise<void> | undefined,
     staleStatusGate: undefined as Promise<void> | undefined,
     staleStatusPending: false,
@@ -55,6 +58,7 @@ async function mount(
   };
   const settings = () => ({
     mode: state.mode,
+    showWorkPages: state.showWorkPages,
     modes: state.modes,
     connected: state.ready,
     busy: state.busy || state.queryRunning || state.crawlRunning,
@@ -75,13 +79,16 @@ async function mount(
           body = settings();
           break;
         case "/api/browser/settings/save": {
-          const modes = [route.request().postDataJSON().mode] as BrowserMode[];
+          const input = route.request().postDataJSON();
+          const modes = [input.mode] as BrowserMode[];
           state.saves.push(modes);
+          state.visibilitySaves.push(input.showWorkPages);
           if (state.saveGate) await state.saveGate;
           if (state.saveError)
             return route.fulfill({ status: 409, json: { error: state.saveError } });
           state.modes = modes;
           state.mode = modes[0];
+          state.showWorkPages = input.showWorkPages;
           state.ready = false;
           body = settings();
           break;
@@ -174,6 +181,53 @@ async function mount(
 }
 
 const cdpOption = (page: Page) => page.getByRole("checkbox", { name: /^使用日常 Chrome/ });
+const previewOption = (page: Page) => page.getByRole("checkbox", { name: /^显示操作过程/ });
+
+for (const mode of ["dedicated", "daily"] as const) {
+  test(`${mode} 显示操作过程默认关闭，保存及刷新保留选择且不自动连接`, async ({
+    page,
+  }, testInfo) => {
+    const state = await mount(page, { mode, ready: true });
+    const preview = previewOption(page);
+    await expect(preview).not.toBeChecked();
+    await expect(page.locator(".status-header-row strong")).toHaveText("角色列表已就绪");
+    await preview.click();
+    await expect(preview).toBeChecked();
+    await expect(page.locator("#open-cbg-btn")).toHaveText("开始查询角色");
+    await expect(page.locator(".status-header-row strong")).toHaveText("准备就绪");
+    expect(state.opens).toBe(0);
+    await page.reload();
+    await expect(preview).toBeChecked();
+    await cdpOption(page).click();
+    await expect(cdpOption(page)).toBeChecked({ checked: mode !== "daily" });
+    await expect(preview).toBeChecked();
+    await page
+      .getByRole("region", { name: "浏览器运行方式" })
+      .screenshot({ path: testInfo.outputPath("operation-preview.png") });
+    await preview.click();
+    await expect(preview).not.toBeChecked();
+    expect(state.visibilitySaves).toEqual([true, true, false]);
+    expect(state.opens).toBe(0);
+  });
+}
+
+test("显示开关保存失败保留旧选择和就绪状态，忙时禁止修改", async ({ page }) => {
+  const state = await mount(page, { ready: true, showWorkPages: true });
+  const preview = previewOption(page);
+  await expect(preview).toBeChecked();
+  state.saveError = "模拟显示设置保存失败";
+  await preview.click();
+  await expect(page.getByRole("alert")).toContainText(state.saveError);
+  await expect(preview).toBeChecked();
+  await expect(page.locator(".status-header-row strong")).toHaveText("角色列表已就绪");
+  expect(state.showWorkPages).toBe(true);
+  state.saveError = "";
+  state.busy = true;
+  await page.reload();
+  await expect(preview).toBeDisabled();
+  state.busy = false;
+  await expect(preview).toBeEnabled();
+});
 
 test("CDP 默认不勾选；选择和刷新只保存配置，不请求浏览器授权", async ({ page }, testInfo) => {
   const state = await mount(page);
@@ -181,7 +235,7 @@ test("CDP 默认不勾选；选择和刷新只保存配置，不请求浏览器�
   await expect(cdp).not.toBeChecked();
   await expect(
     page.getByRole("region", { name: "浏览器运行方式" }).getByRole("checkbox"),
-  ).toHaveCount(1);
+  ).toHaveCount(2);
   await expect(page.getByRole("region", { name: "浏览器运行方式" }).getByRole("radio")).toHaveCount(
     0,
   );
@@ -266,6 +320,7 @@ for (const activity of ["queryRunning", "crawlRunning"] as const) {
   test(`${activity} 运行时禁止切换，结束后恢复`, async ({ page }) => {
     const state = await mount(page, { [activity]: true });
     await expect(cdpOption(page)).toBeDisabled();
+    await expect(previewOption(page)).toBeDisabled();
     state[activity] = false;
     await expect(cdpOption(page)).toBeEnabled();
     expect(state.saves).toEqual([]);

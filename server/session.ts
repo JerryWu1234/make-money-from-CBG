@@ -369,6 +369,7 @@ export function browserSessionSettings() {
     mode: getActiveBrowserMode(),
     modes,
     browsers,
+    showWorkPages: showBrowserWorkPages(),
     connected: browsers.some((entry) => entry.connected),
     busy: pool.closing || browsers.some((entry) => entry.busy),
   };
@@ -377,6 +378,7 @@ export async function changeBrowserModes(
   modes: BrowserMode[],
   busy: () => boolean,
   reset: () => void,
+  showWorkPages?: boolean,
 ) {
   if (!isBrowserModes(modes)) throw new Error("请只选择一种浏览器方式");
   if (
@@ -387,10 +389,12 @@ export async function changeBrowserModes(
   )
     throw browserBusyError("查询、采集或分析正在运行，请先暂停并等待任务结束后切换浏览器");
   const previous = browserSettings();
+  const previousVisibility = showBrowserWorkPages();
   browserControl.changing = true;
   let saved = false;
   try {
-    saveBrowserSettings(modes);
+    if (showWorkPages === undefined) saveBrowserSettings(modes);
+    else saveBrowserSettings(modes, showWorkPages);
     saved = true;
     reset();
     const results = await Promise.allSettled(
@@ -403,11 +407,12 @@ export async function changeBrowserModes(
         String(errors[0].reason),
       );
     pool.sessions = {};
-    diagnostics.record("browser.modes_changed", { modes });
+    diagnostics.record("browser.modes_changed", { modes, showWorkPages: showBrowserWorkPages() });
   } catch (error) {
     if (saved) {
       try {
-        saveBrowserSettings(previous.modes || [previous.mode]);
+        if (showWorkPages === undefined) saveBrowserSettings(previous.modes || [previous.mode]);
+        else saveBrowserSettings(previous.modes || [previous.mode], previousVisibility);
       } catch (rollbackError) {
         diagnostics.record("browser.mode_rollback_error", { error, rollbackError });
         throw new AggregateError(
