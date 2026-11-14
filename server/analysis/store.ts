@@ -1,6 +1,10 @@
-import { conditionNodes, defaultConditions } from "./conditions";
-import { evaluateSavedConditions } from "./condition-evaluation";
-import { RULE_ENGINE_VERSION } from "./condition-rule-types";
+import { defaultConditions } from "./conditions";
+import {
+  DIRECT_CONDITION_VERSION,
+  directConditionNodes,
+  evaluateDirectConditions,
+  hasCurrentDirectReview,
+} from "./direct-condition-review";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { setImmediate as yieldThread } from "node:timers/promises";
@@ -63,7 +67,16 @@ const now = () => new Date().toISOString();
 const nullable = (value: SQLOutputValue | undefined) => (value == null ? null : String(value));
 // Invalidate checkpoints when review semantics change; pricing versions live in the frozen profile.
 const checkpointKey = (provider: string, model: string, profile: string | null) =>
-  textHash(JSON.stringify(["analysis-checkpoint-v1", RULE_VERSION, provider, model, profile]));
+  textHash(
+    JSON.stringify([
+      "analysis-checkpoint-v1",
+      DIRECT_CONDITION_VERSION,
+      RULE_VERSION,
+      provider,
+      model,
+      profile,
+    ]),
+  );
 const currentCheckpointSql = `c.listing_key=l.key AND c.validation_key=?
   AND c.listing_revision=(SELECT revision FROM record_versions WHERE entity='listings' AND record_key=l.key)
   AND c.valid_until>? AND c.result_task_id IS NOT NULL AND c.proof_id IS NOT NULL
@@ -769,6 +782,25 @@ export class AnalysisStore {
             );
             const replayedComparison = JSON.parse(JSON.stringify(replayed)) as ProductAnalysis;
             const savedComparison = JSON.parse(String(row.result_json)) as ProductAnalysis;
+            const tree = profile.settings.conditions || defaultConditions();
+            const prices = {
+              asking: replayed.valuation!.asking_price,
+              bare: replayed.valuation!.bare_role_value ?? null,
+            };
+            if (
+              hasCurrentDirectReview(
+                tree,
+                record,
+                prices,
+                savedComparison.valuation?.condition_review,
+              )
+            )
+              replayed.valuation!.condition_review = evaluateDirectConditions(
+                tree,
+                record,
+                prices,
+                savedComparison.valuation?.condition_review,
+              );
             // Eligibility uses the current conditions. Its local review may change
             // while every source, pricing snapshot and AI proof remains identical.
             if (replayedComparison.valuation) delete replayedComparison.valuation.condition_review;
@@ -779,6 +811,17 @@ export class AnalysisStore {
                 result_json: JSON.stringify(replayed),
                 proof_id: attempt.id,
                 proof_task_id: attempt.task_id,
+                condition_review_pending: hasCurrentDirectReview(
+                  profile.settings.conditions || defaultConditions(),
+                  record,
+                  {
+                    asking: replayed.valuation!.asking_price,
+                    bare: replayed.valuation!.bare_role_value ?? null,
+                  },
+                  replayed.valuation!.condition_review,
+                )
+                  ? 0
+                  : 1,
               };
           } catch {
             // Pricing may have changed since the review; reuse facts only after
@@ -801,6 +844,17 @@ export class AnalysisStore {
             prompt_hash: textHash(prompt),
             completed_at: now(),
             recalculated: 1,
+            condition_review_pending: hasCurrentDirectReview(
+              profile.settings.conditions || defaultConditions(),
+              record,
+              {
+                asking: result.valuation!.asking_price,
+                bare: result.valuation!.bare_role_value ?? null,
+              },
+              result.valuation!.condition_review,
+            )
+              ? 0
+              : 1,
           };
         }
       } catch {
@@ -821,6 +875,7 @@ export class AnalysisStore {
     force = false,
     id: string = randomUUID(),
   ) {
+    const completed = !!previous && !previous.condition_review_pending;
     const inserted = this.db
       .prepare(
         `INSERT INTO analysis_tasks(id,run_id,ordinal,listing_key,input_hash,input_text,prompt_hash,prompt_text,source_listing_json,source_detail_json,collected_at,status,reused,result_json,completed_at,source_task_id,equipment_pricing_json,pet_pricing_json,queue_lane,analysis_data_hash,force_reanalysis) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -837,15 +892,15 @@ export class AnalysisStore {
         row.key,
         document.contentHash,
         document.text,
-        previous?.prompt_hash || textHash(prompt),
-        previous?.prompt_text || prompt,
+        completed ? previous.prompt_hash || textHash(prompt) : textHash(prompt),
+        completed ? previous.prompt_text || prompt : prompt,
         row.listing_json,
         row.detail_json,
         document.collectedAt,
-        previous ? "completed" : "queued",
-        previous ? 1 : 0,
+        completed ? "completed" : "queued",
+        completed ? 1 : 0,
         previous?.result_json ?? null,
-        previous?.completed_at ?? null,
+        completed ? (previous?.completed_at ?? null) : null,
         previous
           ? previous.recalculated
             ? previous.id
@@ -858,7 +913,7 @@ export class AnalysisStore {
         force ? "1" : "0",
       );
     if (inserted.changes !== 1) throw new Error("分析任务状态已变化");
-    if (previous?.recalculated) {
+    if (completed && previous.recalculated) {
       const result = JSON.parse(String(previous.result_json)) as ProductAnalysis;
       const time = now();
       const proofId = randomUUID();
@@ -998,7 +1053,7 @@ export class AnalysisStore {
         const previous = force
           ? undefined
           : this.reusableResult(provider, model, record, document, prompt, profile);
-        if (previous && !sample && !previous.recalculated) {
+        if (previous && !sample && !previous.recalculated && !previous.condition_review_pending) {
           this.rememberCapture(id, row, previous, validationKey);
           return;
         }
@@ -1122,7 +1177,7 @@ export class AnalysisStore {
           prompt,
           profile,
         );
-        if (previous && !previous.recalculated) {
+        if (previous && !previous.recalculated && !previous.condition_review_pending) {
           this.rememberCapture(id, row, previous, validationKey);
           continue;
         }
@@ -1208,8 +1263,29 @@ export class AnalysisStore {
         false,
         task.id,
       );
-      if (!previous.recalculated) this.rememberCapture(task.runId, row, previous, key);
+      if (!previous.recalculated && !previous.condition_review_pending)
+        this.rememberCapture(task.runId, row, previous, key);
       this.db.prepare("UPDATE analysis_runs SET updated_at=? WHERE id=?").run(now(), task.runId);
+      if (previous.condition_review_pending) {
+        // Reuse validated values and quotes, then ask AI only for the new condition
+        // results in the normal analysis request. Do not mark this task completed.
+        task.previousResult = JSON.parse(String(previous.result_json));
+        task.prompt = valuationPrompt(
+          task.document,
+          task.record,
+          task.profile!,
+          previous.equipment_pricing_json
+            ? JSON.parse(String(previous.equipment_pricing_json))
+            : undefined,
+          previous.pet_pricing_json ? JSON.parse(String(previous.pet_pricing_json)) : undefined,
+        );
+        if (previous.equipment_pricing_json)
+          task.equipmentPricing = JSON.parse(String(previous.equipment_pricing_json));
+        if (previous.pet_pricing_json)
+          task.petPricing = JSON.parse(String(previous.pet_pricing_json));
+        this.db.exec("COMMIT");
+        return false;
+      }
       this.db.exec("COMMIT");
       return true;
     } catch (error) {
@@ -1550,10 +1626,15 @@ export class AnalysisStore {
     ) {
       const conditions =
         (currentProfile || savedProfile)?.settings.conditions || defaultConditions();
-      localResult.valuation.condition_review = evaluateSavedConditions(conditions, sourceRecord, {
-        asking: localResult.valuation.asking_price,
-        bare: localResult.valuation.bare_role_value ?? null,
-      });
+      localResult.valuation.condition_review = evaluateDirectConditions(
+        conditions,
+        sourceRecord,
+        {
+          asking: localResult.valuation.asking_price,
+          bare: localResult.valuation.bare_role_value ?? null,
+        },
+        localResult.valuation.condition_review,
+      );
     }
     const attempts = this.db
       .prepare(
@@ -1632,9 +1713,7 @@ export class AnalysisStore {
       (currentProfile || savedProfile?.settings.conditions || result.valuation.condition_review)
     ) {
       const tree = (currentProfile || savedProfile)?.settings.conditions || defaultConditions();
-      const needsSource = conditionNodes(tree).some(
-        (node) => !("children" in node) && node.rule?.status === "ready",
-      );
+      const needsSource = directConditionNodes(tree).length > 0;
       const detailJson = needsSource
         ? (row.detail_json ??
           this.db.prepare("SELECT detail_json FROM listings WHERE key=?").get(String(row.key))
@@ -1646,10 +1725,12 @@ export class AnalysisStore {
         status: "complete",
         error: null,
       };
-      result.valuation.condition_review = evaluateSavedConditions(tree, record, {
-        asking: result.valuation.asking_price,
-        bare: result.valuation.bare_role_value ?? null,
-      });
+      result.valuation.condition_review = evaluateDirectConditions(
+        tree,
+        record,
+        { asking: result.valuation.asking_price, bare: result.valuation.bare_role_value ?? null },
+        result.valuation.condition_review,
+      );
     }
     return {
       key: String(row.key),
@@ -1875,7 +1956,7 @@ export class AnalysisStore {
       }[] = [];
       const manualReview: AnalysisItem[] = [];
       const profileKey = textHash(
-        JSON.stringify([options.currentProfile || null, RULE_ENGINE_VERSION]),
+        JSON.stringify([options.currentProfile || null, DIRECT_CONDITION_VERSION]),
       );
       const signature = (row: Row) =>
         textHash(

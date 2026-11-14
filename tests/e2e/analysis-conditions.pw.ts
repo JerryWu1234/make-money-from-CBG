@@ -11,15 +11,6 @@ import {
   saveProfile,
   loadProfile,
 } from "../../server/analysis/profile";
-import { prepareConditionRules } from "../../server/analysis/condition-rule-cache";
-import type {
-  ConditionTextInput,
-  ConditionCompilerOptions,
-} from "../../server/analysis/condition-compiler";
-import {
-  RULE_ENGINE_VERSION,
-  type CompiledConditionRule,
-} from "../../server/analysis/condition-rule-types";
 import { calculateValuation } from "../../server/analysis/valuation-calculator";
 import { valuationRecord } from "../fixtures/analysis";
 
@@ -74,77 +65,69 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
   );
   let recoveryGate: Promise<void> | undefined;
   let releaseRecovery: (() => void) | undefined;
-  let compileCalls = 0;
-  const compileRequests: Array<{ provider: string; model?: string }> = [];
+  const clientRequests: Array<{ provider: string; model?: string }> = [];
   let calls = 0;
   const requests: unknown[] = [];
-  const runner = new AnalysisRunner(store, async () => ({
-    model: "fixture-model",
-    analyze: async (prompt, schema) => {
-      calls++;
-      requests.push({ prompt, schema });
-      expect(schema).not.toHaveProperty("properties.condition_results");
-      const expected = calculateValuation(record, profile);
-      expect(
-        expected.bare_role_value,
-        JSON.stringify({ missing: expected.missing_fields, pending: expected.pending_rules }),
-      ).toBeGreaterThan(0);
-      return {
-        text: JSON.stringify({
-          decision: expected.decision,
-          reason: expected.reason,
-          extracted_facts: [],
-        }),
-      };
-    },
-  }));
-  async function compileFixture(
-    input: readonly ConditionTextInput[],
-    options: ConditionCompilerOptions,
-  ) {
-    compileCalls++;
-    compileRequests.push({ provider: options.provider, model: options.model });
-    return input.map((node) => {
-      const rule: CompiledConditionRule = node.text.startsWith("速度大于")
-        ? {
-            version: RULE_ENGINE_VERSION,
-            sourceText: node.text.trim(),
-            status: "ready",
-            issues: [],
-            expression: {
-              op: "gt",
-              args: [
-                { op: "field", path: "role.speed" },
-                { op: "literal", value: Number(node.text.match(/\d+/)![0]) },
-              ],
-            },
-            explanation: "人物速度阈值",
+  const runner = new AnalysisRunner(store, async (provider, model) => {
+    clientRequests.push({ provider, model });
+    return {
+      model: model || "fixture-model",
+      analyze: async (prompt, schema) => {
+        calls++;
+        requests.push({ prompt, schema });
+        expect(schema).toHaveProperty("properties.condition_results");
+        expect(prompt).toContain("条件证据列表摘要");
+        const expected = calculateValuation(record, profile);
+        expect(expected.bare_role_value).toBeGreaterThan(0);
+        const conditionResults = [];
+        for (const node of profile.settings.conditions?.children || []) {
+          if ("children" in node || node.price) continue;
+          if (node.text.startsWith("养成")) {
+            conditionResults.push({
+              id: node.id,
+              sourceText: node.text,
+              matched: null,
+              reason: "养成完整缺少可核实标准",
+              observations: [],
+              calculation: null,
+              comparison: null,
+            });
+            continue;
           }
-        : node.text.startsWith("人物等级")
-          ? {
-              version: RULE_ENGINE_VERSION,
-              sourceText: node.text.trim(),
-              status: "ready",
-              issues: [],
-              expression: {
-                op: "gte",
-                args: [
-                  { op: "field", path: "role.level" },
-                  { op: "literal", value: 120 },
-                ],
+          const speed = node.text.startsWith("速度");
+          const actual = speed ? 850 : 109;
+          const target = Number(node.text.match(/\d+/)![0]);
+          const levelIndex = record.detail!.tabs[0].fields.findIndex(
+            (field) => field.name === "级别",
+          );
+          conditionResults.push({
+            id: node.id,
+            sourceText: node.text,
+            matched: speed ? actual > target : actual >= target,
+            reason: "根据本商品原始资料逐条判断",
+            observations: [
+              {
+                label: speed ? "人物速度" : "人物等级",
+                path: speed ? "/listing/attrs/速度" : `/detail/tabs/0/fields/${levelIndex}/value`,
+                quote: String(actual),
+                numericValue: actual,
               },
-              explanation: "人物等级至少120",
-            }
-          : {
-              version: RULE_ENGINE_VERSION,
-              sourceText: node.text.trim(),
-              status: "unsupported",
-              issues: ["请说明养成完整的可核实标准"],
-              explanation: "缺少可核实标准",
-            };
-      return { id: node.id, rule };
-    });
-  }
+            ],
+            calculation: { operation: "identity", inputs: [0], result: actual },
+            comparison: { operator: speed ? "gt" : "gte", target },
+          });
+        }
+        return {
+          text: JSON.stringify({
+            decision: expected.decision,
+            reason: expected.reason,
+            extracted_facts: [],
+            condition_results: conditionResults,
+          }),
+        };
+      },
+    };
+  });
   try {
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
@@ -214,15 +197,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
           }
           break;
         case "/api/analysis/start":
-          profile = await prepareConditionRules(
-            crawl.db,
-            {
-              provider: input.provider,
-              model: input.model,
-              profileFile: promptFile,
-            },
-            compileFixture,
-          );
+          profile = loadProfile(crawl.db, promptFile);
           body = store.run(
             await runner.start(input.provider, input.force, profile, false, input.model),
           );
@@ -276,7 +251,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await expect(settings.getByRole("button", { name: "解析文字条件", exact: true })).toHaveCount(
       0,
     );
-    expect(compileCalls).toBe(0);
+    expect(calls).toBe(0);
     profile = saveProfile(
       crawl.db,
       {
@@ -342,14 +317,14 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     expect(loadProfile(crawl.db, promptFile).settings.conditions).toEqual(
       profile.settings.conditions,
     );
-    expect(compileCalls).toBe(0);
+    expect(calls).toBe(0);
     await page
       .getByRole("button", {
         name: /^(开始分析已有商品|分析新增或已更新商品|按新规则开始分析|按新模型开始分析)$/,
       })
       .click();
     await expect
-      .poll(() => compileRequests[0])
+      .poll(() => clientRequests[0])
       .toEqual({ provider: "deepseek", model: "fixture-deepseek-custom" });
     await expect.poll(() => store.overview().run?.completed).toBe(1);
     await page.getByRole("tab", { name: /^全部商品/ }).click();
@@ -374,19 +349,22 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     await settings.getByLabel("C1条件", { exact: true }).fill("速度大于900");
     await settings.getByRole("button", { name: "保存设置", exact: true }).click();
-    expect(compileCalls).toBe(1);
+    expect(calls).toBe(1);
     await page
       .getByRole("button", {
         name: /^(开始分析已有商品|分析新增或已更新商品|按新规则开始分析|按新模型开始分析)$/,
       })
       .click();
-    await expect.poll(() => compileCalls).toBe(2);
+    await expect.poll(() => calls).toBe(2);
+    await expect.poll(() => store.overview().run?.completed).toBe(1);
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
     await expect(page.getByLabel("条件匹配")).toContainText("条件 1 速度大于900：不满足");
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
     const storedResult = crawl.db
-      .prepare("SELECT result_json FROM analysis_tasks WHERE listing_key=? AND status='completed'")
+      .prepare(
+        "SELECT result_json FROM analysis_tasks WHERE listing_key=? AND status='completed' ORDER BY completed_at ASC LIMIT 1",
+      )
       .get(record.listing.key)!;
     expect(String(storedResult.result_json)).toContain("速度大于800");
     expect(String(storedResult.result_json)).not.toContain("速度大于900");
@@ -396,15 +374,14 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
     await expect(page.getByLabel("条件匹配")).toContainText("条件 1 速度大于900：不满足");
-    expect(calls).toBe(1);
+    expect(calls).toBe(2);
     await writeFile(
       testInfo.outputPath("evidence.json"),
       JSON.stringify(
         {
           fixture: true,
           calls,
-          compileCalls,
-          compileRequests,
+          clientRequests,
           requests,
           oldDetail,
           current: store.overview(),

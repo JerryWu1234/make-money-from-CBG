@@ -1,5 +1,5 @@
-import { RULE_ENGINE_VERSION } from "../server/analysis/condition-rule-types";
 import {
+  CONDITION_REVIEW_VERSION,
   defaultConditions,
   priceConditionLabel,
   type Condition,
@@ -68,7 +68,7 @@ export function AnalysisConditions({
     <section className="analysis-settings-section" aria-label="入榜条件设置">
       <h3>入榜条件</h3>
       <p>从上到下按“且／或”依次计算，最终满足才入榜。价格“不限制”不参与计算。</p>
-      <p>填写并保存后，开始分析即可查看每条条件是否满足及依据；资料不足时显示“无法判断”。</p>
+      <p>保存后开始分析，逐条查看 true／false、原始数值和计算过程；资料不足时显示“无法判断”。</p>
       {legacy ? (
         <>
           <p role="status">
@@ -212,7 +212,7 @@ export function AnalysisConditions({
   );
 }
 
-const labels = { met: "满足", unmet: "不满足", unknown: "无法判断" };
+const labels = { met: "满足（true）", unmet: "不满足（false）", unknown: "无法判断" };
 export function ConditionReviewView({ review }: { review?: ConditionReview }) {
   if (!review)
     return (
@@ -293,7 +293,7 @@ export function ConditionReviewView({ review }: { review?: ConditionReview }) {
   return (
     <section aria-label="条件匹配">
       <h3>条件匹配</h3>
-      {review.engineVersion !== RULE_ENGINE_VERSION && (
+      {review.engineVersion !== CONDITION_REVIEW_VERSION && (
         <p role="status" className="analysis-pending-note">
           历史条件记录，不作为当前入榜依据；当前榜单会按保存的条件重新判断。
         </p>

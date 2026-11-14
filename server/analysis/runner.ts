@@ -772,6 +772,7 @@ export class AnalysisRunner {
               task.profile,
               task.equipmentPricing,
               task.petPricing,
+              { requireConditions: true },
             )
           : validateAnalysis(raw, task.document, task.record);
         this.store.finish(task, attempt, owner, { state: "completed", result, raw, usage });

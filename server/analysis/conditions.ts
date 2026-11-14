@@ -5,6 +5,7 @@ import {
 } from "./condition-rule-types";
 
 export type ConditionOperator = "and" | "or";
+export const CONDITION_REVIEW_VERSION = "ai-per-condition-v1";
 export type PriceCondition = {
   comparison: "none" | "eq" | "lt" | "lte" | "gt" | "gte";
   adjustment: "none" | "minus" | "plus";
@@ -33,11 +34,18 @@ export type ConditionResult = {
   reason: string;
   skipped?: boolean;
   evidence?: import("./condition-rule-runtime").RuleEvidence[];
+  matched?: boolean | null;
+  sourceText?: string;
+  observations?: import("./direct-condition-review").DirectObservation[];
+  calculation?: import("./direct-condition-review").DirectCalculation | null;
+  comparison?: import("./direct-condition-review").DirectComparison | null;
 };
 export type ConditionReview = {
   tree: ConditionGroup;
   results: ConditionResult[];
   engineVersion?: string;
+  sourceHash?: string;
+  priceContext?: ConditionPrices;
 };
 export type ConditionPrices = { asking: number | null; bare: number | null };
 

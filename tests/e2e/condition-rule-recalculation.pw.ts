@@ -11,63 +11,96 @@ import {
   saveProfile,
 } from "../../server/analysis/profile";
 import { compareListingPrice } from "../../server/analysis/valuation-calculator";
-import {
-  describeRule,
-  RULE_ENGINE_VERSION,
-  type RuleExpression,
-} from "../../server/analysis/condition-rule-types";
+import { validateDirectConditionResults } from "../../server/analysis/direct-condition-review";
 import type { ConditionGroup } from "../../server/analysis/conditions";
-import { prepareConditionRules } from "../../server/analysis/condition-rule-cache";
 import type { ValuationResult } from "../../server/analysis/valuation-types";
 import { analysisRecord, analysisResponse } from "../fixtures/analysis";
 
-// Reproduce the production false positive with complete source data, an old AI met result,
-// and its contradictory reason. Automatic interpretation uses a fixture; cache,
-// persistence/evaluation/UI are real. Saving alone never calls the model.
-test("保存后开始分析自动判断，排除0装备3宝宝旧AI误入榜（不重新估值）", async ({
-  page,
-}, testInfo) => {
-  const crawl = new CrawlStore(testInfo.outputPath("old-ai-false-positive.sqlite"));
+// Only AI output and browser network are fixtures. Source quotes, arithmetic,
+// comparisons, persisted archives and rendered per-condition results are real.
+test("逐商品判断宝石30段、人物当前修炼26，并展示可核对过程", async ({ page }, testInfo) => {
+  const crawl = new CrawlStore(testInfo.outputPath("direct-condition-review.sqlite"));
   try {
-    const record = analysisRecord("old-ai-false-positive");
-    record.listing.name = "70391545";
+    const record = analysisRecord("direct-condition-review");
+    record.listing.name = "46957901";
     record.listing.price = "999";
-    const gear = record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!;
-    gear.items = [];
-    gear.text = "没有装备";
-    record.detail!.equipmentCapture!.emptyProof = "explicit-text";
-    const pets = record.detail!.tabs.find((tab) => tab.name === "召唤兽/孩子")!;
-    pets.pets = [0, 141, 5].map((level, index) => ({
-      index,
-      name: ["灵符女娲", "凤凰", "日游神"][index],
-      fields: [
-        { name: "等级", value: String(level) },
-        { name: "是否宝宝", value: "是" },
+    const roleIndex = record.detail!.tabs.findIndex((tab) => tab.name === "人物/修炼");
+    const role = record.detail!.tabs[roleIndex];
+    role.tables = [
+      [
+        ["攻击修炼：", "12/20"],
+        ["防御修炼：", "7/20"],
+        ["法术修炼：", "0/20"],
+        ["抗法修炼：", "7/20"],
+        ["猎术修炼：", "100"],
       ],
-      skills: [],
-      equipment: [],
-      innerSkills: [],
+    ];
+    const gearIndex = record.detail!.tabs.findIndex((tab) => tab.name === "道具/法宝");
+    const gear = record.detail!.tabs[gearIndex];
+    const gemLevels = [7, 5, 6, 4, 4, 4];
+    gear.items = gemLevels.map((level, index) => ({
+      index,
+      name: `测试人物装备${index + 1}`,
+      kind: "equipment" as const,
+      location: `role_using_equip_${index + 1}`,
+      category: `人物装备 · ${["头盔", "衣服", "鞋子", "饰品", "腰带", "武器"][index]}`,
+      description: `等级100\n锻炼等级 ${level}\n镶嵌宝石 黑宝石`,
     }));
-    pets.petCount = 3;
+    gear.items.push({
+      index: 6,
+      name: "星辉石不混入",
+      kind: "equipment",
+      category: "人物装备 · 戒指",
+      location: "role_using_equip_187",
+      description: "等级100\n精炼等级3",
+    });
+    const conditions: ConditionGroup = {
+      id: "G1",
+      operator: "and",
+      evaluation: "sequence",
+      children: [
+        {
+          id: "C1",
+          text: "",
+          price: { comparison: "none", adjustment: "none", unit: "amount", value: 0 },
+        },
+        { id: "C2", text: "总宝石数量大于等于20", join: "and" },
+        { id: "C3", text: "角色修为大于等于27", join: "and" },
+      ],
+    };
+    // The old contradiction is rejected even when the model claims true.
+    const contradiction = {
+      id: "C2",
+      sourceText: "召唤兽数量大于8",
+      matched: true,
+      reason: "实际仅3只，不大于8",
+      observations: [0, 1, 2].map((index) => ({
+        label: `召唤兽${index + 1}`,
+        path: `/detail/tabs/${record.detail!.tabs.findIndex((tab) => tab.name === "召唤兽/孩子")}/pets/${index}/name`,
+        quote: record.detail!.tabs.find((tab) => tab.name === "召唤兽/孩子")!.pets![index].name,
+        numericValue: null,
+      })),
+      calculation: { operation: "count", inputs: [0, 1, 2], result: 3 },
+      comparison: { operator: "gt", target: 8 },
+    };
+    expect(() =>
+      validateDirectConditionResults(
+        [contradiction],
+        {
+          id: "G1",
+          operator: "and",
+          evaluation: "sequence",
+          children: [{ id: "C2", text: contradiction.sourceText }],
+        },
+        record,
+        { asking: 999, bare: 1024.5 },
+      ),
+    ).toThrow();
     crawl.observe(record.listing);
     expect(crawl.save(record.listing, record.detail!)).toBe(true);
     const template = await readFile(PROMPT_FILE, "utf8");
     const promptFile = testInfo.outputPath("valuation.md");
     await writeFile(promptFile, template);
-    const text = "装备和宝宝加起来的数量大于8件";
-    const conditions: ConditionGroup = {
-      id: "G1",
-      evaluation: "sequence",
-      operator: "and",
-      children: [
-        {
-          id: "C1",
-          text: "",
-          price: { comparison: "lte", adjustment: "none", unit: "amount", value: 0 },
-        },
-        { id: "C2", text, join: "and" },
-      ],
-    };
     let profile = saveProfile(
       crawl.db,
       {
@@ -78,7 +111,8 @@ test("保存后开始分析自动判断，排除0装备3宝宝旧AI误入榜（�
       promptFile,
     );
     const store = new AnalysisStore(crawl.db);
-    const runId = store.createRun("codex", "fixture-model", false, profile);
+    store.followsCapture = () => false;
+    const oldRunId = store.createRun("codex", "fixture-model", false, profile);
     const value = {
       ...compareListingPrice(1024.5, 999),
       asking_price: 999,
@@ -95,21 +129,50 @@ test("保存后开始分析自动判断，排除0装备3宝宝旧AI误入榜（�
       condition_review: {
         tree: conditions,
         results: [
-          { id: "C1", status: "met", reason: "999小于1024.50" },
-          { id: "C2", status: "met", reason: "装备容器为空，召唤兽3只；合计仅3，不大于8。" },
-          { id: "G1", status: "met", reason: "旧AI错误满足状态" },
+          { id: "C2", status: "unknown", reason: "旧目录没有宝石数量字段" },
+          { id: "C3", status: "unknown", reason: "旧目录没有角色修为字段" },
+          { id: "G1", status: "unknown", reason: "旧条件尚未判断" },
         ],
       },
     } as ValuationResult;
-    const sourceResult = JSON.stringify({ ...analysisResponse(record), valuation: value });
+    const oldSource = JSON.stringify({ ...analysisResponse(record), valuation: value });
     crawl.db
       .prepare(
         "UPDATE analysis_tasks SET status='completed',result_json=?,completed_at=? WHERE run_id=?",
       )
-      .run(sourceResult, new Date().toISOString(), runId);
-    crawl.db.prepare("UPDATE analysis_runs SET status='completed' WHERE id=?").run(runId);
-    let compileCalls = 0;
-    let analysisCalls = 0;
+      .run(oldSource, new Date().toISOString(), oldRunId);
+    crawl.db.prepare("UPDATE analysis_runs SET status='completed' WHERE id=?").run(oldRunId);
+    let conditionCalls = 0;
+    const rawResults = [
+      {
+        id: "C2",
+        sourceText: "总宝石数量大于等于20",
+        matched: true,
+        reason: "按人物装备宝石段数合计，排除灵饰星辉石",
+        observations: gemLevels.map((level, index) => ({
+          label: `人物装备${index + 1}宝石段数`,
+          path: `/detail/tabs/${gearIndex}/items/${index}/description`,
+          quote: `锻炼等级 ${level}`,
+          numericValue: level,
+        })),
+        calculation: { operation: "sum", inputs: [0, 1, 2, 3, 4, 5], result: 30 },
+        comparison: { operator: "gte", target: 20 },
+      },
+      {
+        id: "C3",
+        sourceText: "角色修为大于等于27",
+        matched: false,
+        reason: "四项当前修炼等级求和，不使用分母上限或猎术",
+        observations: [12, 7, 0, 7].map((level, index) => ({
+          label: ["攻击修炼", "防御修炼", "法术修炼", "抗法修炼"][index],
+          path: `/detail/tabs/${roleIndex}/tables/0/${index}/1`,
+          quote: `${level}/20`,
+          numericValue: level,
+        })),
+        calculation: { operation: "sum", inputs: [0, 1, 2, 3], result: 26 },
+        comparison: { operator: "gte", target: 27 },
+      },
+    ];
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
       if (url.origin !== "http://rules.test") return route.abort();
@@ -155,7 +218,7 @@ test("保存后开始分析自动判断，排除0装备3宝宝旧AI误入榜（�
           body = { profile, promptFile, servers: [] };
           break;
         case "/api/analysis/conditions/compile":
-          throw new Error("界面不应调用手动解析接口");
+          throw new Error("逐商品判断不应调用文字解析接口");
         case "/api/analysis/settings/save":
           profile = saveProfile(crawl.db, input, promptFile);
           body = { profile };
@@ -167,40 +230,26 @@ test("保存后开始分析自动判断，排除0装备3宝宝旧AI误入榜（�
         case "/api/analysis/detail":
           body = store.detail(url.searchParams.get("taskId")!, profile);
           break;
-        case "/api/analysis/start":
-          profile = await prepareConditionRules(
-            crawl.db,
-            {
-              provider: input.provider,
-              model: input.model,
-              profileFile: promptFile,
-            },
-            async (entries) => {
-              compileCalls++;
-              const expression: RuleExpression = {
-                op: "gt",
-                args: [
-                  { op: "count", collections: ["equipment", "jewelry", "petEquipment", "pets"] },
-                  { op: "literal", value: 8 },
-                ],
-              };
-              return entries.map((entry) => ({
-                id: entry.id,
-                rule: {
-                  version: RULE_ENGINE_VERSION,
-                  sourceText: entry.text,
-                  status: "ready" as const,
-                  expression,
-                  explanation: describeRule(expression),
-                  issues: [],
-                },
-              }));
-            },
-          );
-          // Existing source-bound valuations can be recomputed locally; this fixture
-          // deliberately has no product AI client. Controller coverage checks wiring.
+        case "/api/analysis/start": {
+          conditionCalls++;
+          const review = validateDirectConditionResults(rawResults, conditions, record, {
+            asking: 999,
+            bare: 1024.5,
+          });
+          const runId = store.createRun("codex", "fixture-model", true, profile);
+          const result = {
+            ...analysisResponse(record),
+            valuation: { ...value, condition_review: review },
+          };
+          crawl.db
+            .prepare(
+              "UPDATE analysis_tasks SET status='completed',result_json=?,completed_at=? WHERE run_id=?",
+            )
+            .run(JSON.stringify(result), new Date().toISOString(), runId);
+          crawl.db.prepare("UPDATE analysis_runs SET status='completed' WHERE id=?").run(runId);
           body = store.run(runId);
           break;
+        }
         default:
           throw new Error("未模拟接口：" + url.pathname);
       }
@@ -212,41 +261,51 @@ test("保存后开始分析自动判断，排除0装备3宝宝旧AI误入榜（�
     await expect(settings.getByRole("button", { name: "解析文字条件", exact: true })).toHaveCount(
       0,
     );
-    await expect(settings.getByLabel("C2条件", { exact: true })).toHaveValue(text);
-    await settings.screenshot({ path: testInfo.outputPath("simple-conditions.png") });
+    await expect(settings.getByLabel("C2条件", { exact: true })).toHaveValue(
+      "总宝石数量大于等于20",
+    );
+    await expect(settings.getByLabel("C3条件", { exact: true })).toHaveValue("角色修为大于等于27");
+    await settings.screenshot({ path: testInfo.outputPath("direct-conditions-settings.png") });
     await settings.getByRole("button", { name: "保存设置", exact: true }).click();
     await expect(settings).not.toBeVisible();
-    expect(compileCalls).toBe(0);
+    expect(conditionCalls).toBe(0);
     await page
       .getByRole("button", {
         name: /^(开始分析已有商品|分析新增或已更新商品|按新规则开始分析|按新模型开始分析)$/,
       })
       .click();
-    await expect.poll(() => compileCalls).toBe(1);
+    await expect.poll(() => conditionCalls).toBe(1);
     await page.getByRole("tab", { name: /^推荐榜/ }).click();
     await expect(page.getByRole("tabpanel", { name: "推荐榜" }).getByRole("article")).toHaveCount(
       0,
     );
-    expect(store.overview({ currentProfile: profile }).ranking).toHaveLength(0);
     await page.getByRole("tab", { name: /^全部商品/ }).click();
     await page.getByRole("button", { name: "查看分析", exact: true }).click();
     const review = page.getByLabel("条件匹配");
-    await expect(review).toContainText("条件 1 挂牌价小于或等于裸号估值：满足");
-    await expect(review).toContainText(`条件 2 ${text}：不满足`);
-    await expect(review).toContainText("3");
-    await expect(review).toContainText("8");
+    await expect(review).toContainText("条件 2 总宝石数量大于等于20：满足");
+    await expect(review).toContainText("true");
+    await expect(review).toContainText("条件 3 角色修为大于等于27：不满足");
+    await expect(review).toContainText("false");
+    await expect(review).toContainText("30");
+    await expect(review).toContainText("26");
+    await expect(review).not.toContainText("旧目录");
+    await expect(review).not.toContainText("历史条件记录");
+    await review
+      .getByText(/查看采集依据/)
+      .first()
+      .click();
     await review.scrollIntoViewIfNeeded();
+    await page.setViewportSize({ width: 1100, height: 1400 });
     await page
-      .getByRole("dialog", { name: "70391545", exact: true })
-      .screenshot({ path: testInfo.outputPath("local-count-rejects-old-ai.png") });
-    expect(compileCalls).toBe(1);
-    expect(analysisCalls).toBe(0);
+      .getByRole("dialog", { name: "46957901", exact: true })
+      .screenshot({ path: testInfo.outputPath("direct-condition-process.png") });
     expect(
       String(
-        crawl.db.prepare("SELECT result_json FROM analysis_tasks WHERE run_id=?").get(runId)!
+        crawl.db.prepare("SELECT result_json FROM analysis_tasks WHERE run_id=?").get(oldRunId)!
           .result_json,
       ),
-    ).toBe(sourceResult);
+    ).toBe(oldSource);
+    expect(conditionCalls).toBe(1);
   } finally {
     crawl.close();
   }

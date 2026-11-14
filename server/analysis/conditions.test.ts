@@ -8,6 +8,7 @@ import {
   validateConditionResults,
   type ConditionGroup,
   type ConditionResult,
+  CONDITION_REVIEW_VERSION,
 } from "./conditions";
 import {
   RULE_ENGINE_VERSION,
@@ -179,7 +180,7 @@ describe("自由文字条件编译与本地执行", () => {
       ).toBe("unknown");
     },
   );
-  it("估值模型无需条件结论，规则变化不改变裸号公式和价差", () => {
+  it("逐条条件返回true及可核对过程，价格公式保持独立", () => {
     const text = "人物等级至少100";
     const tree = list([true]);
     tree.children = [
@@ -197,7 +198,8 @@ describe("自由文字条件编译与本地执行", () => {
     ];
     const template = readFileSync(PROMPT_FILE, "utf8");
     const profile = createProfile(template, { ...DEFAULT_SETTINGS, conditions: tree });
-    expect(valuationSchema(profile)).toBe(VALUATION_SCHEMA);
+    expect(valuationSchema(profile).required).toContain("condition_results");
+    expect(valuationSchema(createProfile(template))).toBe(VALUATION_SCHEMA);
     const record = valuationRecord();
     const expected = calculateValuation(record, profile);
     const result = validateValuation(
@@ -205,16 +207,36 @@ describe("自由文字条件编译与本地执行", () => {
         decision: expected.decision,
         reason: expected.reason,
         extracted_facts: [],
-        condition_results: [{ id: "C1", status: "unmet", reason: "不可信AI" }],
+        condition_results: [
+          {
+            id: "C1",
+            sourceText: text,
+            matched: true,
+            reason: "当前等级109达到100",
+            observations: [
+              {
+                label: "人物等级",
+                path: "/detail/tabs/0/fields/1/value",
+                quote: "109",
+                numericValue: 109,
+              },
+            ],
+            calculation: { operation: "identity", inputs: [0], result: 109 },
+            comparison: { operator: "gte", target: 100 },
+          },
+        ],
       }),
       buildProductDocument(record),
       record,
       profile,
+      undefined,
+      undefined,
+      { requireConditions: true },
     );
     expect(result.valuation?.condition_review?.results.find((r) => r.id === "C1")?.status).toBe(
       "met",
     );
     expect(result.valuation?.bare_role_value).toBe(expected.bare_role_value);
-    expect(result.valuation?.condition_review?.engineVersion).toBe(RULE_ENGINE_VERSION);
+    expect(result.valuation?.condition_review?.engineVersion).toBe(CONDITION_REVIEW_VERSION);
   });
 });

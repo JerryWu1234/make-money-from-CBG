@@ -18,6 +18,7 @@ import { applyValuationRange } from "./valuation-range";
 import { validateValuation } from "./valuation-contract";
 import { defaultConditions, type ConditionGroup } from "./conditions";
 import { RULE_ENGINE_VERSION, describeRule, type RuleExpression } from "./condition-rule-types";
+import { validateDirectConditionResults } from "./direct-condition-review";
 
 const allAssets: RuleExpression = {
   op: "count",
@@ -65,7 +66,44 @@ function source() {
   return record;
 }
 
-it("旧AI把3件标满足不能入榜；修改可执行规则立即重算并保持旧证据", () => {
+function countResults(tree: ConditionGroup, record: SavedRoleRecord, threshold: number) {
+  const observations = record.detail!.tabs.flatMap((tab, ti) => [
+    ...(tab.items || [])
+      .map((item, index) => ({ item, index }))
+      .filter(
+        ({ item }) => /装备|腰带/.test(item.category || "") && !/法宝/.test(item.category || ""),
+      )
+      .map(({ item, index }) => ({
+        label: item.name,
+        path: `/detail/tabs/${ti}/items/${index}/name`,
+        quote: item.name,
+        numericValue: null,
+      })),
+    ...(tab.pets || []).map((pet, index) => ({
+      label: pet.name,
+      path: `/detail/tabs/${ti}/pets/${index}/name`,
+      quote: pet.name,
+      numericValue: null,
+    })),
+  ]);
+  return tree.children
+    .filter((node) => !("children" in node) && !node.price)
+    .map((node) => ({
+      id: node.id,
+      sourceText: "text" in node ? node.text : "",
+      matched: observations.length > threshold,
+      reason: `原始装备和召唤兽合计${observations.length}件`,
+      observations,
+      calculation: {
+        operation: "count",
+        inputs: observations.map((_, index) => index),
+        result: observations.length,
+      },
+      comparison: { operator: "gt", target: threshold },
+    }));
+}
+
+it("旧AI及旧规则不能冒充新逐条判断；修改文字等待判断，历史证据保留", () => {
   const crawl = new CrawlStore(":memory:");
   try {
     const record = source();
@@ -109,30 +147,39 @@ it("旧AI把3件标满足不能入榜；修改可执行规则立即重算并保�
     expect(detail.profileChanged).toBe(false);
     expect(
       detail.result?.valuation?.condition_review?.results.find((r) => r.id === "C2"),
-    ).toMatchObject({ status: "unmet" });
+    ).toMatchObject({ status: "unknown" });
+    const direct = validateDirectConditionResults(
+      countResults(configured(), record, 8),
+      configured(),
+      record,
+      { asking: 999, bare: 1024.5 },
+    );
+    const checked = JSON.stringify({
+      ...archived,
+      valuation: { ...archived.valuation, condition_review: direct },
+    });
+    crawl.db.prepare("UPDATE analysis_tasks SET result_json=? WHERE id=?").run(checked, taskId);
     expect(
-      detail.result?.valuation?.condition_review?.results.find((r) => r.id === "C2")?.reason,
-    ).toContain("3");
+      store
+        .detail(taskId, current)!
+        .result?.valuation?.condition_review?.results.find((r) => r.id === "C2"),
+    ).toMatchObject({ status: "unmet", matched: false });
     const changed = createProfile(oldProfile.template, {
       ...DEFAULT_SETTINGS,
       conditions: configured(2),
     });
     const updated = store.overview({ runId, currentProfile: changed });
-    expect(updated.ranking).toHaveLength(1);
+    expect(updated.ranking).toHaveLength(0);
+    expect(updated.manualReview).toHaveLength(1);
     expect(
-      updated.ranking[0].recommendation?.conditionReview?.results.find((r) => r.id === "C2")
-        ?.status,
-    ).toBe("met");
-    expect(updated.ranking[0].valuation?.condition_review).toEqual(
-      updated.ranking[0].recommendation?.conditionReview,
-    );
-    expect(store.detail(taskId, changed)!.result?.valuation?.condition_review).toEqual(
-      updated.ranking[0].recommendation?.conditionReview,
-    );
+      store
+        .detail(taskId, changed)!
+        .result?.valuation?.condition_review?.results.find((r) => r.id === "C2"),
+    ).toMatchObject({ status: "unknown" });
     expect(
       crawl.db.prepare("SELECT result_json FROM analysis_tasks WHERE id=?").get(taskId)
         ?.result_json,
-    ).toBe(json);
+    ).toBe(checked);
     expect(
       store.overview({ runId, currentProfile: createProfile("pricing changed", changed.settings) })
         .ranking,
@@ -282,6 +329,7 @@ function fullValuationFixture() {
     decision: computed.decision,
     reason: "已核对完整角色资料及保存的装备和宝宝报价",
     extracted_facts: [],
+    condition_results: countResults(conditions, task.record, 1),
   });
   const attempt = store.begin(task, "seed");
   const result = validateValuation(raw, task.document, task.record, profile, equipment, pets);
@@ -296,12 +344,17 @@ function fullValuationFixture() {
     ...profile.settings,
     conditions: changedConditions,
   });
-  return { crawl, store, profile, changed, taskId: task.id, raw, result };
+  return { crawl, store, profile, changed, record: task.record, taskId: task.id, raw, result };
 }
 
-it("完整装备宝宝估值仅修改条件时直接复用，逐条重算而不再调用商品AI", async () => {
+it("完整装备宝宝估值修改条件后只重新核对结果，复用报价且不覆盖历史", async () => {
   const x = fullValuationFixture();
-  const analyze = vi.fn().mockRejectedValue(new Error("不得重复调用商品AI"));
+  const analyze = vi.fn().mockResolvedValue({
+    text: JSON.stringify({
+      ...JSON.parse(x.raw),
+      condition_results: countResults(x.changed.settings.conditions!, x.record, 2),
+    }),
+  });
   const runner = new AnalysisRunner(x.store, async () => ({
     model: "full-condition-fixture",
     analyze,
@@ -315,8 +368,8 @@ it("完整装备宝宝估值仅修改条件时直接复用，逐条重算而不�
     ).toBe("met");
     const id = await runner.start("codex", false, x.changed, true, "full-condition-fixture");
     await runner.settled();
-    expect(x.store.run(id)).toMatchObject({ completed: 1, reused: 1, queued: 0 });
-    expect(analyze).not.toHaveBeenCalled();
+    expect(x.store.run(id)).toMatchObject({ completed: 1, reused: 0, queued: 0 });
+    expect(analyze).toHaveBeenCalledOnce();
     const row = x.crawl.db
       .prepare("SELECT result_json,source_task_id FROM analysis_tasks WHERE run_id=?")
       .get(id)!;
@@ -337,6 +390,92 @@ it("完整装备宝宝估值仅修改条件时直接复用，逐条重算而不�
         .prepare("SELECT raw_response FROM analysis_attempts WHERE task_id=?")
         .get(x.taskId)!.raw_response,
     ).toBe(x.raw);
+  } finally {
+    await runner.shutdown();
+    x.crawl.close();
+  }
+});
+
+it("相同资料和相同文字的逐条判断可复用，不再调用AI", async () => {
+  const x = fullValuationFixture();
+  const analyze = vi.fn().mockRejectedValue(new Error("同一条件无需重复核对"));
+  const runner = new AnalysisRunner(x.store, async () => ({
+    model: "full-condition-fixture",
+    analyze,
+  }));
+  try {
+    const id = await runner.start("codex", false, x.profile, true, "full-condition-fixture");
+    await runner.settled();
+    expect(x.store.run(id)).toMatchObject({ completed: 1, reused: 1, queued: 0 });
+    expect(analyze).not.toHaveBeenCalled();
+    const result = x.store.detail(
+      String(x.crawl.db.prepare("SELECT id FROM analysis_tasks WHERE run_id=?").get(id)!.id),
+      x.profile,
+    )!.result!;
+    expect(result.valuation?.condition_review?.results.find((r) => r.id === "C2")).toMatchObject({
+      status: "met",
+      matched: true,
+    });
+  } finally {
+    await runner.shutdown();
+    x.crawl.close();
+  }
+});
+
+it("只改且或时从已核实的逐条结果重新汇总，不调用AI", async () => {
+  const x = fullValuationFixture();
+  const conditions = structuredClone(x.profile.settings.conditions!);
+  const second = structuredClone(configured(2).children[1]);
+  conditions.children.push({ ...second, id: "C3", join: "and" });
+  const profile = createProfile(x.profile.template, { ...x.profile.settings, conditions });
+  const first = countResults({ ...conditions, children: [conditions.children[0]] }, x.record, 1)[0];
+  const last = countResults({ ...conditions, children: [conditions.children[1]] }, x.record, 2)[0];
+  const raw = JSON.stringify({ ...JSON.parse(x.raw), condition_results: [first, last] });
+  const taskRow = x.crawl.db
+    .prepare("SELECT input_hash,input_text,collected_at,run_id FROM analysis_tasks WHERE id=?")
+    .get(x.taskId)!;
+  const result = validateValuation(
+    raw,
+    {
+      formatVersion: 1,
+      productKey: x.record.listing.key,
+      contentHash: String(taskRow.input_hash),
+      text: String(taskRow.input_text),
+      collectedAt: String(taskRow.collected_at),
+    },
+    x.record,
+    profile,
+    x.result.valuation?.equipment_pricing,
+    x.result.valuation?.pet_pricing,
+  );
+  x.crawl.db
+    .prepare("UPDATE analysis_runs SET profile_json=? WHERE id=?")
+    .run(JSON.stringify(profile), taskRow.run_id);
+  x.crawl.db
+    .prepare("UPDATE analysis_tasks SET result_json=? WHERE id=?")
+    .run(JSON.stringify(result), x.taskId);
+  x.crawl.db
+    .prepare("UPDATE analysis_attempts SET raw_response=? WHERE task_id=?")
+    .run(raw, x.taskId);
+  const changed = structuredClone(conditions);
+  changed.children[1].join = "or";
+  const nextProfile = createProfile(profile.template, { ...profile.settings, conditions: changed });
+  const analyze = vi.fn().mockRejectedValue(new Error("只改关系不必重复分析"));
+  const runner = new AnalysisRunner(x.store, async () => ({
+    model: "full-condition-fixture",
+    analyze,
+  }));
+  try {
+    const id = await runner.start("codex", false, nextProfile, true, "full-condition-fixture");
+    await runner.settled();
+    expect(x.store.run(id)).toMatchObject({ completed: 1, reused: 1 });
+    expect(analyze).not.toHaveBeenCalled();
+    const taskId = String(
+      x.crawl.db.prepare("SELECT id FROM analysis_tasks WHERE run_id=?").get(id)!.id,
+    );
+    expect(
+      x.store.detail(taskId, nextProfile)!.result!.valuation!.condition_review!.results.at(-1),
+    ).toMatchObject({ status: "met" });
   } finally {
     await runner.shutdown();
     x.crawl.close();

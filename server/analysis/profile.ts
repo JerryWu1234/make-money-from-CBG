@@ -1,6 +1,4 @@
 import { normalizeConditions, type ConditionNode } from "./conditions";
-import { applyCachedConditionRules } from "./condition-rule-cache";
-import { normalizeCompiledRule } from "./condition-rule-types";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -224,13 +222,7 @@ function savedConditionRules(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const node = { ...(value as Record<string, unknown>) };
   if (Array.isArray(node.children)) node.children = node.children.map(savedConditionRules);
-  else if (node.rule !== undefined) {
-    try {
-      normalizeCompiledRule(node.rule, typeof node.text === "string" ? node.text.trim() : "");
-    } catch {
-      delete node.rule;
-    }
-  }
+  delete node.rule;
   return node;
 }
 export function loadProfile(
@@ -261,7 +253,6 @@ export function loadProfile(
     ...settings,
     ...(settings.conditions ? { conditions: savedConditionRules(settings.conditions) } : {}),
   });
-  const conditions = applyCachedConditionRules(db, normalized.conditions);
   const manual = normalized.servers.filter(
     (row: ValuationSettings["servers"][number]) => row.source !== "auto",
   );
@@ -280,7 +271,6 @@ export function loadProfile(
   );
   const profile = createProfile(readFileSync(file, "utf8"), {
     ...normalized,
-    ...(conditions ? { conditions } : {}),
     servers: [...manual, ...available],
   });
   const confirmations = loadAscendedSchoolFormulaConfirmations(db);

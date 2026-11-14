@@ -1,7 +1,7 @@
 import type { SavedRoleRecord } from "../crawler/types";
 import type { ValuationResult } from "./valuation-types";
 import { defaultConditions, type ConditionGroup } from "./conditions";
-import { evaluateSavedConditions } from "./condition-evaluation";
+import { evaluateDirectConditions } from "./direct-condition-review";
 
 export type Recommendation = {
   status: "recommended" | "manual" | "excluded";
@@ -9,7 +9,7 @@ export type Recommendation = {
   gap: number | null;
   factors: string[];
   strongerFactors: string[];
-  conditionReview?: ReturnType<typeof evaluateSavedConditions>;
+  conditionReview?: ReturnType<typeof evaluateDirectConditions>;
 };
 
 export function recommendationFor(
@@ -36,7 +36,7 @@ export function recommendationFor(
     return result;
   result.gap = (Math.round(asking * 100) - Math.round(bare * 100)) / 100;
   const tree = conditions || defaultConditions();
-  const review = evaluateSavedConditions(tree, record, { asking, bare });
+  const review = evaluateDirectConditions(tree, record, { asking, bare }, value?.condition_review);
   result.conditionReview = review;
   const status = review.results.find((entry) => entry.id === tree.id)?.status;
   result.status = status === "met" ? "recommended" : status === "unknown" ? "manual" : "excluded";

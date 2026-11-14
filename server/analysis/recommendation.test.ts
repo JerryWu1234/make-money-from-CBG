@@ -13,6 +13,7 @@ import {
   type CompiledConditionRule,
 } from "./condition-rule-types";
 import { defaultConditions, type ConditionGroup } from "./conditions";
+import { validateDirectConditionResults } from "./direct-condition-review";
 
 function record() {
   const r = analysisRecord();
@@ -20,7 +21,7 @@ function record() {
   return r;
 }
 const valuation = (bare = 20000) =>
-  ({ bare_role_value: bare, decision: "PASS" }) as ValuationResult;
+  ({ asking_price: 20000, bare_role_value: bare, decision: "PASS" }) as ValuationResult;
 
 const compiled = (text: string, expression: RuleExpression): CompiledConditionRule => ({
   version: RULE_ENGINE_VERSION,
@@ -38,6 +39,55 @@ const speedRule = () =>
       { op: "literal", value: 800 },
     ],
   });
+
+function checked(
+  tree: ConditionGroup,
+  source: SavedRoleRecord,
+  bare = 20000,
+  specs: Record<string, { field: string; operator: "gt" | "lt" | "gte"; target: number }> = {},
+) {
+  return validateDirectConditionResults(
+    tree.children
+      .filter((node) => !("children" in node) && !node.price)
+      .map((node) => {
+        const spec = specs[node.id] || { field: "速度", operator: "gt", target: 800 };
+        const value =
+          spec.field === "挂牌价" ? source.listing.price : source.listing.attrs[spec.field];
+        const numeric = value === undefined ? null : Number(value);
+        return {
+          id: node.id,
+          sourceText: "text" in node ? node.text : "",
+          matched:
+            numeric === null
+              ? null
+              : spec.operator === "gt"
+                ? numeric > spec.target
+                : spec.operator === "lt"
+                  ? numeric < spec.target
+                  : numeric >= spec.target,
+          reason: numeric === null ? "采集资料缺少该字段" : `${spec.field}为${numeric}`,
+          observations:
+            numeric === null
+              ? []
+              : [
+                  {
+                    label: spec.field,
+                    path:
+                      spec.field === "挂牌价" ? "/listing/price" : `/listing/attrs/${spec.field}`,
+                    quote: String(value),
+                    numericValue: numeric,
+                  },
+                ],
+          calculation:
+            numeric === null ? null : { operation: "identity", inputs: [0], result: numeric },
+          comparison: numeric === null ? null : { operator: spec.operator, target: spec.target },
+        };
+      }),
+    tree,
+    source,
+    { asking: Number(source.listing.price), bare },
+  );
+}
 
 it.each([
   [20000, "recommended", 0],
@@ -62,8 +112,14 @@ it.each(["and", "or"] as const)("价格不限制不会使其他%s条件被绕过
       ],
     }),
   });
-  expect(recommendationFor(record(), valuation(18000), tree).status).toBe("excluded");
-  (tree.children[1] as { rule?: unknown }).rule = undefined;
+  const source = record();
+  const value = {
+    ...valuation(18000),
+    condition_review: checked(tree, source, 18000, {
+      C2: { field: "挂牌价", operator: "lt", target: 1 },
+    }),
+  };
+  expect(recommendationFor(source, value, tree).status).toBe("excluded");
   expect(recommendationFor(record(), valuation(18000), tree).status).toBe("manual");
 });
 
@@ -115,21 +171,21 @@ it("重新计算价格与整体结果，不信任AI返回的组和价格状态",
       }),
     },
   );
+  const source = record();
+  source.listing.attrs.速度 = "850";
+  source.listing.attrs.烹饪 = "100";
   const value = {
     ...valuation(20001),
-    condition_review: {
-      tree,
-      results: [
-        { id: "G1", status: "met", reason: "不能信任的合计" },
-        { id: "C1", status: "met", reason: "错误价格结果" },
-        { id: "C2", status: "met", reason: "速度850" },
-        { id: "C3", status: "unmet", reason: "烹饪100" },
-      ],
-    },
+    condition_review: checked(tree, source, 20001, {
+      C2: { field: "速度", operator: "gt", target: 800 },
+      C3: { field: "烹饪", operator: "gte", target: 120 },
+    }),
   } as ValuationResult;
-  expect(recommendationFor(record(), value, tree).status).toBe("excluded");
-  (tree.children[2] as { rule?: unknown }).rule = undefined;
-  expect(recommendationFor(record(), value, tree).status).toBe("manual");
+  value.condition_review!.results.find((r) => r.id === "G1")!.status = "met";
+  value.condition_review!.results.find((r) => r.id === "C1")!.status = "unmet";
+  expect(recommendationFor(source, value, tree).status).toBe("excluded");
+  (tree.children[2] as { text: string }).text = "烹饪130";
+  expect(recommendationFor(source, value, tree).status).toBe("manual");
   expect(
     recommendationFor(record(), value, { ...tree, children: [{ id: "C2", text: "速度900" }] })
       .status,
@@ -151,14 +207,14 @@ it("批次条件快照决定榜单，设置变更、隐藏、来源变更仍生�
     const profile = createProfile("条件入榜", { ...DEFAULT_SETTINGS, conditions: tree });
     const store = new AnalysisStore(crawl.db);
     const runId = store.createRun("codex", "test", false, profile);
-    for (const [key, status] of Object.entries({ match: "met", miss: "unmet", unknown: "unknown" }))
+    for (const key of ["match", "miss", "unknown"])
       crawl.db
         .prepare("UPDATE analysis_tasks SET status='completed',result_json=? WHERE listing_key=?")
         .run(
           JSON.stringify({
             valuation: {
               ...valuation(18000),
-              condition_review: { tree, results: [{ id: "C1", status, reason: "速度核对依据" }] },
+              condition_review: checked(tree, crawl.detail(key) as SavedRoleRecord, 18000),
             },
           }),
           key,
@@ -292,16 +348,11 @@ it("大资料榜单只排序轻量候选，再按原序补足推荐和人工复�
             score: 12 - index,
             valuation: {
               ...valuation(kind === "excluded" ? 19000 : kind === "manual" ? 18000 : 20000),
-              condition_review: {
-                tree: conditions,
-                results: [
-                  {
-                    id: "C1",
-                    status: kind === "excluded" ? "unmet" : kind === "manual" ? "unknown" : "met",
-                    reason: "模拟速度依据",
-                  },
-                ],
-              },
+              condition_review: checked(
+                conditions,
+                crawl.detail(`${kind}-${String(index).padStart(2, "0")}`) as SavedRoleRecord,
+                kind === "excluded" ? 19000 : kind === "manual" ? 18000 : 20000,
+              ),
               ...(index % 2
                 ? { margin_of_safety: kind === "excluded" ? 100 : 12 - index }
                 : { price_difference_ratio: kind === "excluded" ? 100 : 12 - index }),

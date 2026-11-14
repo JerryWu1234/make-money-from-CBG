@@ -1,8 +1,8 @@
 import { expect, it } from "vite-plus/test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AnalysisConditions, ConditionReviewView } from "./AnalysisConditions";
-import { RULE_ENGINE_VERSION } from "../server/analysis/condition-rule-types";
 import {
+  CONDITION_REVIEW_VERSION,
   defaultConditions,
   normalizeConditions,
   type ConditionReview,
@@ -23,7 +23,7 @@ it("旧AI满足记录标为历史依据，当前程序判断展示可追溯证�
   );
   const current: ConditionReview = {
     ...old,
-    engineVersion: RULE_ENGINE_VERSION,
+    engineVersion: CONDITION_REVIEW_VERSION,
     results: [
       {
         id: "C1",
@@ -83,7 +83,7 @@ it("文字条件直接编辑，不显示解析步骤或规则确认卡片", () =
     { id: "C3", text: "等级等于129", join: "or" },
   ];
   const markup = renderToStaticMarkup(<AnalysisConditions value={tree} onChange={() => {}} />);
-  expect(markup).toContain("填写并保存后，开始分析即可查看每条条件是否满足及依据");
+  expect(markup).toContain("逐条查看 true／false、原始数值和计算过程");
   expect(markup).toContain("速度大于800");
   expect(markup).toContain("且（两者都满足）");
   expect(markup).toContain("或（任一满足）");
@@ -95,7 +95,7 @@ it("文字条件直接编辑，不显示解析步骤或规则确认卡片", () =
 
 it("逐条显示满足、不满足、无法判断及且或关系，最后显示整体结果", () => {
   const review: ConditionReview = {
-    engineVersion: RULE_ENGINE_VERSION,
+    engineVersion: CONDITION_REVIEW_VERSION,
     tree: {
       id: "G1",
       operator: "and",
