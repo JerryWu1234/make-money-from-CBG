@@ -69,7 +69,7 @@ const nullable = (value: SQLOutputValue | undefined) => (value == null ? null : 
 const checkpointKey = (provider: string, model: string, profile: string | null) =>
   textHash(
     JSON.stringify([
-      "analysis-checkpoint-v1",
+      "analysis-checkpoint-v2",
       DIRECT_CONDITION_VERSION,
       RULE_VERSION,
       provider,
@@ -787,20 +787,15 @@ export class AnalysisStore {
               asking: replayed.valuation!.asking_price,
               bare: replayed.valuation!.bare_role_value ?? null,
             };
-            if (
-              hasCurrentDirectReview(
-                tree,
-                record,
-                prices,
-                savedComparison.valuation?.condition_review,
-              )
-            )
-              replayed.valuation!.condition_review = evaluateDirectConditions(
-                tree,
-                record,
-                prices,
-                savedComparison.valuation?.condition_review,
-              );
+            // Revalidating an old raw response does not make its archived review
+            // current. Preserve the review's version boundary so changed semantics
+            // are queued, rather than checkpointing a result the UI rejects.
+            replayed.valuation!.condition_review = evaluateDirectConditions(
+              tree,
+              record,
+              prices,
+              savedComparison.valuation?.condition_review,
+            );
             // Eligibility uses the current conditions. Its local review may change
             // while every source, pricing snapshot and AI proof remains identical.
             if (replayedComparison.valuation) delete replayedComparison.valuation.condition_review;
@@ -1293,7 +1288,11 @@ export class AnalysisStore {
       throw error;
     }
   }
-  next(runId: string, preferredLane?: AnalysisLane): AnalysisTask | null {
+  next(
+    runId: string,
+    preferredLane?: AnalysisLane,
+    excludedIds: readonly string[] = [],
+  ): AnalysisTask | null {
     this.skipUnavailableQueued(runId);
     const next = this.db.prepare(
       `SELECT t.*,r.profile_json,${matchingSourceSql} AS source_matches,
@@ -1301,15 +1300,16 @@ export class AnalysisStore {
            WHERE a.task_id=t.id ORDER BY a.rowid DESC LIMIT 1) last_attempt_had_response
          FROM analysis_tasks t JOIN analysis_runs r ON t.run_id=r.id JOIN listings l ON l.key=t.listing_key
          WHERE t.run_id=? AND t.status='queued' AND l.status='complete' AND l.detail_json IS NOT NULL
+         ${excludedIds.length ? `AND t.id NOT IN (${excludedIds.map(() => "?").join(",")})` : ""}
          ORDER BY CASE WHEN t.queue_lane=? THEN 0 ELSE 1 END,t.ordinal ASC LIMIT 1`,
     );
-    let row = next.get(runId, preferredLane ?? null);
+    let row = next.get(runId, ...excludedIds, preferredLane ?? null);
     if (!row) return null;
     if (row.source_matches !== 1) {
       // Collection may finish while analysis is waiting. Refresh only this input;
       // unchanged tasks use the indexed source match rather than a queue-wide scan.
       this.refreshPendingCaptures(runId, String(row.listing_key));
-      row = next.get(runId, preferredLane ?? null);
+      row = next.get(runId, ...excludedIds, preferredLane ?? null);
       if (!row) return null;
       if (row.source_matches !== 1) throw new Error("角色资料正在更新，请资料稳定后继续分析");
     }

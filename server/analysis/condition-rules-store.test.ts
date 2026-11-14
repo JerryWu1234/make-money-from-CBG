@@ -428,6 +428,41 @@ it("相同资料和相同文字的逐条判断可复用，不再调用AI", async
   }
 });
 
+it.each([
+  ["create", "ai-per-condition-v2"],
+  ["append", "ai-per-condition-v2"],
+  ["create", "ai-per-condition-v3"],
+  ["append", "ai-per-condition-v3"],
+])("旧条件版本必须重新判断，不能被原始响应重放跳过：%s %s", (mode, version) => {
+  const x = fullValuationFixture();
+  try {
+    const legacy = structuredClone(x.result);
+    legacy.valuation!.condition_review!.engineVersion = version;
+    x.crawl.db
+      .prepare("UPDATE analysis_tasks SET result_json=? WHERE id=?")
+      .run(JSON.stringify(legacy), x.taskId);
+    const id = x.store.createRun("codex", "full-condition-fixture", false, x.profile);
+    if (mode === "append") {
+      x.crawl.db.prepare("DELETE FROM analysis_tasks WHERE run_id=?").run(id);
+      x.crawl.db.prepare("DELETE FROM analysis_capture_checks WHERE run_id=?").run(id);
+      expect(x.store.acquire("append-version-test")).toBe(true);
+      expect(x.store.appendCaptured(id, "append-version-test")).toBe(1);
+      x.store.release("append-version-test");
+    }
+    expect(x.store.run(id)).toMatchObject({ total: 1, queued: 1, completed: 0 });
+    expect(
+      JSON.parse(
+        String(
+          x.crawl.db.prepare("SELECT result_json FROM analysis_tasks WHERE id=?").get(x.taskId)!
+            .result_json,
+        ),
+      ).valuation.condition_review.engineVersion,
+    ).toBe(version);
+  } finally {
+    x.crawl.close();
+  }
+});
+
 it("只改且或时从已核实的逐条结果重新汇总，不调用AI", async () => {
   const x = fullValuationFixture();
   const conditions = structuredClone(x.profile.settings.conditions!);
