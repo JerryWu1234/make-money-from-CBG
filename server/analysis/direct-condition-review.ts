@@ -13,6 +13,9 @@ import {
 } from "./conditions";
 
 export const DIRECT_CONDITION_VERSION = CONDITION_REVIEW_VERSION;
+export class ConditionResponseError extends Error {
+  name = "ConditionResponseError";
+}
 export type DirectObservation = {
   label: string;
   path: string;
@@ -143,6 +146,7 @@ export function directConditionPrompt(
     "用户已确认口径：‘角色修为／人物修为／人物修炼合计’是攻击修炼、法术修炼、防御修炼、抗法修炼四项当前等级之和，不含猎术和宠修；12/20取12，0/25取0，不取斜杠后的上限。‘总宝石数量’是人物装备锻炼等级（宝石段数）合计，不是装备件数，不含灵饰精炼等级／星辉石，不含宝宝装备。人物装备包括穿戴、背包及已采集仓库中明确属于人物装备的项目，不能只取六个穿戴槽。结合类别、装备角色／装备对象及官方描述识别；category缺失不等于不存在，不能仅因没有category漏掉已有明确人物装备证据的项目，也不能凭名称猜类型。",
     "凡条件要求合计或总数，有逐项明细时必须列出各组成项并重新求和，不直接使用listing.summary中的已有合计。人物修炼四项明细完整时分别引用攻击、法术、防御、抗法四项当前等级，包含明确的0，使用sum；不要以摘要xiulian或斜杠后的上限代替四项明细。",
     "非负数量或段数求和遇到缺少数值的组成项时，不能把该项当作0，也不能把已知部分写成准确总数。只有已知合计已足以确定用户比较结论时，才可返回确定布尔值，此时calculation和comparison均为null，reason明确写‘已知至少X，另Y项缺少数值’，并引用已知数值及缺数值项目的原文。若已知下界不能确定结论，返回matched=null并列明缺项。此下界规则只用于非负数量／段数，不用于可能为负的属性。明确未镶嵌或锻炼等级0才可作为0；没有锻炼等级字段不是0。",
+    "下界说明必须同时将calculation和comparison设为null，不能只提供其中一个，也不能把部分计数写进calculation冒充准确总数。需要修正上次错误时，完整重返所有条件结果；保留真实引用，不为了通过校验编造缺项。",
     "每条结果必须包含原id和sourceText（与输入原文完全一致）、matched、简短事实说明reason、observations、calculation、comparison。observations每项为{label,path,quote,numericValue}。下方证据清单是{原始JSON路径:原始值}映射；path必须逐字复制映射的键，不自行拼接、改前缀或重编号。详情的路径是/detail/tabs/...，绝不是/listing/tabs/...或/tabs/...；例如/detail/tabs/0/tables/0/0/1。价格仅可引用已有的/prices/asking和/prices/bare。quote逐字引用对应值中的字符串，或该值的JSON文本片段；不要引用清单条目的/path或/value作为原始资料路径。numericValue只可取quote中实际出现的数值，非数值证据填null。价格为null时无法判断涉及它的条件。不要引用估算后的模型金额来证明采集事实。",
     "资料完整且为单个数值比较时，必须返回calculation:{operation:sum/count/min/max/identity,inputs:引用observations的从0开始索引,result:实际计算值}及comparison:{operator:eq/ne/gt/gte/lt/lte,target:比较目标}。sum/min/max/identity读取所选证据的numericValue；count按所选证据不同path计数。同一物品不要重复计数；空库存须引用完整采集或明确为空的证据，不能凭没有找到就假设为0。程序会重算算术和比较，3>8不能返回true。保留用户数值和严格／非严格边界，不擅自将27改成21。",
     "明确为空的库存也是已知数值，不能将calculation/comparison留为null：observations保留采集完整及空容器的原始证据，calculation使用{operation:count,inputs:[],result:0}，comparison仍按条件原文填写。inputs只列实际参与计数的物品，不把采集完整标记或空容器计成物品。例如数量大于等于8、已确认0件时返回matched=false、上述0件计算及comparison:{operator:gte,target:8}。",
@@ -488,6 +492,21 @@ export function validateDirectConditionResults(
   record: SavedRoleRecord,
   prices: ConditionPrices,
 ): ConditionReview {
+  try {
+    return validatedDirectResults(raw, tree, record, prices);
+  } catch (cause) {
+    throw new ConditionResponseError(cause instanceof Error ? cause.message : "逐条条件响应无效", {
+      cause,
+    });
+  }
+}
+
+function validatedDirectResults(
+  raw: unknown,
+  tree: ConditionGroup,
+  record: SavedRoleRecord,
+  prices: ConditionPrices,
+): ConditionReview {
   let value: unknown = raw;
   if (typeof value === "string") {
     try {
@@ -506,7 +525,13 @@ export function validateDirectConditionResults(
     const id = object(raw, "逐条条件结果").id;
     const node = typeof id === "string" ? remaining.get(id) : undefined;
     if (!node) throw new Error("逐条条件结果编号无效或重复");
-    results.set(node.id, validatedLeaf(raw, node, record, prices));
+    try {
+      results.set(node.id, validatedLeaf(raw, node, record, prices));
+    } catch (cause) {
+      throw new Error(`${node.id}：${cause instanceof Error ? cause.message : "条件结果无效"}`, {
+        cause,
+      });
+    }
     remaining.delete(node.id);
   }
   return finish(tree, record, prices, results);

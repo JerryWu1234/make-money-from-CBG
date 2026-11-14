@@ -26,7 +26,7 @@ import { captureIssues } from "../crawler/capture-readiness";
 import { isCurrentRoleCapture } from "../crawler/role-identity";
 import { EXPIRED_MARKET_NOTICE } from "./market";
 import { assertServiceOpen } from "../service-lifecycle";
-import { directConditionNodes } from "./direct-condition-review";
+import { ConditionResponseError, directConditionNodes } from "./direct-condition-review";
 
 export type AnalysisClient = {
   model: string;
@@ -453,6 +453,7 @@ export class AnalysisRunner {
       controller.abort();
     };
     const budget = { started: Date.now(), rounds: 0 };
+    let conditionRepairs = 0;
     while (!stop.aborted && this.store.owns(owner)) {
       if (this.store.skipUnavailableTask(task, owner)) return;
       if (
@@ -817,6 +818,12 @@ export class AnalysisRunner {
           /401|403|429|unauth|authentication|api.?key|登录|quota|rate.?limit|限流|额度|余额|insufficient|账号已变化|model.*(?:not available|not found|unsupported)/i.test(
             message,
           );
+        const repairCondition =
+          !stop.aborted &&
+          !signal.aborted &&
+          error instanceof ConditionResponseError &&
+          !!raw &&
+          conditionRepairs < 1;
         this.store.finish(task, attempt, owner, {
           state: stop.aborted ? "interrupted" : "failed",
           error: message,
@@ -828,9 +835,19 @@ export class AnalysisRunner {
               : undefined,
           raw,
           usage,
-          requeue: stop.aborted || fatal,
+          requeue: stop.aborted || fatal || repairCondition,
         });
         persisted = true;
+        if (repairCondition) {
+          conditionRepairs++;
+          task = {
+            ...task,
+            lastError: message,
+            lastAttemptHadResponse: true,
+            attempts: task.attempts + 1,
+          };
+          continue;
+        }
         if (!stop.aborted && providerPause.message) {
           this.store.setRun(
             id,

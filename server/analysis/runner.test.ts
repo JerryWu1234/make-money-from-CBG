@@ -138,6 +138,74 @@ function untilAborted(signal: AbortSignal): Promise<never> {
 }
 
 describe("持久化的商品分析队列", () => {
+  it.each([true, false])("条件响应最多自动修正一次，成功=%s，保留两次原文", async (success) => {
+    const { crawl, store, runner, analyze } = setup(["a"], valuationRecord);
+    const record = crawl.detail("a") as SavedRoleRecord;
+    const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), {
+      ...DEFAULT_SETTINGS,
+      conditions: {
+        id: "G1",
+        operator: "and",
+        evaluation: "sequence",
+        children: [{ id: "C1", text: "人物名称已采集" }],
+      },
+      servers: [{ serverId: record.listing.serverId, age: "three", rank: 10 }],
+    });
+    const valid = {
+      decision: calculateValuation(record, profile).decision,
+      reason: "核对裸号资料。",
+      extracted_facts: [],
+      condition_results: [
+        {
+          id: "C1",
+          sourceText: "人物名称已采集",
+          matched: true,
+          reason: "已采集人物名称。",
+          observations: [
+            {
+              label: "人物名称",
+              path: "/listing/name",
+              quote: record.listing.name,
+              numericValue: null,
+            },
+          ],
+          calculation: null,
+          comparison: null,
+        },
+      ],
+    };
+    const invalid = structuredClone(valid);
+    Object.assign(invalid.condition_results[0], {
+      calculation: { operation: "count", inputs: [0], result: 1 },
+    });
+    analyze
+      .mockResolvedValueOnce({ text: JSON.stringify(invalid) })
+      .mockResolvedValue({ text: JSON.stringify(success ? valid : invalid) });
+    const id = await runner.start("codex", true, profile, true);
+    await runner.settled();
+    expect(analyze).toHaveBeenCalledTimes(2);
+    expect(analyze.mock.calls[1][0]).toContain("C1：条件计算与比较必须同时提供");
+    expect(store.run(id)).toMatchObject(
+      success
+        ? { status: "completed", completed: 1, failed: 0 }
+        : { status: "paused", completed: 0, failed: 1 },
+    );
+    const attempts = store.db
+      .prepare("SELECT state,error,raw_response,request_text FROM analysis_attempts ORDER BY rowid")
+      .all();
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toMatchObject({
+      state: "failed",
+      error: "C1：条件计算与比较必须同时提供",
+      raw_response: JSON.stringify(invalid),
+    });
+    expect(attempts[1]).toMatchObject({
+      state: success ? "completed" : "failed",
+      raw_response: JSON.stringify(success ? valid : invalid),
+    });
+    expect(String(attempts[1].request_text)).toContain("上次输出校验未通过：C1：");
+  });
+
   it("已入队角色确认不存在后继续分析时跳过，不发模型且不进入失败统计", async () => {
     const { crawl, store, runner, analyze } = setup(["a"]);
     const id = store.createRun("codex", "test-model");
