@@ -5,6 +5,7 @@ import {
   DIRECT_CONDITION_VERSION,
   directConditionNodes,
   directConditionPrompt,
+  directConditionSources,
   evaluateDirectConditions,
   hasCurrentDirectReview,
   validateDirectConditionResults,
@@ -79,7 +80,7 @@ function training(target = 27): DirectConditionOutput {
     comparison: { operator: "gte", target },
   };
 }
-function proof(sourceText = "人物等级至少100"): DirectConditionOutput {
+function proof(sourceText = "人物名称已采集"): DirectConditionOutput {
   return {
     id: "C1",
     sourceText,
@@ -107,11 +108,129 @@ describe("逐商品逐条条件输入与协议", () => {
     expect(prompt).toContain("没有预定义字段目录限制");
     expect(prompt).toContain("12/20取12，0/25取0");
     expect(prompt).toContain("不含灵饰精炼等级／星辉石");
-    expect(prompt).toContain('"tables":[[["攻击修炼：","12/20"]');
+    expect(prompt).toContain(
+      JSON.stringify({ path: "/detail/tabs/0/tables/0/0/1", value: "12/20" }),
+    );
     expect(prompt).not.toContain("UNNEEDED_HTML_MARKER");
     expect(prompt).toContain("sourceText（与输入原文完全一致）");
+    expect(prompt).toContain("每条独立判断，不能把其他条件或整组的false传播到本条");
     expect(directConditionPrompt(defaultConditions(), fixture(), prices)).toBe("");
     expect(DIRECT_CONDITION_RESULTS_SCHEMA.items.required).toContain("sourceText");
+  });
+
+  it("动态列出真实路径，保留转义键、数组索引、原始值及空容器", () => {
+    const record = fixture();
+    record.listing.attrs = {};
+    record.listing.summary = {
+      "扩展/记录~名": { entries: ["第一项", "", null, false, 0, [], {}] },
+      rawOnly: { raw: "DUPLICATE_RAW_ONLY_MARKER" },
+      absent: undefined,
+    };
+    const sources = directConditionSources(record, prices);
+    expect(sources).toContainEqual({ path: "/listing/attrs", value: {} });
+    expect(sources).toContainEqual({ path: "/detail/tabs/0/fields", value: [] });
+    expect(sources).toContainEqual({ path: "/detail/tabs/0/tables/0/1/1", value: "0/20" });
+    for (const [index, value] of ["第一项", "", null, false, 0, [], {}].entries())
+      expect(sources).toContainEqual({
+        path: `/listing/summary/扩展~1记录~0名/entries/${index}`,
+        value,
+      });
+    expect(sources).toContainEqual({ path: "/prices/asking", value: 999 });
+    expect(sources).toContainEqual({ path: "/prices/bare", value: 1024.5 });
+    expect(sources.some((entry) => entry.path.startsWith("/listing/tabs"))).toBe(false);
+    expect(sources.some((entry) => entry.path.startsWith("/listing/summary/rawOnly"))).toBe(false);
+    expect(sources.some((entry) => entry.path.endsWith("/absent"))).toBe(false);
+    expect(JSON.stringify(sources)).not.toContain("DUPLICATE_RAW_ONLY_MARKER");
+    expect(JSON.stringify(sources)).not.toContain("UNNEEDED_HTML_MARKER");
+    const prompt = directConditionPrompt(tree("角色修为大于等于27"), record, prices);
+    expect(prompt).toContain(JSON.stringify(sources));
+    expect(prompt).toContain("path必须逐字复制下方证据清单中的path");
+    expect(prompt).toContain("不要引用清单条目的/path或/value");
+  });
+
+  it("完整提供穿戴及背包装备证据，不按六个穿戴槽截断或依赖category存在", () => {
+    const record = fixture();
+    const tabIndex = record.detail!.tabs.length - 1;
+    record.detail!.tabs[tabIndex].items!.push(
+      ...Array.from({ length: 200 }, (_, index) => ({
+        index: 1000 + index,
+        name: "背包装备" + index,
+        location: "store_equip_tips" + index,
+        description: "等级 100\n锻炼等级 11",
+        attributes: { 装备角色: "人物" },
+        officialModel: { modelId: String(index), description: "装备角色 人物" },
+      })),
+    );
+    const sources = directConditionSources(record, prices);
+    expect(sources).toContainEqual({
+      path: `/detail/tabs/${tabIndex}/items/205/description`,
+      value: "等级 100\n锻炼等级 11",
+    });
+    expect(sources).toContainEqual({
+      path: `/detail/tabs/${tabIndex}/items/205/attributes/装备角色`,
+      value: "人物",
+    });
+    expect(sources).toContainEqual({
+      path: `/detail/tabs/${tabIndex}/items/205/location`,
+      value: "store_equip_tips199",
+    });
+    const prompt = directConditionPrompt(tree("总宝石数量大于等于20"), record, prices);
+    expect(prompt).toContain("穿戴、背包及已采集仓库");
+    expect(prompt).toContain("不能只取六个穿戴槽");
+    expect(prompt).toContain("category缺失不等于不存在");
+    expect(prompt).toContain(JSON.stringify(sources));
+  });
+
+  it("合计要求逐项核算，保留四项当前等级而不取摘要或上限", () => {
+    const record = fixture();
+    record.listing.summary = { xiulian: 80 };
+    const prompt = directConditionPrompt(tree("角色修为大于等于27"), record, prices);
+    expect(prompt).toContain("有逐项明细时必须列出各组成项并重新求和");
+    expect(prompt).toContain("分别引用攻击、法术、防御、抗法四项当前等级");
+    expect(prompt).toContain("不要以摘要xiulian或斜杠后的上限代替四项明细");
+    expect(prompt).toContain(
+      JSON.stringify({ path: "/detail/tabs/0/tables/0/0/1", value: "12/20" }),
+    );
+    expect(prompt).toContain(JSON.stringify({ path: "/listing/summary/xiulian", value: 80 }));
+  });
+
+  it.each([
+    [5, true],
+    [20, null],
+  ] as const)("非负合计缺数值时保留已知下界，阈值%d的结果为%s", (target, matched) => {
+    const record = fixture(),
+      ti = record.detail!.tabs.length - 1;
+    record.detail!.tabs[ti].items = record.detail!.tabs[ti].items!.slice(0, 2);
+    record.detail!.tabs[ti].items![1].description = "等级 100\n未采集宝石明细";
+    const sourceText = `总宝石数量大于等于${target}`;
+    const output: DirectConditionOutput = {
+      id: "C1",
+      sourceText,
+      matched,
+      reason: "已知至少7，另1项缺少数值，不能将已知下界当作准确总数。",
+      observations: [
+        {
+          label: "已知宝石段数",
+          path: `/detail/tabs/${ti}/items/0/description`,
+          quote: "锻炼等级 7",
+          numericValue: 7,
+        },
+        {
+          label: "缺少宝石段数的装备",
+          path: `/detail/tabs/${ti}/items/1/description`,
+          quote: "等级 100\n未采集宝石明细",
+          numericValue: null,
+        },
+      ],
+      calculation: null,
+      comparison: null,
+    };
+    const review = validateDirectConditionResults([output], tree(sourceText), record, prices);
+    expect(review.results[0]).toMatchObject({ matched, calculation: null, comparison: null });
+    expect(review.results[0].reason).toContain("已知至少7，另1项缺少数值");
+    const prompt = directConditionPrompt(tree(sourceText), record, prices);
+    expect(prompt).toContain("没有锻炼等级字段不是0");
+    expect(prompt).toContain("若已知下界不能确定结论，返回matched=null");
   });
 
   it.each([21, 27])("四项当前修炼合计26，与阈值%d比较而非读取上限", (target) => {
@@ -182,9 +301,18 @@ describe("逐商品逐条条件输入与协议", () => {
         .reason,
     ).toContain("3 > 8，不满足");
     output.matched = true;
-    expect(() =>
-      validateDirectConditionResults([output], tree(output.sourceText), record, prices),
-    ).toThrow("矛盾");
+    const corrected = validateDirectConditionResults(
+      [output],
+      tree(output.sourceText),
+      record,
+      prices,
+    );
+    expect(corrected.results[0]).toMatchObject({
+      matched: false,
+      modelMatched: true,
+      status: "unmet",
+    });
+    expect(corrected.results[0].reason).toContain("模型原判断true，已按算式校正");
   });
 
   it("无法判断是独立null，不伪装成false且可缓存", () => {
@@ -237,8 +365,10 @@ describe("逐商品逐条条件输入与协议", () => {
     };
     output.calculation = { operation: "identity", inputs: [0], result: 999 };
     output.comparison = { operator: "lt", target: 1000 };
+    output.sourceText = "挂牌价小于1000";
     expect(
-      validateDirectConditionResults([output], conditions, record, prices).results[0].matched,
+      validateDirectConditionResults([output], tree(output.sourceText), record, prices).results[0]
+        .matched,
     ).toBe(true);
   });
 
@@ -266,6 +396,16 @@ describe("逐商品逐条条件输入与协议", () => {
       ["lt", false],
       ["lte", true],
     ] as const) {
+      output.sourceText = `角色修为${
+        {
+          eq: "等于",
+          ne: "不等于",
+          gt: "大于",
+          gte: "大于等于",
+          lt: "小于",
+          lte: "小于等于",
+        }[operator]
+      }26`;
       output.comparison = { operator, target: 26 };
       output.matched = matched;
       expect(
@@ -296,6 +436,108 @@ describe("逐商品逐条条件输入与协议", () => {
 });
 
 describe("逐条条件结果校验及失效", () => {
+  it("简单明确数值条件不能省略计算或将27换成21", () => {
+    const output = training();
+    output.matched = true;
+    output.calculation = null;
+    output.comparison = null;
+    expect(() =>
+      validateDirectConditionResults([output], tree(output.sourceText), fixture(), prices),
+    ).toThrow("必须提供计算");
+    const wrongTarget = training();
+    wrongTarget.matched = true;
+    wrongTarget.comparison!.target = 21;
+    expect(() =>
+      validateDirectConditionResults(
+        [wrongTarget],
+        tree(wrongTarget.sourceText),
+        fixture(),
+        prices,
+      ),
+    ).toThrow("与原文不一致");
+    const wrongDirection = training();
+    wrongDirection.matched = true;
+    wrongDirection.comparison!.operator = "lt";
+    expect(() =>
+      validateDirectConditionResults(
+        [wrongDirection],
+        tree(wrongDirection.sourceText),
+        fixture(),
+        prices,
+      ),
+    ).toThrow("与原文不一致");
+  });
+
+  it.each([
+    "人物等级大于100且人物速度大于800",
+    "人物门派为化生寺且人物等级大于100",
+    "挂牌价低于裸号估值10%",
+    "人物名称为测试角色",
+  ])("复杂或文本条件保留逐条事实判断：%s", (sourceText) => {
+    const output = proof(sourceText);
+    expect(
+      validateDirectConditionResults([output], tree(sourceText), fixture(), prices).results[0]
+        .matched,
+    ).toBe(true);
+  });
+
+  it.each(["不能", "非", "未", "无", "否", "没", "勿", "别"])(
+    "未解析否定前缀%s不能触发原文比较绑定或布尔自动校正",
+    (prefix) => {
+      const record = fixture();
+      record.detail!.tabs[0].tables[0][0][1] = "14/20";
+      record.detail!.tabs[0].text = record.detail!.tabs[0].text.replace("12/20", "14/20");
+      const output = training(27);
+      output.sourceText = `角色修为${prefix}低于27`;
+      output.observations[0].quote = "14/20";
+      output.observations[0].numericValue = 14;
+      output.calculation!.result = 28;
+      output.matched = true;
+      const result = validateDirectConditionResults(
+        [output],
+        tree(output.sourceText),
+        record,
+        prices,
+      ).results[0];
+      expect(result).toMatchObject({ matched: true, status: "met" });
+      expect(result.modelMatched).toBeUndefined();
+      output.matched = false;
+      expect(() =>
+        validateDirectConditionResults([output], tree(output.sourceText), record, prices),
+      ).toThrow("矛盾");
+    },
+  );
+
+  it("已识别的不低于仍绑定原文方向，不能将其当作低于", () => {
+    const output = training(27);
+    output.sourceText = "角色修为不低于27";
+    output.comparison!.operator = "lt";
+    output.matched = true;
+    expect(() =>
+      validateDirectConditionResults([output], tree(output.sourceText), fixture(), prices),
+    ).toThrow("与原文不一致");
+  });
+
+  it("无充分非负下界的简单比较不能伪装成不完整资料而跳过计算", () => {
+    const record = fixture(),
+      ti = record.detail!.tabs.length - 1;
+    const output = proof("总宝石数量大于等于20");
+    output.reason = "已知至少7，另1项缺少数值";
+    output.observations.push({
+      label: "已知段数",
+      path: `/detail/tabs/${ti}/items/0/description`,
+      quote: "锻炼等级 7",
+      numericValue: 7,
+    });
+    expect(() =>
+      validateDirectConditionResults([output], tree(output.sourceText), record, prices),
+    ).toThrow("必须提供计算");
+    output.sourceText = "总宝石数量小于20";
+    expect(() =>
+      validateDirectConditionResults([output], tree(output.sourceText), record, prices),
+    ).toThrow("必须提供计算");
+  });
+
   it.each([
     ["缺项", () => []],
     ["重复编号", (item: DirectConditionOutput) => [item, copy(item)]],
@@ -359,7 +601,6 @@ describe("逐条条件结果校验及失效", () => {
         return [item];
       },
     ],
-    ["布尔矛盾", (item: DirectConditionOutput) => [{ ...item, matched: true }]],
     ["已知又未知", (item: DirectConditionOutput) => [{ ...item, matched: null }]],
   ] as const)("拒绝%s而非采用AI给出的状态", (_label, mutate) => {
     expect(() =>
@@ -378,6 +619,57 @@ describe("逐条条件结果校验及失效", () => {
     expect(() =>
       validateDirectConditionResults([output], tree(output.sourceText), fixture(), prices),
     ).toThrow("必须引用");
+  });
+
+  it("原文数值比较的布尔值按已核验算式校正，保留原判断及缓存审计说明", () => {
+    const output = training(21);
+    output.matched = false;
+    const record = fixture(),
+      conditions = tree(output.sourceText);
+    const review = validateDirectConditionResults([output], conditions, record, prices);
+    expect(review.results[0]).toMatchObject({ matched: true, modelMatched: false, status: "met" });
+    expect(review.results[0].reason).toContain("26 ≥ 21，满足");
+    expect(review.results[0].reason).toContain("模型原判断false，已按算式校正");
+    expect(review.results.at(-1)?.matched).toBe(true);
+    expect(hasCurrentDirectReview(conditions, record, prices, review)).toBe(true);
+    const cached = evaluateDirectConditions(conditions, record, prices, review);
+    expect(cached.results[0]).toMatchObject({ matched: true, modelMatched: false, status: "met" });
+    expect(cached.results[0].reason).toBe(review.results[0].reason);
+  });
+
+  it("没有单一原文数值比较的复合条件及null结果不自动校正", () => {
+    const compound = training(21);
+    compound.sourceText = "角色修为至少21且其他条件完整";
+    compound.matched = false;
+    expect(() =>
+      validateDirectConditionResults([compound], tree(compound.sourceText), fixture(), prices),
+    ).toThrow("矛盾");
+    const unknown = training(21);
+    unknown.matched = null;
+    expect(() =>
+      validateDirectConditionResults([unknown], tree(unknown.sourceText), fixture(), prices),
+    ).toThrow("矛盾");
+  });
+
+  it("即使布尔值可校正，错误原文、假引用和错误算式仍被拒绝", () => {
+    const output = training(21);
+    output.matched = false;
+    output.comparison!.target = 27;
+    expect(() =>
+      validateDirectConditionResults([output], tree(output.sourceText), fixture(), prices),
+    ).toThrow("与原文不一致");
+    const badQuote = training(21);
+    badQuote.matched = false;
+    badQuote.observations[0].quote = "11/20";
+    expect(() =>
+      validateDirectConditionResults([badQuote], tree(badQuote.sourceText), fixture(), prices),
+    ).toThrow("引用与原始资料不一致");
+    const badMath = training(21);
+    badMath.matched = false;
+    badMath.calculation!.result = 25;
+    expect(() =>
+      validateDirectConditionResults([badMath], tree(badMath.sourceText), fixture(), prices),
+    ).toThrow("计算结果与观察值不一致");
   });
 
   it("count不会将同一路径计数两次", () => {

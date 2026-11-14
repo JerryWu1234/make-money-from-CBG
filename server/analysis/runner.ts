@@ -21,6 +21,7 @@ import { captureIssues } from "../crawler/capture-readiness";
 import { isCurrentRoleCapture } from "../crawler/role-identity";
 import { EXPIRED_MARKET_NOTICE } from "./market";
 import { assertServiceOpen } from "../service-lifecycle";
+import { directConditionNodes } from "./direct-condition-review";
 
 export type AnalysisClient = {
   model: string;
@@ -748,13 +749,22 @@ export class AnalysisRunner {
         if (Buffer.byteLength(prompt, "utf8") > 256 * 1024)
           throw new Error("分析请求超过 256 KiB，已保留原文，请先核对请求长度后重试");
         if (client.acquireSession) session = await client.acquireSession(signal);
+        const bareRoleReview =
+          !!task.profile && !task.profile.equipmentSearch && !task.profile.petSearch;
+        const conditionReview =
+          !!task.profile && directConditionNodes(task.profile.settings.conditions).length > 0;
         const response = await pricingUntilAborted(
           (session?.analyze ?? client.analyze)(
             prompt,
             task.profile ? valuationSchema(task.profile) : ANALYSIS_SCHEMA,
             signal,
-            ...(task.profile && !task.profile.equipmentSearch && !task.profile.petSearch
-              ? [{ bareRoleReview: true }]
+            ...(bareRoleReview || conditionReview
+              ? [
+                  {
+                    ...(bareRoleReview ? { bareRoleReview: true } : {}),
+                    ...(conditionReview ? { conditionReview: true } : {}),
+                  },
+                ]
               : []),
           ),
           signal,

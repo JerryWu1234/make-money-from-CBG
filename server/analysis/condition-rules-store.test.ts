@@ -370,6 +370,12 @@ it("完整装备宝宝估值修改条件后只重新核对结果，复用报价�
     await runner.settled();
     expect(x.store.run(id)).toMatchObject({ completed: 1, reused: 0, queued: 0 });
     expect(analyze).toHaveBeenCalledOnce();
+    expect(analyze).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Object),
+      expect.any(AbortSignal),
+      { conditionReview: true },
+    );
     const row = x.crawl.db
       .prepare("SELECT result_json,source_task_id FROM analysis_tasks WHERE run_id=?")
       .get(id)!;

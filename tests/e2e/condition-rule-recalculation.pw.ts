@@ -68,7 +68,7 @@ test("逐商品判断宝石30段、人物当前修炼26，并展示可核对过�
         { id: "C3", text: "角色修为大于等于27", join: "and" },
       ],
     };
-    // The old contradiction is rejected even when the model claims true.
+    // Verified arithmetic corrects the old contradictory model boolean.
     const contradiction = {
       id: "C2",
       sourceText: "召唤兽数量大于8",
@@ -83,19 +83,23 @@ test("逐商品判断宝石30段、人物当前修炼26，并展示可核对过�
       calculation: { operation: "count", inputs: [0, 1, 2], result: 3 },
       comparison: { operator: "gt", target: 8 },
     };
-    expect(() =>
-      validateDirectConditionResults(
-        [contradiction],
-        {
-          id: "G1",
-          operator: "and",
-          evaluation: "sequence",
-          children: [{ id: "C2", text: contradiction.sourceText }],
-        },
-        record,
-        { asking: 999, bare: 1024.5 },
-      ),
-    ).toThrow();
+    const corrected = validateDirectConditionResults(
+      [contradiction],
+      {
+        id: "G1",
+        operator: "and",
+        evaluation: "sequence",
+        children: [{ id: "C2", text: contradiction.sourceText }],
+      },
+      record,
+      { asking: 999, bare: 1024.5 },
+    );
+    expect(corrected.results.find((entry) => entry.id === "C2")).toMatchObject({
+      status: "unmet",
+      matched: false,
+      modelMatched: true,
+    });
+    expect(corrected.results.find((entry) => entry.id === "C2")?.reason).toContain("已按算式校正");
     crawl.observe(record.listing);
     expect(crawl.save(record.listing, record.detail!)).toBe(true);
     const template = await readFile(PROMPT_FILE, "utf8");

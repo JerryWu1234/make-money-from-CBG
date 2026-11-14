@@ -12,6 +12,7 @@ import { codexHomeDirectory } from "./codex-runtime.mjs";
 import {
   DIRECT_AUDIT_CONDITIONS,
   expectedDirectAuditResults,
+  expectedDirectAuditChecks,
 } from "./direct-condition-audit-oracle.mjs";
 
 const flags = new Map();
@@ -40,6 +41,7 @@ const server = await createServer({
 const output = {
   generatedAt: new Date().toISOString(),
   model: flags.get("model") || "gpt-6-luna",
+  reasoningMode: "condition-review-high",
   evaluationMode: replay
     ? replay.fixture
       ? "local-fixture-replay"
@@ -87,10 +89,13 @@ try {
       key: record.listing.key,
       name: record.listing.name,
       expected: expectedDirectAuditResults(sample.oracle),
+      expectedChecks: expectedDirectAuditChecks(sample.oracle),
       oracle: sample.oracle,
       raw: null,
+      usage: null,
       review: null,
       combinations: [],
+      checks: [],
     };
     try {
       if (replay) {
@@ -108,19 +113,75 @@ try {
             properties: { condition_results: DIRECT_CONDITION_RESULTS_SCHEMA },
           },
           AbortSignal.timeout(180_000),
-          { bareRoleReview: true },
+          { bareRoleReview: true, conditionReview: true },
         );
         if (response.truncated) throw new Error("模型响应截断");
         entry.raw = response.text;
+        entry.usage = response.usage ?? null;
       }
       // Save the original output before strict validation, including failing outputs.
       output.samples.push(entry);
       await save();
       const review = validateDirectConditionResults(entry.raw, tree, record, prices);
       entry.review = review;
-      for (const [id, expected] of Object.entries(entry.expected)) {
-        const actual = review.results.find((result) => result.id === id)?.matched;
-        if (actual !== expected) output.failures.push({ key: entry.key, id, expected, actual });
+      for (const [id, expected] of Object.entries(entry.expectedChecks)) {
+        const actual = review.results.find((result) => result.id === id);
+        const problems = [];
+        if (actual?.matched !== expected.matched) problems.push("matched");
+        if (expected.boundType === "exact") {
+          if (actual?.calculation?.result !== expected.actual) problems.push("actual");
+          if (actual?.comparison?.operator !== expected.operator) problems.push("operator");
+          if (actual?.comparison?.target !== expected.target) problems.push("target");
+          if (["C1", "C2", "C3", "C4", "C5"].includes(id)) {
+            const selected = (actual?.calculation?.inputs || []).map(
+              (index) => actual?.observations?.[index],
+            );
+            const expectedTerms = ["C1", "C5"].includes(id)
+              ? sample.oracle.equipment.map((item) => item.gemLevel)
+              : ["攻击修炼", "法术修炼", "防御修炼", "抗法修炼"].map(
+                  (name) => sample.oracle.training[name].current,
+                );
+            const observedTerms = selected.map((item) => item?.numericValue);
+            const emptyInventoryCount =
+              ["C1", "C5"].includes(id) &&
+              expectedTerms.length === 0 &&
+              actual?.calculation?.operation === "count" &&
+              actual.calculation.inputs.length === 0;
+            if (
+              !emptyInventoryCount &&
+              (actual?.calculation?.operation !== "sum" ||
+                JSON.stringify([...expectedTerms].sort((a, b) => a - b)) !==
+                  JSON.stringify([...observedTerms].sort((a, b) => Number(a) - Number(b))))
+            )
+              problems.push("component-sum");
+          }
+        } else if (expected.boundType === "lower-bound") {
+          // An incomplete sum may establish a lower bound, but cannot be shown as
+          // a verified exact total. The explanation must disclose the missing terms.
+          if (actual?.calculation !== null || actual?.comparison !== null)
+            problems.push("lower-bound-presented-as-exact");
+          if (
+            !/至少|下界|已知/.test(actual?.reason || "") ||
+            !/缺|未知|未|不完整|无法/.test(actual?.reason || "") ||
+            !String(actual?.reason).includes(String(expected.knownMinimum))
+          )
+            problems.push("lower-bound-disclosure");
+        } else if (actual?.calculation !== null || actual?.comparison !== null)
+          problems.push("unknown-presented-as-exact");
+        const check = {
+          id,
+          expected,
+          actual: {
+            matched: actual?.matched,
+            value: actual?.calculation?.result ?? null,
+            comparison: actual?.comparison ?? null,
+            reason: actual?.reason,
+          },
+          passed: !problems.length,
+          problems,
+        };
+        entry.checks.push(check);
+        if (problems.length) output.failures.push({ key: entry.key, ...check });
       }
       for (const [name, joins] of [
         ["全部且", ["and", "and", "and", "and", "and"]],
@@ -144,10 +205,21 @@ try {
         const expected = truth
           .slice(1)
           .reduce(
-            (acc, value, index) => (joins[index] === "and" ? acc && value : acc || value),
+            (acc, value, index) =>
+              joins[index] === "and"
+                ? acc === false || value === false
+                  ? false
+                  : acc === true && value === true
+                    ? true
+                    : null
+                : acc === true || value === true
+                  ? true
+                  : acc === false && value === false
+                    ? false
+                    : null,
             truth[0],
           );
-        const expectedStatus = expected ? "met" : "unmet";
+        const expectedStatus = expected === null ? "unknown" : expected ? "met" : "unmet";
         entry.combinations.push({ name, expected: expectedStatus, actual: combined });
         if (combined !== expectedStatus)
           output.failures.push({
@@ -172,7 +244,13 @@ try {
     }
     await save();
   }
-  output.leafChecks = output.samples.length * DIRECT_AUDIT_CONDITIONS.length;
+  output.attemptedLeafChecks = output.samples.length * DIRECT_AUDIT_CONDITIONS.length;
+  output.validatedSamples = output.samples.filter((sample) => sample.review).length;
+  output.leafChecks = output.samples.reduce((count, sample) => count + sample.checks.length, 0);
+  output.passedLeafChecks = output.samples.reduce(
+    (count, sample) => count + sample.checks.filter((check) => check.passed).length,
+    0,
+  );
   output.combinationChecks = output.samples.reduce(
     (count, sample) => count + sample.combinations.length,
     0,

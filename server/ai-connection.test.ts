@@ -590,6 +590,12 @@ describe("AI 连接验证", () => {
       outputSchema: schema,
       bareRoleReview: true,
     });
+    await codex.analyze("逐条条件", schema, signal, { conditionReview: true });
+    expect(mocks.requestCodex).toHaveBeenLastCalledWith("逐条条件", signal, {
+      model: "other-model",
+      outputSchema: schema,
+      conditionReview: true,
+    });
 
     mocks.readFile.mockResolvedValue(
       JSON.stringify({ deepseek: { apiKey: fakeKey, model: "deepseek-v4-pro" } }),

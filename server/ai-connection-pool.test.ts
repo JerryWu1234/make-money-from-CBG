@@ -70,13 +70,16 @@ it("会话池保留模型、并发、账号校验和请求参数，并交由调�
   expect(mocks.constructed).toHaveBeenCalledWith(10, "configured-model");
   expect(mocks.acquire).toHaveBeenCalledWith(signal);
   await expect(
-    lease.analyze("角色原文", schema, signal, { bareRoleReview: true }),
+    lease.analyze("角色原文", schema, signal, { bareRoleReview: true, conditionReview: true }),
   ).resolves.toEqual({
     text: "result",
     usage: { input_tokens: 1 },
   });
   expect(mocks.account).toHaveBeenCalledTimes(2);
-  expect(mocks.run).toHaveBeenCalledWith("角色原文", schema, signal, { bareRoleReview: true });
+  expect(mocks.run).toHaveBeenCalledWith("角色原文", schema, signal, {
+    bareRoleReview: true,
+    conditionReview: true,
+  });
   await lease.release(true);
   await pool.close();
   expect(mocks.release).toHaveBeenCalledWith(true);
