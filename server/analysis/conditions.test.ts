@@ -6,6 +6,7 @@ import {
   defaultConditions,
   evaluateConditions,
   validateConditionResults,
+  priceConditionLabel,
   type ConditionGroup,
   type ConditionResult,
   CONDITION_REVIEW_VERSION,
@@ -30,6 +31,120 @@ const rule = (text: string, expression: RuleExpression): CompiledConditionRule =
   expression,
   explanation: describeRule(expression),
   issues: [],
+});
+
+describe("价格条件百分比", () => {
+  function percentage(comparison: "lt" | "gt", value: number) {
+    const tree = defaultConditions();
+    tree.children = [
+      {
+        id: "C1",
+        text: "",
+        price: {
+          comparison,
+          adjustment: comparison === "lt" ? "minus" : "plus",
+          unit: "percent",
+          value,
+        },
+      },
+    ];
+    return tree;
+  }
+
+  it.each([
+    ["lt", 10, 899.99, "met", "900.00"],
+    ["lt", 10, 900, "unmet", "900.00"],
+    ["lt", 10, 900.01, "unmet", "900.00"],
+    ["gt", 10, 1099.99, "unmet", "1100.00"],
+    ["gt", 10, 1100, "unmet", "1100.00"],
+    ["gt", 10, 1100.01, "met", "1100.00"],
+    ["lt", 0, 999.99, "met", "1000.00"],
+    ["lt", 0, 1000, "unmet", "1000.00"],
+    ["gt", 0, 1000, "unmet", "1000.00"],
+    ["gt", 0, 1000.01, "met", "1000.00"],
+    ["lt", 2.5, 974.99, "met", "975.00"],
+    ["lt", 2.5, 975, "unmet", "975.00"],
+    ["gt", 2.5, 1025, "unmet", "1025.00"],
+    ["gt", 2.5, 1025.01, "met", "1025.00"],
+    ["lt", 100, 0.01, "unmet", "0.00"],
+    ["gt", 150, 2500, "unmet", "2500.00"],
+    ["gt", 150, 2500.01, "met", "2500.00"],
+  ] as const)(
+    "裸号1000元，%s幅度%s%%，挂牌%s => %s",
+    (comparison, value, asking, status, target) => {
+      const tree = normalizeConditions(percentage(comparison, value))!;
+      const review = evaluateConditions(tree, [], { asking, bare: 1000 });
+      expect(review.results.find((result) => result.id === "C1")).toMatchObject({ status });
+      expect(review.results.find((result) => result.id === "C1")?.reason).toContain(
+        `比较目标${target}元`,
+      );
+      expect(review.results.at(-1)?.status).toBe(status);
+    },
+  );
+
+  it("下浮最多100%，非有限值和负数不能保存，上浮可超过100%", () => {
+    expect(normalizeConditions(percentage("lt", 100))).toBeDefined();
+    expect(normalizeConditions(percentage("gt", 150))).toBeDefined();
+    for (const value of [100.01, -1, Number.NaN, Number.POSITIVE_INFINITY])
+      expect(() => normalizeConditions(percentage("lt", value))).toThrow("价格条件数值无效");
+    for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY])
+      expect(() => normalizeConditions(percentage("gt", value))).toThrow("价格条件数值无效");
+  });
+
+  it("切换为不限制后清除百分比并跳过比较", () => {
+    const tree = defaultConditions();
+    tree.children = [
+      {
+        id: "C1",
+        text: "",
+        price: { comparison: "none", adjustment: "minus", unit: "percent", value: 42 },
+      },
+    ];
+    const normalized = normalizeConditions(tree)!;
+    expect(normalized.children[0]).toMatchObject({
+      price: { comparison: "none", adjustment: "none", unit: "amount", value: 0 },
+    });
+    expect(
+      evaluateConditions(normalized, [], { asking: null, bare: null }).results.find(
+        (result) => result.id === "C1",
+      ),
+    ).toMatchObject({ status: "met", skipped: true });
+  });
+
+  it("百分比直接说明低／高幅度，旧金额及包含边界的价格条件保留原意", () => {
+    expect(
+      priceConditionLabel({
+        comparison: "lt",
+        adjustment: "minus",
+        unit: "percent",
+        value: 10,
+      }),
+    ).toBe("挂牌价比裸号估值低10%");
+    expect(
+      priceConditionLabel({
+        comparison: "gt",
+        adjustment: "plus",
+        unit: "percent",
+        value: 2.5,
+      }),
+    ).toBe("挂牌价比裸号估值高2.5%");
+    expect(
+      priceConditionLabel({
+        comparison: "lt",
+        adjustment: "minus",
+        unit: "amount",
+        value: 100,
+      }),
+    ).toBe("挂牌价小于裸号估值减去100元");
+    expect(
+      priceConditionLabel({
+        comparison: "gte",
+        adjustment: "plus",
+        unit: "percent",
+        value: 10,
+      }),
+    ).toBe("挂牌价大于或等于裸号估值加上10%");
+  });
 });
 const predicate = (value: boolean): RuleExpression => ({
   op: value ? "gt" : "lt",

@@ -40,7 +40,7 @@ it("旧AI满足记录标为历史依据，当前程序判断展示可追溯证�
   expect(markup).not.toContain("/detail/pets");
 });
 
-it("价格控件仅提供小于、大于、不限制，默认不限制且无调整输入", () => {
+it("价格控件默认不限制且不显示百分比输入", () => {
   const markup = renderToStaticMarkup(<AnalysisConditions onChange={() => {}} />);
   const select = markup.match(/<select\b[^>]*aria-label="C1价格比较"[\s\S]*?<\/select>/)?.[0] || "";
   expect(select.match(/<option\b/g)).toHaveLength(3);
@@ -53,6 +53,24 @@ it("价格控件仅提供小于、大于、不限制，默认不限制且无调�
   expect(markup).toContain("未自定义时，默认：价格不限制。");
   expect(markup).not.toContain('aria-label="C1估值调整"');
   expect(markup).not.toContain('aria-label="C1调整数值"');
+  expect(markup).not.toContain('aria-label="C1价格百分比"');
+});
+
+it.each([
+  ["lt", "minus", 10, 90],
+  ["gt", "plus", 12.5, 112.5],
+] as const)("%s价格显示百分比及正确比较目标", (comparison, adjustment, value, target) => {
+  const tree = defaultConditions();
+  tree.children = [
+    { id: "C1", text: "", price: { comparison, adjustment, value, unit: "percent" } },
+  ];
+  const markup = renderToStaticMarkup(<AnalysisConditions value={tree} onChange={() => {}} />);
+  expect(markup).toContain('aria-label="C1价格百分比"');
+  expect(markup).toContain(`value="${value}"`);
+  expect(markup).toContain(`裸号估值 × ${target}%`);
+  expect(markup).not.toContain('value="legacy"');
+  expect(markup).not.toContain('aria-label="C1估值调整"');
+  expect(markup).not.toContain("元</option>");
 });
 
 it("旧版等价、包含边界及调整额条件保留历史展示和原始值", () => {

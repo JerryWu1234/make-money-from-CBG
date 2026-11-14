@@ -180,6 +180,12 @@ export const comparisonLabels = {
 };
 export function priceConditionLabel(price: PriceCondition) {
   if (price.comparison === "none") return "价格不限制";
+  if (
+    price.unit === "percent" &&
+    ((price.comparison === "lt" && price.adjustment === "minus") ||
+      (price.comparison === "gt" && price.adjustment === "plus"))
+  )
+    return `挂牌价比裸号估值${price.comparison === "lt" ? "低" : "高"}${price.value}%`;
   return `挂牌价${comparisonLabels[price.comparison]}裸号估值${
     price.adjustment === "none"
       ? ""

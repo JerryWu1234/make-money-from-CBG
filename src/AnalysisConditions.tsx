@@ -7,7 +7,20 @@ import {
   type ConditionNode,
   type ConditionOperator,
   type ConditionReview,
+  type PriceCondition,
 } from "../server/analysis/conditions";
+
+function editablePriceComparison(price: PriceCondition) {
+  if (price.comparison === "none") return "none";
+  if (
+    (price.comparison === "lt" || price.comparison === "gt") &&
+    (price.adjustment === "none" ||
+      (price.unit === "percent" &&
+        price.adjustment === (price.comparison === "lt" ? "minus" : "plus")))
+  )
+    return price.comparison;
+  return "legacy";
+}
 
 function nextId(root: ConditionGroup) {
   const ids = new Set<string>();
@@ -85,6 +98,8 @@ export function AnalysisConditions({
           <ol className="analysis-condition-list">
             {current.children.map((entry, index) => {
               const node = entry as Condition;
+              const priceComparison = node.price ? editablePriceComparison(node.price) : undefined;
+              const percentage = node.price?.adjustment === "none" ? 0 : (node.price?.value ?? 0);
               return (
                 <li key={node.id}>
                   {index > 0 && (
@@ -139,35 +154,65 @@ export function AnalysisConditions({
                       <div className="analysis-price-condition">
                         <select
                           aria-label={`${node.id}价格比较`}
-                          value={
-                            ["none", "lt", "gt"].includes(node.price.comparison) &&
-                            node.price.adjustment === "none"
-                              ? node.price.comparison
-                              : "legacy"
-                          }
-                          onChange={(event) =>
+                          value={priceComparison}
+                          onChange={(event) => {
+                            const comparison = event.target.value as "none" | "lt" | "gt";
                             update(node.id, {
                               price: {
-                                comparison: event.target.value as "none" | "lt" | "gt",
-                                adjustment: "none",
-                                unit: "amount",
-                                value: 0,
+                                comparison,
+                                adjustment:
+                                  comparison === "none"
+                                    ? "none"
+                                    : comparison === "lt"
+                                      ? "minus"
+                                      : "plus",
+                                unit: comparison === "none" ? "amount" : "percent",
+                                value:
+                                  comparison === "none" || priceComparison === "legacy"
+                                    ? 0
+                                    : percentage,
                               },
-                            })
-                          }
+                            });
+                          }}
                         >
                           <option value="none">不限制</option>
                           <option value="lt">挂牌价小于裸号估值</option>
                           <option value="gt">挂牌价大于裸号估值</option>
-                          {(!["none", "lt", "gt"].includes(node.price.comparison) ||
-                            node.price.adjustment !== "none") && (
+                          {priceComparison === "legacy" && (
                             <option value="legacy" hidden>
                               历史条件：{priceConditionLabel(node.price)}
                             </option>
                           )}
                         </select>
+                        {(priceComparison === "lt" || priceComparison === "gt") && (
+                          <label className="analysis-price-percentage">
+                            幅度
+                            <input
+                              aria-label={`${node.id}价格百分比`}
+                              type="number"
+                              inputMode="decimal"
+                              min={0}
+                              max={priceComparison === "lt" ? 100 : undefined}
+                              step="any"
+                              value={percentage}
+                              onChange={(event) =>
+                                update(node.id, {
+                                  price: {
+                                    comparison: priceComparison,
+                                    adjustment: priceComparison === "lt" ? "minus" : "plus",
+                                    unit: "percent",
+                                    value: Number(event.target.value),
+                                  },
+                                })
+                              }
+                            />
+                            %
+                          </label>
+                        )}
                         <p className="analysis-condition-summary">
                           {priceConditionLabel(node.price)}
+                          {(priceComparison === "lt" || priceComparison === "gt") &&
+                            `（挂牌价 ${priceComparison === "lt" ? "<" : ">"} 裸号估值 × ${priceComparison === "lt" ? 100 - percentage : 100 + percentage}%）`}
                         </p>
                       </div>
                     ) : (
