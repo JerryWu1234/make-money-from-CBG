@@ -109,7 +109,7 @@ describe("逐商品逐条条件输入与协议", () => {
     expect(prompt).toContain("12/20取12，0/25取0");
     expect(prompt).toContain("不含灵饰精炼等级／星辉石");
     expect(prompt).toContain(
-      JSON.stringify({ path: "/detail/tabs/0/tables/0/0/1", value: "12/20" }),
+      JSON.stringify("/detail/tabs/0/tables/0/0/1") + ":" + JSON.stringify("12/20"),
     );
     expect(prompt).not.toContain("UNNEEDED_HTML_MARKER");
     expect(prompt).toContain("sourceText（与输入原文完全一致）");
@@ -143,8 +143,10 @@ describe("逐商品逐条条件输入与协议", () => {
     expect(JSON.stringify(sources)).not.toContain("DUPLICATE_RAW_ONLY_MARKER");
     expect(JSON.stringify(sources)).not.toContain("UNNEEDED_HTML_MARKER");
     const prompt = directConditionPrompt(tree("角色修为大于等于27"), record, prices);
-    expect(prompt).toContain(JSON.stringify(sources));
-    expect(prompt).toContain("path必须逐字复制下方证据清单中的path");
+    expect(prompt).toContain(
+      JSON.stringify(Object.fromEntries(sources.map(({ path, value }) => [path, value]))),
+    );
+    expect(prompt).toContain("path必须逐字复制映射的键");
     expect(prompt).toContain("不要引用清单条目的/path或/value");
   });
 
@@ -178,7 +180,25 @@ describe("逐商品逐条条件输入与协议", () => {
     expect(prompt).toContain("穿戴、背包及已采集仓库");
     expect(prompt).toContain("不能只取六个穿戴槽");
     expect(prompt).toContain("category缺失不等于不存在");
-    expect(prompt).toContain(JSON.stringify(sources));
+    expect(prompt).toContain(
+      JSON.stringify(Object.fromEntries(sources.map(({ path, value }) => [path, value]))),
+    );
+  });
+
+  it("密集字段请求省去重复包装，仍保留每个原始路径和值", () => {
+    const record = fixture();
+    record.detail!.tabs[0].fields = Array.from({ length: 2000 }, (_, index) => ({
+      name: `扩展字段${index}`,
+      value: `原始值${index}`,
+    }));
+    const sources = directConditionSources(record, prices);
+    const prompt = directConditionPrompt(tree("角色修为大于等于27"), record, prices);
+    expect(Buffer.byteLength(JSON.stringify(sources))).toBeGreaterThan(256 * 1024);
+    expect(Buffer.byteLength(prompt)).toBeLessThan(256 * 1024);
+    const encoded = prompt.split("数组索引保持原样）：\n")[1].split("\n\n")[0];
+    const restored = JSON.parse(encoded);
+    expect(Object.entries(restored)).toEqual(sources.map(({ path, value }) => [path, value]));
+    expect(restored["/detail/tabs/0/fields/1999/value"]).toBe("原始值1999");
   });
 
   it("合计要求逐项核算，保留四项当前等级而不取摘要或上限", () => {
@@ -189,9 +209,9 @@ describe("逐商品逐条条件输入与协议", () => {
     expect(prompt).toContain("分别引用攻击、法术、防御、抗法四项当前等级");
     expect(prompt).toContain("不要以摘要xiulian或斜杠后的上限代替四项明细");
     expect(prompt).toContain(
-      JSON.stringify({ path: "/detail/tabs/0/tables/0/0/1", value: "12/20" }),
+      JSON.stringify("/detail/tabs/0/tables/0/0/1") + ":" + JSON.stringify("12/20"),
     );
-    expect(prompt).toContain(JSON.stringify({ path: "/listing/summary/xiulian", value: 80 }));
+    expect(prompt).toContain('"/listing/summary/xiulian":80');
   });
 
   it.each([
@@ -314,6 +334,45 @@ describe("逐商品逐条条件输入与协议", () => {
     });
     expect(corrected.results[0].reason).toContain("模型原判断true，已按算式校正");
   });
+
+  it.each(["装备数量大于等于8", "总宝石数量大于等于20"])(
+    "明确为空的%s仍返回0的计算和原文比较，不能省略依据",
+    (sourceText) => {
+      const record = fixture();
+      const ti = record.detail!.tabs.length - 1;
+      record.detail!.tabs[ti].items = [];
+      const output: DirectConditionOutput = {
+        ...proof(sourceText),
+        matched: false,
+        reason: "采集完整且库存明确为空，合计0。",
+        observations: [
+          {
+            label: "采集完整",
+            path: "/detail/equipmentCapture/complete",
+            quote: "true",
+            numericValue: null,
+          },
+          { label: "空库存", path: `/detail/tabs/${ti}/items`, quote: "[]", numericValue: null },
+        ],
+        calculation: { operation: "count", inputs: [], result: 0 },
+        comparison: { operator: "gte", target: sourceText.includes("8") ? 8 : 20 },
+      };
+      const review = validateDirectConditionResults([output], tree(sourceText), record, prices);
+      expect(review.results[0]).toMatchObject({
+        matched: false,
+        status: "unmet",
+        calculation: { result: 0 },
+      });
+      expect(directConditionPrompt(tree(sourceText), record, prices)).toContain(
+        "operation:count,inputs:[],result:0",
+      );
+      output.calculation = null;
+      output.comparison = null;
+      expect(() =>
+        validateDirectConditionResults([output], tree(sourceText), record, prices),
+      ).toThrow("明确数值比较必须提供计算与比较依据");
+    },
+  );
 
   it("无法判断是独立null，不伪装成false且可缓存", () => {
     const output: DirectConditionOutput = {

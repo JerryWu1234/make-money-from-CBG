@@ -11,7 +11,12 @@ import { AnalysisStore, type AnalysisTask } from "./store";
 import { analysisConcurrency, analysisLaneLimits, DEFAULT_ANALYSIS_CONCURRENCY } from "./types";
 import type { AnalysisLane } from "./types";
 import type { PricingSearchProgress } from "./equipment-pricing";
-import { valuationSchema, validateValuation, recalculateValuation } from "./valuation-contract";
+import {
+  valuationSchema,
+  valuationPrompt,
+  validateValuation,
+  recalculateValuation,
+} from "./valuation-contract";
 import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { CALCULATION_VERSION } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
@@ -729,17 +734,28 @@ export class AnalysisRunner {
         });
         return;
       }
+      // Rebuild the transport format from frozen source/settings when resuming old tasks.
+      // Each attempt still archives its exact request; prior requests stay untouched.
+      const basePrompt = task.profile
+        ? valuationPrompt(
+            task.document,
+            task.record,
+            task.profile,
+            task.equipmentPricing,
+            task.petPricing,
+          )
+        : task.prompt;
       const prompt =
         task.profile &&
         task.lastError &&
         task.lastAttemptHadResponse &&
         !task.lastError.startsWith("已暂停") &&
         task.attempts > 0
-          ? task.prompt +
+          ? basePrompt +
             "\n\n上次输出校验未通过：" +
             task.lastError.slice(0, 1000) +
             "。请复核原文引用与本批次计价规则后修正 JSON，不得补造缺失资料。"
-          : task.prompt;
+          : basePrompt;
       const attempt = this.store.begin(task, owner, prompt);
       const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
       let raw: string | undefined, usage: unknown;
