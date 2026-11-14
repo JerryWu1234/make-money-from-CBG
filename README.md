@@ -241,3 +241,7 @@ vp run test:e2e
 - `server/crawler/controller.ts` 管理采集任务的启动、暂停和状态；`source.ts` 对接真实浏览器页面。
 - `server/crawler/resume.ts` 选择续采锚点和页码；`runner.ts` 负责补采、逐页处理和完成状态；`store.ts` 管理 SQLite 数据与断点。
 - `server/diagnostics.ts` 保存可导出的关键运行日志；`tests/e2e/` 验证角色界面，`tests/fixtures/` 保存模拟数据；`scripts/*-regression.mjs` 用隔离浏览器验证其余流程。
+
+### 自由文字入榜规则
+
+文字条件先解析并核对执行口径，再由程序根据采集证据判断；旧AI满足状态不直接用于入榜。详见[使用与执行边界](docs/condition-rules.md)和[实库多维验证](docs/condition-rules-validation.md)。

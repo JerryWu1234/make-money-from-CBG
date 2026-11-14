@@ -6,6 +6,12 @@ import type { ValuationResult } from "./valuation-types";
 import { CrawlStore } from "../crawler/store";
 import { AnalysisStore } from "./store";
 import { createProfile, DEFAULT_SETTINGS } from "./profile";
+import {
+  RULE_ENGINE_VERSION,
+  describeRule,
+  type RuleExpression,
+  type CompiledConditionRule,
+} from "./condition-rule-types";
 import { defaultConditions, type ConditionGroup } from "./conditions";
 
 function record() {
@@ -15,6 +21,23 @@ function record() {
 }
 const valuation = (bare = 20000) =>
   ({ bare_role_value: bare, decision: "PASS" }) as ValuationResult;
+
+const compiled = (text: string, expression: RuleExpression): CompiledConditionRule => ({
+  version: RULE_ENGINE_VERSION,
+  sourceText: text,
+  status: "ready" as const,
+  expression,
+  explanation: describeRule(expression),
+  issues: [],
+});
+const speedRule = () =>
+  compiled("速度大于800", {
+    op: "gt",
+    args: [
+      { op: "field", path: "role.speed" },
+      { op: "literal", value: 800 },
+    ],
+  });
 
 it.each([
   [20000, "recommended", 0],
@@ -59,8 +82,19 @@ it("自定义价格条件取代默认规则，不再附加装备、宝宝或金�
 it("重新计算价格与整体结果，不信任AI返回的组和价格状态", () => {
   const tree = defaultConditions();
   tree.children.push(
-    { id: "C2", text: "速度大于800", join: "or" },
-    { id: "C3", text: "烹饪120", join: "and" },
+    { id: "C2", text: "速度大于800", join: "or", rule: speedRule() },
+    {
+      id: "C3",
+      text: "烹饪120",
+      join: "and",
+      rule: compiled("烹饪120", {
+        op: "lt",
+        args: [
+          { op: "field", path: "listing.price" },
+          { op: "literal", value: 0 },
+        ],
+      }),
+    },
   );
   const value = {
     ...valuation(20001),
@@ -75,7 +109,7 @@ it("重新计算价格与整体结果，不信任AI返回的组和价格状态",
     },
   } as ValuationResult;
   expect(recommendationFor(record(), value, tree).status).toBe("excluded");
-  value.condition_review!.results.find((r) => r.id === "C3")!.status = "unknown";
+  (tree.children[2] as { rule?: unknown }).rule = undefined;
   expect(recommendationFor(record(), value, tree).status).toBe("manual");
   expect(
     recommendationFor(record(), value, { ...tree, children: [{ id: "C2", text: "速度900" }] })
@@ -89,11 +123,12 @@ it("批次条件快照决定榜单，设置变更、隐藏、来源变更仍生�
     for (const key of ["match", "miss", "unknown"]) {
       const r = record();
       r.listing.key = key;
+      if (key !== "unknown") r.listing.attrs["速度"] = key === "match" ? "850" : "700";
       crawl.observe(r.listing);
       crawl.save(r.listing, r.detail!);
     }
     const tree = defaultConditions();
-    tree.children = [{ id: "C1", text: "速度大于800" }];
+    tree.children = [{ id: "C1", text: "速度大于800", rule: speedRule() }];
     const profile = createProfile("条件入榜", { ...DEFAULT_SETTINGS, conditions: tree });
     const store = new AnalysisStore(crawl.db);
     const runId = store.createRun("codex", "test", false, profile);
@@ -213,6 +248,7 @@ it("大资料榜单只排序轻量候选，再按原序补足推荐和人工复�
       for (let index = 0; index < 12; index++) {
         const r = record();
         r.listing.key = `${kind}-${String(index).padStart(2, "0")}`;
+        if (kind !== "manual") r.listing.attrs["速度"] = kind === "recommended" ? "850" : "700";
         r.detail!.tabs[0].text += "采集证据".repeat(8192);
         crawl.observe(r.listing);
         crawl.save(r.listing, r.detail!);
@@ -223,7 +259,7 @@ it("大资料榜单只排序轻量候选，再按原序补足推荐和人工复�
       id: "G1",
       operator: "and",
       evaluation: "sequence",
-      children: [{ id: "C1", text: "速度大于800" }],
+      children: [{ id: "C1", text: "速度大于800", rule: speedRule() }],
     };
     const profile = createProfile("大资料榜单回归", { ...DEFAULT_SETTINGS, conditions });
     const runId = store.createRun("codex", "test", false, profile);

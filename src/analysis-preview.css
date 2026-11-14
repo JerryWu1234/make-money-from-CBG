@@ -1845,3 +1845,48 @@ body:has(.analysis-page) #root {
   flex-basis: 100%;
   margin: 0;
 }
+
+.analysis-rule-preview {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-left: 3px solid #94a3b8;
+  border-radius: 6px;
+  background: #f8fafc;
+  overflow-wrap: anywhere;
+}
+.analysis-rule-preview p {
+  margin: 4px 0;
+}
+.analysis-rule-preview ul {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+.analysis-rule-preview.is-ready {
+  border-color: #0f766e;
+  background: #f0fdfa;
+}
+.analysis-rule-preview.is-ambiguous,
+.analysis-rule-preview.is-unsupported {
+  border-color: #d97706;
+  background: #fffbeb;
+}
+
+.analysis-condition-evidence {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.analysis-condition-evidence summary {
+  cursor: pointer;
+}
+.analysis-condition-evidence dl {
+  margin: 8px 0;
+}
+.analysis-condition-evidence dl > div {
+  margin: 8px 0;
+}
+.analysis-condition-evidence dt {
+  font-weight: 600;
+}
+.analysis-condition-evidence dd {
+  margin: 2px 0 0;
+}

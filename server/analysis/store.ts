@@ -1,3 +1,6 @@
+import { conditionNodes, defaultConditions } from "./conditions";
+import { evaluateSavedConditions } from "./condition-evaluation";
+import { RULE_ENGINE_VERSION } from "./condition-rule-types";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { setImmediate as yieldThread } from "node:timers/promises";
@@ -146,6 +149,7 @@ function profileScope(
   const source = value?.marketSources?.find((server) => server.serverId === serverId);
   const { serverName: _name, fetchedAt: _at, sources: _sources, ...automatic } = source || {};
   const servers = configured ? [configured] : source ? [automatic] : [];
+  const { conditions: _conditions, ...pricingSettings } = value?.settings || {};
   // Only this role's server affects its calculation; other servers and source bookkeeping do not.
   return value
     ? {
@@ -159,7 +163,7 @@ function profileScope(
         petSearch: !!value.petSearch,
         petGearSearch: !!value.petGearSearch,
         settings: {
-          ...value.settings,
+          ...pricingSettings,
           servers,
         },
       }
@@ -682,8 +686,6 @@ export class AnalysisStore {
         const sameBodyReview =
           !!profile &&
           !!savedProfile &&
-          !profile.settings.conditions &&
-          !savedProfile.settings.conditions &&
           !profile.equipmentSearch &&
           !profile.petSearch &&
           !savedProfile.equipmentSearch &&
@@ -1517,6 +1519,36 @@ export class AnalysisStore {
     const savedProfile = row.profile_json
       ? (JSON.parse(String(row.profile_json)) as AnalysisProfile)
       : null;
+    const archivedResult: ProductAnalysis | null = row.result_json
+      ? JSON.parse(String(row.result_json))
+      : null;
+    const localResult = archivedResult ? structuredClone(archivedResult) : null;
+    const sourceRecord: SavedRoleRecord = {
+      listing,
+      detail: JSON.parse(String(row.source_detail_json)),
+      status: "complete",
+      error: null,
+    };
+    const pricingChanged =
+      !!currentProfile &&
+      !isDeepStrictEqual(
+        profileScope(savedProfile, listing.serverId, listing.key),
+        profileScope(currentProfile, listing.serverId, listing.key),
+      );
+    if (
+      localResult?.valuation &&
+      !pricingChanged &&
+      (currentProfile ||
+        savedProfile?.settings.conditions ||
+        localResult.valuation.condition_review)
+    ) {
+      const conditions =
+        (currentProfile || savedProfile)?.settings.conditions || defaultConditions();
+      localResult.valuation.condition_review = evaluateSavedConditions(conditions, sourceRecord, {
+        asking: localResult.valuation.asking_price,
+        bare: localResult.valuation.bare_role_value ?? null,
+      });
+    }
     const attempts = this.db
       .prepare(
         "SELECT * FROM analysis_attempts WHERE task_id IN (?,?) ORDER BY created_at ASC,rowid ASC",
@@ -1554,7 +1586,7 @@ export class AnalysisStore {
       ...(String(row.prompt_text).startsWith("【裸号核对专用模板 ")
         ? { requestTemplate: String(row.prompt_text).split("\n\n")[0] }
         : {}),
-      result: row.result_json ? JSON.parse(String(row.result_json)) : null,
+      result: localResult,
       completedAt: nullable(row.completed_at),
       error: nullable(row.error),
       reusedFrom: nullable(row.source_task_id),
@@ -1580,6 +1612,39 @@ export class AnalysisStore {
     const result: ProductAnalysis | null = row.result_json
       ? JSON.parse(String(row.result_json))
       : null;
+    const pricingChanged =
+      !!row.task_id &&
+      !!currentProfile &&
+      !isDeepStrictEqual(
+        profileScope(savedProfile, listing.serverId, listing.key),
+        profileScope(currentProfile, listing.serverId, listing.key),
+      );
+    if (
+      result?.valuation &&
+      row.state === "completed" &&
+      !pricingChanged &&
+      (currentProfile || savedProfile?.settings.conditions || result.valuation.condition_review)
+    ) {
+      const tree = (currentProfile || savedProfile)?.settings.conditions || defaultConditions();
+      const needsSource = conditionNodes(tree).some(
+        (node) => !("children" in node) && node.rule?.status === "ready",
+      );
+      const detailJson = needsSource
+        ? (row.detail_json ??
+          this.db.prepare("SELECT detail_json FROM listings WHERE key=?").get(String(row.key))
+            ?.detail_json)
+        : null;
+      const record: SavedRoleRecord = {
+        listing,
+        detail: detailJson ? JSON.parse(String(detailJson)) : null,
+        status: "complete",
+        error: null,
+      };
+      result.valuation.condition_review = evaluateSavedConditions(tree, record, {
+        asking: result.valuation.asking_price,
+        bare: result.valuation.bare_role_value ?? null,
+      });
+    }
     return {
       key: String(row.key),
       name: listing.name,
@@ -1803,7 +1868,9 @@ export class AnalysisStore {
         };
       }[] = [];
       const manualReview: AnalysisItem[] = [];
-      const profileKey = textHash(JSON.stringify(options.currentProfile || null));
+      const profileKey = textHash(
+        JSON.stringify([options.currentProfile || null, RULE_ENGINE_VERSION]),
+      );
       const signature = (row: Row) =>
         textHash(
           JSON.stringify([row.listing_revision, row.task_revision, row.profile_json, profileKey]),
@@ -1891,10 +1958,12 @@ export class AnalysisStore {
                   recommendation: recommendationFor(
                     record,
                     item.valuation,
-                    row.profile_json
-                      ? (JSON.parse(String(row.profile_json)) as AnalysisProfile).settings
-                          .conditions
-                      : undefined,
+                    options.currentProfile
+                      ? options.currentProfile.settings.conditions
+                      : row.profile_json
+                        ? (JSON.parse(String(row.profile_json)) as AnalysisProfile).settings
+                            .conditions
+                        : undefined,
                   ),
                 }
               : {}),

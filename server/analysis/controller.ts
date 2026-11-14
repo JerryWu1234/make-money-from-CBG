@@ -1,3 +1,11 @@
+import {
+  assertConditionsCompiled,
+  conditionNodes,
+  normalizeConditions,
+  type ConditionGroup,
+} from "./conditions";
+import { compileConditionTexts } from "./condition-compiler";
+import { aiProvider } from "../ai-connection";
 import { prepareAnalysisClient } from "../ai-connection";
 import type { AiProvider } from "../ai/types";
 import { crawlDatabase, crawlStatus } from "../crawler/controller";
@@ -112,9 +120,49 @@ export async function analysisSettings() {
   };
 }
 export function saveAnalysisSettings(input: unknown) {
+  if (!input || typeof input !== "object" || Array.isArray(input))
+    throw new Error("分析设置格式错误");
+  const value = input as { settings?: { conditions?: unknown } };
+  assertConditionsCompiled(normalizeConditions(value.settings?.conditions));
   const profile = saveProfile(service().store.db, input);
   return { profile };
 }
+export async function compileAnalysisConditions(
+  input: Record<string, unknown>,
+  signal: AbortSignal,
+) {
+  assertServiceOpen();
+  const tree = normalizeConditions(input.conditions);
+  if (!tree) throw new Error("请先输入文字条件");
+  const provider = aiProvider(input.provider ?? "codex");
+  if (
+    input.model !== undefined &&
+    (typeof input.model !== "string" || !input.model.trim() || input.model.length > 200)
+  )
+    throw new Error("请选择有效的解析模型");
+  const textNodes = conditionNodes(tree).filter((node) => !("children" in node) && !node.price);
+  if (!textNodes.length) return { conditions: tree };
+  const compiled = await compileConditionTexts(
+    textNodes.map((node) => ({ id: node.id, text: (node as { text: string }).text })),
+    {
+      provider,
+      model: input.model as string | undefined,
+      signal,
+    },
+  );
+  signal.throwIfAborted();
+  const rules = new Map(compiled.map((entry) => [entry.id, entry.rule]));
+  const attach = (group: ConditionGroup): ConditionGroup => ({
+    ...group,
+    children: group.children.map((node) =>
+      "children" in node ? attach(node) : node.price ? node : { ...node, rule: rules.get(node.id) },
+    ),
+  });
+  const conditions = normalizeConditions(attach(tree));
+  assertConditionsCompiled(conditions);
+  return { conditions };
+}
+
 export function confirmSchoolFormula(productKeys: unknown, confirmed: unknown) {
   assertServiceOpen();
   return confirmAscendedSchoolFormula(service().store.db, productKeys, confirmed);

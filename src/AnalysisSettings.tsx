@@ -1,4 +1,6 @@
-import { normalizeConditions } from "../server/analysis/conditions";
+import type { AiProvider } from "../server/ai/types";
+import { RULE_ENGINE_VERSION } from "../server/analysis/condition-rule-types";
+import { normalizeConditions, conditionNodes } from "../server/analysis/conditions";
 import { AnalysisConditions } from "./AnalysisConditions";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -76,11 +78,15 @@ export function AnalysisSettings({
   onSaved,
   draft,
   onDraftChange,
+  conditionProvider,
+  conditionModel,
 }: {
   onClose: () => void;
   onSaved: () => void;
   draft: AnalysisSettingsDraft | null;
   onDraftChange: (draft: AnalysisSettingsDraft | null) => void;
+  conditionProvider?: AiProvider;
+  conditionModel?: string;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const initialDraft = useRef(draft);
@@ -90,6 +96,7 @@ export function AnalysisSettings({
   const [settings, setSettings] = useState<ValuationSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [compilingConditions, setCompilingConditions] = useState(false);
   useEffect(() => {
     const element = dialog.current!,
       previous = document.activeElement as HTMLElement | null;
@@ -129,7 +136,7 @@ export function AnalysisSettings({
   }, [source, settings, template, error, onDraftChange]);
 
   async function reloadSettings() {
-    if (!source || !settings || busy) return;
+    if (!source || !settings || busy || compilingConditions) return;
     setBusy(true);
     try {
       const response = await fetch("/api/analysis/settings", { cache: "no-store" });
@@ -221,7 +228,7 @@ export function AnalysisSettings({
         : current,
     );
   async function save() {
-    if (!source || !settings || busy) return;
+    if (!source || !settings || busy || compilingConditions) return;
     if (
       Object.values(settings.equipmentBaselinePrices || DEFAULT_EQUIPMENT_BASELINE_PRICES).some(
         (row) =>
@@ -235,6 +242,18 @@ export function AnalysisSettings({
     }
     try {
       normalizeConditions(settings.conditions);
+      if (settings.conditions) {
+        const unresolved = conditionNodes(settings.conditions).find(
+          (node) =>
+            !("children" in node) &&
+            !node.price &&
+            (!node.rule ||
+              node.rule.version !== RULE_ENGINE_VERSION ||
+              node.rule.sourceText !== node.text.trim()),
+        );
+        if (unresolved)
+          throw new Error(`${unresolved.id} 条件尚未解析或文字已修改，请先解析文字条件`);
+      }
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : "条件格式错误");
       return;
@@ -504,6 +523,9 @@ export function AnalysisSettings({
           <AnalysisConditions
             value={settings.conditions}
             onChange={(value) => set("conditions", value)}
+            onCompilingChange={setCompilingConditions}
+            compileProvider={conditionProvider}
+            compileModel={conditionModel}
           />
           <details className="analysis-settings-section">
             <summary>编辑完整 Prompt</summary>
@@ -540,7 +562,7 @@ export function AnalysisSettings({
             <button
               type="button"
               className="analysis-button analysis-button-outline"
-              disabled={busy}
+              disabled={busy || compilingConditions}
               onClick={() => void reloadSettings()}
             >
               重新读取并保留输入
@@ -549,7 +571,7 @@ export function AnalysisSettings({
           <div className="analysis-detail-links">
             <button
               className="analysis-button analysis-button-primary"
-              disabled={busy}
+              disabled={busy || compilingConditions}
               onClick={() => void save()}
             >
               {busy ? "保存中…" : "保存设置"}
