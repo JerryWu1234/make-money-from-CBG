@@ -730,7 +730,7 @@ export function AnalysisPreview() {
                 <div className="analysis-list-intro">
                   <span>查看详情和复制不会隐藏商品；点击“确认隐藏”后才移出默认榜单。</span>
                   <span>
-                    按当前保存的入榜规则和完整采集资料计算，且／或从上到下依次计算；未设置时默认挂牌价等于裸号估值。
+                    按当前保存的入榜规则和完整采集资料计算，且／或从上到下依次计算；未设置时默认价格不限制。
                   </span>
                   <span>条件满足才入榜；无法判断的商品可在全部商品查看依据。</span>
                   <span>差额 = 挂牌价 − 裸号估值</span>
@@ -794,7 +794,7 @@ export function AnalysisPreview() {
                           <p>
                             入榜依据：
                             {item.recommendation.basis === "default-price"
-                              ? "默认条件：挂牌价等于裸号估值"
+                              ? "默认条件：价格不限制"
                               : "当前入榜规则计算后满足"}
                           </p>
                         )}

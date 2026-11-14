@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import type { AiProvider } from "../server/ai/types";
 import { RULE_ENGINE_VERSION } from "../server/analysis/condition-rule-types";
 import {
-  comparisonLabels,
   defaultConditions,
   normalizeConditions,
   priceConditionLabel,
@@ -11,7 +10,6 @@ import {
   type ConditionNode,
   type ConditionOperator,
   type ConditionReview,
-  type PriceCondition,
 } from "../server/analysis/conditions";
 
 function nextId(root: ConditionGroup) {
@@ -192,7 +190,7 @@ export function AnalysisConditions({
     <section className="analysis-settings-section" aria-label="入榜条件设置">
       <h3>入榜条件</h3>
       <p>
-        从上到下依次计算，每一步将前面的结果与下一条按“且／或”合并。最终满足才入榜，无法判断不入榜，可在全部商品查看依据。
+        从上到下依次计算，每一步将前面的结果与下一条按“且／或”合并。最终满足才入榜，无法判断不入榜，可在全部商品查看依据。不限制的价格条目不参与且／或计算。
       </p>
       <p>
         文字可自由输入。先解析并核对执行口径，再由程序根据已采集资料计算；价格条件按分比较。不改变裸号估值公式。
@@ -212,9 +210,7 @@ export function AnalysisConditions({
         </>
       ) : (
         <>
-          {!value && (
-            <p className="analysis-pending-note">未自定义时，默认：挂牌价等于裸号估值。</p>
-          )}
+          {!value && <p className="analysis-pending-note">未自定义时，默认：价格不限制。</p>}
           <ol className="analysis-condition-list">
             {current.children.map((entry, index) => {
               const node = entry as Condition;
@@ -266,83 +262,35 @@ export function AnalysisConditions({
                     </div>
                     {node.price ? (
                       <div className="analysis-price-condition">
-                        <span>挂牌价</span>
                         <select
                           aria-label={`${node.id}价格比较`}
-                          value={node.price.comparison}
-                          onChange={(event) =>
-                            update(node.id, {
-                              price: {
-                                ...node.price!,
-                                comparison: event.target.value as PriceCondition["comparison"],
-                              },
-                            })
+                          value={
+                            ["none", "lt", "gt"].includes(node.price.comparison) &&
+                            node.price.adjustment === "none"
+                              ? node.price.comparison
+                              : "legacy"
                           }
-                        >
-                          {Object.entries(comparisonLabels).map(([key, label]) => (
-                            <option key={key} value={key}>
-                              {label}
-                            </option>
-                          ))}
-                        </select>
-                        <span>裸号估值</span>
-                        <select
-                          aria-label={`${node.id}估值调整`}
-                          value={node.price.adjustment}
                           onChange={(event) =>
                             update(node.id, {
                               price: {
-                                ...node.price!,
+                                comparison: event.target.value as "none" | "lt" | "gt",
+                                adjustment: "none",
+                                unit: "amount",
                                 value: 0,
-                                adjustment: event.target.value as PriceCondition["adjustment"],
                               },
                             })
                           }
                         >
-                          <option value="none">原值</option>
-                          <option value="minus">减去</option>
-                          <option value="plus">加上</option>
+                          <option value="none">不限制</option>
+                          <option value="lt">挂牌价小于裸号估值</option>
+                          <option value="gt">挂牌价大于裸号估值</option>
+                          {(!["none", "lt", "gt"].includes(node.price.comparison) ||
+                            node.price.adjustment !== "none") && (
+                            <option value="legacy" hidden>
+                              历史条件：{priceConditionLabel(node.price)}
+                            </option>
+                          )}
                         </select>
-                        {node.price.adjustment !== "none" && (
-                          <>
-                            <input
-                              aria-label={`${node.id}调整数值`}
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              max={
-                                node.price.unit === "percent" && node.price.adjustment === "minus"
-                                  ? 100
-                                  : 1e9
-                              }
-                              value={Number.isNaN(node.price.value) ? "" : node.price.value}
-                              onChange={(event) =>
-                                update(node.id, {
-                                  price: {
-                                    ...node.price!,
-                                    value:
-                                      event.target.value === "" ? NaN : Number(event.target.value),
-                                  },
-                                })
-                              }
-                            />
-                            <select
-                              aria-label={`${node.id}调整单位`}
-                              value={node.price.unit}
-                              onChange={(event) =>
-                                update(node.id, {
-                                  price: {
-                                    ...node.price!,
-                                    unit: event.target.value as PriceCondition["unit"],
-                                  },
-                                })
-                              }
-                            >
-                              <option value="amount">元</option>
-                              <option value="percent">%（裸号估值的百分比）</option>
-                            </select>
-                          </>
-                        )}
                         <p className="analysis-condition-summary">
                           {priceConditionLabel(node.price)}
                         </p>
@@ -460,7 +408,8 @@ export function ConditionReviewView({ review }: { review?: ConditionReview }) {
     const description = (
       <>
         <strong>
-          {title}：{result ? labels[result.status] : "无法判断"}
+          {title}：
+          {result?.skipped ? "不限制（已跳过）" : result ? labels[result.status] : "无法判断"}
         </strong>
         <p>{result?.reason || "缺少判断结果"}</p>
         {!!result?.evidence?.length && (
@@ -491,7 +440,8 @@ export function ConditionReviewView({ review }: { review?: ConditionReview }) {
     return "children" in node ? (
       <details key={node.id} open className="analysis-condition-group">
         <summary>
-          {title}：{result ? labels[result.status] : "无法判断"}
+          {title}：
+          {result?.skipped ? "不限制（已跳过）" : result ? labels[result.status] : "无法判断"}
         </summary>
         <p>{result?.reason}</p>
         {node.children.map((child, index) => (

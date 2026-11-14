@@ -123,8 +123,38 @@ describe("自由文字条件编译与本地执行", () => {
         ?.status,
     ).toBe("unmet");
   });
+  it("默认价格不限制，缺少价格时也跳过比较", () => {
+    const tree = defaultConditions();
+    expect(tree.children[0]).toMatchObject({ price: { comparison: "none" } });
+    const review = evaluateSavedConditions(tree, valuationRecord(), { asking: null, bare: null });
+    expect(review.results.find((result) => result.id === "C1")).toMatchObject({
+      status: "met",
+      skipped: true,
+    });
+    expect(review.results.at(-1)?.status).toBe("met");
+  });
+  it.each(["and", "or"] as const)("不限制价格不参与%s运算，不会覆盖其他条件", (join) => {
+    const tree = defaultConditions();
+    tree.children.push({
+      id: "C2",
+      text: "挂牌价小于0",
+      join,
+      rule: rule("挂牌价小于0", predicate(false)),
+    });
+    expect(
+      evaluateSavedConditions(tree, valuationRecord(), { asking: 500, bare: null }).results.at(-1)
+        ?.status,
+    ).toBe("unmet");
+    tree.children[1] = { id: "C2", text: "尚未解析的其他条件", join };
+    expect(
+      evaluateSavedConditions(tree, valuationRecord(), { asking: 500, bare: null }).results.at(-1)
+        ?.status,
+    ).toBe("unknown");
+  });
   it.each([
     ["eq", "none", "amount", 0, 1000.104, "met"],
+    ["lt", "none", "amount", 0, 1000.1, "unmet"],
+    ["gt", "none", "amount", 0, 1000.1, "unmet"],
     ["lt", "none", "amount", 0, 1000.11, "met"],
     ["gt", "none", "amount", 0, 1000.09, "met"],
     ["lte", "minus", "amount", 100, 1100.1, "met"],
@@ -137,6 +167,7 @@ describe("自由文字条件编译与本地执行", () => {
     (comparison, adjustment, unit, value, bare, expected) => {
       const tree = defaultConditions();
       tree.children = [{ id: "C1", text: "", price: { comparison, adjustment, unit, value } }];
+      expect(normalizeConditions(tree)).toEqual(tree);
       expect(
         evaluateSavedConditions(tree, valuationRecord(), { asking: 1000.1, bare }).results.at(-1)
           ?.status,

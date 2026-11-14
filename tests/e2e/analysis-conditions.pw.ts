@@ -245,7 +245,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "估值与挂牌比较设置" });
     await expect(
-      settings.getByText("未自定义时，默认：挂牌价等于裸号估值。", { exact: true }),
+      settings.getByText("未自定义时，默认：价格不限制。", { exact: true }),
     ).toBeVisible();
     await expect(settings.getByRole("button", { name: "增加条件组", exact: true })).toHaveCount(0);
     await settings.getByLabel("C1条件类型", { exact: true }).selectOption("text");
@@ -266,10 +266,11 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await settings.getByLabel("C3条件", { exact: true }).fill("人物等级至少120级");
     await settings.getByRole("button", { name: "增加价格条件", exact: true }).click();
     await settings.getByLabel("C4价格比较", { exact: true }).selectOption("lt");
-    await settings.getByLabel("C4估值调整", { exact: true }).selectOption("plus");
-    await settings.getByLabel("C4调整数值", { exact: true }).fill("10");
-    await settings.getByLabel("C4调整单位", { exact: true }).selectOption("percent");
-    await expect(settings.getByText("挂牌价小于裸号估值加上10%", { exact: true })).toBeVisible();
+    await expect(settings.getByLabel("C4价格比较", { exact: true }).locator("option")).toHaveCount(
+      3,
+    );
+    await expect(settings.getByLabel("C4估值调整", { exact: true })).toHaveCount(0);
+    await expect(settings.getByText("挂牌价小于裸号估值", { exact: true }).last()).toBeVisible();
     await settings.getByRole("button", { name: "解析文字条件", exact: true }).click();
     await expect(settings.getByLabel("C1执行口径", { exact: true })).toContainText(
       "人物速度 > 800",
@@ -393,7 +394,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await expect(page.getByLabel("条件匹配")).toContainText("C1 速度大于800：满足");
     await expect(page.getByLabel("条件匹配")).toContainText("850");
     await expect(page.getByLabel("条件匹配")).toContainText("G1 入榜条件（从上到下计算）：不满足");
-    await expect(page.getByLabel("条件匹配")).toContainText("C4 挂牌价小于裸号估值加上10%：满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("C4 挂牌价小于裸号估值：满足");
     expect(store.overview().ranking).toHaveLength(0);
     await page.screenshot({
       path: testInfo.outputPath("A3-condition-results.png"),

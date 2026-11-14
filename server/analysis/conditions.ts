@@ -6,7 +6,7 @@ import {
 
 export type ConditionOperator = "and" | "or";
 export type PriceCondition = {
-  comparison: "eq" | "lt" | "lte" | "gt" | "gte";
+  comparison: "none" | "eq" | "lt" | "lte" | "gt" | "gte";
   adjustment: "none" | "minus" | "plus";
   unit: "amount" | "percent";
   value: number;
@@ -31,6 +31,7 @@ export type ConditionResult = {
   id: string;
   status: "met" | "unmet" | "unknown";
   reason: string;
+  skipped?: boolean;
   evidence?: import("./condition-rule-runtime").RuleEvidence[];
 };
 export type ConditionReview = {
@@ -49,7 +50,7 @@ export function defaultConditions(): ConditionGroup {
       {
         id: "C1",
         text: "",
-        price: { comparison: "eq", adjustment: "none", unit: "amount", value: 0 },
+        price: { comparison: "none", adjustment: "none", unit: "amount", value: 0 },
       },
     ],
   };
@@ -117,7 +118,7 @@ export function normalizeConditions(value: unknown): ConditionGroup | undefined 
         throw new Error("价格条件无效");
       const p = node.price as Record<string, unknown>;
       if (
-        !["eq", "lt", "lte", "gt", "gte"].includes(String(p.comparison)) ||
+        !["none", "eq", "lt", "lte", "gt", "gte"].includes(String(p.comparison)) ||
         !["none", "minus", "plus"].includes(String(p.adjustment)) ||
         !["amount", "percent"].includes(String(p.unit)) ||
         typeof p.value !== "number" ||
@@ -133,9 +134,10 @@ export function normalizeConditions(value: unknown): ConditionGroup | undefined 
         ...join,
         price: {
           comparison: p.comparison as PriceCondition["comparison"],
-          adjustment: p.adjustment as PriceCondition["adjustment"],
-          unit: p.unit as PriceCondition["unit"],
-          value: p.adjustment === "none" ? 0 : p.value,
+          adjustment:
+            p.comparison === "none" ? "none" : (p.adjustment as PriceCondition["adjustment"]),
+          unit: p.comparison === "none" ? "amount" : (p.unit as PriceCondition["unit"]),
+          value: p.comparison === "none" || p.adjustment === "none" ? 0 : p.value,
         },
       };
     }
@@ -160,6 +162,7 @@ export function normalizeConditions(value: unknown): ConditionGroup | undefined 
 }
 
 export const comparisonLabels = {
+  none: "不限制",
   eq: "等于",
   lt: "小于",
   lte: "小于或等于",
@@ -167,6 +170,7 @@ export const comparisonLabels = {
   gte: "大于或等于",
 };
 export function priceConditionLabel(price: PriceCondition) {
+  if (price.comparison === "none") return "价格不限制";
   return `挂牌价${comparisonLabels[price.comparison]}裸号估值${
     price.adjustment === "none"
       ? ""
@@ -229,25 +233,38 @@ export function evaluateConditions(
   function visit(node: ConditionNode): ConditionResult {
     let result: ConditionResult;
     if ("children" in node) {
-      const children = node.children.map(visit);
-      const status = children
+      const children = node.children.map((child) => ({ node: child, result: visit(child) }));
+      const active = children.filter((child) => !child.result.skipped);
+      const skipped = children.length > 0 && !active.length;
+      const status = active
         .slice(1)
         .reduce(
-          (status, child, index) =>
+          (status, child) =>
             combine(
               status,
-              child.status,
-              node.evaluation === "sequence" ? node.children[index + 1].join! : node.operator,
+              child.result.status,
+              node.evaluation === "sequence" ? child.node.join! : node.operator,
             ),
-          children[0]?.status ?? "unknown",
+          active[0]?.result.status ?? (skipped ? "met" : "unknown"),
         );
       result = {
         id: node.id,
         status,
-        reason:
-          node.evaluation === "sequence"
-            ? "按列表从上到下依次计算且／或；仅最终满足时入榜。"
-            : "按保存的且／或关系计算。",
+        ...(skipped ? { skipped: true } : {}),
+        reason: !children.length
+          ? "条件列表为空，无法判断"
+          : skipped
+            ? "价格不限制，没有启用需要判断的条件"
+            : node.evaluation === "sequence"
+              ? "按列表从上到下依次计算且／或；仅最终满足时入榜。"
+              : "按保存的且／或关系计算。",
+      };
+    } else if (node.price?.comparison === "none") {
+      result = {
+        id: node.id,
+        status: "met",
+        skipped: true,
+        reason: "价格不限制，此条不参与且／或运算；其他条件按原关系计算",
       };
     } else if (node.price) {
       const asking = prices?.asking,

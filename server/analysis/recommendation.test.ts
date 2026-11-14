@@ -42,10 +42,29 @@ const speedRule = () =>
 it.each([
   [20000, "recommended", 0],
   [20000.004, "recommended", 0],
-  [20000.01, "excluded", -0.01],
-  [19999.99, "excluded", 0.01],
-] as const)("未设置条件时默认按分比较挂牌价等于裸号估值 %s", (bare, expected, gap) => {
+  [20000.01, "recommended", -0.01],
+  [19999.99, "recommended", 0.01],
+] as const)("未设置条件时默认不限制挂牌与裸号估值的大小关系 %s", (bare, expected, gap) => {
   expect(recommendationFor(record(), valuation(bare))).toMatchObject({ status: expected, gap });
+});
+
+it.each(["and", "or"] as const)("价格不限制不会使其他%s条件被绕过", (join) => {
+  const tree = defaultConditions();
+  tree.children.push({
+    id: "C2",
+    text: "挂牌价小于1元",
+    join,
+    rule: compiled("挂牌价小于1元", {
+      op: "lt",
+      args: [
+        { op: "field", path: "listing.price" },
+        { op: "literal", value: 1 },
+      ],
+    }),
+  });
+  expect(recommendationFor(record(), valuation(18000), tree).status).toBe("excluded");
+  (tree.children[1] as { rule?: unknown }).rule = undefined;
+  expect(recommendationFor(record(), valuation(18000), tree).status).toBe("manual");
 });
 
 it("无效金额、缺少估值和待补资料不能入榜", () => {
