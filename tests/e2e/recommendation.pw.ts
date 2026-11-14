@@ -11,12 +11,9 @@ import { createProfile } from "../../server/analysis/profile";
 import { analysisRecord, analysisResponse } from "../fixtures/analysis";
 import type { SavedRoleRecord } from "../../server/crawler/types";
 
-// Failure cases: backend filter omitted, tier boundary excluded, manual products automatically
-// included, viewed products reappear, showing all overrides eligibility,
-// refresh loses view history, stale results remain, missing inventory summary, bare-role
-// discounts require assets, or wild/future pet skills appear as usable assets.
+// Default equality, viewed history, asset summaries, mobile layout, and stale-result exclusion.
 // All records are simulated; SQLite and UI are real.
-test("推荐榜裸号折价与原差额阶梯→查看不隐藏→确认隐藏→全部商品与详情→刷新→过期结果移出", async ({
+test("推荐榜默认等价条件→查看不隐藏→确认隐藏→全部商品与详情→刷新→过期结果移出", async ({
   page,
 }, testInfo) => {
   const database = testInfo.outputPath("recommendation.sqlite");
@@ -114,12 +111,12 @@ test("推荐榜裸号折价与原差额阶梯→查看不隐藏→确认隐藏�
     }
     const batch = store.createRun("codex", "fixture-model", true);
     for (const [key, bare] of Object.entries({
-      gem: 1800,
-      pet: 900,
-      wild: 1000,
+      gem: 2000,
+      pet: 1000,
+      wild: 1001,
       far: 2799.99,
       manual: 18500,
-      wide: 849.99,
+      wide: 1000,
       "bare-discount": 1200,
       "bare-equal": 1000,
       "bare-over": 999.99,
@@ -199,23 +196,23 @@ test("推荐榜裸号折价与原差额阶梯→查看不隐藏→确认隐藏�
     await expect(ranking).not.toContainText("角色wild");
     await expect(ranking).not.toContainText("角色far");
     await expect(ranking).toContainText("角色wide");
-    await expect(ranking).toContainText("角色bare-discount");
-    await expect(ranking).not.toContainText("角色bare-equal");
+    await expect(ranking).not.toContainText("角色bare-discount");
+    await expect(ranking).toContainText("角色bare-equal");
     await expect(ranking).not.toContainText("角色bare-over");
-    await expect(ranking).toContainText("不限制差额百分比");
-    await expect(ranking).toContainText("相差不超过 10 级");
+    await expect(ranking).toContainText("未设置时默认挂牌价等于裸号估值");
     await expect(ranking.getByRole("region", { name: "人工复核" })).toHaveCount(0);
     await expect(ranking).not.toContainText("角色manual");
-    await expect(ranking).toContainText("差额超过1000元不展示");
     await expect(ranking.getByRole("article").filter({ hasText: "角色manual" })).toHaveCount(0);
     const gearCard = ranking.getByRole("article").filter({ hasText: "角色gem" });
     const petCard = ranking.getByRole("article").filter({ hasText: "角色pet" });
-    const bareCard = ranking.getByRole("article").filter({ hasText: "角色bare-discount" });
-    await expect(bareCard).toContainText("挂牌低于裸号预估价");
-    await expect(bareCard).toContainText("裸号预估价 ¥1,200.00");
-    await expect(bareCard).toContainText("0 类配置");
+    const bareCard = ranking.getByRole("article").filter({ hasText: "角色bare-equal" });
+    await expect(bareCard).toContainText("默认条件：挂牌价等于裸号估值");
+    await expect(bareCard).toContainText("裸号预估价 ¥1,000.00");
     await bareCard.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: testInfo.outputPath("bare-role-discount.png"), fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath("default-price-condition.png"),
+      fullPage: true,
+    });
     await expect(gearCard.getByLabel("装备和宝宝简要信息")).toContainText("装备 3件 · 灵饰 1件");
     await expect(gearCard).toContainText("带宝石/星辉石 4件");
     await expect(gearCard).toContainText("特技：罗汉金钟");
@@ -240,8 +237,6 @@ test("推荐榜裸号折价与原差额阶梯→查看不隐藏→确认隐藏�
     await gearCard.scrollIntoViewIfNeeded();
     await page.screenshot({ path: testInfo.outputPath("asset-summary-mobile.png") });
     await page.setViewportSize({ width: 1100, height: 1000 });
-    await ranking.getByText("查看配置条件（每类只计一次）").click();
-    await expect(ranking).toContainText("每类只计一次");
     await page.screenshot({ path: testInfo.outputPath("eligible-ranking.png"), fullPage: true });
     const showViewed = ranking.getByRole("checkbox", { name: "显示已隐藏的推荐" });
     await expect(showViewed).not.toBeChecked();
@@ -303,19 +298,9 @@ test("推荐榜裸号折价与原差额阶梯→查看不隐藏→确认隐藏�
             .ranking.map(({ key, assetSummary }) => ({ key, assetSummary })),
           inventoryDisplay:
             "Observed gear/pets only; wild and level-zero pets separately labelled; future skills excluded; desktop and 390px mobile verified",
-          eligible: ["gem", "pet", "wide", "bare-discount"],
-          bareRoleDiscount: {
-            listing: 1000,
-            bareRoleEstimate: 1200,
-            inventoryFactors: 0,
-            reason: "挂牌低于裸号预估价",
-          },
-          excluded: {
-            wild: "野生宝宝",
-            far: "差额200.01元，仅1类配置不足",
-            "bare-equal": "空号挂牌1000元，裸号预估1000元，未严格低于",
-            "bare-over": "空号挂牌1000元，裸号预估999.99元，未满足折价或原配置规则",
-          },
+          eligible: ["gem", "pet", "wide", "bare-equal"],
+          defaultCondition: "挂牌价等于裸号估值（按分比较）",
+          excluded: ["wild", "far", "bare-discount", "bare-over", "manual"],
           aboveLimitExcluded: !store
             .overview({ showViewed: true })
             .ranking.some((r) => r.key === "manual"),

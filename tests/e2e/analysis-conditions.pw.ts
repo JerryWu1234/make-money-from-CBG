@@ -11,7 +11,7 @@ import {
   saveProfile,
   loadProfile,
 } from "../../server/analysis/profile";
-import { conditionNodes } from "../../server/analysis/conditions";
+import { aiConditionNodes } from "../../server/analysis/conditions";
 import { calculateValuation } from "../../server/analysis/valuation-calculator";
 import { valuationRecord } from "../fixtures/analysis";
 
@@ -27,7 +27,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
   const crawl = new CrawlStore(testInfo.outputPath("conditions.sqlite"));
   const record = valuationRecord();
   record.listing.attrs["速度"] = "850";
-  record.listing.summary = { 测试备注: "条件证据列表摘要" };
+  record.listing.summary = { ...(record.listing.summary as object), 测试备注: "条件证据列表摘要" };
   record.detail!.tabs.push({
     name: "技能",
     text: "烹饪技巧：100",
@@ -43,7 +43,27 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
   const template = await readFile(PROMPT_FILE, "utf8");
   const promptFile = testInfo.outputPath("valuation.md");
   await writeFile(promptFile, template);
-  let profile = createProfile(template, DEFAULT_SETTINGS);
+  let profile = createProfile(template, {
+    ...DEFAULT_SETTINGS,
+    servers: [
+      {
+        serverId: record.listing.serverId,
+        age: "three",
+        rank: 10,
+        goldPrice: null,
+        goldUnit: null,
+      },
+    ],
+  });
+  profile = saveProfile(
+    crawl.db,
+    {
+      template,
+      settings: profile.settings,
+      baseHash: createProfile(template).hash,
+    },
+    promptFile,
+  );
   let recoveryGate: Promise<void> | undefined;
   let releaseRecovery: (() => void) | undefined;
   let calls = 0;
@@ -68,12 +88,16 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
         skill.fields.find((field: { name: string }) => field.name === "烹饪技巧").value,
       );
       const expected = calculateValuation(record, profile);
+      expect(
+        expected.bare_role_value,
+        JSON.stringify({ missing: expected.missing_fields, pending: expected.pending_rules }),
+      ).toBeGreaterThan(0);
       return {
         text: JSON.stringify({
           decision: expected.decision,
           reason: expected.reason,
           extracted_facts: [],
-          condition_results: conditionNodes(profile.settings.conditions!).map((node) => ({
+          condition_results: aiConditionNodes(profile.settings.conditions!).map((node) => ({
             id: node.id,
             status:
               node.id === "C2"
@@ -174,7 +198,11 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await page.goto("http://conditions.test/analysis-preview");
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "估值与挂牌比较设置" });
-    await settings.getByRole("button", { name: "添加分析条件" }).click();
+    await expect(
+      settings.getByText("未自定义时，默认：挂牌价等于裸号估值。", { exact: true }),
+    ).toBeVisible();
+    await expect(settings.getByRole("button", { name: "增加条件组", exact: true })).toHaveCount(0);
+    await settings.getByLabel("C1条件类型", { exact: true }).selectOption("text");
     await settings.getByRole("button", { name: "保存设置", exact: true }).click();
     await expect(settings.getByRole("alert")).toContainText("C1 条件须填写");
     await expect(settings.getByRole("alert")).toBeInViewport();
@@ -185,15 +213,30 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
     await expect(settings.getByLabel("C1条件", { exact: true })).toHaveValue("速度大于800");
     await expect(settings.getByText("已恢复未保存的输入。草稿仅在当前页面保留。")).toBeVisible();
-    await settings.getByRole("button", { name: "增加条件组", exact: true }).click();
+    await settings.getByRole("button", { name: "增加文字条件", exact: true }).click();
     await settings.getByLabel("C2条件", { exact: true }).fill("养成完整");
-    const subgroup = settings.getByRole("group", { name: "G2 条件组" });
-    await subgroup.getByRole("button", { name: "增加条件", exact: true }).click();
+    await settings.getByLabel("C2连接关系", { exact: true }).selectOption("or");
+    await settings.getByRole("button", { name: "增加文字条件", exact: true }).click();
     await settings.getByLabel("C3条件", { exact: true }).fill("烹饪技巧至少120级");
+    await settings.getByRole("button", { name: "增加价格条件", exact: true }).click();
+    await settings.getByLabel("C4价格比较", { exact: true }).selectOption("lt");
+    await settings.getByLabel("C4估值调整", { exact: true }).selectOption("plus");
+    await settings.getByLabel("C4调整数值", { exact: true }).fill("10");
+    await settings.getByLabel("C4调整单位", { exact: true }).selectOption("percent");
+    await expect(settings.getByText("挂牌价小于裸号估值加上10%", { exact: true })).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath("A1-conditions-settings.png"),
       fullPage: true,
     });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await settings.getByLabel("C4价格比较", { exact: true }).scrollIntoViewIfNeeded();
+    expect(
+      await settings
+        .getByLabel("入榜条件设置", { exact: true })
+        .evaluate((element) => element.scrollWidth <= element.clientWidth),
+    ).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath("A2-conditions-mobile.png") });
+    await page.setViewportSize({ width: 1100, height: 1000 });
     profile = saveProfile(
       crawl.db,
       {
@@ -251,6 +294,9 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await expect(page.getByText("C2 养成完整：无法判断", { exact: true })).toBeVisible();
     await expect(page.getByLabel("条件匹配")).toContainText("C1 速度大于800：满足");
     await expect(page.getByLabel("条件匹配")).toContainText("已采集速度850");
+    await expect(page.getByLabel("条件匹配")).toContainText("G1 入榜条件（从上到下计算）：不满足");
+    await expect(page.getByLabel("条件匹配")).toContainText("C4 挂牌价小于裸号估值加上10%：满足");
+    expect(store.overview().ranking).toHaveLength(0);
     await page.screenshot({
       path: testInfo.outputPath("A3-condition-results.png"),
       fullPage: true,

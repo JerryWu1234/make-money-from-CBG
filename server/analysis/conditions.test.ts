@@ -82,3 +82,125 @@ describe("补充分析条件", () => {
     ).toThrow();
   });
 });
+
+// Ordered mixed operators must never use normal AND precedence or AI's aggregate answer.
+describe("单层入榜条件", () => {
+  const list = (joins: ("and" | "or")[] = ["or", "and"]): ConditionGroup => ({
+    id: "G1",
+    operator: "and",
+    evaluation: "sequence",
+    children: ["C1", "C2", "C3"].map((id, index) => ({
+      id,
+      text: id,
+      ...(index ? { join: joins[index - 1] } : {}),
+    })),
+  });
+  it("按顺序计算（满足 或 不满足）且 不满足，结果为不满足", async () => {
+    const { evaluateConditions } = await import("./conditions");
+    const review = evaluateConditions(
+      list(),
+      ["met", "unmet", "unmet"].map((status, index) => ({
+        id: `C${index + 1}`,
+        status: status as "met" | "unmet",
+        reason: "测试依据",
+      })),
+    );
+    expect(review.results.at(-1)?.status).toBe("unmet");
+  });
+  it.each([
+    ["unknown", "and", "unmet", "unmet"],
+    ["unknown", "or", "met", "met"],
+    ["unknown", "and", "met", "unknown"],
+    ["unknown", "or", "unmet", "unknown"],
+  ] as const)("三态计算 %s %s %s = %s", async (left, join, right, expected) => {
+    const { evaluateConditions } = await import("./conditions");
+    const tree = list([join]);
+    tree.children.pop();
+    expect(
+      evaluateConditions(tree, [
+        { id: "C1", status: left, reason: "左" },
+        { id: "C2", status: right, reason: "右" },
+      ]).results.at(-1)?.status,
+    ).toBe(expected);
+  });
+  it("拒绝嵌套列表、遗漏连接关系、无效金额和百分比", async () => {
+    const { defaultConditions } = await import("./conditions");
+    expect(() => normalizeConditions({ ...list(), children: [tree] })).toThrow("不能嵌套");
+    expect(() =>
+      normalizeConditions({
+        ...list(),
+        children: [
+          { id: "C1", text: "a" },
+          { id: "C2", text: "b" },
+        ],
+      }),
+    ).toThrow("选择且或");
+    for (const value of [null, -1, NaN, Infinity, 101]) {
+      const root = defaultConditions();
+      root.children = [
+        {
+          id: "C1",
+          text: "",
+          price: { comparison: "lt", adjustment: "minus", unit: "percent", value: value as number },
+        },
+      ];
+      expect(() => normalizeConditions(root)).toThrow("数值无效");
+    }
+  });
+  it.each([
+    ["eq", "none", "amount", 0, 1000.104, "met"],
+    ["lt", "none", "amount", 0, 1000.11, "met"],
+    ["gt", "none", "amount", 0, 1000.09, "met"],
+    ["lte", "minus", "amount", 100, 1100.1, "met"],
+    ["lt", "minus", "amount", 100, 1100.1, "unmet"],
+    ["gte", "plus", "amount", 100, 900.1, "met"],
+    ["lt", "minus", "percent", 10, 1200, "met"],
+    ["gt", "plus", "percent", 10, 900, "met"],
+  ] as const)(
+    "本地价格比较 %s %s %s %s",
+    async (comparison, adjustment, unit, value, bare, expected) => {
+      const { defaultConditions, evaluateConditions, conditionPrompt } =
+        await import("./conditions");
+      const root = defaultConditions();
+      root.children = [{ id: "C1", text: "", price: { comparison, adjustment, unit, value } }];
+      expect(evaluateConditions(root, [], { asking: 1000.1, bare }).results.at(-1)?.status).toBe(
+        expected,
+      );
+      expect(
+        evaluateConditions(root, [], { asking: 1000, bare: null }).results.at(-1)?.status,
+      ).toBe("unknown");
+      expect(conditionPrompt(root)).toBe("");
+    },
+  );
+  it("价格条件不要求AI返回结果；混合条件只收文字证据，本地计算整体结果", async () => {
+    const { defaultConditions } = await import("./conditions");
+    const root = defaultConditions();
+    const prices = { asking: 1000, bare: 1000 };
+    expect(validateConditionResults(undefined, root, prices)?.results.at(-1)?.status).toBe("met");
+    root.children.push({ id: "C2", text: "速度800", join: "and" });
+    expect(() => validateConditionResults(undefined, root, prices)).toThrow("缺项");
+    const evidence = [{ id: "C2", status: "unmet", reason: "速度700" }];
+    expect(validateConditionResults(evidence, root, prices)?.results.at(-1)?.status).toBe("unmet");
+    expect(() =>
+      validateConditionResults(
+        [...evidence, { id: "G1", status: "met", reason: "模型自行判断" }],
+        root,
+        prices,
+      ),
+    ).toThrow();
+    const profile = createProfile(readFileSync(PROMPT_FILE, "utf8"), {
+      ...DEFAULT_SETTINGS,
+      conditions: defaultConditions(),
+    });
+    expect(valuationSchema(profile)).toBe(VALUATION_SCHEMA);
+    const record = valuationRecord();
+    const expected = calculateValuation(record, profile);
+    const result = validateValuation(
+      JSON.stringify({ decision: expected.decision, reason: expected.reason, extracted_facts: [] }),
+      buildProductDocument(record),
+      record,
+      profile,
+    );
+    expect(result.valuation?.condition_review?.results).toHaveLength(2);
+  });
+});

@@ -40,7 +40,7 @@ it("推荐不足十条时，反复轮询不重算未变化商品；只更新变�
     expect(compute).toHaveBeenCalledTimes(48);
     crawl.db
       .prepare("UPDATE analysis_tasks SET result_json=? WHERE listing_key='poll-047'")
-      .run(JSON.stringify({ valuation: { bare_role_value: 1500, decision: "PASS" } }));
+      .run(JSON.stringify({ valuation: { bare_role_value: 1000, decision: "PASS" } }));
     expect(store.overview({ runId, summary: true }).ranking.map((item) => item.key)).toEqual([
       "poll-047",
     ]);
@@ -60,7 +60,7 @@ it("冷汇总分批让出主线程，相同并发请求合并；处理中商品�
   try {
     crawl.db
       .prepare("UPDATE analysis_tasks SET result_json=? WHERE listing_key='poll-000'")
-      .run(JSON.stringify({ valuation: { bare_role_value: 1500, decision: "PASS" } }));
+      .run(JSON.stringify({ valuation: { bare_role_value: 1000, decision: "PASS" } }));
     const original = recommendations.recommendationFor;
     const compute = vi.spyOn(recommendations, "recommendationFor");
     compute.mockImplementation((...args) => {
@@ -153,7 +153,7 @@ it("让出线程期间出现更新的完整分析结果，不能再发布旧任�
   try {
     crawl.db
       .prepare("UPDATE analysis_tasks SET result_json=? WHERE listing_key='poll-000'")
-      .run(JSON.stringify({ valuation: { bare_role_value: 1500, decision: "PASS" } }));
+      .run(JSON.stringify({ valuation: { bare_role_value: 1000, decision: "PASS" } }));
     const original = recommendations.recommendationFor;
     const compute = vi.spyOn(recommendations, "recommendationFor").mockImplementation((...args) => {
       const until = performance.now() + 2;
@@ -183,7 +183,7 @@ it("汇总期间标记已查看，不计入分页总数且不显示旧推荐", a
   try {
     crawl.db
       .prepare("UPDATE analysis_tasks SET result_json=?")
-      .run(JSON.stringify({ valuation: { bare_role_value: 1500, decision: "PASS" } }));
+      .run(JSON.stringify({ valuation: { bare_role_value: 1000, decision: "PASS" } }));
     const original = recommendations.recommendationFor;
     const compute = vi.spyOn(recommendations, "recommendationFor").mockImplementation((...args) => {
       const until = performance.now() + 2;
@@ -215,7 +215,7 @@ it("并发请求隐藏已查看时，显示已查看的分页不丢失其结果"
   try {
     crawl.db
       .prepare("UPDATE analysis_tasks SET result_json=?")
-      .run(JSON.stringify({ valuation: { bare_role_value: 1500, decision: "PASS" } }));
+      .run(JSON.stringify({ valuation: { bare_role_value: 1000, decision: "PASS" } }));
     store.markRecommendationViewed("poll-000");
     const original = recommendations.recommendationFor;
     const compute = vi.spyOn(recommendations, "recommendationFor").mockImplementation((...args) => {

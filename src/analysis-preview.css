@@ -1793,3 +1793,55 @@ body:has(.analysis-page) #root {
   padding: 6px 8px;
   background: white;
 }
+
+.analysis-condition-list {
+  list-style: none;
+  padding: 0;
+}
+.analysis-condition-join {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: fit-content;
+  padding: 8px 14px;
+  border: 2px solid #2563eb;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1e40af;
+  font-weight: 700;
+}
+.analysis-condition-toolbar,
+.analysis-price-condition,
+.analysis-condition-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.analysis-condition-toolbar {
+  margin-bottom: 10px;
+}
+.analysis-condition-list .analysis-condition-row {
+  padding: 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+}
+.analysis-condition-list select,
+.analysis-condition-list input {
+  max-width: 100%;
+  min-width: 0;
+  font: inherit;
+  padding: 6px 8px;
+  color: inherit;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: white;
+}
+.analysis-price-condition input {
+  width: 120px;
+}
+.analysis-condition-summary {
+  flex-basis: 100%;
+  margin: 0;
+}

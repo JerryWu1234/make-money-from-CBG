@@ -1,4 +1,11 @@
-import { conditionPrompt, CONDITION_RESULTS_SCHEMA, validateConditionResults } from "./conditions";
+import {
+  defaultConditions,
+  evaluateConditions,
+  aiConditionNodes,
+  conditionPrompt,
+  CONDITION_RESULTS_SCHEMA,
+  validateConditionResults,
+} from "./conditions";
 import type { SavedRoleRecord } from "../crawler/types";
 import type { ProductDocument } from "./product-document";
 import type { ProductAnalysis } from "./types";
@@ -113,7 +120,8 @@ export const VALUATION_SCHEMA = {
   },
 };
 export function valuationSchema(profile: AnalysisProfile) {
-  if (!profile.settings.conditions) return VALUATION_SCHEMA;
+  if (!profile.settings.conditions || !aiConditionNodes(profile.settings.conditions).length)
+    return VALUATION_SCHEMA;
   return {
     ...VALUATION_SCHEMA,
     required: [...VALUATION_SCHEMA.required, "condition_results"],
@@ -355,12 +363,12 @@ export function validateValuation(
   petPricing?: PetPricingSnapshot,
 ): ProductAnalysis {
   const result = parseValuationResponse(raw);
-  const conditionReview = validateConditionResults(
-    result.condition_results,
-    profile.settings.conditions,
-  );
   const facts = validateValuationFacts(result.extracted_facts, record);
   const expected = computedValuation(record, profile, equipmentPricing, petPricing, facts);
+  const prices = { asking: expected.asking_price, bare: expected.bare_role_value ?? null };
+  const conditionReview =
+    validateConditionResults(result.condition_results, profile.settings.conditions, prices) ||
+    evaluateConditions(defaultConditions(), [], prices);
   const money = [
     "asking_price",
     "extra_cost",
