@@ -8,7 +8,13 @@
     lastUrl = location.href,
     lastFingerprint = "";
   const nodes = new Map();
-  let stopped = false,
+  let stopped = true,
+    observing = false,
+    lifecycle = 0,
+    observerToken = null,
+    timer = null,
+    delayed = null,
+    lastSentAt = 0,
     pending = false,
     actionContext = null,
     bindingContext = null,
@@ -16,23 +22,19 @@
     lastListCommit = null,
     marketAction = null;
   const marketRequests = new Map();
-  document.addEventListener(
-    "click",
-    (event) => {
-      if (
-        !event.isTrusted ||
-        !marketAction ||
-        marketAction.actionId !== actionContext?.actionId ||
-        !event.composedPath().includes(marketAction.node)
-      )
-        return;
-      marketAction.activationTime = event.timeStamp;
-      marketAction.activatedAt = new Date().toISOString();
-      marketAction.requestId = null;
-      marketAction.responseEventId = null;
-    },
-    true,
-  );
+  const trustedClick = (event) => {
+    if (
+      !event.isTrusted ||
+      !marketAction ||
+      marketAction.actionId !== actionContext?.actionId ||
+      !event.composedPath().includes(marketAction.node)
+    )
+      return;
+    marketAction.activationTime = event.timeStamp;
+    marketAction.activatedAt = new Date().toISOString();
+    marketAction.requestId = null;
+    marketAction.responseEventId = null;
+  };
   const visible = (el) =>
     el instanceof HTMLElement &&
     el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
@@ -107,8 +109,8 @@
             !/time_lock_/.test(el.getAttribute("src") || ""),
         )
       : [];
-  function capture() {
-    if (!allowed()) return;
+  function capture(force = false) {
+    if (!observing || stopped || !allowed()) return;
     if (location.href !== lastUrl) {
       lastUrl = location.href;
       lastFingerprint = "";
@@ -570,28 +572,32 @@
       Array.isArray(globals.QueryResult) &&
       globals.QueryResult.length === items.length &&
       (items.length > 0 || snapshot.empty);
-    const fingerprint = JSON.stringify({
-      url: snapshot.url,
-      listing: snapshot.listing?.items.map((item) => item.href),
-      page,
-      tab: tabName,
-      formValues,
-      roleQueryControls,
-      roleQueryDimensions,
-      controls,
-      business: snapshot.business,
-      market: snapshot.market,
-      productRevision: snapshot.productRevision,
-      tooltips: snapshot.detail?.tabs[0]?.tooltips,
-    });
-    if (fingerprint !== lastFingerprint) {
+    const fingerprint = JSON.stringify(snapshot, (name, value) =>
+      ["observedAt", "receivedAt", "collectedAt", "revision"].includes(name) ? undefined : value,
+    );
+    const now = Date.now(),
+      changed = fingerprint !== lastFingerprint;
+    if (changed) {
       lastFingerprint = fingerprint;
       revision++;
       snapshot.revision = `${pageId}:${generation}:${revision}`;
     }
+    if (!changed && !force && now - lastSentAt < 4000) return;
+    lastSentAt = now;
     chrome.runtime.sendMessage({ kind: "snapshot", payload: snapshot }).catch(() => {});
+    clearTimeout(timer);
+    const epoch = lifecycle;
+    timer = setTimeout(() => {
+      timer = null;
+      if (observing && !stopped && epoch === lifecycle) {
+        mainControl("capture");
+        capture(true);
+      }
+    }, 4000);
   }
+
   const changed = (records) => {
+    if (!observing || stopped) return;
     if (
       Array.isArray(records) &&
       records.some((record) => {
@@ -618,29 +624,33 @@
         actionId: actionContext?.actionId || null,
         sequence: ++listCommitSequence,
       };
-    revision++;
     if (!pending) {
       pending = true;
-      setTimeout(() => {
+      const epoch = lifecycle;
+      delayed = setTimeout(() => {
+        delayed = null;
         pending = false;
-        capture();
+        if (observing && !stopped && epoch === lifecycle) {
+          mainControl("capture");
+          capture();
+        }
       }, 100);
     }
   };
-  for (const name of ["input", "change", "scroll"])
-    document.addEventListener(name, changed, { capture: true, passive: true });
   const observer = new MutationObserver(changed);
-  observer.observe(document, {
-    childList: true,
-    subtree: true,
-    attributes: true,
-    characterData: true,
-  });
-  window.addEventListener("message", (event) => {
+  const mainControl = (command, force = false) =>
+    window.postMessage(
+      { channel: "cbg-observer-control-v1", command, token: observerToken, force },
+      location.origin,
+    );
+  const passiveMessage = (event) => {
     if (
       event.source !== window ||
       event.origin !== location.origin ||
-      event.data?.channel !== "cbg-passive-v1"
+      event.data?.channel !== "cbg-passive-v1" ||
+      !observing ||
+      stopped ||
+      event.data.observerToken !== observerToken
     )
       return;
     try {
@@ -720,7 +730,63 @@
     } catch {
       /* MAIN evidence is untrusted and cannot authorize control. */
     }
-  });
+  };
+  const mainReady = (event) => {
+    if (
+      observing &&
+      !stopped &&
+      event.source === window &&
+      event.origin === location.origin &&
+      event.data?.channel === "cbg-observer-control-v1" &&
+      event.data.command === "ready"
+    )
+      mainControl("bind");
+  };
+  window.addEventListener("message", mainReady);
+  function suspend() {
+    const token = observerToken;
+    observing = false;
+    stopped = true;
+    lifecycle++;
+    clearTimeout(timer);
+    timer = null;
+    clearTimeout(delayed);
+    delayed = null;
+    pending = false;
+    observer.disconnect();
+    for (const name of ["input", "change", "scroll"])
+      document.removeEventListener(name, changed, true);
+    document.removeEventListener("click", trustedClick, true);
+    window.removeEventListener("message", passiveMessage);
+    nodes.clear();
+    marketAction = null;
+    marketRequests.clear();
+    actionContext = null;
+    if (token) mainControl("stop");
+  }
+  function start() {
+    suspend();
+    observerToken = crypto.randomUUID();
+    observing = true;
+    stopped = false;
+    lifecycle++;
+    globals = {};
+    business = [];
+    lastListCommit = null;
+    lastFingerprint = "";
+    lastSentAt = 0;
+    for (const name of ["input", "change", "scroll"])
+      document.addEventListener(name, changed, { capture: true, passive: true });
+    document.addEventListener("click", trustedClick, true);
+    window.addEventListener("message", passiveMessage);
+    observer.observe(document, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      characterData: true,
+    });
+    mainControl("bind");
+  }
   function select(plan) {
     const target = plan.target;
     if (target.kind === "scroll") {
@@ -899,23 +965,29 @@
   }
   chrome.runtime.onMessage.addListener((message, sender, reply) => {
     if (sender.id !== chrome.runtime.id) return;
-    if (message.kind === "stop") {
-      stopped = true;
-      nodes.clear();
-      marketAction = null;
-      marketRequests.clear();
+    if (["stop", "unbind"].includes(message.kind)) {
+      if (message.observerToken !== undefined && message.observerToken !== observerToken) {
+        reply({ ok: false, error: "stale-observer-token" });
+        return;
+      }
+      suspend();
       reply({ ok: true });
       return;
     }
     if (message.kind === "capture") {
-      capture();
+      if (message.observerToken !== undefined && message.observerToken !== observerToken) {
+        reply({ ok: false, error: "stale-observer-token" });
+        return;
+      }
+      if (observing && !stopped) {
+        mainControl("capture", true);
+        capture(true);
+      }
       reply({ ok: true });
       return;
     }
     if (message.kind === "bind") {
-      stopped = false;
-      marketAction = null;
-      marketRequests.clear();
+      start();
       if (message.context)
         bindingContext = {
           recoveryEpoch: message.context.recoveryEpoch,
@@ -930,15 +1002,8 @@
           stopEpoch: message.plan.stopEpoch,
           browserSessionEpoch: message.plan.browserSessionEpoch,
         };
-      observer.observe(document, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        characterData: true,
-      });
-      if (!timer) timer = setInterval(capture, 2000);
-      capture();
-      reply({ pageId, pageGeneration: generation });
+      capture(true);
+      reply({ pageId, pageGeneration: generation, observerToken });
       return;
     }
     if (!["prepare", "revalidate", "locate"].includes(message.kind)) return;
@@ -1111,17 +1176,6 @@
       reply({ ok: false, error: String(error.message || error) });
     }
   });
-  let timer = setInterval(capture, 2000);
-  window.addEventListener(
-    "pagehide",
-    () => {
-      observer.disconnect();
-      clearInterval(timer);
-      timer = null;
-      stopped = true;
-      nodes.clear();
-    },
-    { once: true },
-  );
+  window.addEventListener("pagehide", suspend);
   globalThis.__cbgIsolatedObserver = true;
 })();

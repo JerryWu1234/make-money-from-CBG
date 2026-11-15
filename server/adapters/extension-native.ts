@@ -80,6 +80,14 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     string,
     Pick<NativeNavigationDocument, "tabId" | "windowId" | "bindingEpoch" | "connectionEpoch">
   >();
+  private currentBinding?: {
+    pageId: string;
+    pageGeneration: number;
+    tabId: number;
+    windowId: number;
+    bindingEpoch: string;
+    connectionEpoch: string;
+  };
   private readonly pageContexts = new Map<
     string,
     {
@@ -658,13 +666,19 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
           Number.isSafeInteger(payload.tabId) &&
           Number.isSafeInteger(payload.windowId) &&
           typeof payload.bindingEpoch === "string"
-        )
+        ) {
           this.pageBindings.set(payload.pageId, {
             tabId: Number(payload.tabId),
             windowId: Number(payload.windowId),
             bindingEpoch: payload.bindingEpoch,
             connectionEpoch: envelope.connectionEpoch,
           });
+          this.currentBinding = {
+            pageId: payload.pageId,
+            pageGeneration: Number(payload.pageGeneration),
+            ...this.pageBindings.get(payload.pageId)!,
+          };
+        }
         if (
           payload.navigated &&
           this.activePlan &&
@@ -682,9 +696,17 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
           });
         }
         if (payload.stopped) {
-          this.idle = false;
-          this.stopped = true;
-          this.reason = textValue(payload.reason, "扩展停止");
+          const binding = this.currentBinding;
+          if (
+            binding &&
+            binding.connectionEpoch === envelope.connectionEpoch &&
+            binding.pageId === payload.pageId &&
+            binding.pageGeneration === payload.pageGeneration &&
+            binding.tabId === payload.tabId &&
+            binding.windowId === payload.windowId &&
+            binding.bindingEpoch === payload.bindingEpoch
+          )
+            await this.stop(textValue(payload.reason, "扩展停止"));
         } else if (
           payload.bound &&
           typeof payload.pageId === "string" &&
@@ -1513,6 +1535,30 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
   async prepareManualRecovery(): Promise<NativeRecoveryTicket> {
     return this.prepareActivation(false);
   }
+  private async activationSnapshot(): Promise<PageSnapshot> {
+    const pageId = this.pageId || "",
+      previous = this.snapshots.get(pageId),
+      now = Date.now();
+    if (
+      pageId &&
+      (!previous ||
+        now - Date.parse(previous.context.observedAt) > 10_000 ||
+        now - Date.parse(previous.context.receivedAt) > 10_000)
+    ) {
+      const result = await this.request({
+        kind: "command",
+        command: "observe",
+        actionId: randomUUID(),
+      });
+      if (!result.ok) throw new Error("无法刷新绑定页面的只读观察");
+      await this.waitFor((value) => Date.parse(value.context.observedAt) >= now, {
+        pageId,
+        after: "",
+        timeoutMs: 5000,
+      });
+    }
+    return this.snapshot(pageId);
+  }
   private async prepareActivation(automatic: boolean): Promise<NativeRecoveryTicket> {
     if (this.recovery) throw new Error("已有原生恢复核验正在进行");
     if (
@@ -1521,7 +1567,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
         (this.options.accessReady && !this.options.accessReady()))
     )
       throw new Error("未知动作或访问暂停禁止自动启用原生输入");
-    const snapshot = await this.snapshot();
+    const snapshot = await this.activationSnapshot();
     if (
       snapshot.access !== "normal" ||
       snapshot.authenticated !== true ||

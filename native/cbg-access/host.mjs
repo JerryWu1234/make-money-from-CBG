@@ -189,6 +189,25 @@ socket.on("data", (data) => {
           pending.set(message.actionId, message);
           continue;
         }
+        if (message.command === "observe") {
+          if (
+            !/^[a-zA-Z0-9_-]{1,100}$/.test(message.actionId) ||
+            pending.has(message.actionId) ||
+            pending.size >= 128
+          )
+            server({
+              kind: "input-result",
+              actionId: message.actionId,
+              ok: false,
+              posted: false,
+              error: "invalid-observation-request",
+            });
+          else {
+            pending.set(message.actionId, { kind: "observe" });
+            native(message);
+          }
+          continue; // Read-only extension observation never reaches the input helper or authority.
+        }
         if (
           !message.plan ||
           !authority.accepts(message.plan) ||
@@ -273,7 +292,13 @@ process.stdin.on("data", (data) => {
         else if (pending.delete(message.actionId)) server({ ...message, kind: "input-result" });
       } else if (message.kind === "command-proof") {
         const command = pending.get(message.actionId);
-        if (!command || stopped || command.generation !== authority.generation) continue;
+        if (
+          !command ||
+          command.kind === "observe" ||
+          stopped ||
+          command.generation !== authority.generation
+        )
+          continue;
         if (!activities.accepts(command.plan.activity, authority)) {
           stop("native-activity-expired-before-dispatch");
           continue;

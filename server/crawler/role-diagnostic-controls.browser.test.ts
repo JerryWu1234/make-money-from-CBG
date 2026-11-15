@@ -61,7 +61,11 @@ async function nativeControls(page: Page) {
         sendMessage: async (message: unknown) => {
           globals.__snapshots.push(message);
         },
-        onMessage: { addListener: () => {} },
+        onMessage: {
+          addListener: (listener: unknown) => {
+            globals.__observerListener = listener;
+          },
+        },
       },
     };
   });
@@ -71,6 +75,16 @@ async function nativeControls(page: Page) {
       "utf8",
     ),
   });
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        (window as unknown as Record<string, any>).__observerListener(
+          { kind: "bind" },
+          { id: "test-extension" },
+          resolve,
+        ),
+      ),
+  );
   await page.waitForFunction(() =>
     (window as unknown as Record<string, any>).__snapshots.some(
       (entry: any) => entry.payload?.roleQueryControls,

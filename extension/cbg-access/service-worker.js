@@ -28,19 +28,41 @@ async function state() {
   })());
 }
 const save = (value) => chrome.storage.local.set({ bridge: value });
+const bindingIdentity = (bound) =>
+  bound && {
+    pageId: bound.pageId,
+    pageGeneration: bound.pageGeneration,
+    tabId: bound.tabId,
+    windowId: bound.windowId,
+    bindingEpoch: bound.bindingEpoch,
+  };
 async function enqueue(kind, payload) {
   await serial(async () => {
     const value = await state();
     if (value.outbox.length >= 128) {
+      const bound = value.bound && { ...value.bound },
+        revision = (value.controlRevision || 0) + 1;
       value.stopped = true;
-      value.controlRevision = (value.controlRevision || 0) + 1;
+      value.observing = false;
+      value.controlRevision = revision;
       await save(value);
+      if (bound && value.controlRevision === revision)
+        await chrome.tabs
+          .sendMessage(bound.tabId, { kind: "stop", observerToken: bound.observerToken })
+          .catch(() => {});
       throw new Error("bridge-buffer-full");
     }
     if (JSON.stringify(payload).length > 450000) {
+      const bound = value.bound && { ...value.bound },
+        revision = (value.controlRevision || 0) + 1;
       value.stopped = true;
-      value.controlRevision = (value.controlRevision || 0) + 1;
+      value.observing = false;
+      value.controlRevision = revision;
       await save(value);
+      if (bound && value.controlRevision === revision)
+        await chrome.tabs
+          .sendMessage(bound.tabId, { kind: "stop", observerToken: bound.observerToken })
+          .catch(() => {});
       throw new Error("bridge-message-size");
     }
     value.outbox.push({
@@ -64,9 +86,16 @@ async function connect() {
     clearTimeout(ackTimer);
     void serial(async () => {
       const value = await state();
+      const bound = value.bound && { ...value.bound },
+        revision = (value.controlRevision || 0) + 1;
       value.stopped = true;
-      value.controlRevision = (value.controlRevision || 0) + 1;
+      value.observing = false;
+      value.controlRevision = revision;
       await save(value);
+      if (bound && value.controlRevision === revision)
+        await chrome.tabs
+          .sendMessage(bound.tabId, { kind: "stop", observerToken: bound.observerToken })
+          .catch(() => {});
     });
   });
   port.onMessage.addListener((message) => {
@@ -106,18 +135,62 @@ async function command(message) {
     plan = message.plan;
   const commandPort = port;
   if (message.command === "stop") {
-    value.controlRevision = (value.controlRevision || 0) + 1;
+    const bound = value.bound && { ...value.bound },
+      revision = (value.controlRevision = (value.controlRevision || 0) + 1);
     value.stopped = true;
+    value.observing = false;
     delete value.navigation;
     await save(value);
-    if (value.bound)
-      await chrome.tabs.sendMessage(value.bound.tabId, { kind: "stop" }).catch(() => {});
+    if (bound && value.controlRevision === revision)
+      await chrome.tabs
+        .sendMessage(bound.tabId, { kind: "stop", observerToken: bound.observerToken })
+        .catch(() => {});
     port?.postMessage({ kind: "command-result", actionId: message.actionId, ok: true });
     return;
   }
   try {
+    if (message.command === "observe") {
+      const revision = value.controlRevision || 0,
+        bound = value.bound;
+      const stillCurrent = () =>
+        (value.controlRevision || 0) === revision && value.bound === bound && port === commandPort;
+      if (!bound) throw new Error("observation-unbound");
+      const current = await chrome.tabs.get(bound.tabId);
+      if (!stillCurrent()) throw new Error("observation-generation-changed");
+      if (new URL(current.url).origin !== ORIGIN) throw new Error("observation-origin-mismatch");
+      value.observing = true;
+      const observed = await chrome.tabs.sendMessage(bound.tabId, {
+        kind: "bind",
+        context: value.observerContext,
+      });
+      if (!stillCurrent()) {
+        if (typeof observed?.observerToken === "string")
+          await chrome.tabs
+            .sendMessage(bound.tabId, { kind: "stop", observerToken: observed.observerToken })
+            .catch(() => {});
+        throw new Error("observation-generation-changed");
+      }
+      bound.observerToken = observed?.observerToken;
+      await save(value);
+      if (!stillCurrent()) throw new Error("observation-generation-changed");
+      await chrome.tabs.sendMessage(bound.tabId, {
+        kind: "capture",
+        observerToken: observed?.observerToken,
+      });
+      if (!stillCurrent()) throw new Error("observation-generation-changed");
+      port?.postMessage({
+        kind: "command-result",
+        actionId: message.actionId,
+        ok: true,
+        posted: false,
+      });
+      return;
+    }
     if (message.command === "resume") {
       const revision = (value.controlRevision = (value.controlRevision || 0) + 1);
+      const bound = value.bound;
+      const stillCurrent = () =>
+        value.controlRevision === revision && value.bound === bound && port === commandPort;
       value.stopped = true;
       value.authority = {
         stopEpoch: message.context?.stopEpoch,
@@ -130,30 +203,45 @@ async function command(message) {
         message.context.pageGeneration !== value.bound.pageGeneration
       )
         throw new Error("recovery-bound-page-mismatch");
-      const current = await chrome.tabs.get(value.bound.tabId),
-        window = await chrome.windows.get(current.windowId);
+      const current = await chrome.tabs.get(bound.tabId);
+      if (!stillCurrent()) throw new Error("recovery-generation-changed");
+      const window = await chrome.windows.get(current.windowId);
+      if (!stillCurrent()) throw new Error("recovery-generation-changed");
       if (!current.active || !window.focused || new URL(current.url).origin !== ORIGIN)
         throw new Error("recovery-foreground-mismatch");
-      if (value.controlRevision !== revision || port !== commandPort)
+      value.observerContext = message.context;
+      value.observing = true;
+      const observed = await chrome.tabs.sendMessage(current.id, {
+        kind: "bind",
+        context: message.context,
+      });
+      if (!stillCurrent()) {
+        if (typeof observed?.observerToken === "string")
+          await chrome.tabs
+            .sendMessage(current.id, { kind: "stop", observerToken: observed.observerToken })
+            .catch(() => {});
         throw new Error("recovery-generation-changed");
-      await chrome.tabs.sendMessage(current.id, { kind: "bind", context: message.context });
-      if (value.controlRevision !== revision || port !== commandPort)
-        throw new Error("recovery-generation-changed");
+      }
+      bound.observerToken = observed?.observerToken;
       value.stopped = false;
       await save(value);
-      if (value.controlRevision !== revision || value.stopped || port !== commandPort)
-        throw new Error("recovery-generation-changed");
+      if (!stillCurrent() || value.stopped) throw new Error("recovery-generation-changed");
       port?.postMessage({
         kind: "command-result",
         actionId: message.actionId,
         ok: true,
         posted: false,
       });
-      await chrome.tabs.sendMessage(current.id, { kind: "capture" });
+      if (stillCurrent() && !value.stopped)
+        await chrome.tabs.sendMessage(current.id, {
+          kind: "capture",
+          observerToken: observed?.observerToken,
+        });
       return;
     }
     if (
       value.stopped ||
+      value.observing === false ||
       !value.bound ||
       !plan ||
       plan.pageId !== value.bound.pageId ||
@@ -296,6 +384,7 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     const value = await state(),
       payload = message.payload;
     if (
+      value.observing === false ||
       !value.bound ||
       sender.tab.id !== value.bound.tabId ||
       payload.pageId !== value.bound.pageId ||
@@ -316,14 +405,33 @@ chrome.action.onClicked.addListener(async (tab) => {
   if (!tab.id || !tab.url || new URL(tab.url).origin !== ORIGIN) return;
   const value = await state();
   if (!value.stopped) {
+    const binding = bindingIdentity(value.bound),
+      revision = (value.controlRevision || 0) + 1;
     await command({ command: "stop", actionId: crypto.randomUUID() });
-    await enqueue("status", { stopped: true, reason: "user-stop" });
+    if (value.controlRevision !== revision || !value.stopped) return;
+    await enqueue("status", { ...binding, stopped: true, reason: "user-stop" });
+    if (value.controlRevision !== revision || !value.stopped) return;
     await chrome.action.setBadgeText({ text: "停" });
     return;
   }
-  value.controlRevision = (value.controlRevision || 0) + 1;
+  const revision = (value.controlRevision = (value.controlRevision || 0) + 1);
+  const stillCurrent = () => value.controlRevision === revision && value.stopped;
   value.authority = null;
+  if (value.bound && value.bound.tabId !== tab.id)
+    await chrome.tabs
+      .sendMessage(value.bound.tabId, { kind: "unbind", observerToken: value.bound.observerToken })
+      .catch(() => {});
+  if (!stillCurrent()) return;
+  value.observing = true;
+  delete value.observerContext;
   const bound = await chrome.tabs.sendMessage(tab.id, { kind: "bind" });
+  if (!stillCurrent()) {
+    if (typeof bound?.observerToken === "string")
+      await chrome.tabs
+        .sendMessage(tab.id, { kind: "stop", observerToken: bound.observerToken })
+        .catch(() => {});
+    return;
+  }
   value.bound = {
     tabId: tab.id,
     windowId: tab.windowId,
@@ -333,15 +441,21 @@ chrome.action.onClicked.addListener(async (tab) => {
   value.stopped = false;
   delete value.navigation;
   delete value.parent;
+  const binding = value.bound;
+  const stillBound = () =>
+    value.controlRevision === revision && value.bound === binding && !value.stopped;
   await save(value);
+  if (!stillBound()) return;
   await connect();
+  if (!stillBound()) return;
   await chrome.action.setBadgeText({ text: "读" });
+  if (!stillBound()) return;
   await enqueue("status", {
     bound: true,
     ...bound,
     tabId: tab.id,
     windowId: tab.windowId,
-    bindingEpoch: value.bound.bindingEpoch,
+    bindingEpoch: binding.bindingEpoch,
   });
 });
 async function finishedNavigation(tabId) {
@@ -353,6 +467,7 @@ async function finishedNavigation(tabId) {
     !value.stopped &&
     (value.controlRevision || 0) === navigation.controlRevision;
   const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!stillCurrent()) return;
   if (
     !tab?.url ||
     (!tab.active && tabId !== navigation.fromTabId) ||
@@ -372,7 +487,24 @@ async function finishedNavigation(tabId) {
   const bound = await chrome.tabs
     .sendMessage(tab.id, { kind: "bind", plan: navigation.plan })
     .catch(() => null);
-  if (!bound || !stillCurrent()) return;
+  const releaseStaleObservation = async () => {
+    if (typeof bound?.observerToken === "string")
+      await chrome.tabs
+        .sendMessage(tab.id, { kind: "stop", observerToken: bound.observerToken })
+        .catch(() => {});
+  };
+  if (!bound || !stillCurrent()) {
+    await releaseStaleObservation();
+    return;
+  }
+  if (value.bound?.tabId !== tab.id && value.bound)
+    await chrome.tabs
+      .sendMessage(value.bound.tabId, { kind: "unbind", observerToken: value.bound.observerToken })
+      .catch(() => {});
+  if (!stillCurrent()) {
+    await releaseStaleObservation();
+    return;
+  }
   if (navigation.plan.target.kind === "listing-detail")
     value.parent = {
       tabId: navigation.fromTabId,
@@ -387,26 +519,46 @@ async function finishedNavigation(tabId) {
     ...bound,
   };
   delete value.navigation;
+  const binding = value.bound;
+  const stillBound = () =>
+    value.bound === binding &&
+    !value.stopped &&
+    (value.controlRevision || 0) === navigation.controlRevision;
   await save(value);
+  if (!stillBound()) return;
   await enqueue("status", {
     navigated: true,
     ...bound,
     actionId: navigation.plan.actionId,
     tabId: tab.id,
     windowId: tab.windowId,
-    bindingEpoch: value.bound.bindingEpoch,
+    bindingEpoch: binding.bindingEpoch,
   });
-  await chrome.tabs.sendMessage(tab.id, { kind: "capture" }).catch(() => {});
+  if (!stillBound()) return;
+  await chrome.tabs
+    .sendMessage(tab.id, { kind: "capture", observerToken: bound.observerToken })
+    .catch(() => {});
 }
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   void (async () => {
     const value = await state();
     if (info.status === "loading" && value.bound?.tabId === tabId && !value.navigation) {
-      value.controlRevision = (value.controlRevision || 0) + 1;
+      const bound = value.bound,
+        revision = (value.controlRevision = (value.controlRevision || 0) + 1);
       value.stopped = true;
+      value.observing = false;
       value.bound = null;
       await save(value);
-      await enqueue("status", { stopped: true, reason: "unexpected-navigation-rebind-required" });
+      if (value.controlRevision !== revision) return;
+      await chrome.tabs
+        .sendMessage(tabId, { kind: "unbind", observerToken: bound.observerToken })
+        .catch(() => {});
+      if (value.controlRevision !== revision) return;
+      await enqueue("status", {
+        ...bindingIdentity(bound),
+        stopped: true,
+        reason: "unexpected-navigation-rebind-required",
+      });
     }
     if (info.status === "complete") await finishedNavigation(tabId);
   })();
@@ -415,8 +567,15 @@ chrome.tabs.onCreated.addListener((tab) => {
   void (async () => {
     const value = await state();
     if (value.navigation && tab.openerTabId === value.navigation.fromTabId) {
-      value.navigation.childTabId = tab.id;
+      const navigation = value.navigation;
+      navigation.childTabId = tab.id;
       await save(value);
+      if (
+        value.navigation !== navigation ||
+        value.stopped ||
+        (value.controlRevision || 0) !== navigation.controlRevision
+      )
+        return;
       await finishedNavigation(tab.id);
     }
   })();
@@ -432,10 +591,17 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       await finishedNavigation(value.parent.tabId);
       return;
     }
+    const bound = value.bound;
+    value.controlRevision = (value.controlRevision || 0) + 1;
     value.stopped = true;
+    value.observing = false;
     value.bound = null;
     await save(value);
-    await enqueue("status", { stopped: true, reason: "bound-tab-closed" });
+    await enqueue("status", {
+      ...bindingIdentity(bound),
+      stopped: true,
+      reason: "bound-tab-closed",
+    });
   })();
 });
 chrome.alarms.create("bridge-reconnect", { periodInMinutes: 0.5 });

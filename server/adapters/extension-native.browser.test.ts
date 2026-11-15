@@ -42,6 +42,12 @@ async function fixture(body: string, query = "act=show_overall_search_equip") {
   await page.addScriptTag({ content: script("market-rules.js") });
   await page.addScriptTag({ content: script("pet-product-observation.js") });
   await page.addScriptTag({ content: script("isolated.js") });
+  await page.evaluate(async () => {
+    const g = window as unknown as Record<string, any>;
+    g.__bound = await new Promise((resolve) =>
+      g.__listeners[0]({ kind: "bind" }, { id: "test-extension" }, resolve),
+    );
+  });
   await page.bringToFront();
   return page;
 }
@@ -54,9 +60,7 @@ async function prepare(
   return page.evaluate(
     async ({ target, actionId, queryId }) => {
       const g = window as unknown as Record<string, any>;
-      const bound = await new Promise<any>((resolve) =>
-        g.__listeners[0]({ kind: "bind" }, { id: "test-extension" }, resolve),
-      );
+      const bound = g.__bound;
       const plan = {
         runId: "run",
         queryId,
@@ -111,6 +115,7 @@ describe("isolated extension observation and semantic targeting", () => {
         window.postMessage(
           {
             channel: "cbg-passive-v1",
+            observerToken: (window as unknown as Record<string, any>).__bound.observerToken,
             value: {
               kind: "render",
               globals: {

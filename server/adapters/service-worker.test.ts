@@ -12,7 +12,26 @@ const settle = async () => {
 function fixture(initial?: unknown) {
   let saved: any = initial ? structuredClone(initial) : undefined;
   let deferredProof: ((value: unknown) => void) | undefined;
-  let defer = false;
+  let defer = false,
+    hold: string | undefined,
+    release: (() => void) | undefined,
+    tokenSequence = 0;
+  const observerTokens = new Map<number, string>();
+  const tabValues = new Map<number, Record<string, unknown>>();
+  const held = (kind: string, result: unknown, apply = () => {}) => {
+    if (hold === kind) {
+      hold = undefined;
+      return new Promise((resolve) => {
+        release = () => {
+          apply();
+          resolve(result);
+        };
+      });
+    }
+    apply();
+    return Promise.resolve(result);
+  };
+  if (saved?.bound?.observerToken) observerTokens.set(saved.bound.tabId, saved.bound.observerToken);
   const handlers: Record<string, (...args: any[]) => any> = {},
     sent: any[] = [],
     tabMessages: any[] = [];
@@ -33,23 +52,35 @@ function fixture(initial?: unknown) {
         get: async () => ({ bridge: structuredClone(saved) }),
         set: async ({ bridge }: any) => {
           saved = structuredClone(bridge);
+          await held("save", undefined);
         },
       },
     },
     tabs: {
-      get: async (id: number) => ({
-        id,
-        windowId: 1,
-        active: true,
-        url: "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=role",
-      }),
-      sendMessage: async (_: number, message: any) => {
-        tabMessages.push(message);
+      get: async (id: number) =>
+        held("get", {
+          id,
+          windowId: 1,
+          active: true,
+          url: "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=role",
+          ...tabValues.get(id),
+        }),
+      sendMessage: async (tabId: number, message: any) => {
+        tabMessages.push({ ...message, tabId });
         if (message.kind === "revalidate" && defer)
           return new Promise((resolve) => {
             deferredProof = resolve;
           });
-        if (message.kind === "bind") return { pageId: "page-1", pageGeneration: 1 };
+        if (message.kind === "bind") {
+          const observerToken = `observer-${++tokenSequence}`;
+          observerTokens.set(tabId, observerToken);
+          return held("bind", { pageId: `page-${tabId}`, pageGeneration: 1, observerToken });
+        }
+        if (["stop", "unbind"].includes(message.kind))
+          return held(message.kind, { ok: true }, () => {
+            if (!message.observerToken || observerTokens.get(tabId) === message.observerToken)
+              observerTokens.delete(tabId);
+          });
         return {
           ok: true,
           proof: {
@@ -82,9 +113,9 @@ function fixture(initial?: unknown) {
     },
     clearTimeout: () => {},
   });
-  const bind = async () => {
+  const bind = async (tabId = 1) => {
     await handlers.action({
-      id: 1,
+      id: tabId,
       windowId: 1,
       url: "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=role",
     });
@@ -98,6 +129,12 @@ function fixture(initial?: unknown) {
     handlers,
     sent,
     tabMessages,
+    observerTokens,
+    tabValues,
+    holdNext: (kind: string) => {
+      hold = kind;
+    },
+    release: () => release?.(),
     bind,
     snapshot,
     timers,
@@ -115,6 +152,233 @@ const sender = {
   url: "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=role",
 };
 describe("MV3 trust boundary and durable outbox", () => {
+  it.each(["get", "bind"])(
+    "an old observe held at %s cannot stop a newer successful resume",
+    async (stage) => {
+      const f = fixture();
+      await f.bind();
+      f.handlers.native({ kind: "command", command: "stop", actionId: "stop" });
+      await settle();
+      f.holdNext(stage);
+      f.handlers.native({ kind: "command", command: "observe", actionId: "old-observe" });
+      await settle();
+      f.handlers.native({
+        kind: "command",
+        command: "resume",
+        actionId: "new-resume",
+        context: {
+          pageId: "page-1",
+          pageGeneration: 1,
+          stopEpoch: 1,
+          browserSessionEpoch: "new-session",
+        },
+      });
+      await settle();
+      const token = f.observerTokens.get(1);
+      expect(token).toBeTypeOf("string");
+      expect(f.saved().stopped).toBe(false);
+      f.release();
+      await settle();
+      expect(f.observerTokens.get(1)).toBe(token);
+      expect(f.saved().stopped).toBe(false);
+      expect(
+        f.sent.find(
+          (message) => message.kind === "command-result" && message.actionId === "old-observe",
+        )?.ok,
+      ).toBe(false);
+      if (stage === "bind")
+        expect(f.tabMessages.at(-1)).toMatchObject({
+          kind: "stop",
+          observerToken: expect.any(String),
+        });
+    },
+  );
+  it("an old navigation unbind ACK cannot overwrite or delete a newer user binding", async () => {
+    const childUrl = "https://xyq.cbg.163.com/equip?s=367&eid=child";
+    const f = fixture({
+      version: 1,
+      connectionEpoch: "connection",
+      nextSequence: 1,
+      outbox: [],
+      bound: {
+        tabId: 1,
+        windowId: 1,
+        pageId: "page-1",
+        pageGeneration: 1,
+        observerToken: "old-parent",
+      },
+      stopped: false,
+      controlRevision: 0,
+      navigation: {
+        createdAt: Date.now(),
+        controlRevision: 0,
+        fromTabId: 1,
+        fromUrl: "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=role",
+        expectedUrl: childUrl,
+        bindingEpoch: "navigation",
+        plan: {
+          actionId: "old-navigation",
+          target: { kind: "listing-detail", serverId: "367", eid: "child" },
+        },
+      },
+    });
+    await settle();
+    f.tabValues.set(2, { url: childUrl });
+    f.holdNext("unbind");
+    f.handlers.updated(2, { status: "complete" });
+    await settle();
+    expect(f.tabMessages.some((message) => message.kind === "unbind" && message.tabId === 1)).toBe(
+      true,
+    );
+    f.handlers.native({ kind: "command", command: "stop", actionId: "stop-navigation" });
+    await settle();
+    await f.bind(3);
+    const token = f.observerTokens.get(3);
+    f.handlers.native({
+      kind: "command",
+      command: "resume",
+      actionId: "new-resume",
+      context: {
+        pageId: "page-3",
+        pageGeneration: 1,
+        stopEpoch: 1,
+        browserSessionEpoch: "new-session",
+      },
+    });
+    await settle();
+    const resumedToken = f.observerTokens.get(3);
+    f.handlers.native({
+      kind: "command",
+      command: "execute",
+      plan: {
+        actionId: "new-navigation",
+        pageId: "page-3",
+        pageGeneration: 1,
+        stopEpoch: 1,
+        browserSessionEpoch: "new-session",
+        target: { kind: "listing-detail", serverId: "367", eid: "new-child" },
+      },
+    });
+    await settle();
+    expect(f.saved().navigation?.plan.actionId).toBe("new-navigation");
+    f.release();
+    await settle();
+    expect(resumedToken).not.toBe(token);
+    expect(f.saved().bound).toMatchObject({
+      tabId: 3,
+      pageId: "page-3",
+      observerToken: resumedToken,
+    });
+    expect(f.saved().stopped).toBe(false);
+    expect(f.observerTokens.get(3)).toBe(resumedToken);
+    expect(f.saved().navigation?.plan.actionId).toBe("new-navigation");
+    expect(f.observerTokens.has(2)).toBe(false);
+    expect(
+      f
+        .saved()
+        .outbox.some(
+          (envelope: any) => envelope.payload?.navigated && envelope.payload.tabId === 2,
+        ),
+    ).toBe(false);
+  });
+  it("a loading event waiting for an old unbind ACK cannot clear a new user binding", async () => {
+    const f = fixture();
+    await f.bind();
+    f.holdNext("unbind");
+    f.handlers.updated(1, { status: "loading" });
+    await settle();
+    await f.bind(3);
+    const token = f.observerTokens.get(3);
+    f.release();
+    await settle();
+    expect(f.saved().bound).toMatchObject({ tabId: 3, observerToken: token });
+    expect(f.saved().stopped).toBe(false);
+    expect(f.observerTokens.get(3)).toBe(token);
+    expect(
+      f
+        .saved()
+        .outbox.some(
+          (message: any) => message.payload?.reason === "unexpected-navigation-rebind-required",
+        ),
+    ).toBe(false);
+  });
+  it("an old stop waiting for persistence cannot stop an observation installed by a newer resume", async () => {
+    const f = fixture();
+    await f.bind();
+    f.holdNext("save");
+    f.handlers.native({ kind: "command", command: "stop", actionId: "old-stop" });
+    await settle();
+    f.handlers.native({
+      kind: "command",
+      command: "resume",
+      actionId: "new-resume",
+      context: {
+        pageId: "page-1",
+        pageGeneration: 1,
+        stopEpoch: 1,
+        browserSessionEpoch: "new-session",
+      },
+    });
+    await settle();
+    const token = f.observerTokens.get(1);
+    f.release();
+    await settle();
+    expect(f.saved().stopped).toBe(false);
+    expect(f.observerTokens.get(1)).toBe(token);
+  });
+  it.each(["user-stop", "bound-tab-closed", "unexpected-navigation-rebind-required"])(
+    "%s includes the stopped binding identity for the runtime generation check",
+    async (reason) => {
+      const f = fixture();
+      await f.bind();
+      const { pageId, pageGeneration, tabId, windowId, bindingEpoch } = f.saved().bound;
+      if (reason === "user-stop") await f.bind();
+      else if (reason === "bound-tab-closed") f.handlers.removed(1);
+      else f.handlers.updated(1, { status: "loading" });
+      await settle();
+      expect(
+        f.saved().outbox.find((message: any) => message.payload?.reason === reason)?.payload,
+      ).toMatchObject({ stopped: true, pageId, pageGeneration, tabId, windowId, bindingEpoch });
+    },
+  );
+  it("read-only observe refreshes a stopped binding without granting input authority", async () => {
+    const f = fixture();
+    await f.bind();
+    f.handlers.native({ kind: "command", command: "stop", actionId: "stop" });
+    await settle();
+    expect((await f.snapshot(sender)).ok).toBe(false);
+    const authority = f.saved().authority;
+    f.handlers.native({ kind: "command", command: "observe", actionId: "observe" });
+    await settle();
+    expect(f.saved().stopped).toBe(true);
+    expect(f.saved().observing).toBe(true);
+    expect(f.saved().authority).toEqual(authority);
+    expect(f.sent).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "command-result",
+          actionId: "observe",
+          ok: true,
+          posted: false,
+        }),
+      ]),
+    );
+    expect(
+      f.tabMessages.filter((message) =>
+        ["prepare", "revalidate", "execute"].includes(message.kind),
+      ),
+    ).toEqual([]);
+    expect((await f.snapshot(sender)).ok).toBe(true);
+  });
+  it("stops page observation when its native host disconnects", async () => {
+    const f = fixture();
+    await f.bind();
+    f.handlers.disconnect();
+    await settle();
+    expect(f.saved().observing).toBe(false);
+    expect(f.tabMessages.at(-1).kind).toBe("stop");
+    expect((await f.snapshot(sender)).ok).toBe(false);
+  });
   it("rejects forged origins, frames, tabs and payload generations using actual sender metadata", async () => {
     const f = fixture();
     await f.bind();

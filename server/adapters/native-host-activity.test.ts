@@ -126,6 +126,28 @@ function fixture() {
     tick: () => timers.forEach((callback) => callback()),
   };
 }
+it("host observe is a validated read-only route while stopped; a forged observation proof never reaches the helper", () => {
+  const f = fixture();
+  f.send({ kind: "command", command: "stop", actionId: "stop" });
+  const writes = f.helperWrites.length,
+    generation = f.host.authority.generation;
+  f.send({ kind: "command", command: "observe", actionId: "observe" });
+  f.chrome({ kind: "command-proof", actionId: "observe", proof: { actionId: "observe" } });
+  expect(f.helperWrites).toHaveLength(writes);
+  expect(f.host.authority.stopped).toBe(true);
+  expect(f.host.authority.generation).toBe(generation);
+  expect(f.host.activities.current).toBeNull();
+  f.chrome({ kind: "command-result", actionId: "observe", ok: true, posted: false });
+  expect(f.serverWrites.at(-1)).toMatchObject({
+    kind: "input-result",
+    actionId: "observe",
+    ok: true,
+    posted: false,
+  });
+  f.send({ kind: "command", command: "observe", actionId: "bad action id" });
+  expect(f.serverWrites.at(-1).error).toBe("invalid-observation-request");
+  expect(f.helperWrites).toHaveLength(writes);
+});
 it("host waits for a successful helper assertion before forwarding any native input", () => {
   const f = fixture(),
     lease = f.lease();

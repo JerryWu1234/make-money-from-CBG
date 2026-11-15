@@ -1,37 +1,92 @@
 (() => {
   const key = Symbol.for("cbg.passive-observer.v1");
   if (window[key]) return;
-  const own = [];
   const observationEpoch =
     typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : String(Date.now());
-  let eventSequence = 0,
-    requestSequence = 0,
-    activation = null;
-  const usedActivations = new WeakSet();
+  const own = new Set(),
+    readers = new Set(),
+    cache = new Map(),
+    usedOptions = new WeakMap();
+  let active = false,
+    generation = 0,
+    readSequence = 0,
+    eventSequence = 0,
+    requestSequence = 0;
+  let activation = null,
+    usedActivations = new WeakSet(),
+    timer = null,
+    scheduled = null,
+    scheduledForce = false;
+  let ajaxInstalled = false,
+    lastRender = "",
+    lastRenderAt = 0,
+    bindingToken = null;
   const safe = (fn) => {
     try {
-      fn();
+      return fn();
     } catch {
-      /* Observation cannot change the site's behavior. */
+      /* Observation cannot change website behavior. */
     }
   };
-  const emit = (value) =>
+  const live = (epoch) => active && epoch === generation;
+  const plain = (value) =>
+    JSON.parse(
+      JSON.stringify(value, (name, item) =>
+        /cookie|token|password|fingerprint|authorization|session|signature|^fp$|^sign$/i.test(name)
+          ? undefined
+          : item,
+      ),
+    );
+  const emit = (value, epoch = generation) =>
     safe(() => {
+      if (!live(epoch)) return;
       if (["fetch", "xhr", "jsonp"].includes(value.kind) && !value.observedAt)
         value = { ...value, observedAt: new Date().toISOString() };
       if (["fetch", "xhr", "jsonp"].includes(value.kind) && !value.eventId)
         value = { ...value, eventId: `${observationEpoch}-${++eventSequence}` };
-      const text = JSON.stringify(value, (name, item) =>
-        /cookie|token|password|fingerprint|authorization|session|signature|^fp$|^sign$/i.test(name)
-          ? undefined
-          : item,
-      );
-      if (text.length <= 200000)
-        window.postMessage({ channel: "cbg-passive-v1", value: JSON.parse(text) }, location.origin);
+      const snapshot = plain(value),
+        text = JSON.stringify(snapshot);
+      if (text.length <= 200000 && live(epoch))
+        window.postMessage(
+          {
+            channel: "cbg-passive-v1",
+            lifecycle: epoch,
+            observerToken: bindingToken,
+            value: snapshot,
+          },
+          location.origin,
+        );
     });
+  const memo = (name, inputs, build, force = false, ttl = 1000) => {
+    const previous = cache.get(name),
+      now = Date.now();
+    if (
+      !force &&
+      previous &&
+      now >= previous.at &&
+      now - previous.at < ttl &&
+      inputs.length === previous.inputs.length &&
+      inputs.every((value, index) => value === previous.inputs[index])
+    )
+      return previous.value;
+    const value = build();
+    cache.set(name, { inputs, value, at: now });
+    return value;
+  };
+  const render = (globals, epoch, sequence, force, url) => {
+    if (!live(epoch) || sequence !== readSequence || url !== location.href) return;
+    const snapshot = plain(globals),
+      fingerprint = JSON.stringify(snapshot),
+      now = Date.now();
+    if (!force && fingerprint === lastRender && now - lastRenderAt < 4000) return;
+    lastRender = fingerprint;
+    lastRenderAt = now;
+    emit({ kind: "render", globals: snapshot }, epoch);
+  };
   const endpoint = (value) => {
+    if (typeof value !== "string") return null;
     try {
       const u = new URL(value, location.href);
       return u.origin === location.origin &&
@@ -48,213 +103,360 @@
       return null;
     }
   };
-  const summary = (value) => ({
-    denial:
-      Number.isInteger(value?.status) && typeof value.msg === "string"
-        ? { status: value.status, msg: value.msg.slice(0, 200) }
-        : undefined,
-    success: value?.status === 0 && Array.isArray(value.msg),
-    count: Array.isArray(value?.msg) ? value.msg.length : undefined,
-    resultRows:
-      Array.isArray(value?.msg) && value.msg.length <= 1000
-        ? value.msg.map((row) => {
-            const field = (value) =>
-              ["string", "number"].includes(typeof value) && /^[\w-]{1,200}$/.test(String(value))
-                ? String(value)
-                : undefined;
-            return {
-              eid: field(row?.eid),
-              serverId: field(row?.server_id ?? row?.serverid ?? row?.serverId),
-              ordersn: field(row?.game_ordersn),
-            };
-          })
-        : undefined,
-  });
+  const summary = (value) => {
+    const ownValue = (object, name) => {
+      if (!object || typeof object !== "object") return undefined;
+      const descriptor = Object.getOwnPropertyDescriptor(object, name);
+      return descriptor && "value" in descriptor ? descriptor.value : undefined;
+    };
+    const status = ownValue(value, "status"),
+      message = ownValue(value, "msg");
+    const count = Array.isArray(message) ? message.length : undefined;
+    const field = (value) =>
+      ["string", "number"].includes(typeof value) && /^[\w-]{1,200}$/.test(String(value))
+        ? String(value)
+        : undefined;
+    return {
+      denial:
+        Number.isInteger(status) && typeof message === "string"
+          ? { status, msg: message.slice(0, 200) }
+          : undefined,
+      success: status === 0 && Array.isArray(message),
+      count,
+      resultRows:
+        Array.isArray(message) && count <= 1000
+          ? Array.from({ length: count }, (_, index) => {
+              const row = ownValue(message, String(index));
+              return {
+                eid: field(ownValue(row, "eid")),
+                serverId: field(
+                  ownValue(row, "server_id") ??
+                    ownValue(row, "serverid") ??
+                    ownValue(row, "serverId"),
+                ),
+                ordersn: field(ownValue(row, "game_ordersn")),
+              };
+            })
+          : undefined,
+    };
+  };
   const clicked = (event) => {
     if (event.isTrusted) activation = event;
   };
-  if (typeof document.addEventListener === "function") {
-    document.addEventListener("click", clicked, true);
-    own.push(() => document.removeEventListener("click", clicked, true));
-  }
   function wrap(object, property, make) {
-    const original = object[property];
-    if (typeof original !== "function") return;
-    const replacement = make(original);
-    object[property] = replacement;
-    own.push(() => {
-      if (object[property] === replacement) object[property] = original;
-    });
-  }
-  wrap(
-    window,
-    "fetch",
-    (original) =>
-      function (...args) {
-        const result = Reflect.apply(original, this, args);
-        const path = endpoint(typeof args[0] === "string" ? args[0] : args[0]?.url);
-        if (path)
-          result.then(
-            (response) =>
-              safe(() => {
-                emit({ kind: "fetch", endpoint: path, status: response.status });
-                if (Number(response.headers.get("content-length") || 0) > 200000) return;
-                const copy = response.clone();
-                const reader = copy.body?.getReader();
-                if (!reader) return;
-                void (async () => {
-                  let size = 0,
-                    chunks = [];
-                  try {
-                    while (true) {
-                      const read = await reader.read();
-                      if (read.done) break;
-                      size += read.value.length;
-                      if (size > 200000) {
-                        await reader.cancel();
-                        return;
-                      }
-                      chunks.push(read.value);
-                    }
-                    const bytes = new Uint8Array(size);
-                    let at = 0;
-                    for (const chunk of chunks) {
-                      bytes.set(chunk, at);
-                      at += chunk.length;
-                    }
-                    emit({
-                      kind: "fetch",
-                      endpoint: path,
-                      status: response.status,
-                      ...summary(JSON.parse(new TextDecoder().decode(bytes))),
-                    });
-                  } catch {
-                    /* Keep the website response untouched. */
-                  }
-                })();
-              }),
-            () => {},
-          );
-        return result;
-      },
-  );
-  const paths = new WeakMap();
-  wrap(
-    XMLHttpRequest.prototype,
-    "open",
-    (original) =>
-      function (...args) {
-        paths.set(this, endpoint(args[1]));
-        return Reflect.apply(original, this, args);
-      },
-  );
-  wrap(
-    XMLHttpRequest.prototype,
-    "send",
-    (original) =>
-      function (...args) {
-        const path = paths.get(this);
-        if (path)
-          this.addEventListener(
-            "loadend",
-            () =>
-              safe(() => {
-                let data;
-                if (this.responseType === "json") data = this.response;
-                else if (
-                  (!this.responseType || this.responseType === "text") &&
-                  this.responseText.length <= 200000
-                ) {
-                  try {
-                    data = JSON.parse(this.responseText);
-                  } catch {
-                    /* Unknown schema is evidence only. */
-                  }
-                }
-                emit({ kind: "xhr", endpoint: path, status: this.status, ...summary(data) });
-              }),
-            { once: true },
-          );
-        return Reflect.apply(original, this, args);
-      },
-  );
-  let ajaxOriginal;
-  function installAjax() {
+    const descriptor = Object.getOwnPropertyDescriptor(object, property);
     if (
-      typeof window.ajax_with_recommend !== "function" ||
-      window.ajax_with_recommend === ajaxOriginal
+      !descriptor ||
+      !("value" in descriptor) ||
+      typeof descriptor.value !== "function" ||
+      (!descriptor.configurable && !descriptor.writable)
     )
       return;
-    const original = window.ajax_with_recommend;
-    const replacement = function (options, ...rest) {
-      if (!options || typeof options !== "object")
-        return Reflect.apply(original, this, [options, ...rest]);
-      const next = { ...options };
-      let request;
-      safe(() => {
-        request = {
-          requestId: `${observationEpoch}-request-${++requestSequence}`,
-          startedAt: new Date().toISOString(),
-          activationTime:
-            activation?.eventPhase > 0 && !usedActivations.has(activation)
-              ? activation.timeStamp
-              : null,
-          page: Number(options.data?.page || 1),
-          act: typeof options.data?.act === "string" ? options.data.act : "",
-          searchType: typeof options.data?.search_type === "string" ? options.data.search_type : "",
-          orderBy: typeof options.data?.order_by === "string" ? options.data.order_by : "",
-          conditions: Object.fromEntries(
-            Object.entries(options.data || {}).filter(
-              ([key, value]) =>
-                !["act", "search_type", "page", "order_by", "callback", "_"].includes(key) &&
-                !/cookie|token|password|fingerprint|authorization|session|signature|^fp$|^sign$/i.test(
-                  key,
-                ) &&
-                ["string", "number"].includes(typeof value),
-            ),
-          ),
-        };
-        if (request.activationTime !== null) usedActivations.add(activation);
-        emit({ kind: "jsonp", endpoint: "/cgi-bin/recommend.py", phase: "request", ...request });
-      });
-      for (const name of ["onSuccess", "onFailure"]) {
-        const callback = options[name];
-        next[name] = function (...args) {
-          let completed = false;
-          let evidence = { success: false };
-          safe(() => {
-            if (name === "onSuccess") evidence = summary(args[0]);
-          });
-          try {
-            const value =
-              typeof callback === "function" ? Reflect.apply(callback, this, args) : undefined;
-            completed = true;
-            return value;
-          } finally {
-            safe(() =>
-              emit({
-                kind: "jsonp",
-                endpoint: "/cgi-bin/recommend.py",
-                phase: "response",
-                ...request,
-                status: 200,
-                observedAt: new Date().toISOString(),
-                ...evidence,
-                success: completed && evidence.success,
-              }),
-            );
-          }
-        };
-      }
-      return Reflect.apply(original, this, [next, ...rest]);
-    };
-    ajaxOriginal = replacement;
-    window.ajax_with_recommend = replacement;
-    own.push(() => {
-      if (window.ajax_with_recommend === replacement) window.ajax_with_recommend = original;
+    const replacement = make(descriptor.value);
+    Object.defineProperty(object, property, { ...descriptor, value: replacement });
+    own.add(() => {
+      const current = Object.getOwnPropertyDescriptor(object, property);
+      if (current?.value === replacement) Object.defineProperty(object, property, descriptor);
     });
   }
-  function read() {
+  function installNetwork(epoch) {
+    wrap(
+      window,
+      "fetch",
+      (original) =>
+        function (...args) {
+          const result = Reflect.apply(original, this, args);
+          if (!live(epoch)) return result;
+          safe(() => {
+            const path = endpoint(typeof args[0] === "string" ? args[0] : undefined);
+            if (!path || typeof result?.then !== "function") return;
+            result.then(
+              (response) =>
+                safe(() => {
+                  if (!live(epoch)) return;
+                  emit({ kind: "fetch", endpoint: path, status: response.status }, epoch);
+                  if (
+                    Number(response.headers.get("content-length") || 0) > 200000 ||
+                    readers.size >= 16
+                  )
+                    return;
+                  const reader = response.clone().body?.getReader();
+                  if (!reader) return;
+                  readers.add(reader);
+                  void (async () => {
+                    let size = 0;
+                    const chunks = [];
+                    try {
+                      while (live(epoch)) {
+                        const next = await reader.read();
+                        if (!live(epoch)) return;
+                        if (next.done) break;
+                        size += next.value.length;
+                        if (size > 200000) {
+                          await reader.cancel();
+                          return;
+                        }
+                        chunks.push(next.value);
+                      }
+                      if (!live(epoch)) return;
+                      const bytes = new Uint8Array(size);
+                      let at = 0;
+                      for (const chunk of chunks) {
+                        bytes.set(chunk, at);
+                        at += chunk.length;
+                      }
+                      emit(
+                        {
+                          kind: "fetch",
+                          endpoint: path,
+                          status: response.status,
+                          ...summary(JSON.parse(new TextDecoder().decode(bytes))),
+                        },
+                        epoch,
+                      );
+                      scheduleRead();
+                    } catch {
+                      /* Keep the original response untouched. */
+                    } finally {
+                      readers.delete(reader);
+                    }
+                  })();
+                }),
+              () => {},
+            );
+          });
+          return result;
+        },
+    );
+    const paths = new WeakMap();
+    wrap(
+      XMLHttpRequest.prototype,
+      "open",
+      (original) =>
+        function (...args) {
+          const result = Reflect.apply(original, this, args);
+          if (live(epoch)) safe(() => paths.set(this, endpoint(args[1])));
+          return result;
+        },
+    );
+    wrap(
+      XMLHttpRequest.prototype,
+      "send",
+      (original) =>
+        function (...args) {
+          let cleanup;
+          if (live(epoch))
+            safe(() => {
+              const path = paths.get(this);
+              if (!path) return;
+              const done = () => {
+                safe(() => {
+                  if (!live(epoch)) return;
+                  let data;
+                  if (this.responseType === "json") data = this.response;
+                  else if (
+                    (!this.responseType || this.responseType === "text") &&
+                    this.responseText.length <= 200000
+                  )
+                    safe(() => {
+                      data = JSON.parse(this.responseText);
+                    });
+                  emit(
+                    { kind: "xhr", endpoint: path, status: this.status, ...summary(data) },
+                    epoch,
+                  );
+                  scheduleRead();
+                });
+                cleanup();
+              };
+              cleanup = () => {
+                this.removeEventListener("loadend", done);
+                own.delete(cleanup);
+              };
+              this.addEventListener("loadend", done, { once: true });
+              own.add(cleanup);
+            });
+          try {
+            return Reflect.apply(original, this, args);
+          } catch (error) {
+            safe(() => cleanup?.());
+            throw error;
+          }
+        },
+    );
+  }
+  function installAjax() {
+    if (ajaxInstalled) return;
+    const descriptor = Object.getOwnPropertyDescriptor(window, "ajax_with_recommend");
+    if (!descriptor || !("value" in descriptor) || typeof descriptor.value !== "function") return;
+    const epoch = generation;
+    wrap(
+      window,
+      "ajax_with_recommend",
+      (original) =>
+        function (...args) {
+          const options = args[0];
+          if (!live(epoch) || !options || typeof options !== "object")
+            return Reflect.apply(original, this, args);
+          let record,
+            instrumented = false;
+          safe(() => {
+            const previous = usedOptions.get(options);
+            if (previous) {
+              previous.abandoned = true;
+              previous.restore();
+              return;
+            }
+            const descriptors = Object.getOwnPropertyDescriptors(options),
+              dataDescriptor = descriptors.data;
+            if (
+              !dataDescriptor ||
+              !("value" in dataDescriptor) ||
+              !dataDescriptor.value ||
+              typeof dataDescriptor.value !== "object"
+            )
+              return;
+            const callbacks = ["onSuccess", "onFailure"].filter(
+              (name) =>
+                descriptors[name] &&
+                "value" in descriptors[name] &&
+                typeof descriptors[name].value === "function",
+            );
+            if (
+              !callbacks.length ||
+              callbacks.some(
+                (name) => !descriptors[name].writable || !descriptors[name].configurable,
+              )
+            )
+              return;
+            if (
+              ["onSuccess", "onFailure"].some(
+                (name) => descriptors[name] && !("value" in descriptors[name]),
+              )
+            )
+              return;
+            const fields = Object.getOwnPropertyDescriptors(dataDescriptor.value);
+            if (Object.values(fields).some((field) => !("value" in field))) return;
+            const data = Object.fromEntries(
+              Object.entries(fields).map(([name, field]) => [name, field.value]),
+            );
+            const request = {
+              requestId: `${observationEpoch}-request-${++requestSequence}`,
+              startedAt: new Date().toISOString(),
+              activationTime:
+                activation?.eventPhase > 0 && !usedActivations.has(activation)
+                  ? activation.timeStamp
+                  : null,
+              page: Number(data.page || 1),
+              act: typeof data.act === "string" ? data.act : "",
+              searchType: typeof data.search_type === "string" ? data.search_type : "",
+              orderBy: typeof data.order_by === "string" ? data.order_by : "",
+              conditions: Object.fromEntries(
+                Object.entries(data).filter(
+                  ([name, value]) =>
+                    !["act", "search_type", "page", "order_by", "callback", "_"].includes(name) &&
+                    !/cookie|token|password|fingerprint|authorization|session|signature|^fp$|^sign$/i.test(
+                      name,
+                    ) &&
+                    ["string", "number"].includes(typeof value),
+                ),
+              ),
+            };
+            record = {
+              abandoned: false,
+              completed: false,
+              replacements: {},
+              restore: () => {
+                for (const name of callbacks)
+                  if (
+                    Object.getOwnPropertyDescriptor(options, name)?.value ===
+                    record.replacements[name]
+                  )
+                    Object.defineProperty(options, name, descriptors[name]);
+                own.delete(record.restore);
+              },
+            };
+            usedOptions.set(options, record);
+            own.add(record.restore);
+            for (const name of callbacks) {
+              const callback = descriptors[name].value;
+              const replacement = function (...values) {
+                let completed = false,
+                  evidence = { success: false };
+                if (live(epoch) && !record.abandoned && !record.completed && name === "onSuccess")
+                  safe(() => {
+                    evidence = summary(values[0]);
+                  });
+                try {
+                  const result = Reflect.apply(callback, this, values);
+                  completed = true;
+                  return result;
+                } finally {
+                  if (live(epoch) && !record.abandoned && !record.completed) {
+                    record.completed = true;
+                    emit(
+                      {
+                        kind: "jsonp",
+                        endpoint: "/cgi-bin/recommend.py",
+                        phase: "response",
+                        ...request,
+                        status: 200,
+                        observedAt: new Date().toISOString(),
+                        ...evidence,
+                        success: completed && evidence.success,
+                      },
+                      epoch,
+                    );
+                    scheduleRead();
+                  }
+                  safe(record.restore);
+                }
+              };
+              record.replacements[name] = replacement;
+              Object.defineProperty(options, name, { ...descriptors[name], value: replacement });
+            }
+            if (request.activationTime !== null) usedActivations.add(activation);
+            emit(
+              { kind: "jsonp", endpoint: "/cgi-bin/recommend.py", phase: "request", ...request },
+              epoch,
+            );
+            instrumented = true;
+          });
+          if (record && !instrumented) {
+            record.abandoned = true;
+            safe(record.restore);
+          }
+          try {
+            return Reflect.apply(original, this, args);
+          } catch (error) {
+            if (record) {
+              record.abandoned = true;
+              safe(record.restore);
+            }
+            throw error;
+          }
+        },
+    );
+    ajaxInstalled =
+      Object.getOwnPropertyDescriptor(window, "ajax_with_recommend")?.value !== descriptor.value;
+  }
+  function scheduleRead(force = false) {
+    if (!active) return;
+    scheduledForce ||= force;
+    if (scheduled !== null) return;
+    const epoch = generation;
+    scheduled = setTimeout(() => {
+      scheduled = null;
+      const wanted = scheduledForce;
+      scheduledForce = false;
+      if (live(epoch)) read(wanted);
+    }, 0);
+  }
+  function read(force = false) {
+    if (!active) return;
+    const epoch = generation,
+      sequence = ++readSequence,
+      url = location.href;
     safe(installAjax);
     safe(() => {
       const globals = {};
@@ -285,7 +487,13 @@
       }
       globals.marketConfig =
         typeof window.__CBGReadMarketConfig === "function"
-          ? window.__CBGReadMarketConfig()
+          ? memo(
+              "marketConfig",
+              [window.__CBGReadMarketConfig, location.href],
+              () => window.__CBGReadMarketConfig(),
+              force,
+              5000,
+            )
           : undefined;
       globals.marketMenus = {};
       for (const id of [
@@ -452,10 +660,23 @@
         typeof window.RoleInfoParser === "function" &&
         encoded
       ) {
-        const parser = new window.RoleInfoParser(window.decode_desc(encoded), {
-          resUrl: window.ResUrl,
-          serverId: String(info.server_id || ""),
-        });
+        const parser = memo(
+          "roleParser",
+          [
+            encoded,
+            window.RoleInfoParser,
+            window.decode_desc,
+            window.ResUrl,
+            String(info.server_id || ""),
+            String(info.eid || ""),
+          ],
+          () =>
+            new window.RoleInfoParser(window.decode_desc(encoded), {
+              resUrl: window.ResUrl,
+              serverId: String(info.server_id || ""),
+            }),
+          force,
+        );
         const raw = parser.raw_info,
           school = parser.conf?.skill?.school_skill;
         if (raw?.AllEquip && typeof raw.AllEquip === "object" && !Array.isArray(raw.AllEquip)) {
@@ -549,25 +770,73 @@
           ),
           names: passive(typeof RoleNameConf === "undefined" ? window.RoleNameConf : RoleNameConf),
         });
+        const snapshot = plain(globals);
         crypto.subtle.digest("SHA-256", new TextEncoder().encode(version)).then(
           (digest) => {
-            globals.productRevision = [...new Uint8Array(digest)]
+            snapshot.productRevision = [...new Uint8Array(digest)]
               .map((byte) => byte.toString(16).padStart(2, "0"))
               .join("");
-            emit({ kind: "render", globals });
+            render(snapshot, epoch, sequence, force, url);
           },
-          () => emit({ kind: "render", globals }),
+          () => render(snapshot, epoch, sequence, force, url),
         );
-      } else emit({ kind: "render", globals });
+      } else render(globals, epoch, sequence, force, url);
     });
   }
-  const timer = setInterval(read, 1000);
-  read();
-  const stop = () => {
+  function stop() {
+    active = false;
+    generation++;
+    readSequence++;
     clearInterval(timer);
-    for (const cleanup of own.reverse()) safe(cleanup);
-    delete window[key];
+    timer = null;
+    clearTimeout(scheduled);
+    scheduled = null;
+    scheduledForce = false;
+    for (const reader of readers)
+      safe(() => {
+        void reader.cancel().catch(() => {});
+      });
+    readers.clear();
+    for (const cleanup of [...own].reverse()) safe(cleanup);
+    own.clear();
+    cache.clear();
+    activation = null;
+    ajaxInstalled = false;
+    lastRender = "";
+    lastRenderAt = 0;
+  }
+  function start(token) {
+    stop();
+    bindingToken = token;
+    active = true;
+    generation++;
+    usedActivations = new WeakSet();
+    safe(() => {
+      document.addEventListener("click", clicked, true);
+      own.add(() => document.removeEventListener("click", clicked, true));
+    });
+    safe(() => installNetwork(generation));
+    timer = setInterval(() => read(), 1000);
+    read(true);
+  }
+  const control = (event) => {
+    if (
+      event.source !== window ||
+      event.origin !== location.origin ||
+      event.data?.channel !== "cbg-observer-control-v1"
+    )
+      return;
+    if (event.data.command === "bind" && typeof event.data.token === "string")
+      start(event.data.token);
+    else if (["stop", "unbind"].includes(event.data.command) && event.data.token === bindingToken)
+      stop();
+    else if (event.data.command === "capture" && event.data.token === bindingToken && active)
+      scheduleRead(event.data.force === true);
   };
-  window.addEventListener("pagehide", stop, { once: true });
+  window.addEventListener("message", control);
+  window.addEventListener("pagehide", stop);
   window[key] = { stop };
+  safe(() =>
+    window.postMessage({ channel: "cbg-observer-control-v1", command: "ready" }, location.origin),
+  );
 })();
