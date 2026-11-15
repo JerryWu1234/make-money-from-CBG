@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, it } from "vite-plus/test";
 import { chromium, type Browser } from "playwright-core";
 import { captureValuation } from "./valuation-capture";
+import { retainDetailRoot } from "./detail-root";
 import { schoolSkillsComplete } from "./school-skills";
 import type { TabSnapshot } from "./types";
 
@@ -34,14 +35,15 @@ it.each(["official-map", "missing-map"])(
       77: { name: "未提供技能乙", pos: 6 },
     };
     try {
-      await page.setContent(`<div data-cbg-detail-root>价格：￥350</div>
-        <textarea id="equip_desc_value">synthetic-five-skills</textarea><script>
+      await page.setContent(`<section id="detail-fixture"><p>价格：￥350</p>
+        <textarea id="equip_desc_value">synthetic-five-skills</textarea></section><script>
         window.EquipInfo={server_id:299,eid:"sparse-fixture"};window.decode_desc=x=>x;
         window.RoleInfoParser=class {constructor(){
           this.raw_info={AllRider:{},all_skills:${JSON.stringify(allSkills)},i3FlyLv:0};
           this.result={shenqi:false,basic_info:{is_gold_id:false}};
           ${mode === "official-map" ? `this.conf={skill:{school_skill:${JSON.stringify(mapping)}}};` : ""}
         }};</script>`);
+      await retainDetailRoot(page, page.locator("#detail-fixture"));
       const capture = await captureValuation(page);
       const tab: TabSnapshot = {
         name: "技能",
@@ -89,11 +91,12 @@ it.each(["lexical", "equip", "conflict", "partial-conflict", "array-config", "id
               : mode === "array-config"
                 ? 'window.equip_info=[{server_id:481,eid:"another-role"}];'
                 : `window.EquipInfo={server_id:481,${mode === "conflict" ? 'eid:"another-role"' : ""}};window.equip={server_id:482,eid:"another-role"};`;
-      await page.setContent(`<div data-cbg-detail-root>价格：￥100</div>
-        <textarea id="equip_desc_value">fixture</textarea><script>${script}
+      await page.setContent(`<section id="detail-fixture"><p>价格：￥100</p>
+        <textarea id="equip_desc_value">fixture</textarea></section><script>${script}
         window.decode_desc=x=>x;
         window.RoleInfoParser=class {constructor(){${mode === "identity-changes" ? 'window.EquipInfo.eid="different-role";' : ""}this.raw_info={AllRider:{},jinjie_rider_info:{isJinJie:0},all_skills:{},i3FlyLv:0};this.result={shenqi:false,basic_info:{is_gold_id:false}}}};
         </script>`);
+      await retainDetailRoot(page, page.locator("#detail-fixture"));
       const capture = await captureValuation(page);
       if (["lexical", "equip"].includes(mode)) {
         expect(capture.source).toMatchObject({ serverId: "481", eid: "another-role" });
@@ -119,13 +122,14 @@ it.each([
   const page = await browser.newPage();
   try {
     await page.setContent(
-      `<div data-cbg-detail-root>价格：￥100</div><textarea id="equip_desc_value">fixture</textarea><script>
+      `<section id="detail-fixture"><p>价格：￥100</p><textarea id="equip_desc_value">fixture</textarea></section><script>
       ${equip ? `window.EquipInfo=${JSON.stringify(equip)};` : ""}
       window.decode_desc=x=>x;
       window.RoleInfoParser=class {constructor(){this.raw_info={AllRider:{},jinjie_rider_info:{isJinJie:0},shenqi:{},idbid_desc:[],all_skills:{},i3FlyLv:0,iCash:0,iSaving:0,iLearnCash:0,xianyu:0};this.result={shenqi:false,basic_info:{is_gold_id:false}}}};
     </script>`,
       { waitUntil: "domcontentloaded" },
     );
+    await retainDetailRoot(page, page.locator("#detail-fixture"));
     const capture = await captureValuation(page);
     if (valid) {
       expect(capture.source).toMatchObject({ serverId: "367", eid: "identity-browser" });

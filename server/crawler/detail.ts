@@ -23,109 +23,128 @@ import { captureBrowserStep } from "../browser-evidence";
 import { accessNavigationFailure } from "./access-navigation";
 import { readDetailRevision } from "./detail-read-state";
 import { readOfficialModels } from "./official-model-page";
+import {
+  assertDetailRoot,
+  detailRootLocator,
+  evaluateDetailRoot,
+  retainDetailRoot,
+  detailPetItems,
+  detailRootSelector,
+  readDetailEncodedRole,
+} from "./detail-root";
 
 export { MAIN_TABS } from "./detail-tabs";
 import { MAIN_TABS } from "./detail-tabs";
 
 async function capture(page: Page, name: string): Promise<TabSnapshot> {
-  return page.evaluate((tabName) => {
-    const root = document.querySelector<HTMLElement>("[data-cbg-detail-root]");
-    if (!root) throw new Error("未找到角色详情内容区域");
-    const text = root.innerText.trim();
-    const fields = text
-      .split(/\n|\t(?=[^\t：:]{1,40}[：:])/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .flatMap((line) => {
-        const match = line.match(/^([^：:]{1,40})[：:]\s*(.+)$/);
-        return match ? [{ name: match[1].trim(), value: match[2].trim() }] : [];
-      });
-    const tables = Array.from(root.querySelectorAll("table"))
-      .filter((el) => el.checkVisibility())
-      .map((table) =>
-        Array.from(table.rows).map((row) =>
-          Array.from(row.cells).map((cell) => cell.innerText.trim()),
-        ),
-      );
-    const equipmentScopes = ["RoleUsingEquips", "RoleStoreEquips", "RoleSplitEquips", "RoleYuHun"];
-    const scopes = equipmentScopes.map((id) => root.querySelector<HTMLElement>("#" + id));
-    const present = scopes.filter((scope): scope is HTMLElement => Boolean(scope));
-    // The official show_equips renders these containers and removes empty worn-slot icons.
-    const emptyEquipment =
-      /^道具\/法宝(?:\s*\/|$)/.test(tabName) &&
-      Boolean(scopes[0] && scopes[1]) &&
-      present.every((scope) =>
-        scope.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }),
-      ) &&
-      present.every((scope) =>
-        Array.from(scope.querySelectorAll("img, [data_equip_name], [data-equip-name]")).every(
-          (element) =>
-            /\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#].*)?$/i.test(
-              element.getAttribute("src") || "",
-            ) ||
-            // Observed official model 17320 is a task consumable, not role equipment.
-            (element.getAttribute("data_equip_type") === "17320" &&
-              element.getAttribute("data_equip_name") === "三界密令"),
-        ),
-      );
-    return {
-      name: tabName,
-      text,
-      fields,
-      tables,
-      elements: [],
-      tooltips: [],
-      items: [],
-      ...(/^道具\/法宝(?:\s*\/|$)/.test(tabName)
-        ? {
-            equipmentContainers: equipmentScopes.map((id, index) => ({
-              id,
-              present: !!scopes[index],
-              visible:
-                scopes[index]?.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
-                false,
-              icons: Array.from(
-                scopes[index]?.querySelectorAll("img, [data_equip_name], [data-equip-name]") || [],
-              )
-                .filter(
-                  (icon) =>
-                    (icon.tagName === "IMG" || !icon.querySelector("img")) &&
-                    !/\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#].*)?$/i.test(
-                      icon.getAttribute("src") || "",
-                    ),
+  return evaluateDetailRoot(
+    page,
+    (root, tabName) => {
+      const text = root.innerText.trim();
+      const fields = text
+        .split(/\n|\t(?=[^\t：:]{1,40}[：:])/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .flatMap((line) => {
+          const match = line.match(/^([^：:]{1,40})[：:]\s*(.+)$/);
+          return match ? [{ name: match[1].trim(), value: match[2].trim() }] : [];
+        });
+      const tables = Array.from(root.querySelectorAll("table"))
+        .filter((el) => el.checkVisibility())
+        .map((table) =>
+          Array.from(table.rows).map((row) =>
+            Array.from(row.cells).map((cell) => cell.innerText.trim()),
+          ),
+        );
+      const equipmentScopes = [
+        "RoleUsingEquips",
+        "RoleStoreEquips",
+        "RoleSplitEquips",
+        "RoleYuHun",
+      ];
+      const scopes = equipmentScopes.map((id) => root.querySelector<HTMLElement>("#" + id));
+      const present = scopes.filter((scope): scope is HTMLElement => Boolean(scope));
+      // The official show_equips renders these containers and removes empty worn-slot icons.
+      const emptyEquipment =
+        /^道具\/法宝(?:\s*\/|$)/.test(tabName) &&
+        Boolean(scopes[0] && scopes[1]) &&
+        present.every((scope) =>
+          scope.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }),
+        ) &&
+        present.every((scope) =>
+          Array.from(scope.querySelectorAll("img, [data_equip_name], [data-equip-name]")).every(
+            (element) =>
+              /\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#].*)?$/i.test(
+                element.getAttribute("src") || "",
+              ) ||
+              // Observed official model 17320 is a task consumable, not role equipment.
+              (element.getAttribute("data_equip_type") === "17320" &&
+                element.getAttribute("data_equip_name") === "三界密令"),
+          ),
+        );
+      return {
+        name: tabName,
+        text,
+        fields,
+        tables,
+        elements: [],
+        tooltips: [],
+        items: [],
+        ...(/^道具\/法宝(?:\s*\/|$)/.test(tabName)
+          ? {
+              equipmentContainers: equipmentScopes.map((id, index) => ({
+                id,
+                present: !!scopes[index],
+                visible:
+                  scopes[index]?.checkVisibility({
+                    checkOpacity: true,
+                    checkVisibilityCSS: true,
+                  }) || false,
+                icons: Array.from(
+                  scopes[index]?.querySelectorAll("img, [data_equip_name], [data-equip-name]") ||
+                    [],
                 )
-                .map((icon) => {
-                  // Match inspectItems: official equipment metadata may live on the a/td
-                  // around its image. Otherwise a fully read pet item leaves an anonymous
-                  // image in the inventory proof and falsely looks like unread role gear.
-                  const ancestors: Element[] = [icon];
-                  let parent = icon.parentElement;
-                  for (
-                    let depth = 0;
-                    depth < 2 && parent && parent !== root;
-                    depth++, parent = parent.parentElement
+                  .filter(
+                    (icon) =>
+                      (icon.tagName === "IMG" || !icon.querySelector("img")) &&
+                      !/\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#].*)?$/i.test(
+                        icon.getAttribute("src") || "",
+                      ),
                   )
-                    ancestors.unshift(parent);
-                  let name = "",
-                    modelId = "";
-                  for (const element of ancestors) {
-                    name =
-                      element.getAttribute("data_equip_name") ||
-                      element.getAttribute("data-equip-name") ||
-                      name;
-                    modelId =
-                      element.getAttribute("data_equip_type") ||
-                      element.getAttribute("data-equip-type") ||
-                      modelId;
-                  }
-                  return { name, modelId };
-                }),
-            })),
-          }
-        : {}),
-      ...(emptyEquipment ? { equipmentEmptyProof: "official-containers" as const } : {}),
-    };
-  }, name);
+                  .map((icon) => {
+                    // Match inspectItems: official equipment metadata may live on the a/td
+                    // around its image. Otherwise a fully read pet item leaves an anonymous
+                    // image in the inventory proof and falsely looks like unread role gear.
+                    const ancestors: Element[] = [icon];
+                    let parent = icon.parentElement;
+                    for (
+                      let depth = 0;
+                      depth < 2 && parent && parent !== root;
+                      depth++, parent = parent.parentElement
+                    )
+                      ancestors.unshift(parent);
+                    let name = "",
+                      modelId = "";
+                    for (const element of ancestors) {
+                      name =
+                        element.getAttribute("data_equip_name") ||
+                        element.getAttribute("data-equip-name") ||
+                        name;
+                      modelId =
+                        element.getAttribute("data_equip_type") ||
+                        element.getAttribute("data-equip-type") ||
+                        modelId;
+                    }
+                    return { name, modelId };
+                  }),
+              })),
+            }
+          : {}),
+        ...(emptyEquipment ? { equipmentEmptyProof: "official-containers" as const } : {}),
+      };
+    },
+    name,
+  );
 }
 async function inspectItems(
   page: Page,
@@ -136,89 +155,101 @@ async function inspectItems(
   worn?: { listing: Listing; source: WornEquipmentSource | null },
 ) {
   const petItems = /^召唤兽 \d+$/.test(snapshot.name);
-  const inspection = await page
-    .locator(
-      petItems
-        ? "[data-cbg-detail-root] img[data-cbg-pet-item]:visible"
-        : "[data-cbg-detail-root] img:visible",
-    )
-    .evaluateAll((elements) => {
-      document
-        .querySelectorAll("[data-cbg-inspect-index]")
-        .forEach((el) => el.removeAttribute("data-cbg-inspect-index"));
+  const petEntries = petItems ? await detailPetItems(page) : [];
+  const inspection = await evaluateDetailRoot(
+    page,
+    (root, { petItems, petEntries }) => {
+      const path = (element: Element) => {
+        const parts: string[] = [];
+        for (let node: Element | null = element; node && node !== root; node = node.parentElement)
+          parts.unshift(
+            `${node.tagName.toLowerCase()}:nth-child(${[...node.parentElement!.children].indexOf(node) + 1})`,
+          );
+        return ":scope > " + parts.join(" > ");
+      };
+      const elements = petItems
+        ? petEntries.flatMap(({ path }) => [...root.querySelectorAll(path)])
+        : [...root.querySelectorAll("img")];
       const icons = elements.filter(
         (el) =>
+          el.checkVisibility() &&
           !el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]') &&
-          // Official show_lock() adds these badges next to equipment/pet icons.
           !/\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#].*)?$/i.test(
             el.getAttribute("src") || "",
           ),
       );
       const models: string[] = [];
-      icons.forEach((el, index) => {
-        el.setAttribute("data-cbg-inspect-index", String(index));
+      for (const el of icons) {
         let model = "";
         for (
           let node: Element | null = el, depth = 0;
-          node && depth < 3 && !node.hasAttribute("data-cbg-detail-root");
+          node && depth < 3 && node !== root;
           node = node.parentElement, depth++
         )
           model ||=
             node.getAttribute("data_equip_type") || node.getAttribute("data-equip-type") || "";
         if (model) models.push(model);
-      });
-      return { count: icons.length, models };
-    });
+      }
+      return { count: icons.length, models, paths: icons.map(path) };
+    },
+    { petItems, petEntries },
+  );
   const metadata = await readOfficialModels(page, inspection.models);
   for (const issue of metadata.issues) report("物品元数据读取异常：" + JSON.stringify(issue));
   const count = inspection.count;
   for (let index = 0; index < count; index++) {
     checkAborted(signal);
-    const icon = page.locator(`[data-cbg-inspect-index="${index}"]`);
-    const observations = await icon.evaluateAll((elements) =>
-      elements.map((el) => {
-        if (el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]')) return null;
-        const attrs: Record<string, string> = {};
-        // 装备数据和提示框标识可能在图片的 a/td 父元素上。
-        const ancestors: Element[] = [el];
-        let parent = el.parentElement;
-        for (
-          let depth = 0;
-          depth < 2 && parent && !parent.hasAttribute("data-cbg-detail-root");
-          depth++, parent = parent.parentElement
-        )
-          ancestors.unshift(parent);
-        for (const node of ancestors)
-          for (const a of node.attributes) {
-            if (node !== el && /^(?:data_kindid|data-kindid)$/.test(a.name)) continue;
-            if (/^(data[-_]|alt$|title$)/.test(a.name) && !a.name.startsWith("data-cbg-"))
-              attrs[a.name.replace(/^data-/, "data_")] = a.value;
-          }
-        // Exact model metadata from the official page is an observed name, not a guessed mapping.
-        delete attrs.data_official_model_name;
-        delete attrs.data_official_model_metadata;
-        const container = el.closest("[data-equip-location], [data_equip_location], [id]");
-        if (
-          !attrs.data_equip_location &&
-          container &&
-          !container.hasAttribute("data-cbg-detail-root")
-        )
-          attrs.data_equip_location =
-            container.getAttribute("data-equip-location") ||
-            container.getAttribute("data_equip_location") ||
-            container.id;
-        if (attrs.data_skill_type && !attrs.data_equip_level) {
-          for (const node of [...ancestors].reverse()) {
-            const text = (node as HTMLElement).innerText || "";
-            const level = text.length < 120 && text.match(/(?:^|\n)\s*(\d{1,3})\s*(?:\n|$)/)?.[1];
-            if (level) {
-              attrs.data_visible_level = level;
-              break;
+    const path = inspection.paths[index];
+    const icon = (await detailRootLocator(page)).locator(path);
+    const observations = await evaluateDetailRoot(
+      page,
+      (root, { path, section }) =>
+        [...root.querySelectorAll(path)].map((el) => {
+          if (el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]')) return null;
+          const attrs: Record<string, string> = {};
+          // 装备数据和提示框标识可能在图片的 a/td 父元素上。
+          const ancestors: Element[] = [el];
+          let parent = el.parentElement;
+          for (
+            let depth = 0;
+            depth < 2 && parent && parent !== root;
+            depth++, parent = parent.parentElement
+          )
+            ancestors.unshift(parent);
+          for (const node of ancestors)
+            for (const a of node.attributes) {
+              if (node !== el && /^(?:data_kindid|data-kindid)$/.test(a.name)) continue;
+              if (/^(data[-_]|alt$|title$)/.test(a.name) && !a.name.startsWith("data-cbg-"))
+                attrs[a.name.replace(/^data-/, "data_")] = a.value;
+            }
+          if (section) attrs.data_cbg_skill_section = section;
+          // Exact model metadata from the official page is an observed name, not a guessed mapping.
+          delete attrs.data_official_model_name;
+          delete attrs.data_official_model_metadata;
+          const container = el.closest("[data-equip-location], [data_equip_location], [id]");
+          if (
+            !attrs.data_equip_location &&
+            container &&
+            container !== root &&
+            root.contains(container)
+          )
+            attrs.data_equip_location =
+              container.getAttribute("data-equip-location") ||
+              container.getAttribute("data_equip_location") ||
+              container.id;
+          if (attrs.data_skill_type && !attrs.data_equip_level) {
+            for (const node of [...ancestors].reverse()) {
+              const text = (node as HTMLElement).innerText || "";
+              const level = text.length < 120 && text.match(/(?:^|\n)\s*(\d{1,3})\s*(?:\n|$)/)?.[1];
+              if (level) {
+                attrs.data_visible_level = level;
+                break;
+              }
             }
           }
-        }
-        return attrs;
-      }),
+          return attrs;
+        }),
+      { path, section: petEntries.find((entry) => entry.path === path)?.section || "" },
     );
     if (observations.length !== 1)
       throw Object.assign(new Error(`详情图标 ${index + 1}/${count} 已变化，未完整读取`), {
@@ -299,11 +330,26 @@ async function inspectItems(
     if (tipId || incompleteEquipment)
       await page
         .waitForFunction(
-          ({ id, name, requireStats, expectedLevel }) => {
+          ({ id, name, requireStats, expectedLevel, rootSelector }) => {
+            const root = document.querySelector<HTMLElement>(rootSelector);
+            if (!root) return false;
+            const matching = id
+              ? [...root.querySelectorAll<HTMLElement>("[id]")].filter((node) => node.id === id)
+              : [];
+            const globalMatching =
+              id && !matching.length
+                ? [...document.querySelectorAll<HTMLElement>("[id]")].filter(
+                    (node) => node.id === id,
+                  )
+                : [];
             const boxes = id
-              ? [document.getElementById(id)]
+              ? matching.length === 1
+                ? matching
+                : matching.length === 0 && globalMatching.length === 1
+                  ? globalMatching
+                  : []
               : Array.from(
-                  document.querySelectorAll<HTMLElement>(
+                  root.querySelectorAll<HTMLElement>(
                     '[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"], .tips, .tooltip, #tips_box, #role_tips_box, .equip_tips',
                   ),
                 );
@@ -339,6 +385,7 @@ async function inspectItems(
             name: equipmentNameUnresolved(item.name) ? "" : item.name.trim(),
             requireStats: incompleteEquipment,
             expectedLevel,
+            rootSelector: await detailRootSelector(page),
           },
           { timeout: 4000 },
         )
@@ -346,12 +393,24 @@ async function inspectItems(
           if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
           issues?.push(`${snapshot.name}：${item.name} 的物品提示框未完整显示`);
         });
-    const observedTip = await page.evaluate(
-      ({ id, name }) => {
+    const observedTip = await evaluateDetailRoot(
+      page,
+      (root, { id, name }) => {
+        const matching = id
+          ? [...root.querySelectorAll<HTMLElement>("[id]")].filter((node) => node.id === id)
+          : [];
+        const globalMatching =
+          id && !matching.length
+            ? [...document.querySelectorAll<HTMLElement>("[id]")].filter((node) => node.id === id)
+            : [];
         const boxes = id
-          ? [document.getElementById(id)]
+          ? matching.length === 1
+            ? matching
+            : matching.length === 0 && globalMatching.length === 1
+              ? globalMatching
+              : []
           : Array.from(
-              document.querySelectorAll<HTMLElement>(
+              root.querySelectorAll<HTMLElement>(
                 '[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"], .tips, .tooltip, #tips_box, #role_tips_box, .equip_tips',
               ),
             );
@@ -465,6 +524,7 @@ async function settled(page: Page, signal: AbortSignal) {
   await page.waitForLoadState("networkidle", { timeout: 15000 });
   await pace(signal, 600, 500);
   await assertAvailable(page);
+  await assertDetailRoot(page);
 }
 async function assertDetailExists(page: Page, item: Listing, response: Response | null) {
   // Access restrictions always take precedence over a missing-product response.
@@ -557,25 +617,12 @@ async function openDetail(
       signal,
     );
     await assertDetailExists(page, item, response);
-    const first = page.getByText(MAIN_TABS[0], { exact: true }).filter({ visible: true }).first();
-    await first.waitFor({ state: "visible", timeout: 20000 });
-    for (const name of MAIN_TABS) {
-      if (!(await page.getByText(name, { exact: true }).filter({ visible: true }).count()))
-        throw new Error(`详情缺少「${name}」标签，未标记完整采集`);
-    }
-    const rooted = await first.evaluateAll((elements) => {
-      if (elements.length !== 1) return false;
-      const el = elements[0];
-      let root = el.parentElement!;
-      // 包含标签栏和实际属性面板的最小祖先；不采集顶部登录账号或整个 window。
-      while (root.parentElement && root.innerText.trim().length < 160) root = root.parentElement;
-      root.setAttribute("data-cbg-detail-root", "true");
-      return true;
-    });
-    if (!rooted)
-      throw Object.assign(new Error("详情标签已变化，无法确认读取范围"), {
-        name: "IncompleteDetailError",
-      });
+    await page
+      .getByText(MAIN_TABS[0], { exact: true })
+      .filter({ visible: true })
+      .first()
+      .waitFor({ state: "visible", timeout: 20000 });
+    await retainDetailRoot(page, undefined, item);
   } catch (error) {
     const failure = (await accessNavigationFailure(page, error, signal)) || error;
     await captureBrowserStep(
@@ -593,7 +640,9 @@ async function captureMountEntries(
   report: (message: string) => void,
 ) {
   const tabs: TabSnapshot[] = [];
-  const entries = page.locator("#RoleRiders img[data_idx]:visible");
+  const entries = (await detailRootLocator(page)).locator("[id=RoleRiders] img[data_idx]:visible");
+  if ((await (await detailRootLocator(page)).locator("[id=RoleRiders]").count()) > 1)
+    throw Object.assign(new Error("坐骑容器不唯一"), { name: "IncompleteDetailError" });
   for (let index = 0; index < (await entries.count()); index++) {
     checkAborted(signal);
     report(`正在读取第 ${index + 1} 只坐骑…`);
@@ -619,10 +668,12 @@ async function inspectEquipmentTabs(
 ) {
   const snapshots = [snapshot];
   const identity = await readDetailIdentity(page);
+  const encodedRole = await readDetailEncodedRole(page);
   const source =
     !identity.issues.length && identity.serverId === item.serverId && identity.eid === item.eid
-      ? await page.evaluate(
-          ({ serverId, eid }): WornEquipmentSource | null => {
+      ? await evaluateDetailRoot(
+          page,
+          (_root, { serverId, eid, encoded }): WornEquipmentSource | null => {
             try {
               const globals = window as unknown as Record<string, unknown>;
               const decode = globals.decode_desc;
@@ -630,8 +681,6 @@ async function inspectEquipmentTabs(
                 text: string,
                 options: Record<string, unknown>,
               ) => { raw_info: Record<string, unknown> };
-              const encoded =
-                document.querySelector<HTMLTextAreaElement>("#equip_desc_value")?.value;
               if (typeof decode !== "function" || typeof Parser !== "function" || !encoded)
                 return null;
               const raw = new Parser(decode(encoded), { resUrl: globals.ResUrl, serverId })
@@ -662,7 +711,7 @@ async function inspectEquipmentTabs(
               return null;
             }
           },
-          { serverId: item.serverId, eid: item.eid },
+          { serverId: item.serverId, eid: item.eid, encoded: encodedRole },
         )
       : null;
   const after = source ? await readDetailIdentity(page) : null;
@@ -675,8 +724,8 @@ async function inspectEquipmentTabs(
   };
   await inspectItems(page, snapshot, signal, report, issues, worn);
   snapshot.itemsCollectedAt = new Date().toISOString();
-  const nested = page.locator(
-    '[data-cbg-detail-root] [role="tab"], [data-cbg-detail-root] [data-tab], [data-cbg-detail-root] .tab a, [data-cbg-detail-root] .tabs a',
+  const nested = (await detailRootLocator(page)).locator(
+    '[role="tab"], [data-tab], .tab a, .tabs a',
   );
   const names = await nested.evaluateAll((elements) =>
     elements
@@ -686,7 +735,9 @@ async function inspectEquipmentTabs(
   );
   for (const name of [...new Set(names)].filter((name) => !MAIN_TABS.includes(name))) {
     checkAborted(signal);
-    const tab = nested.filter({ hasText: name }).filter({ visible: true }).first();
+    const tab = nested.filter({ hasText: name }).filter({ visible: true });
+    if ((await tab.count()) !== 1)
+      throw Object.assign(new Error("装备子标签不唯一"), { name: "IncompleteDetailError" });
     if ((await tab.innerText()).trim() !== name) continue;
     const href = await tab.getAttribute("href");
     if (href && /^https?:|^\//.test(href)) continue;
@@ -726,8 +777,13 @@ export async function collectDetail(
       step = name;
       checkAborted(signal);
       report(`正在读取标签 ${MAIN_TABS.indexOf(name) + 1}/${MAIN_TABS.length}：${name}`);
-      const tab = page.getByText(name, { exact: true }).filter({ visible: true }).first();
-      if (!(await tab.count())) throw new Error(`详情缺少「${name}」标签，未标记完整采集`);
+      const tab = (await detailRootLocator(page))
+        .getByText(name, { exact: true })
+        .filter({ visible: true });
+      if ((await tab.count()) !== 1)
+        throw Object.assign(new Error(`详情「${name}」标签缺失或不唯一，未标记完整采集`), {
+          name: "IncompleteDetailError",
+        });
       await pace(signal, 500, 600);
       await hoverForInspection(page, tab);
       // 仅操作已确认的详情标签，不点击购买、还价、收藏或站外链接。
@@ -763,8 +819,8 @@ export async function collectDetail(
         if (name === "坐骑") tabs.push(...(await captureMountEntries(page, signal, report)));
         await inspectItems(page, snapshot, signal, report);
       }
-      const nested = page.locator(
-        '[data-cbg-detail-root] [role="tab"], [data-cbg-detail-root] [data-tab], [data-cbg-detail-root] .tab a, [data-cbg-detail-root] .tabs a',
+      const nested = (await detailRootLocator(page)).locator(
+        '[role="tab"], [data-tab], .tab a, .tabs a',
       );
       const names = await nested.evaluateAll((els) =>
         els
@@ -775,7 +831,9 @@ export async function collectDetail(
       for (const child of [...new Set(names)].filter((value) => !MAIN_TABS.includes(value))) {
         checkAborted(signal);
         report(`正在读取 ${name} / ${child}`);
-        const childTab = nested.filter({ hasText: child }).filter({ visible: true }).first();
+        const childTab = nested.filter({ hasText: child }).filter({ visible: true });
+        if ((await childTab.count()) !== 1)
+          throw Object.assign(new Error("详情子标签不唯一"), { name: "IncompleteDetailError" });
         const exact = (await childTab.innerText()).trim();
         if (exact !== child) continue;
         const href = await childTab.getAttribute("href");
@@ -792,8 +850,8 @@ export async function collectDetail(
           signal,
         );
       }
-      const entries = page.locator(
-        "[data-cbg-detail-root] [data-child-id]:visible, [data-cbg-detail-root] .child_list li:visible",
+      const entries = (await detailRootLocator(page)).locator(
+        "[data-child-id]:visible, .child_list li:visible",
       );
       const entryCount = await entries.count();
       for (let index = 0; index < entryCount; index++) {
@@ -822,31 +880,35 @@ export async function collectDetail(
       signal,
     );
     step = "商品原始资料";
-    raw = await page.evaluate(() => {
-      const globals = window as unknown as Record<string, unknown>;
-      const result: Record<string, unknown> = {};
-      const encoded = document.querySelector<HTMLTextAreaElement>("#equip_desc_value")?.value;
-      if (encoded) result.encodedRoleData = encoded;
-      // 只保存商品详情的数据，不读取 Cookie、登录信息或其他页面的账户。
-      for (const key of [
-        "EquipInfo",
-        "RoleInfo",
-        "RoleData",
-        "role_info",
-        "role_data",
-        "equip_info",
-      ]) {
-        const value = globals[key];
-        if (value && typeof value === "object") {
-          try {
-            result[key] = JSON.parse(JSON.stringify(value));
-          } catch {
-            throw new Error(`商品原始数据 ${key} 无法完整序列化`);
+    const encodedRole = await readDetailEncodedRole(page);
+    raw = await evaluateDetailRoot(
+      page,
+      (_root, encoded) => {
+        const globals = window as unknown as Record<string, unknown>;
+        const result: Record<string, unknown> = {};
+        if (encoded) result.encodedRoleData = encoded;
+        // 只保存商品详情的数据，不读取 Cookie、登录信息或其他页面的账户。
+        for (const key of [
+          "EquipInfo",
+          "RoleInfo",
+          "RoleData",
+          "role_info",
+          "role_data",
+          "equip_info",
+        ]) {
+          const value = globals[key];
+          if (value && typeof value === "object") {
+            try {
+              result[key] = JSON.parse(JSON.stringify(value));
+            } catch {
+              throw new Error(`商品原始数据 ${key} 无法完整序列化`);
+            }
           }
         }
-      }
-      return result;
-    });
+        return result;
+      },
+      encodedRole,
+    );
     checkAborted(signal);
     report("全部标签读取完成，正在保存详情…");
     const now = new Date().toISOString();

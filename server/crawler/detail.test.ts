@@ -108,20 +108,32 @@ describe("装备局部补采", () => {
   afterAll(async () => {
     await browser?.close();
   });
-  it("详情属性读取不依赖单元素句柄转换，句柄求值超时也不丢失技能及装备", async () => {
+  it("物品属性读取不依赖每图标Locator.evaluate，句柄求值超时也不丢失技能及装备", async () => {
     const page = await browser.newPage(),
       locate = page.locator.bind(page);
+    let injected = 0;
     const spy = vi.spyOn(page, "locator").mockImplementation((selector, options) => {
       const target = locate(selector, options);
-      if (selector.includes("data-cbg-inspect-index"))
-        vi.spyOn(target, "evaluate").mockImplementation(async () => {
-          throw Object.assign(
-            new Error(
-              "locator.evaluate: Timeout 15000ms exceeded; locator resolved to visible element",
-            ),
-            { name: "TimeoutError" },
-          );
-        });
+      const nested = target.locator.bind(target);
+      vi.spyOn(target, "locator").mockImplementation((childSelector, childOptions) => {
+        const child = nested(childSelector, childOptions);
+        if (
+          typeof childSelector === "string" &&
+          childSelector.startsWith(":scope >") &&
+          childSelector.includes("img:nth-child")
+        ) {
+          injected++;
+          vi.spyOn(child, "evaluate").mockImplementation(async () => {
+            throw Object.assign(
+              new Error(
+                "locator.evaluate: Timeout 15000ms exceeded; locator resolved to visible element",
+              ),
+              { name: "TimeoutError" },
+            );
+          });
+        }
+        return child;
+      });
       return target;
     });
     try {
@@ -129,6 +141,7 @@ describe("装备局部补采", () => {
         route.fulfill({ contentType: "text/html", body: fixture(false) }),
       );
       const result = await collectDetail(page, listing, new AbortController().signal);
+      expect(injected).toBeGreaterThan(0);
       expect(
         result.tabs
           .find((tab) => tab.name === "技能")!
