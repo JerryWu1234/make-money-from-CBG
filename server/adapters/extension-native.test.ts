@@ -9,7 +9,10 @@ function fixture() {
     writes: any[] = [];
   let epoch = 0,
     sequence = 0,
-    dispatches = 0;
+    dispatches = 0,
+    assertionGranted = true,
+    holdRenewals = false,
+    holdEnds = false;
   const runtime = new ExtensionNativeRuntime({
     db,
     socketPath: "/private/tmp/not-started-cbg-fixture.sock",
@@ -29,6 +32,21 @@ function fixture() {
     write: (value: string) => {
       const message = JSON.parse(value);
       writes.push(message);
+      if (
+        message.kind === "activity" &&
+        !(holdRenewals && message.command === "renew") &&
+        !(holdEnds && message.command === "end")
+      )
+        queueMicrotask(() => {
+          void internals.receive({
+            kind: "input-result",
+            actionId: message.actionId,
+            ok: assertionGranted,
+            awake: message.command !== "end",
+            activityId: message.activity.activityId,
+            error: assertionGranted ? undefined : "native-awake-assertion-create-failed",
+          });
+        });
       if (message.kind === "resume" && !message.context?.recoveryEpoch)
         queueMicrotask(() => {
           void internals.receive({ kind: "input-result", actionId: message.actionId, ok: true });
@@ -77,10 +95,192 @@ function fixture() {
       epoch = next;
     },
     dispatches: () => dispatches,
+    denyAssertion: () => {
+      assertionGranted = false;
+    },
+    holdRenewals: () => {
+      holdRenewals = true;
+    },
+    holdEnds: (value: boolean) => {
+      holdEnds = value;
+    },
   };
 }
 afterEach(() => vi.useRealTimers());
 describe("extension-native runtime fences and observation", () => {
+  it("binding and idle hold no assertion; a failed awake grant prevents any input", async () => {
+    const f = fixture();
+    await f.bind();
+    expect(f.writes.filter((write) => write.kind === "activity")).toHaveLength(0);
+    f.denyAssertion();
+    const before = await f.runtime.snapshot();
+    await expect(
+      f.runtime.execute({
+        ...before.context,
+        actionId: "denied",
+        target: { kind: "refresh-list", url: before.url },
+        expected: { kind: "page", page: 1 },
+      }),
+    ).rejects.toThrow("assertion-create-failed");
+    expect(f.writes.filter((write) => write.command === "execute")).toHaveLength(0);
+    expect(f.runtime.status().stopped).toBe(true);
+    f.db.close();
+  });
+  it("retains the activity throughout a page wait and releases only after business confirmation", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await f.bind();
+    const before = await f.runtime.snapshot();
+    const plan: ActionPlan = {
+      ...before.context,
+      actionId: "waiting",
+      target: { kind: "refresh-list", url: before.url },
+      expected: { kind: "page", page: 1 },
+    };
+    const operation = f.runtime.execute(plan);
+    await vi.advanceTimersByTimeAsync(1);
+    await f.internals.receive({
+      kind: "input-result",
+      actionId: plan.actionId,
+      ok: true,
+      posted: true,
+    });
+    await vi.advanceTimersByTimeAsync(9000);
+    expect(f.internals.workflowActivity).toBeDefined();
+    expect(f.writes.some((write) => write.kind === "activity" && write.command === "renew")).toBe(
+      true,
+    );
+    expect(f.writes.some((write) => write.kind === "activity" && write.command === "end")).toBe(
+      false,
+    );
+    f.holdRenewals();
+    await f.receive("snapshot", {
+      ...f.base(),
+      revision: "new-result",
+      actionContext: plan,
+      listingCommitted: true,
+      listingCommit: { actionId: plan.actionId, sequence: 1 },
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    const pendingRenewal = f.writes
+      .filter((write) => write.kind === "activity" && write.command === "renew")
+      .at(-1);
+    expect(pendingRenewal.activity.progressSequence).toBe(1);
+    const renewalCount = f.writes.filter(
+      (write) => write.kind === "activity" && write.command === "renew",
+    ).length;
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(
+      f.writes.filter((write) => write.kind === "activity" && write.command === "renew"),
+    ).toHaveLength(renewalCount);
+    await f.internals.receive({
+      kind: "input-result",
+      actionId: pendingRenewal.actionId,
+      ok: true,
+      awake: true,
+      activityId: pendingRenewal.activity.activityId,
+    });
+    await operation;
+    expect(
+      f.writes.filter((write) => write.kind === "activity" && write.command === "end"),
+    ).toHaveLength(1);
+    expect(f.internals.workflowActivity).toBeUndefined();
+    f.db.close();
+  });
+  it("a rejected business-progress renewal stops input and persists the activity risk", async () => {
+    const f = fixture();
+    await f.bind();
+    const activity = await f.runtime.activity.begin(new AbortController().signal);
+    f.denyAssertion();
+    await expect(
+      f.internals.queueActivityRenew(f.internals.workflowActivity, "confirmed-business"),
+    ).rejects.toThrow("assertion-create-failed");
+    expect(f.runtime.status().stopped).toBe(true);
+    expect(f.risks).toHaveLength(1);
+    expect(activity.signal.aborted).toBe(true);
+    await activity.close();
+    f.db.close();
+  });
+  it("an old end failure cannot stop an activity started while its ACK was pending", async () => {
+    const f = fixture();
+    await f.bind();
+    const old = await f.runtime.activity.begin(new AbortController().signal);
+    f.holdEnds(true);
+    const closing = old.close();
+    const rejected = expect(closing).rejects.toThrow("old-end-denied");
+    await Promise.resolve();
+    await Promise.resolve();
+    const ending = f.writes
+      .filter((write) => write.kind === "activity" && write.command === "end")
+      .at(-1);
+    const next = await f.runtime.activity.begin(new AbortController().signal);
+    await f.internals.receive({
+      kind: "input-result",
+      actionId: ending.actionId,
+      ok: false,
+      error: "old-end-denied",
+    });
+    await rejected;
+    expect(next.signal.aborted).toBe(false);
+    expect(f.runtime.status().stopped).toBe(false);
+    f.holdEnds(false);
+    await next.close();
+    f.db.close();
+  });
+  it("cancellation while resuming an idle binding cannot acquire an activity", async () => {
+    const f = fixture();
+    await f.bind();
+    const control = new AbortController();
+    f.internals.idle = true;
+    vi.spyOn(f.runtime, "resumeForRun").mockImplementation(async () => {
+      control.abort(new Error("cancelled before activation"));
+    });
+    await expect(f.runtime.activity.begin(control.signal)).rejects.toThrow(
+      "cancelled before activation",
+    );
+    expect(f.writes.filter((write) => write.kind === "activity")).toHaveLength(0);
+    f.db.close();
+  });
+  it.each(["cancel", "disconnect", "expired"])(
+    "%s releases the activity and never restarts it from heartbeat",
+    async (scenario) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      await f.bind();
+      const control = new AbortController();
+      const handle = await f.runtime.activity.begin(control.signal);
+      if (scenario === "cancel") control.abort(new Error("cancelled workflow"));
+      if (scenario === "disconnect")
+        await f.internals.receive({
+          kind: "host-status",
+          stopped: true,
+          reason: "native-host-disconnected",
+        });
+      if (scenario === "expired") await vi.advanceTimersByTimeAsync(180001);
+      expect(handle.signal.aborted).toBe(true);
+      expect(f.runtime.status().stopped).toBe(true);
+      const count = f.writes.length;
+      await vi.advanceTimersByTimeAsync(30000);
+      expect(f.writes).toHaveLength(count);
+      await handle.close();
+      expect(f.internals.workflowActivity).toBeUndefined();
+      f.db.close();
+    },
+  );
+  it("an old cancellation or cleanup cannot stop the next activity", async () => {
+    const f = fixture();
+    await f.bind();
+    const old = await f.runtime.activity.begin(new AbortController().signal);
+    await f.runtime.stop("pause");
+    await f.bind();
+    const next = await f.runtime.activity.begin(new AbortController().signal);
+    await old.close();
+    await f.internals.failActivity("late-old-heartbeat", old.lease);
+    expect(next.signal.aborted).toBe(false);
+    expect(f.internals.workflowActivity.lease.activityId).toBe(next.lease.activityId);
+    await next.close();
+    f.db.close();
+  });
   it("restores a read-only snapshot on duplicate delivery without rewriting its old stop epoch", async () => {
     const f = fixture();
     await f.bind();

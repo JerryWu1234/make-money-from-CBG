@@ -58,6 +58,16 @@ async function fixture() {
     destroyed: false,
     write: (value: string) => {
       const message = JSON.parse(value);
+      if (message.kind === "activity")
+        queueMicrotask(() => {
+          void internals.receive({
+            kind: "input-result",
+            actionId: message.actionId,
+            ok: true,
+            awake: message.command !== "end",
+            activityId: message.activity.activityId,
+          });
+        });
       if (message.kind === "command" && message.command === "execute") plans.push(message.plan);
       if (message.kind === "resume" || message.command === "locate")
         void Promise.resolve().then(() =>

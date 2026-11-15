@@ -297,6 +297,7 @@ async function createNativeMarket(
   const cache = new Map<string, string>();
   let currentSubject: object | undefined;
   const scope = {
+    activity: adapter.activity,
     context: () => (currentSubject ? querySubjectContext(currentSubject) : undefined),
   };
   let closed = false;

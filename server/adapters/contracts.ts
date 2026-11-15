@@ -1,4 +1,5 @@
 import type { WornEquipmentSource } from "../crawler/compact";
+import type { NativeActivityLease } from "./native-activity";
 import { MAIN_TABS } from "../crawler/detail-tabs";
 import type { Listing, ListingPage, RoleDetail } from "../crawler/types";
 import { captureIssues, IncompleteCaptureError } from "../crawler/capture-readiness";
@@ -64,6 +65,7 @@ export interface ActionPlan extends Pick<
   ObservationContext,
   "runId" | "queryId" | "pageId" | "pageGeneration" | "browserSessionEpoch" | "stopEpoch"
 > {
+  activity?: NativeActivityLease;
   actionId: string;
   target: SemanticTarget;
   expected:

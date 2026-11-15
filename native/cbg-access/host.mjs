@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { CommandAuthority, ResumeAcknowledgement } from "./command-authority.mjs";
+import { ActivityAuthority } from "./activity-authority.mjs";
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const configPath = path.join(os.homedir(), "Library/Application Support/CBGAccess/host.json");
@@ -18,6 +19,8 @@ if (process.argv[2] !== `chrome-extension://${config.extensionId}/`)
   throw new Error("Unapproved extension");
 const socket = net.connect(config.socketPath);
 const authority = new CommandAuthority(randomUUID());
+const activities = new ActivityAuthority();
+let lastCompletedActionId = null;
 let helperReady = false;
 let nativeBuffer = Buffer.alloc(0),
   serverBuffer = "",
@@ -61,21 +64,58 @@ helper.stdout.on("data", (data) => {
         helperReady = true;
         continue;
       }
+      if (result.kind === "activity-invalidated") {
+        if (
+          result.hostInstanceEpoch === authority.instanceEpoch &&
+          result.hostGeneration === authority.generation &&
+          activities.same(result, authority)
+        )
+          stop(result.reason || "native-activity-invalidated");
+        continue;
+      }
       const command = pending.get(result.actionId);
       if (
         command &&
         (command.generation === undefined || command.generation === authority.generation)
       ) {
+        if (command.kind === "activity") {
+          pending.delete(result.actionId);
+          const ending = command.command === "end";
+          if (
+            !result.ok ||
+            result.activityId !== command.activity.activityId ||
+            (!ending && result.awake !== true)
+          ) {
+            server({
+              kind: "input-result",
+              actionId: result.actionId,
+              ok: false,
+              posted: false,
+              error: result.error || "native-awake-assertion-failed",
+            });
+            stop("native-activity-denied");
+          } else {
+            if (!ending) activities.granted(command.activity, authority);
+            server({ kind: "input-result", ...result });
+          }
+          continue;
+        }
         if (command.kind === "resume") {
           resumeAck(result.actionId, command, "helper", result);
           continue;
         }
         pending.delete(result.actionId);
         authority.complete(result.actionId);
+        if (
+          result.ok &&
+          result.posted &&
+          command.plan?.activity?.activityId === activities.current?.lease.activityId
+        )
+          lastCompletedActionId = result.actionId;
         server({ kind: "input-result", ...result });
       }
     } catch {
-      stopped = true;
+      stop("invalid-native-helper-message");
     }
   }
 });
@@ -92,6 +132,7 @@ const invalidatePending = (reason) => {
 };
 const stop = (reason) => {
   stopped = true;
+  activities.stop();
   authority.stop();
   invalidatePending("host-stop-invalidated");
   if (helperReady) helper.kill("SIGUSR1");
@@ -112,7 +153,31 @@ socket.on("data", (data) => {
     try {
       const message = JSON.parse(line);
       if (message.kind === "ack") native(message);
-      else if (message.kind === "command") {
+      else if (message.kind === "activity") {
+        try {
+          if (!/^[a-zA-Z0-9_-]{1,100}$/.test(message.actionId || ""))
+            throw new Error("activity-action-id");
+          if (message.command === "begin") {
+            activities.begin(message.activity, authority);
+            lastCompletedActionId = null;
+          } else if (message.command === "renew")
+            activities.renew(message.activity, authority, lastCompletedActionId);
+          else if (message.command === "end") activities.end(message.activity, authority);
+          else throw new Error("unsupported-activity-command");
+          pending.set(message.actionId, { ...message, generation: authority.generation });
+          helper.stdin.write(
+            `${JSON.stringify({ command: `activity-${message.command}`, actionId: message.actionId, activity: message.activity, hostGeneration: authority.generation, hostInstanceEpoch: authority.instanceEpoch })}\n`,
+          );
+        } catch (error) {
+          server({
+            kind: "input-result",
+            actionId: message.actionId,
+            ok: false,
+            posted: false,
+            error: error.message || "invalid-native-activity",
+          });
+        }
+      } else if (message.kind === "command") {
         if (message.command === "stop") {
           stop("server-stop");
           continue;
@@ -128,7 +193,7 @@ socket.on("data", (data) => {
           !message.plan ||
           !authority.accepts(message.plan) ||
           !/^[a-zA-Z0-9_-]{1,100}$/.test(message.plan.actionId) ||
-          pending.size ||
+          [...pending.values()].some((command) => command.kind !== "activity") ||
           stopped
         ) {
           server({
@@ -137,6 +202,19 @@ socket.on("data", (data) => {
             ok: false,
             posted: false,
             error: "host-stopped-or-busy",
+          });
+          continue;
+        }
+        if (
+          message.command === "execute" &&
+          !activities.accepts(message.plan.activity, authority)
+        ) {
+          server({
+            kind: "input-result",
+            actionId: message.plan.actionId,
+            ok: false,
+            posted: false,
+            error: "native-workflow-activity-required",
           });
           continue;
         }
@@ -149,6 +227,7 @@ socket.on("data", (data) => {
       } else if (message.kind === "resume") {
         if (!message.context) continue;
         invalidatePending("host-resume-invalidated");
+        activities.stop();
         authority.resume(message.context);
         stopped = false;
         if (message.actionId) {
@@ -195,6 +274,10 @@ process.stdin.on("data", (data) => {
       } else if (message.kind === "command-proof") {
         const command = pending.get(message.actionId);
         if (!command || stopped || command.generation !== authority.generation) continue;
+        if (!activities.accepts(command.plan.activity, authority)) {
+          stop("native-activity-expired-before-dispatch");
+          continue;
+        }
         const dispatched = authority.dispatch(message.actionId, message.proof);
         if (!dispatched) continue;
         helper.stdin.write(`${JSON.stringify(dispatched)}\n`);
@@ -206,9 +289,19 @@ process.stdin.on("data", (data) => {
 });
 const exit = () => {
   stopped = true;
+  activities.stop();
+  clearInterval(activityWatchdog);
   helper.kill("SIGTERM");
   socket.destroy();
 };
+const activityWatchdog = setInterval(() => {
+  try {
+    if (activities.current && activities.expired()) stop("native-workflow-activity-expired");
+  } catch {
+    stop("native-activity-clock-anomaly");
+  }
+}, 100);
+activityWatchdog.unref();
 socket.on("error", () => {
   native({ kind: "command", command: "stop", actionId: "disconnect" });
   exit();

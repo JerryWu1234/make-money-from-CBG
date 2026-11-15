@@ -70,6 +70,20 @@ function fixture() {
     onRisk: () => {},
     runAction: async (_plan, dispatch) => dispatch(),
   });
+  // This suite intentionally mocks execute() below: only query identity is under test.
+  vi.spyOn(adapter.activity, "begin").mockImplementation(async () => ({
+    lease: {
+      activityId: "mock-query-workflow",
+      authorizationEpoch: 1,
+      stopEpoch: 0,
+      browserSessionEpoch: "native-session",
+      expiresAt: Date.now() + 15000,
+      progressExpiresAt: Date.now() + 60000,
+      progressSequence: 0,
+    },
+    signal: new AbortController().signal,
+    close: async () => {},
+  }));
   // query() and createCrawlSource() remain the production implementations, including beginQuery.
   (adapter as unknown as { sessionEpoch: string }).sessionEpoch = "native-session";
   vi.spyOn(adapter, "snapshot").mockImplementation(async () => structuredClone(snapshot));

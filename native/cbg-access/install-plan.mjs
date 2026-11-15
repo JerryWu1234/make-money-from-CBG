@@ -2,6 +2,7 @@ export const HOST_FILES = [
   "host.json",
   "host.mjs",
   "command-authority.mjs",
+  "activity-authority.mjs",
   "launch-host",
   "cbg-input",
 ];

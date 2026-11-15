@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <mach/mach_time.h>
 
 static const int64_t marker = 0x43424741;
 static _Atomic bool stopped = false, preempted = false, tapReady = false;
@@ -13,6 +14,37 @@ static double proofDeadline = 0;
 static uint64_t acceptedGeneration = 0;
 static int64_t acceptedStopEpoch = -1;
 static NSString *acceptedSessionEpoch = nil, *acceptedHostInstance = nil;
+static pthread_mutex_t activityLock = PTHREAD_MUTEX_INITIALIZER;
+static NSDictionary *activeActivity = nil;
+static uint64_t highestActivityEpoch = 0;
+static double activityDeadline = 0, progressDeadline = 0;
+static CGDirectDisplayID activityDisplay = kCGNullDirectDisplay;
+static NSString *lastPostedAction = nil;
+static NSMutableSet *creditedActions;
+static void writeResult(NSDictionary *value);
+static double monotonicMs(void) {
+  static mach_timebase_info_data_t timebase;
+  if (!timebase.denom) mach_timebase_info(&timebase);
+  return (double)mach_continuous_time() * timebase.numer / timebase.denom / 1000000.0;
+}
+static bool timely(double now, double lease, double progress) { return now < lease && now < progress; }
+static bool assertionCreated(IOReturn result, IOPMAssertionID value) { return result == kIOReturnSuccess && value != kIOPMNullAssertionID; }
+static bool displayAvailable(CGDirectDisplayID display) {
+  return display != kCGNullDirectDisplay && CGDisplayIsOnline(display) && CGDisplayIsActive(display) && !CGDisplayIsAsleep(display);
+}
+static CGDirectDisplayID displayAt(CGPoint point) {
+  CGDirectDisplayID displays[32]; uint32_t count = 0;
+  if (CGGetActiveDisplayList(32, displays, &count) != kCGErrorSuccess) return kCGNullDirectDisplay;
+  for (uint32_t index = 0; index < count; index++)
+    if (displayAvailable(displays[index]) && CGRectContainsPoint(CGDisplayBounds(displays[index]), point)) return displays[index];
+  return kCGNullDirectDisplay;
+}
+static bool anyDisplay(void) {
+  CGDirectDisplayID displays[32]; uint32_t count = 0;
+  if (CGGetActiveDisplayList(32, displays, &count) != kCGErrorSuccess) return false;
+  for (uint32_t index = 0; index < count; index++) if (displayAvailable(displays[index])) return true;
+  return false;
+}
 static bool authorityMatches(NSDictionary *request) {
   NSDictionary *plan = request[@"plan"];
   return acceptedHostInstance &&
@@ -90,7 +122,7 @@ static bool locked(void) {
 }
 typedef struct {
   bool stopped, preempted, tapReady, accessibility, inputMonitoring, locked,
-      chromeForeground;
+      chromeForeground, displayAvailable;
 } DesktopGuard;
 static NSString *guardFailure(DesktopGuard state) {
   if (state.stopped || state.preempted)
@@ -105,6 +137,7 @@ static NSString *guardFailure(DesktopGuard state) {
     return @"screen-locked-or-session-unavailable";
   if (!state.chromeForeground)
     return @"chrome-not-foreground";
+  if (!state.displayAvailable) return @"display-unavailable";
   return nil;
 }
 static NSString *check(void) {
@@ -112,7 +145,7 @@ static NSString *check(void) {
       stopped, preempted, inputMonitorActive(), AXIsProcessTrusted(),
       CGPreflightListenEventAccess(), locked(),
       [NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier
-          isEqual:@"com.google.Chrome"]});
+          isEqual:@"com.google.Chrome"], anyDisplay()});
 }
 static bool mapCssRect(CGRect content, CGRect css, double width, double height,
                        CGRect *mapped) {
@@ -137,8 +170,95 @@ static void releaseAwake(void) {
     awake = 0;
   }
 }
+static void invalidateActivityFor(NSDictionary *expected, NSString *reason, bool notify) {
+  pthread_mutex_lock(&activityLock);
+  if (expected && (!activeActivity || ![expected[@"activityId"] isEqual:activeActivity[@"activityId"]] ||
+    ![expected[@"authorizationEpoch"] isEqual:activeActivity[@"authorizationEpoch"]])) { pthread_mutex_unlock(&activityLock); return; }
+  NSString *activityId = activeActivity[@"activityId"];
+  NSDictionary *invalidated = activeActivity;
+  activeActivity = nil;
+  activityDeadline = progressDeadline = 0;
+  activityDisplay = kCGNullDirectDisplay;
+  releaseAwake();
+  pthread_mutex_unlock(&activityLock);
+  stopped = true;
+  if (notify && activityId) writeResult(@{@"kind": @"activity-invalidated", @"activityId": activityId,
+    @"authorizationEpoch": invalidated[@"authorizationEpoch"], @"stopEpoch": invalidated[@"stopEpoch"],
+    @"browserSessionEpoch": invalidated[@"browserSessionEpoch"], @"hostGeneration": invalidated[@"hostGeneration"],
+    @"hostInstanceEpoch": invalidated[@"hostInstanceEpoch"], @"reason": reason});
+}
+static void invalidateActivity(NSString *reason, bool notify) { invalidateActivityFor(nil, reason, notify); }
+static NSDictionary *activityStatus(void) {
+  pthread_mutex_lock(&activityLock);
+  NSDictionary *value = @{@"awake": @(awake != 0), @"assertionId": @(awake), @"lease": activeActivity ?: @{},
+    @"expired": @(activeActivity && !timely(monotonicMs(), activityDeadline, progressDeadline))};
+  pthread_mutex_unlock(&activityLock);
+  return value;
+}
+static bool sameActivity(NSDictionary *lease) {
+  return activeActivity && [lease[@"activityId"] isEqual:activeActivity[@"activityId"]] &&
+    [lease[@"authorizationEpoch"] isEqual:activeActivity[@"authorizationEpoch"]] &&
+    [lease[@"stopEpoch"] longLongValue] == acceptedStopEpoch && [lease[@"browserSessionEpoch"] isEqual:acceptedSessionEpoch];
+}
+static NSString *activityFailure(NSDictionary *lease) {
+  pthread_mutex_lock(&activityLock);
+  NSString *error = !sameActivity(lease) || !awake ? @"native-workflow-activity-required" :
+    !timely(monotonicMs(), activityDeadline, progressDeadline) ? @"native-workflow-activity-expired" : nil;
+  pthread_mutex_unlock(&activityLock);
+  return error;
+}
+static NSString *activityCommand(NSDictionary *request) {
+  NSDictionary *lease = request[@"activity"];
+  if (![lease isKindOfClass:NSDictionary.class] || ![request[@"hostInstanceEpoch"] isEqual:acceptedHostInstance] ||
+    [request[@"hostGeneration"] unsignedLongLongValue] != acceptedGeneration ||
+    [lease[@"stopEpoch"] longLongValue] != acceptedStopEpoch || ![lease[@"browserSessionEpoch"] isEqual:acceptedSessionEpoch]) return @"stale-native-activity-authority";
+  NSString *command = request[@"command"], *identifier = lease[@"activityId"];
+  if (![identifier isKindOfClass:NSString.class] || [identifier rangeOfString:@"^[a-zA-Z0-9_-]{1,100}$" options:NSRegularExpressionSearch].location == NSNotFound) return @"invalid-native-activity-id";
+  pthread_mutex_lock(&activityLock);
+  NSString *error = nil;
+  if ([command isEqual:@"activity-end"]) {
+    if (!sameActivity(lease)) error = @"stale-native-activity-end";
+    else { activeActivity = nil; activityDeadline = progressDeadline = 0; releaseAwake(); }
+  } else {
+    double now = NSDate.date.timeIntervalSince1970 * 1000;
+    double ttl = [lease[@"expiresAt"] doubleValue] - now, progress = [lease[@"progressExpiresAt"] doubleValue] - now;
+    uint64_t epoch = [lease[@"authorizationEpoch"] unsignedLongLongValue];
+    if (!isfinite(ttl + progress) || ttl <= 0 || ttl > 15000 || progress <= 0 || progress > 180000) error = @"invalid-native-activity-expiry";
+    else if ([command isEqual:@"activity-begin"]) {
+      if (activeActivity || !epoch || epoch <= highestActivityEpoch) error = @"stale-or-busy-native-activity";
+      else if ((error = check())) {}
+      else {
+        IOPMAssertionID assertion = kIOPMNullAssertionID;
+        IOReturn created = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep, kIOPMAssertionLevelOn, CFSTR("CBG active authorized workflow"), &assertion);
+        if (!assertionCreated(created, assertion) || stopped || preempted || [lease[@"expiresAt"] doubleValue] <= NSDate.date.timeIntervalSince1970 * 1000) {
+          if (assertion) IOPMAssertionRelease(assertion);
+          error = @"native-awake-assertion-create-failed";
+        } else {
+          awake = assertion; highestActivityEpoch = epoch;
+          NSMutableDictionary *saved = [lease mutableCopy]; saved[@"hostGeneration"] = @(acceptedGeneration); saved[@"hostInstanceEpoch"] = acceptedHostInstance; activeActivity = [saved copy];
+          activityDeadline = monotonicMs() + ttl; progressDeadline = monotonicMs() + progress;
+          activityDisplay = kCGNullDirectDisplay; lastPostedAction = nil; creditedActions = [NSMutableSet new];
+        }
+      }
+    } else if ([command isEqual:@"activity-renew"]) {
+      if (!sameActivity(lease) || !awake || !timely(monotonicMs(), activityDeadline, progressDeadline)) error = @"stale-native-activity-renewal";
+      else {
+        NSInteger sequence = [lease[@"progressSequence"] integerValue], prior = [activeActivity[@"progressSequence"] integerValue];
+        if (sequence == prior && ![lease[@"progressExpiresAt"] isEqual:activeActivity[@"progressExpiresAt"]]) error = @"heartbeat-cannot-extend-progress";
+        else if (sequence != prior && (sequence != prior + 1 || ![lease[@"progressActionId"] isEqual:lastPostedAction] || [creditedActions containsObject:lease[@"progressActionId"]])) error = @"unverified-native-activity-progress";
+        else {
+          if (sequence != prior) { [creditedActions addObject:lease[@"progressActionId"]]; progressDeadline = monotonicMs() + progress; }
+          NSMutableDictionary *saved = [lease mutableCopy]; saved[@"hostGeneration"] = @(acceptedGeneration); saved[@"hostInstanceEpoch"] = acceptedHostInstance; activeActivity = [saved copy]; activityDeadline = monotonicMs() + ttl;
+        }
+      }
+    } else error = @"unsupported-activity-command";
+  }
+  pthread_mutex_unlock(&activityLock);
+  return error;
+}
 static NSString *post(CGEventRef event) {
   NSString *error = check();
+  if (!error) { pthread_mutex_lock(&activityLock); error = !activeActivity || !awake || !timely(monotonicMs(), activityDeadline, progressDeadline) ? @"native-workflow-activity-expired" : nil; pthread_mutex_unlock(&activityLock); }
   if (!error && proofDeadline > 0 &&
       NSDate.date.timeIntervalSince1970 * 1000 > proofDeadline)
     error = @"target-proof-expired-before-input";
@@ -199,6 +319,8 @@ static NSString *inputText(NSString *text, bool numeric) {
   return error;
 }
 static NSString *validateAndExecute(NSDictionary *request) {
+  NSString *activityError = activityFailure(request[@"plan"][@"activity"]);
+  if (activityError) return activityError;
   if (!authorityMatches(request))
     return @"stale-native-dispatch-generation";
   NSString *error = check();
@@ -287,6 +409,8 @@ static NSString *validateAndExecute(NSDictionary *request) {
   CGGetDisplaysWithPoint(point, 8, displays, &count);
   if (count != 1)
     return @"native-screen-ambiguous";
+  if (!displayAvailable(displays[0])) return @"native-screen-unavailable";
+  pthread_mutex_lock(&activityLock); activityDisplay = displays[0]; pthread_mutex_unlock(&activityLock);
   CGRect screen = CGDisplayBounds(displays[0]);
   double backing = (double)CGDisplayPixelsWide(displays[0]) / screen.size.width;
   if (!CGRectContainsRect(screen, targetRect) ||
@@ -626,15 +750,11 @@ static NSString *validateAndExecute(NSDictionary *request) {
   CFRelease(hit);
   if (error)
     return error;
-  IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep,
-                              kIOPMAssertionLevelOn,
-                              CFSTR("CBG authorized input"), &awake);
   if ([kind isEqual:@"return-to-list"] || [kind isEqual:@"refresh-list"]) {
     error = key([kind isEqual:@"refresh-list"]
                     ? 15
                     : ([proof[@"ownedChildTab"] boolValue] ? 13 : 33),
                 kCGEventFlagMaskCommand);
-    releaseAwake();
     return error;
   }
   error = post(CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, point,
@@ -644,7 +764,6 @@ static NSString *validateAndExecute(NSDictionary *request) {
       error = post(CGEventCreateScrollWheelEvent(
           NULL, kCGScrollEventUnitPixel, 1,
           (int32_t)-round([target[@"deltaY"] doubleValue] * sy)));
-    releaseAwake();
     return error;
   }
   if (!error && ![kind isEqual:@"inspect-item"]) {
@@ -693,7 +812,6 @@ static NSString *validateAndExecute(NSDictionary *request) {
     } else if (![@[ @"checkbox", @"radio" ] containsObject:type])
       error = inputText(target[@"value"], false);
   }
-  releaseAwake();
   return error ?: check();
 }
 static CGEventRef tapCallback(CGEventTapProxy proxy, CGEventType type,
@@ -709,12 +827,15 @@ static CGEventRef tapCallback(CGEventTapProxy proxy, CGEventType type,
   return event;
 }
 static void writeResult(NSDictionary *value) {
+  static pthread_mutex_t outputLock = PTHREAD_MUTEX_INITIALIZER;
   NSData *data = [NSJSONSerialization dataWithJSONObject:value
                                                  options:NSJSONWritingSortedKeys
                                                    error:NULL];
+  pthread_mutex_lock(&outputLock);
   fwrite(data.bytes, 1, data.length, stdout);
   fputc('\n', stdout);
   fflush(stdout);
+  pthread_mutex_unlock(&outputLock);
 }
 int main(int argc, const char **argv) {
   @autoreleasepool {
@@ -737,11 +858,11 @@ int main(int argc, const char **argv) {
           mapCssRect(content, css, 0, 800, &mapped) ||
           mapCssRect(content, CGRectMake(NAN, 0, 20, 20), 1200, 800, &mapped))
         return 1;
-      DesktopGuard ready = {false, false, true, true, true, false, true};
+      DesktopGuard ready = {false, false, true, true, true, false, true, true};
       if (guardFailure(ready))
         return 1;
-      DesktopGuard variants[7] = {ready, ready, ready, ready,
-                                  ready, ready, ready};
+      DesktopGuard variants[8] = {ready, ready, ready, ready,
+                                  ready, ready, ready, ready};
       variants[0].stopped = true;
       variants[1].preempted = true;
       variants[2].tapReady = false;
@@ -749,13 +870,16 @@ int main(int argc, const char **argv) {
       variants[4].inputMonitoring = false;
       variants[5].locked = true;
       variants[6].chromeForeground = false;
-      for (int index = 0; index < 7; index++)
+      variants[7].displayAvailable = false;
+      for (int index = 0; index < 8; index++)
         if (!guardFailure(variants[index]))
           return 1;
       if (monitorState(true, false) || monitorState(false, true) ||
           !monitorState(true, true))
         return 1;
-      puts("native coordinate and desktop-guard self-tests passed (19 "
+      if (!timely(9, 10, 11) || timely(10, 10, 11) || timely(10, 11, 10) ||
+        assertionCreated(kIOReturnError, 1) || assertionCreated(kIOReturnSuccess, 0) || !assertionCreated(kIOReturnSuccess, 1)) return 1;
+      puts("native activity, coordinate and desktop-guard self-tests passed (26 "
            "assertions, no input posted)");
       return 0;
     }
@@ -789,6 +913,22 @@ int main(int argc, const char **argv) {
       CFRelease(source);
       CFRelease(tap);
     });
+    dispatch_source_t activityWatchdog = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+    dispatch_source_set_timer(activityWatchdog, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), 100 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(activityWatchdog, ^{
+      @autoreleasepool {
+        pthread_mutex_lock(&activityLock);
+        NSDictionary *lease = activeActivity;
+        bool active = lease != nil;
+        bool expired = active && !timely(monotonicMs(), activityDeadline, progressDeadline);
+        CGDirectDisplayID display = activityDisplay;
+        pthread_mutex_unlock(&activityLock);
+        NSString *failure = active ? check() : nil;
+        if (expired || failure || (active && display && !displayAvailable(display)))
+          invalidateActivityFor(lease, failure ?: (expired ? @"native-workflow-activity-expired" : @"activity-display-unavailable"), true);
+      }
+    });
+    dispatch_resume(activityWatchdog);
     char *line = NULL;
     size_t capacity = 0;
     ssize_t length;
@@ -808,16 +948,24 @@ int main(int argc, const char **argv) {
             continue;
           }
           NSString *command=request[@"command"], *actionId=request[@"actionId"] ?: request[@"plan"][@"actionId"] ?: @"";
-          if ([command isEqual:@"status"])
+          if ([command hasPrefix:@"activity-"]) {
+            NSString *error = activityCommand(request);
+            pthread_mutex_lock(&activityLock);
+            bool asserted = awake != 0;
+            pthread_mutex_unlock(&activityLock);
+            writeResult(@{@"ok": @(!error), @"actionId": actionId, @"activityId": request[@"activity"][@"activityId"] ?: @"", @"awake": @(asserted), @"error": error ?: @""});
+          } else if ([command isEqual:@"status"])
             writeResult(@{
               @"ok" : @YES,
               @"actionId" : actionId,
+              @"activity": activityStatus(),
               @"permissions" : @{
                 @"accessibility" : @(AXIsProcessTrusted()),
                 @"inputMonitoring" : @(CGPreflightListenEventAccess()),
                 @"inputMonitorActive" : @(inputMonitorActive()),
                 @"screenRecording" : @(CGPreflightScreenCaptureAccess()),
                 @"locked" : @(locked()),
+                @"displayAvailable": @(anyDisplay()),
                 @"frontmostChrome" :
                     @([NSWorkspace.sharedWorkspace.frontmostApplication
                             .bundleIdentifier isEqual:@"com.google.Chrome"])
@@ -830,9 +978,10 @@ int main(int argc, const char **argv) {
               acceptedGeneration =
                   [request[@"hostGeneration"] unsignedLongLongValue];
             stopped = true;
-            releaseAwake();
+            invalidateActivity(@"native-stop", false);
             writeResult(@{@"ok" : @YES, @"actionId" : actionId});
           } else if ([command isEqual:@"resume"]) {
+            invalidateActivity(@"native-resume-invalidated-old-activity", false);
             NSString *instance = request[@"hostInstanceEpoch"],
                      *session = request[@"browserSessionEpoch"];
             uint64_t generation =
@@ -869,6 +1018,8 @@ int main(int argc, const char **argv) {
           } else if ([command isEqual:@"execute"]) {
             postedAny = false;
             NSString *error = validateAndExecute(request);
+            if (!error && postedAny) { pthread_mutex_lock(&activityLock); lastPostedAction = actionId; pthread_mutex_unlock(&activityLock); }
+            if (error) invalidateActivityFor(request[@"plan"][@"activity"], error, true);
             writeResult(error ? @{
               @"ok" : @NO,
               @"actionId" : actionId,
@@ -893,13 +1044,14 @@ int main(int argc, const char **argv) {
             });
         } @catch (NSException *exception) {
           stopped = true;
-          releaseAwake();
+          invalidateActivity(@"native-invalid-command", true);
           writeResult(@{@"ok" : @NO, @"error" : @"native-invalid-command"});
         }
       }
     }
     free(line);
-    releaseAwake();
+    dispatch_source_cancel(activityWatchdog);
+    invalidateActivity(@"native-input-disconnected", false);
     return 0;
   }
 }

@@ -402,6 +402,7 @@ export function bindNativeCrawlSource(
     return result;
   };
   const scope = {
+    activity: adapter.activity,
     crawlLease,
     context: () => (currentSubject ? querySubjectContext(currentSubject) : current),
   };

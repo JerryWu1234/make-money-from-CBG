@@ -1,4 +1,18 @@
 import { randomUUID } from "node:crypto";
+import {
+  nativeWorkflowActivity,
+  nativeWorkflowScope,
+  withNativeActivity,
+  withNativeWorkflow,
+} from "./native-workflow";
+import {
+  NATIVE_ACTIVITY_TTL_MS,
+  NATIVE_ACTIVITY_HEARTBEAT_MS,
+  NATIVE_ACTIVITY_PROGRESS_MS,
+  type NativeActivityDriver,
+  type NativeActivityHandle,
+  type NativeActivityLease,
+} from "./native-activity";
 import { chmodSync, existsSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import net, { type Socket, type Server } from "node:net";
 import path from "node:path";
@@ -110,9 +124,201 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     timeoutMs: number;
   };
   private starting?: Promise<void>;
+  private activityEpoch = 0;
+  private workflowActivity?: {
+    lease: NativeActivityLease;
+    control: AbortController;
+    timer?: ReturnType<typeof setInterval>;
+    pending?: Promise<void>;
+    detach: () => void;
+    closed: boolean;
+    recoveryId?: string;
+  };
+  readonly activity: NativeActivityDriver = { begin: (signal) => this.beginActivity(signal) };
   constructor(private readonly options: NativeRuntimeOptions) {
     this.store = new BridgeStore(options.db);
     if (this.store.recover().length) this.reason = "上次输入结果未知，须先核验官网页面再人工继续";
+  }
+  private async beginActivity(
+    signal: AbortSignal,
+    allowRecovery = false,
+  ): Promise<NativeActivityHandle> {
+    signal.throwIfAborted();
+    if (this.workflowActivity) throw new Error("已有原生活动工作流，不能借用其授权");
+    if (this.idle && !this.recovery) await this.resumeForRun();
+    signal.throwIfAborted();
+    if (
+      (this.stopped && !(allowRecovery && this.recovery)) ||
+      !this.socket ||
+      this.socket.destroyed
+    )
+      throw new Error("原生工作流尚未获准启动");
+    const now = Date.now();
+    const state: NonNullable<ExtensionNativeRuntime["workflowActivity"]> = {
+      lease: {
+        activityId: randomUUID(),
+        authorizationEpoch: ++this.activityEpoch,
+        stopEpoch: this.options.stopEpoch(),
+        browserSessionEpoch: this.sessionEpoch,
+        expiresAt: now + NATIVE_ACTIVITY_TTL_MS,
+        progressExpiresAt: now + NATIVE_ACTIVITY_PROGRESS_MS,
+        progressSequence: 0,
+      },
+      control: new AbortController(),
+      detach: () => {},
+      closed: false,
+      recoveryId: this.recovery?.ticket.ticketId,
+    };
+    this.workflowActivity = state;
+    const abort = () => {
+      void this.stop("活动工作流已取消");
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    state.detach = () => signal.removeEventListener("abort", abort);
+    try {
+      const result = await this.request({
+        kind: "activity",
+        command: "begin",
+        actionId: randomUUID(),
+        activity: state.lease,
+      });
+      if (
+        !result.ok ||
+        result.awake !== true ||
+        result.activityId !== state.lease.activityId ||
+        this.workflowActivity !== state
+      )
+        throw new Error(textValue(result.error, "防休眠断言申请失败，禁止输入"));
+      signal.throwIfAborted();
+      state.timer = setInterval(() => {
+        if (state.pending || state.closed) return;
+        void this.queueActivityRenew(state).catch(() => {});
+      }, NATIVE_ACTIVITY_HEARTBEAT_MS);
+      state.timer.unref();
+      return {
+        get lease() {
+          return state.lease;
+        },
+        signal: state.control.signal,
+        close: async () => {
+          if (state.closed) return;
+          state.closed = true;
+          clearInterval(state.timer);
+          state.detach();
+          await state.pending;
+          if (this.workflowActivity !== state) return;
+          this.workflowActivity = undefined;
+          try {
+            const ended = await this.request({
+              kind: "activity",
+              command: "end",
+              actionId: randomUUID(),
+              activity: state.lease,
+            });
+            if (!ended.ok) throw new Error(textValue(ended.error, "活动结束未确认"));
+          } catch (error) {
+            if (
+              this.activityEpoch === state.lease.authorizationEpoch &&
+              !this.workflowActivity &&
+              this.recovery?.ticket.ticketId === state.recoveryId
+            )
+              await this.stop("活动结束未确认，输入已停止");
+            throw error;
+          }
+        },
+      };
+    } catch (error) {
+      if (this.workflowActivity === state)
+        await this.stop(error instanceof Error ? error.message : "活动申请失败");
+      throw error;
+    }
+  }
+  private queueActivityRenew(
+    state: NonNullable<ExtensionNativeRuntime["workflowActivity"]>,
+    progressActionId?: string,
+  ): Promise<void> {
+    const operation = (state.pending || Promise.resolve())
+      .then(() => this.renewActivity(state, progressActionId))
+      .catch(async (error) => {
+        await this.failActivity(
+          error instanceof Error ? error.message : "活动续期失败",
+          state.lease,
+        );
+        throw error;
+      });
+    state.pending = operation;
+    const cleanup = () => {
+      if (state.pending === operation) state.pending = undefined;
+    };
+    void operation.then(cleanup, cleanup);
+    return operation;
+  }
+  private async renewActivity(
+    state: NonNullable<ExtensionNativeRuntime["workflowActivity"]>,
+    progressActionId?: string,
+  ) {
+    const now = Date.now();
+    if (
+      state.closed ||
+      this.workflowActivity !== state ||
+      state.lease.stopEpoch !== this.options.stopEpoch() ||
+      now >= state.lease.expiresAt ||
+      now >= state.lease.progressExpiresAt
+    )
+      throw new Error("原生活动已过期或授权代次变化，输入已停止");
+    const lease = {
+      ...state.lease,
+      expiresAt: now + NATIVE_ACTIVITY_TTL_MS,
+      ...(progressActionId
+        ? {
+            progressSequence: state.lease.progressSequence + 1,
+            progressActionId,
+            progressExpiresAt: now + NATIVE_ACTIVITY_PROGRESS_MS,
+          }
+        : {}),
+    };
+    const result = await this.request({
+      kind: "activity",
+      command: "renew",
+      actionId: randomUUID(),
+      activity: lease,
+    });
+    if (
+      !result.ok ||
+      result.awake !== true ||
+      result.activityId !== lease.activityId ||
+      this.workflowActivity !== state
+    )
+      throw new Error(textValue(result.error, "活动续期未确认"));
+    state.lease = lease;
+  }
+  private detachActivity(reason: string) {
+    const activity = this.workflowActivity;
+    this.workflowActivity = undefined;
+    if (activity) {
+      activity.closed = true;
+      clearInterval(activity.timer);
+      activity.detach();
+      activity.control.abort(new Error(reason));
+    }
+    return activity;
+  }
+  private async failActivity(reason: string, lease: NativeActivityLease) {
+    if (
+      this.workflowActivity?.lease.activityId !== lease.activityId ||
+      this.workflowActivity.lease.authorizationEpoch !== lease.authorizationEpoch
+    )
+      return;
+    await this.stop(reason);
+    try {
+      await this.options.onRisk("native-activity-stopped", {
+        activityId: lease.activityId,
+        authorizationEpoch: lease.authorizationEpoch,
+        reason,
+      });
+    } catch {
+      this.reason = "活动停止状态保存失败，禁止继续输入";
+    }
   }
   status(): NativeRuntimeStatus {
     return {
@@ -202,7 +408,9 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     socket.on("close", () => {
       if (this.socket !== socket) return;
       this.socket = undefined;
-      void this.stop("宿主连接中断，输入结果须人工核验");
+      if (this.workflowActivity)
+        void this.failActivity("宿主连接中断，输入结果须人工核验", this.workflowActivity.lease);
+      else void this.stop("宿主连接中断，输入结果须人工核验");
       this.stopped = true;
       this.reason = "宿主连接中断，输入结果须人工核验";
       for (const value of this.pending.values()) value.reject(new Error(this.reason));
@@ -228,10 +436,23 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
       return;
     }
     if (message.kind === "host-status") {
+      const activity = this.detachActivity(String(message.reason));
       if (message.reason !== "server-stop") this.idle = false;
       this.stopped = true;
       this.reason = String(message.reason);
+      for (const pending of this.pending.values()) pending.reject(new Error(this.reason));
+      this.pending.clear();
       this.events.emit("change");
+      if (activity && message.reason !== "server-stop") {
+        try {
+          await this.options.onRisk("native-activity-stopped", {
+            activityId: activity.lease.activityId,
+            reason: message.reason,
+          });
+        } catch {
+          this.reason = "宿主停止状态保存失败，禁止继续输入";
+        }
+      }
       return;
     }
     const envelope = validateBridgeEnvelope(value);
@@ -617,6 +838,25 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     return this.request({ kind: "command", command: "status", actionId: randomUUID() });
   }
   async execute(plan: ActionPlan, signal?: AbortSignal): Promise<PageSnapshot> {
+    const workflow = nativeWorkflowActivity();
+    if (workflow?.driver !== this.activity) {
+      const local = signal || new AbortController().signal;
+      return nativeWorkflowScope()
+        ? withNativeActivity(this.activity, local, () => this.execute(plan, local))
+        : withNativeWorkflow(local, () => this.execute(plan, local), {
+            context: () => undefined,
+            activity: this.activity,
+          });
+    }
+    const activity = this.workflowActivity;
+    if (
+      !activity ||
+      activity.closed ||
+      workflow.handle.lease.activityId !== activity.lease.activityId
+    )
+      throw new Error("原生活动授权已失效");
+    signal = AbortSignal.any([...(signal ? [signal] : []), workflow.handle.signal]);
+    plan = { ...plan, activity: { ...activity.lease } };
     if (this.detailRead)
       signal = signal
         ? AbortSignal.any([signal, this.detailRead.controller.signal])
@@ -645,8 +885,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
                     : "selectedChild"
               ] === target.index
             : target.kind === "query-field" || target.kind === "market-field"
-              ? before.formValues?.[target.kind === "query-field" ? target.field : target.field] ===
-                target.value
+              ? before.formValues?.[target.field] === target.value
               : target.kind === "market-choice"
                 ? before.market?.menus
                     ?.find((menu) => menu.id === target.panel)
@@ -1003,6 +1242,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
       signal,
     );
     if (preflightError) throw preflightError;
+    await this.queueActivityRenew(activity, plan.actionId);
     return outcome;
   }
   async query(
@@ -1185,15 +1425,20 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
         context: { ...context, pageId: ticket.pageId, recoveryEpoch: context.requiredBindingEpoch },
       });
       if (!result.ok) throw new Error(textValue(result.error, "原生恢复握手失败"));
-      await this.waitFor(
-        (value) =>
-          value.context.stopEpoch === ticket.stopEpoch &&
-          value.authenticated === true &&
-          value.access === "normal" &&
-          !value.loading &&
-          value.visible,
-        { pageId: ticket.pageId, after: "", timeoutMs: 5000, signal: recovery.controller.signal },
-      );
+      const activity = await this.beginActivity(recovery.controller.signal, true);
+      try {
+        await this.waitFor(
+          (value) =>
+            value.context.stopEpoch === ticket.stopEpoch &&
+            value.authenticated === true &&
+            value.access === "normal" &&
+            !value.loading &&
+            value.visible,
+          { pageId: ticket.pageId, after: "", timeoutMs: 5000, signal: recovery.controller.signal },
+        );
+      } finally {
+        await activity.close();
+      }
       if (this.options.stopEpoch() !== ticket.stopEpoch || this.recovery !== recovery)
         throw new Error("新的访问风险使本次原生恢复失效");
       ticket.verifiedAt = Date.now();
@@ -1282,6 +1527,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     );
   }
   async stop(reason: string) {
+    this.detachActivity(reason);
     this.idle = false;
     const recovery = this.recovery;
     this.recovery = undefined;
