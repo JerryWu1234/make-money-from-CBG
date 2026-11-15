@@ -4,6 +4,7 @@ import { crawlAccessFailure } from "./types";
 import { completeSchoolSkillsFromText, schoolSkillsComplete } from "./school-skills";
 import { isCurrentRoleCapture, roleIdentityIssues } from "./role-identity";
 import { browserConnectionFailure } from "../browser-connection";
+import { fieldEvidence } from "./field-evidence";
 
 export class IncompleteCaptureError extends Error {
   constructor(
@@ -85,7 +86,20 @@ function normalizeSchoolSkillCapture(detail: RoleDetail): RoleDetail {
   if (!hasSchoolSkillContract(detail)) return detail;
   const tabs = detail.tabs.map(completeSchoolSkillsFromText);
   // 这里只补已被原文证明的师门项；源码与元素须保留至 store.archive，不能提前 compact。
-  return tabs.some((tab, index) => tab !== detail.tabs[index]) ? { ...detail, tabs } : detail;
+  return tabs.some((tab, index) => tab !== detail.tabs[index])
+    ? {
+        ...detail,
+        tabs,
+        ...(detail.sourceEvidence
+          ? {
+              sourceEvidence: {
+                ...detail.sourceEvidence,
+                fields: fieldEvidence(tabs, detail.valuation),
+              },
+            }
+          : {}),
+      }
+    : detail;
 }
 
 /** Partial snapshots remain useful, but are not complete collection evidence. */
@@ -96,6 +110,26 @@ export function captureIssues(
   listing?: Pick<Listing, "serverId" | "eid">,
 ): string[] {
   const issues = [...(detail.valuation?.issues || [])];
+  if (requireEvidence && !detail.sourceEvidence)
+    issues.push("详情字段来源和源版本尚未核验，需补采");
+  for (const tab of detail.tabs)
+    for (const item of tab.items || [])
+      if (
+        ((item.kind === "skill" && item.category !== "召唤兽技能") || item.kind === "innerSkill") &&
+        !/^\d{1,3}$/.test(item.level || "")
+      )
+        issues.push(`「${tab.name}」${item.name}的技能等级未完整读取，需补采`);
+  if (detail.sourceEvidence && !detail.sourceEvidence.stable)
+    issues.push("本次详情源版本未确认一致，需补采");
+  if (detail.sourceEvidence && includeAssets) {
+    for (const name of ["坐骑", "锦衣/外观", "玩家之家"])
+      if (
+        !detail.sourceEvidence.fields.some(
+          (field) => field.path === `tabs.${name}.content` && field.state !== "unknown",
+        )
+      )
+        issues.push(`「${name}」正文或明确无资产证据未完整读取，需补采`);
+  }
   if (requireEvidence && detail.captureVersion !== CAPTURE_VERSION)
     issues.push("角色资料采集版本过旧，需重新核验");
   if (requireEvidence && !detail.valuation) issues.push("角色本体资料未核验");

@@ -228,6 +228,108 @@ export async function detailRootSelector(page: Page): Promise<string> {
   return roots.get(page)!.selector;
 }
 
+/** Retain the discovered leaves themselves, before a later locator can resolve a replacement. */
+export async function retainDetailLeaves<A, R extends { paths: string[] }>(
+  page: Page,
+  discover: (root: HTMLElement, arg: A) => { value: R; elements: Element[] },
+  arg: A,
+) {
+  await assertDetailRoot(page);
+  const root = roots.get(page);
+  if (!root) throw incomplete();
+  const result = await root.element.evaluateHandle(
+    discover as (root: HTMLElement, arg: unknown) => { value: R; elements: Element[] },
+    arg,
+  );
+  const handles: ElementHandle<Element>[] = [];
+  let disposed = false;
+  try {
+    const valueHandle = await result.getProperty("value"),
+      elementsHandle = await result.getProperty("elements");
+    let value: R;
+    try {
+      value = await valueHandle.jsonValue();
+      const properties = await elementsHandle.getProperties();
+      for (const [name, property] of properties) {
+        const element = property.asElement();
+        if (/^\d+$/.test(name) && element) handles[Number(name)] = element;
+        else await property.dispose();
+      }
+    } finally {
+      await valueHandle.dispose();
+      await elementsHandle.dispose();
+    }
+    const assert = async () => {
+      if (disposed || roots.get(page) !== root || handles.length !== value.paths.length)
+        throw incomplete();
+      await assertDetailRoot(page);
+      try {
+        if (
+          !(await root.element.evaluate(
+            (element, { leaves, paths, rootSelector }) =>
+              element.isConnected &&
+              element.ownerDocument === document &&
+              document.querySelector(rootSelector) === element &&
+              leaves.every(
+                (leaf, index) =>
+                  leaf.isConnected &&
+                  leaf.ownerDocument === document &&
+                  element.contains(leaf) &&
+                  element.querySelectorAll(paths[index]).length === 1 &&
+                  element.querySelector(paths[index]) === leaf,
+              ),
+            { leaves: handles, paths: value.paths, rootSelector: root.selector },
+          ))
+        )
+          throw incomplete();
+      } catch (error) {
+        if (page.isClosed()) throw error;
+        throw incomplete();
+      }
+      if (roots.get(page) !== root || disposed) throw incomplete();
+    };
+    await assert();
+    return {
+      value,
+      assert,
+      locator: (index: number) => {
+        if (disposed || !handles[index]) throw incomplete();
+        return page.locator(root.selector).locator(value.paths[index]);
+      },
+      dispose: async () => {
+        disposed = true;
+        await Promise.all(handles.map((element) => element.dispose().catch(() => {})));
+      },
+    };
+  } catch (error) {
+    await Promise.all(handles.map((element) => element.dispose().catch(() => {})));
+    throw error;
+  } finally {
+    await result.dispose();
+  }
+}
+
+export function retainDetailLeafSelector(page: Page, selector: string) {
+  return retainDetailLeaves(
+    page,
+    (root, selector) => {
+      const elements = [...root.querySelectorAll(selector)].filter((element) =>
+        element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }),
+      );
+      const paths = elements.map((element) => {
+        const parts: string[] = [];
+        for (let node: Element | null = element; node && node !== root; node = node.parentElement)
+          parts.unshift(
+            `${node.tagName.toLowerCase()}:nth-child(${[...node.parentElement!.children].indexOf(node) + 1})`,
+          );
+        return ":scope > " + parts.join(" > ");
+      });
+      return { value: { paths }, elements };
+    },
+    selector,
+  );
+}
+
 export async function setDetailPetItems(page: Page, items: { path: string; section: string }[]) {
   await assertDetailRoot(page);
   roots.get(page)!.petItems = structuredClone(items);

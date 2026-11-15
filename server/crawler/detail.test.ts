@@ -78,6 +78,7 @@ const fixture = (
   equipmentDescription = "",
   equipmentHtml?: string,
   schoolCount = 7,
+  publicSource: false | { serverId?: string; eid?: string } = {},
 ) => {
   const gear = `<p>道具和法宝</p><div id="RoleEquip"><a data_kindid="999" data_equip_name="新武器" data_equip_desc="${equipmentDescription}" data_equip_category="武器" data_tip_box="RoleEquipTipsBox"><img ${iconKindId ? `data_kindid="${iconKindId}"` : ""} width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" onmouseout="document.getElementById('RoleEquipTipsBox').style.display='none'" onmouseover="${missingTooltip ? "" : "document.getElementById('RoleEquipTipsBox').style.display='block';document.getElementById('RoleEquipTipsBox').innerText='新武器\\n等级 100\\n伤害 +420\\n魔力 +20'"}"></a></div>`;
   const skills =
@@ -90,12 +91,29 @@ const fixture = (
       )
       .join("") +
     "<p>生活技能</p>";
+  const identity = publicSource && {
+    server_id: publicSource.serverId || listing.serverId,
+    eid: publicSource.eid || listing.eid,
+  };
+  const source = identity
+    ? `<textarea id="equip_desc_value" hidden>${JSON.stringify({ ...identity, role: "fixture-role-source" })}</textarea><script>window.EquipInfo=${JSON.stringify(identity)}</script>`
+    : "";
+  const assetBodies: Record<string, string> = {
+    坐骑: "<p>坐骑：新资料</p><p>坐骑成长：2.3</p>",
+    "锦衣/外观": "<p>锦衣：素色锦衣</p><p>祥瑞：七彩祥瑞</p>",
+    玩家之家: "<p>房屋：豪宅</p><p>庭院：大型庭院</p>",
+  };
   return `<meta charset="utf-8"><section><nav>${MAIN_TABS.map(
     (name) =>
       `<button onclick="show(${JSON.stringify(name).replaceAll('"', "&quot;")})">${name}</button>`,
   ).join(
     "",
-  )}</nav><div id="panel">${"基本资料。".repeat(60)}</div><div id="RoleEquipTipsBox" style="display:none"></div></section><script>function show(name){document.getElementById('panel').innerHTML=name==='道具/法宝'?${JSON.stringify((equipmentHtml ?? gear) + nonEquipmentHtml)}:name==='召唤兽/孩子'?${JSON.stringify(petHtml)}:name==='技能'?${JSON.stringify(skills)}:'<p>'+name+'：新资料</p>'}</script>`;
+  )}</nav><div id="panel">${"基本资料。".repeat(60)}</div><div id="RoleEquipTipsBox" style="display:none"></div>${source}</section><script>function show(name){document.getElementById('panel').innerHTML=name==='道具/法宝'?${JSON.stringify((equipmentHtml ?? gear) + nonEquipmentHtml)}:name==='召唤兽/孩子'?${JSON.stringify(petHtml)}:name==='技能'?${JSON.stringify(skills)}:(${JSON.stringify(assetBodies)}[name]||'<p>'+name+'：新资料</p>')}</script>`;
+};
+// These cases supply their own single public source or deliberately malformed identity.
+const fixtureWithCustomSource = (...args: Parameters<typeof fixture>) => {
+  const [missing, pets, kind, extra, description, equipment, schoolCount] = args;
+  return fixture(missing, pets, kind, extra, description, equipment, schoolCount, false);
 };
 const completePet = () =>
   `<p>召唤兽(1/10)</p><img width="30" height="30" data_idx="0" src="/images/pets/small/0.gif"><section><p>详细信息</p><p>类型：幽灵</p><p>等级：0</p><p>成长：1.23</p>${["攻击资质", "防御资质", "体力资质", "法力资质", "速度资质", "躲闪资质"].map((name) => `<p>${name}：1400</p>`).join("")}<p>技能（2）</p><img width="30" height="30" data_skill_type="cifu" data_equip_name="鬼魂术"><img width="30" height="30" data_skill_type="cifu" data_equip_name="死亡召唤"><p>装备（1）</p><img width="30" height="30" data_equip_name="宝宝项圈" data_equip_desc="等级 80#r速度 +20"><p>内丹（1）</p><img width="30" height="30" data_skill_type="neidan" data_equip_name="玄武躯" data_equip_level="5"></section><p>孩子</p><img width="30" height="30" data_skill_type="cifu" data_equip_name="孩子技能">`;
@@ -260,7 +278,7 @@ describe("装备局部补采", () => {
         return route.fulfill({
           contentType: "text/html",
           body:
-            fixture(false) +
+            fixtureWithCustomSource(false) +
             '<textarea id="equip_desc_value" hidden>same-role-source-v1</textarea><script>const EquipInfo={server_id:367,eid:"equipment-fixture"}</script>',
         });
       });
@@ -341,7 +359,7 @@ describe("装备局部补采", () => {
         return route.fulfill({
           contentType: "text/html",
           body:
-            fixture(false) +
+            fixtureWithCustomSource(false) +
             '<textarea id="equip_desc_value" hidden>stable-role-source</textarea><script>const EquipInfo={server_id:367,eid:"equipment-fixture"}; const stableShow=show; show=function(name){stableShow(name); if(name==="玩家之家"){const s=document.createElement("script");s.src="data:text/javascript,void%200";document.head.appendChild(s)}}</script>',
         });
       });
@@ -366,7 +384,10 @@ describe("装备局部补采", () => {
       try {
         const change = `<textarea id="equip_desc_value" hidden>stable-source</textarea><script>const EquipInfo={server_id:367,eid:"equipment-fixture"};window.CBG_GAME_CONFIG={};const oldShow=show;show=function(name){oldShow(name);if(name==="玩家之家"){${scenario === "原文变化" ? 'document.getElementById("equip_desc_value").value="changed-source"' : 'window.CBG_GAME_CONFIG=new Proxy({},{ownKeys(){throw new Error("unreadable late config")}})'}}}</script>`;
         await page.route(url, (route) =>
-          route.fulfill({ contentType: "text/html", body: fixture(false) + change }),
+          route.fulfill({
+            contentType: "text/html",
+            body: fixtureWithCustomSource(false) + change,
+          }),
         );
         const error = (await createCrawlSource({
           listPage: page,
@@ -445,7 +466,7 @@ describe("装备局部补采", () => {
         await page.route(url, (route) =>
           route.fulfill({
             contentType: "text/html",
-            body: fixture(false, undefined, undefined, "", "", equipment) + config,
+            body: fixtureWithCustomSource(false, undefined, undefined, "", "", equipment) + config,
           }),
         );
         const result = await createCrawlSource({
@@ -573,7 +594,7 @@ describe("装备局部补采", () => {
               const other = document.createElement("div");
               other.setAttribute("role", "tooltip");
               other.innerHTML = "<h3>其他物品</h3><p>等级 30</p><p>伤害 +999</p>";
-              document.body.append(other);
+              document.getElementById("RoleEquipTipsBox")!.parentElement!.append(other);
             }),
           );
         const official = mode.startsWith("official-") || mode.startsWith("resolver-");
@@ -1291,19 +1312,22 @@ describe("装备局部补采", () => {
       return route.fulfill({
         contentType: "text/html",
         body:
-          fixture(false).replaceAll("新武器", `武器${id}`) +
-          `<script>window.RoleData={id:${JSON.stringify(id)}};window.EquipInfo={serverId:"367",eid:${JSON.stringify(id)}}</script>`,
+          fixture(false, undefined, undefined, "", "", undefined, 7, { eid: id }).replaceAll(
+            "新武器",
+            `武器${id}`,
+          ) + `<script>window.RoleData={id:${JSON.stringify(id)}}</script>`,
       });
     });
     vi.mocked(captureValuation).mockImplementation(async (page) => ({
       version: 1,
       fields: [],
       issues: [],
-      source: await page.evaluate(
-        () =>
-          (window as unknown as Window & { EquipInfo: { serverId: string; eid: string } })
-            .EquipInfo,
-      ),
+      source: await page.evaluate(() => {
+        const info = (
+          window as unknown as Window & { EquipInfo: { server_id: string; eid: string } }
+        ).EquipInfo;
+        return { serverId: info.server_id, eid: info.eid };
+      }),
     }));
     try {
       const page = await context.newPage();
@@ -1347,10 +1371,26 @@ describe("装备局部补采", () => {
     const page = await browser.newPage();
     try {
       await page.route("**/*", (route) =>
-        route.fulfill({ contentType: "text/html", body: fixture(false) }),
+        route.fulfill({
+          contentType: "text/html",
+          body: fixture(false, undefined, undefined, "", "", undefined, 7, {
+            eid: new URL(route.request().url()).searchParams.get("eid") || listing.eid,
+          }),
+        }),
       );
-      const old = structuredClone(await collectDetail(page, listing, new AbortController().signal));
-      old.valuation!.source.eid = "another-role";
+      const foreign = {
+        ...listing,
+        key: "367:another-role",
+        eid: "another-role",
+        url: url.replace(listing.eid, "another-role"),
+      };
+      vi.mocked(captureValuation).mockResolvedValueOnce({
+        version: 1,
+        fields: [],
+        issues: [],
+        source: { serverId: "367", eid: foreign.eid },
+      });
+      const old = structuredClone(await collectDetail(page, foreign, new AbortController().signal));
       const oldSkills = old.tabs.find((tab) => tab.name === "技能")!.items!;
       oldSkills.forEach((skill, index) => {
         skill.name = `错源技能${index}`;
@@ -2106,7 +2146,7 @@ describe("装备局部补采", () => {
           },
         };
         const html =
-          fixture(false, undefined, undefined, "", "", gear) +
+          fixtureWithCustomSource(false, undefined, undefined, "", "", gear) +
           `<textarea id="equip_desc_value" hidden>isolated-raw-fixture</textarea><script>window.EquipInfo=${JSON.stringify({ server_id: mode === "wrong-role" ? "750" : listing.serverId, eid: listing.eid })};window.decode_desc=()=>{${mode === "decode-throws" ? 'throw new Error("isolated decode failure")' : 'return "isolated raw"'}};window.RoleInfoParser=class {constructor(){${mode === "parser-throws" ? 'throw new Error("isolated parser failure")' : `this.raw_info=${mode === "malformed-raw" ? "null" : JSON.stringify(raw)}`}}};</script>`;
         await page.route(url, (route) => route.fulfill({ contentType: "text/html", body: html }));
         const detail = await collectDetail(page, listing, new AbortController().signal);
@@ -2176,7 +2216,14 @@ describe("装备局部补采", () => {
       expect(updatedPets.petCount).toBe(0);
       expect(updatedPets.pets).toEqual([]);
       expect(detail.petCapture?.complete).toBe(true);
-      expect(detail.raw).toEqual({});
+      expect(detail.raw).toEqual({
+        EquipInfo: { server_id: listing.serverId, eid: listing.eid },
+        encodedRoleData: JSON.stringify({
+          server_id: listing.serverId,
+          eid: listing.eid,
+          role: "fixture-role-source",
+        }),
+      });
       expect(saved.raw).toEqual({ AllSummon: [{ name: "旧宝宝原始数据" }] });
       expect(detail.tabs.some((tab) => tab.name === "召唤兽/孩子 / 旧子页")).toBe(false);
       expect(pets.pets[0].name).toBe("旧宝宝");

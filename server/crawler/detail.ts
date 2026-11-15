@@ -23,6 +23,8 @@ import { captureBrowserStep } from "../browser-evidence";
 import { accessNavigationFailure } from "./access-navigation";
 import { readDetailRevision } from "./detail-read-state";
 import { readOfficialModels } from "./official-model-page";
+import { itemNeedsTooltip, itemNeedsEquipmentStats, tooltipSkillLevel } from "./item-read-policy";
+import { fieldEvidence } from "./field-evidence";
 import {
   assertDetailRoot,
   detailRootLocator,
@@ -31,6 +33,8 @@ import {
   detailPetItems,
   detailRootSelector,
   readDetailEncodedRole,
+  retainDetailLeaves,
+  retainDetailLeafSelector,
 } from "./detail-root";
 
 export { MAIN_TABS } from "./detail-tabs";
@@ -39,10 +43,36 @@ import { MAIN_TABS } from "./detail-tabs";
 async function capture(page: Page, name: string): Promise<TabSnapshot> {
   return evaluateDetailRoot(
     page,
-    (root, tabName) => {
+    (root, { tabName, mainTabs }) => {
       const text = root.innerText.trim();
+      // Capture actual panel text, rather than using navigation/header text as
+      // evidence that an otherwise empty asset section has loaded.
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const content: string[] = [];
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const parent = node.parentElement;
+        if (!parent?.checkVisibility() || !node.textContent?.trim()) continue;
+        let excluded = false;
+        for (let el: Element | null = parent; el && el !== root; el = el.parentElement) {
+          if (
+            el.matches(
+              'nav,header,script,style,textarea,[role="tooltip"],[id$="TipsBox"],[data-cbg-hover-tip]',
+            ) ||
+            new Set(
+              [...el.querySelectorAll("a,button,li")]
+                .map((n) => n.textContent?.trim())
+                .filter((n) => mainTabs.includes(n || "")),
+            ).size >= 4
+          ) {
+            excluded = true;
+            break;
+          }
+        }
+        const value = node.textContent.trim();
+        if (!excluded && !mainTabs.includes(value)) content.push(value);
+      }
       const fields = text
-        .split(/\n|\t(?=[^\t：:]{1,40}[：:])/)
+        .split(/\n|\t(?=[^\t\n：:]{1,40}[：:])/)
         .map((line) => line.trim())
         .filter(Boolean)
         .flatMap((line) => {
@@ -84,6 +114,7 @@ async function capture(page: Page, name: string): Promise<TabSnapshot> {
         );
       return {
         name: tabName,
+        contentText: content.join("\n"),
         text,
         fields,
         tables,
@@ -143,7 +174,7 @@ async function capture(page: Page, name: string): Promise<TabSnapshot> {
         ...(emptyEquipment ? { equipmentEmptyProof: "official-containers" as const } : {}),
       };
     },
-    name,
+    { tabName: name, mainTabs: MAIN_TABS },
   );
 }
 async function inspectItems(
@@ -156,7 +187,7 @@ async function inspectItems(
 ) {
   const petItems = /^召唤兽 \d+$/.test(snapshot.name);
   const petEntries = petItems ? await detailPetItems(page) : [];
-  const inspection = await evaluateDetailRoot(
+  const leaves = await retainDetailLeaves(
     page,
     (root, { petItems, petEntries }) => {
       const path = (element: Element) => {
@@ -190,304 +221,310 @@ async function inspectItems(
             node.getAttribute("data_equip_type") || node.getAttribute("data-equip-type") || "";
         if (model) models.push(model);
       }
-      return { count: icons.length, models, paths: icons.map(path) };
+      return { value: { count: icons.length, models, paths: icons.map(path) }, elements: icons };
     },
     { petItems, petEntries },
   );
-  const metadata = await readOfficialModels(page, inspection.models);
-  for (const issue of metadata.issues) report("物品元数据读取异常：" + JSON.stringify(issue));
-  const count = inspection.count;
-  for (let index = 0; index < count; index++) {
-    checkAborted(signal);
-    const path = inspection.paths[index];
-    const icon = (await detailRootLocator(page)).locator(path);
-    const observations = await evaluateDetailRoot(
-      page,
-      (root, { path, section }) =>
-        [...root.querySelectorAll(path)].map((el) => {
-          if (el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]')) return null;
-          const attrs: Record<string, string> = {};
-          // 装备数据和提示框标识可能在图片的 a/td 父元素上。
-          const ancestors: Element[] = [el];
-          let parent = el.parentElement;
-          for (
-            let depth = 0;
-            depth < 2 && parent && parent !== root;
-            depth++, parent = parent.parentElement
-          )
-            ancestors.unshift(parent);
-          for (const node of ancestors)
-            for (const a of node.attributes) {
-              if (node !== el && /^(?:data_kindid|data-kindid)$/.test(a.name)) continue;
-              if (/^(data[-_]|alt$|title$)/.test(a.name) && !a.name.startsWith("data-cbg-"))
-                attrs[a.name.replace(/^data-/, "data_")] = a.value;
-            }
-          if (section) attrs.data_cbg_skill_section = section;
-          // Exact model metadata from the official page is an observed name, not a guessed mapping.
-          delete attrs.data_official_model_name;
-          delete attrs.data_official_model_metadata;
-          const container = el.closest("[data-equip-location], [data_equip_location], [id]");
-          if (
-            !attrs.data_equip_location &&
-            container &&
-            container !== root &&
-            root.contains(container)
-          )
-            attrs.data_equip_location =
-              container.getAttribute("data-equip-location") ||
-              container.getAttribute("data_equip_location") ||
-              container.id;
-          if (attrs.data_skill_type && !attrs.data_equip_level) {
-            for (const node of [...ancestors].reverse()) {
-              const text = (node as HTMLElement).innerText || "";
-              const level = text.length < 120 && text.match(/(?:^|\n)\s*(\d{1,3})\s*(?:\n|$)/)?.[1];
-              if (level) {
-                attrs.data_visible_level = level;
-                break;
+  const inspection = leaves.value;
+  try {
+    const metadata = await readOfficialModels(page, inspection.models);
+    await leaves.assert();
+    for (const issue of metadata.issues) report("物品元数据读取异常：" + JSON.stringify(issue));
+    const count = inspection.count;
+    for (let index = 0; index < count; index++) {
+      checkAborted(signal);
+      const path = inspection.paths[index];
+      const icon = leaves.locator(index);
+      await leaves.assert();
+      const observations = await evaluateDetailRoot(
+        page,
+        (root, { path, section }) =>
+          [...root.querySelectorAll(path)].map((el) => {
+            if (el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]')) return null;
+            const attrs: Record<string, string> = {};
+            // 装备数据和提示框标识可能在图片的 a/td 父元素上。
+            const ancestors: Element[] = [el];
+            let parent = el.parentElement;
+            for (
+              let depth = 0;
+              depth < 2 && parent && parent !== root;
+              depth++, parent = parent.parentElement
+            )
+              ancestors.unshift(parent);
+            for (const node of ancestors)
+              for (const a of node.attributes) {
+                if (node !== el && /^(?:data_kindid|data-kindid)$/.test(a.name)) continue;
+                if (/^(data[-_]|alt$|title$)/.test(a.name) && !a.name.startsWith("data-cbg-"))
+                  attrs[a.name.replace(/^data-/, "data_")] = a.value;
+              }
+            if (section) attrs.data_cbg_skill_section = section;
+            // Exact model metadata from the official page is an observed name, not a guessed mapping.
+            delete attrs.data_official_model_name;
+            delete attrs.data_official_model_metadata;
+            const container = el.closest("[data-equip-location], [data_equip_location], [id]");
+            if (
+              !attrs.data_equip_location &&
+              container &&
+              container !== root &&
+              root.contains(container)
+            )
+              attrs.data_equip_location =
+                container.getAttribute("data-equip-location") ||
+                container.getAttribute("data_equip_location") ||
+                container.id;
+            if (attrs.data_skill_type && !attrs.data_equip_level) {
+              for (const node of [...ancestors].reverse()) {
+                const text = (node as HTMLElement).innerText || "";
+                const level =
+                  text.length < 120 && text.match(/(?:^|\n)\s*(\d{1,3})\s*(?:\n|$)/)?.[1];
+                if (level) {
+                  attrs.data_visible_level = level;
+                  break;
+                }
               }
             }
-          }
-          return attrs;
-        }),
-      { path, section: petEntries.find((entry) => entry.path === path)?.section || "" },
-    );
-    if (observations.length !== 1)
-      throw Object.assign(new Error(`详情图标 ${index + 1}/${count} 已变化，未完整读取`), {
-        name: "IncompleteDetailError",
-      });
-    let attrs = observations[0];
-    if (!attrs) continue;
-    const modelMetadata = metadata.models[attrs.data_equip_type];
-    if (modelMetadata) attrs.data_official_model_metadata = modelMetadata;
-    let rawLevel: string | undefined;
-    if (worn) {
-      const merged = mergeWornEquipmentLevel(attrs, worn.listing, worn.source);
-      attrs = merged.attrs;
-      rawLevel = merged.rawLevel;
-      if (merged.issue) issues?.push(`${snapshot.name}：${merged.issue}`);
-    }
-    report(`正在读取 ${snapshot.name} 的物品属性 ${index + 1}/${count}`);
-    // 名称、技能类别或装备属性已在元素里时直接读取，不触发无意义的提示框。
-    let item = itemFromAttributes(attrs, index);
-    // 已明确不在人物装备计价范围内的物品不要求普通装备属性。
-    const dedicatedNonRoleSlot =
-      item.categorySource === "official-slot" && /^(?:法宝|灵宝|神器)$/.test(item.category || "");
-    if (
-      !petItems &&
-      isNonRoleEquipment(item) &&
-      (dedicatedNonRoleSlot ||
-        (!equipmentNameUnresolved(item.name) && (item.description || item.attributes)))
-    ) {
-      snapshot.items!.push(item);
-      continue;
-    }
-    const rawYupo =
-      item.category === "上古玉魄" &&
-      /^\s*\{\s*"minghun"\s*:\s*\{|<json>/i.test(attrs.data_equip_desc || "");
-    const incompletePetEquipment =
-      petItems &&
-      item.kind === "equipment" &&
-      item.location !== "RolePetShipin" &&
-      !/(?:命中(?:率)?|伤害|防御|气血|魔法|速度|敏捷|力量|体质|耐力|灵力|魔力|镶嵌)\s*[：:]?\s*[+＋−-]?\d/.test(
-        (item.description || "") +
-          "\n" +
-          Object.entries(item.attributes || {})
-            .map(([key, value]) => key + " " + value)
-            .join("\n"),
+            return attrs;
+          }),
+        { path, section: petEntries.find((entry) => entry.path === path)?.section || "" },
       );
-    const incompleteEquipment =
-      incompletePetEquipment ||
-      (item.kind === "equipment" &&
-        !isNonRoleEquipment(item) &&
-        /^道具\/法宝(?:\s*\/|$)/.test(snapshot.name) &&
-        !equipmentCaptureSummary([{ ...snapshot, items: [item] }], snapshot.collectedAt || "")
-          .complete);
-    // 官网元素可能只有等级；缺属性时仍须悬停，不能把非空描述当作已读完整。
-    if (
-      (attrs.data_equip_desc?.trim() &&
-        !rawYupo &&
-        !incompleteEquipment &&
-        !item.name.startsWith("图标 ")) ||
-      attrs.data_skill_type
-    ) {
-      if (!item.name.startsWith("图标 ")) snapshot.items!.push(item);
-      continue;
-    }
-    // 头像仅用于切换，不作为一件待估价装备。
-    if (
-      attrs.data_idx !== undefined &&
-      !attrs.data_equip_name &&
-      !attrs.data_tip_box &&
-      !attrs.data_equip_desc
-    )
-      continue;
-    await hoverForInspection(page, icon);
-    await pace(signal, 300, 200);
-    const tipId = attrs.data_tip_box;
-    const levelText =
-      item.attributes?.等级 || item.description?.match(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})/)?.[1];
-    const expectedLevel = levelText && /^\d{1,3}$/.test(levelText) ? Number(levelText) : null;
-    if (tipId || incompleteEquipment)
-      await page
-        .waitForFunction(
-          ({ id, name, requireStats, expectedLevel, rootSelector }) => {
-            const root = document.querySelector<HTMLElement>(rootSelector);
-            if (!root) return false;
-            const matching = id
-              ? [...root.querySelectorAll<HTMLElement>("[id]")].filter((node) => node.id === id)
-              : [];
-            const globalMatching =
-              id && !matching.length
-                ? [...document.querySelectorAll<HTMLElement>("[id]")].filter(
-                    (node) => node.id === id,
-                  )
-                : [];
-            const boxes = id
-              ? matching.length === 1
-                ? matching
-                : matching.length === 0 && globalMatching.length === 1
-                  ? globalMatching
-                  : []
-              : Array.from(
-                  root.querySelectorAll<HTMLElement>(
-                    '[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"], .tips, .tooltip, #tips_box, #role_tips_box, .equip_tips',
-                  ),
-                );
-            return boxes.some((box) => {
-              const text = box?.innerText.trim() || "";
-              const levels = [
-                ...new Set(
-                  [...text.matchAll(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})(?=\s*(?:\n|$))/g)].map(
-                    (match) => Number(match[1]),
-                  ),
-                ),
-              ];
-              const unidentified =
-                !!name &&
-                text.split("\n")[0].trim() === name &&
-                text.split("\n").some((line) => line.trim() === "未鉴定物品") &&
-                levels.length === 1 &&
-                (expectedLevel === null || levels[0] === expectedLevel);
-              return (
-                box?.checkVisibility() &&
-                text &&
-                (!name || text.includes(name)) &&
-                (!requireStats ||
-                  unidentified ||
-                  /(?:命中(?:率)?|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|抗物理暴击|抗法术暴击|抗固伤|固伤暴击|穿刺|狂暴|治疗能力|格挡|抵抗|抗封印)(?:等级|值)?\s*[：:]?\s*[+＋−-]?\d/.test(
-                    text,
-                  ))
-              );
-            });
-          },
-          {
-            id: tipId || "",
-            name: equipmentNameUnresolved(item.name) ? "" : item.name.trim(),
-            requireStats: incompleteEquipment,
-            expectedLevel,
-            rootSelector: await detailRootSelector(page),
-          },
-          { timeout: 4000 },
-        )
-        .catch((error: unknown) => {
-          if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
-          issues?.push(`${snapshot.name}：${item.name} 的物品提示框未完整显示`);
+      await leaves.assert();
+      if (observations.length !== 1)
+        throw Object.assign(new Error(`详情图标 ${index + 1}/${count} 已变化，未完整读取`), {
+          name: "IncompleteDetailError",
         });
-    const observedTip = await evaluateDetailRoot(
-      page,
-      (root, { id, name }) => {
-        const matching = id
-          ? [...root.querySelectorAll<HTMLElement>("[id]")].filter((node) => node.id === id)
-          : [];
-        const globalMatching =
-          id && !matching.length
-            ? [...document.querySelectorAll<HTMLElement>("[id]")].filter((node) => node.id === id)
-            : [];
-        const boxes = id
-          ? matching.length === 1
-            ? matching
-            : matching.length === 0 && globalMatching.length === 1
-              ? globalMatching
-              : []
-          : Array.from(
-              root.querySelectorAll<HTMLElement>(
-                '[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"], .tips, .tooltip, #tips_box, #role_tips_box, .equip_tips',
-              ),
-            );
-        const candidates = boxes.filter(
-          (box): box is HTMLElement =>
-            !!box?.checkVisibility() &&
-            !!box.innerText.trim() &&
-            (!!id || !name || box.innerText.includes(name)),
-        );
-        const texts = [...new Set(candidates.map((box) => box.innerText.trim()).filter(Boolean))];
-        // A missing tip ID cannot justify concatenating unrelated visible tooltips.
-        if (texts.length !== 1) return { text: "", names: [] as string[] };
-        const names = candidates.flatMap((box) =>
-          Array.from(
-            box.querySelectorAll(
-              "[data_equip_name], [data-equip-name], h1, h2, h3, h4, [role=heading]",
-            ),
-          ).map(
-            (node) =>
-              node.getAttribute("data_equip_name") ||
-              node.getAttribute("data-equip-name") ||
-              node.textContent?.trim() ||
-              "",
-          ),
-        );
-        return { text: texts[0], names: [...new Set(names)] };
-      },
-      { id: tipId || "", name: equipmentNameUnresolved(item.name) ? "" : item.name.trim() },
-    );
-    const tooltip = observedTip.text;
-    if (tooltip) {
-      if (
-        rawLevel !== undefined &&
-        [...tooltip.matchAll(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})(?=\s|$)/g)].some(
-          (match) => Number(match[1]) !== Number(rawLevel),
-        )
-      )
-        issues?.push(`${snapshot.name}：原始穿戴装备等级与提示框等级不一致`);
-      if (tooltip.split("\n").some((line) => line.trim() === "未鉴定物品")) {
-        const level = unidentifiedEquipmentLevel(tooltip);
-        if (
-          tooltip.split("\n")[0].trim() !== attrs.data_equip_name ||
-          level === null ||
-          (expectedLevel !== null && level !== expectedLevel)
-        )
-          issues?.push(`${snapshot.name}：${item.name} 的未鉴定提示框名称或等级与物品不一致`);
+      let attrs = observations[0];
+      if (!attrs) continue;
+      const modelMetadata = metadata.models[attrs.data_equip_type];
+      if (modelMetadata) attrs.data_official_model_metadata = modelMetadata;
+      let rawLevel: string | undefined;
+      if (worn) {
+        const merged = mergeWornEquipmentLevel(attrs, worn.listing, worn.source);
+        attrs = merged.attrs;
+        rawLevel = merged.rawLevel;
+        if (merged.issue) issues?.push(`${snapshot.name}：${merged.issue}`);
       }
-      item = itemFromAttributes(
-        {
-          ...attrs,
-          data_equip_desc: preserveJewelryTooltipSections(tooltip, item.description || ""),
+      report(`正在读取 ${snapshot.name} 的物品属性 ${index + 1}/${count}`);
+      // 名称、技能类别或装备属性已在元素里时直接读取，不触发无意义的提示框。
+      let item = itemFromAttributes(attrs, index);
+      if (rawLevel !== undefined)
+        item.readSources = {
+          level: "official-role-parser",
+          "attributes.等级": "official-role-parser",
+        };
+      // 已明确不在人物装备计价范围内的物品不要求普通装备属性。
+      const dedicatedNonRoleSlot =
+        item.categorySource === "official-slot" && /^(?:法宝|灵宝|神器)$/.test(item.category || "");
+      if (
+        !petItems &&
+        isNonRoleEquipment(item) &&
+        (dedicatedNonRoleSlot ||
+          (!equipmentNameUnresolved(item.name) && (item.description || item.attributes)))
+      ) {
+        snapshot.items!.push(item);
+        continue;
+      }
+      const incompleteEquipment = itemNeedsEquipmentStats(item, snapshot, petItems);
+      if (!itemNeedsTooltip(item, attrs, snapshot, petItems)) {
+        snapshot.items!.push(item);
+        continue;
+      }
+      // 头像仅用于切换，不作为一件待估价装备。
+      if (
+        attrs.data_idx !== undefined &&
+        !attrs.data_equip_name &&
+        !attrs.data_tip_box &&
+        !attrs.data_equip_desc
+      )
+        continue;
+      await leaves.assert();
+      await hoverForInspection(page, icon);
+      await leaves.assert();
+      await pace(signal, 300, 200);
+      await leaves.assert();
+      const tipId = attrs.data_tip_box;
+      const levelText =
+        item.attributes?.等级 ||
+        item.description?.match(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})/)?.[1];
+      const expectedLevel = levelText && /^\d{1,3}$/.test(levelText) ? Number(levelText) : null;
+      if (tipId || incompleteEquipment)
+        await page
+          .waitForFunction(
+            ({ id, name, requireStats, expectedLevel, rootSelector }) => {
+              const root = document.querySelector<HTMLElement>(rootSelector);
+              if (!root) return false;
+              const matching = id
+                ? [...root.querySelectorAll<HTMLElement>("[id]")].filter((node) => node.id === id)
+                : [];
+              const globalMatching =
+                id && !matching.length
+                  ? [...document.querySelectorAll<HTMLElement>("[id]")].filter(
+                      (node) => node.id === id,
+                    )
+                  : [];
+              const boxes = id
+                ? matching.length === 1
+                  ? matching
+                  : matching.length === 0 && globalMatching.length === 1
+                    ? globalMatching
+                    : []
+                : Array.from(
+                    root.querySelectorAll<HTMLElement>(
+                      '[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"], .tips, .tooltip, #tips_box, #role_tips_box, .equip_tips',
+                    ),
+                  );
+              return boxes.some((box) => {
+                const text = box?.innerText.trim() || "";
+                const levels = [
+                  ...new Set(
+                    [...text.matchAll(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})(?=\s*(?:\n|$))/g)].map(
+                      (match) => Number(match[1]),
+                    ),
+                  ),
+                ];
+                const unidentified =
+                  !!name &&
+                  text.split("\n")[0].trim() === name &&
+                  text.split("\n").some((line) => line.trim() === "未鉴定物品") &&
+                  levels.length === 1 &&
+                  (expectedLevel === null || levels[0] === expectedLevel);
+                return (
+                  box?.checkVisibility() &&
+                  text &&
+                  (!name || text.includes(name)) &&
+                  (!requireStats ||
+                    unidentified ||
+                    /(?:命中(?:率)?|伤害|防御|气血|魔法|魔力|灵力|速度|敏捷|力量|体质|耐力|法术伤害|法术防御|法术暴击|物理暴击|封印命中|抵抗封印|抗物理暴击|抗法术暴击|抗固伤|固伤暴击|穿刺|狂暴|治疗能力|格挡|抵抗|抗封印)(?:等级|值)?\s*[：:]?\s*[+＋−-]?\d/.test(
+                      text,
+                    ))
+                );
+              });
+            },
+            {
+              id: tipId || "",
+              name: equipmentNameUnresolved(item.name) ? "" : item.name.trim(),
+              requireStats: incompleteEquipment,
+              expectedLevel,
+              rootSelector: await detailRootSelector(page),
+            },
+            { timeout: 4000 },
+          )
+          .catch((error: unknown) => {
+            if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+            issues?.push(`${snapshot.name}：${item.name} 的物品提示框未完整显示`);
+          });
+      const observedTip = await evaluateDetailRoot(
+        page,
+        (root, { id, name }) => {
+          const matching = id
+            ? [...root.querySelectorAll<HTMLElement>("[id]")].filter((node) => node.id === id)
+            : [];
+          const globalMatching =
+            id && !matching.length
+              ? [...document.querySelectorAll<HTMLElement>("[id]")].filter((node) => node.id === id)
+              : [];
+          const boxes = id
+            ? matching.length === 1
+              ? matching
+              : matching.length === 0 && globalMatching.length === 1
+                ? globalMatching
+                : []
+            : Array.from(
+                root.querySelectorAll<HTMLElement>(
+                  '[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"], .tips, .tooltip, #tips_box, #role_tips_box, .equip_tips',
+                ),
+              );
+          const candidates = boxes.filter(
+            (box): box is HTMLElement =>
+              !!box?.checkVisibility() &&
+              !!box.innerText.trim() &&
+              (!!id || !name || box.innerText.includes(name)),
+          );
+          const texts = [...new Set(candidates.map((box) => box.innerText.trim()).filter(Boolean))];
+          // A missing tip ID cannot justify concatenating unrelated visible tooltips.
+          if (texts.length !== 1) return { text: "", names: [] as string[] };
+          const names = candidates.flatMap((box) =>
+            Array.from(
+              box.querySelectorAll(
+                "[data_equip_name], [data-equip-name], h1, h2, h3, h4, [role=heading]",
+              ),
+            ).map(
+              (node) =>
+                node.getAttribute("data_equip_name") ||
+                node.getAttribute("data-equip-name") ||
+                node.textContent?.trim() ||
+                "",
+            ),
+          );
+          return { text: texts[0], names: [...new Set(names)] };
         },
-        index,
+        { id: tipId || "", name: equipmentNameUnresolved(item.name) ? "" : item.name.trim() },
       );
-      if (equipmentNameUnresolved(item.name)) {
-        const names = [
-          ...new Set(observedTip.names.filter((name) => !equipmentNameUnresolved(name))),
-        ];
-        if (!names.length && !equipmentNameUnresolved(tooltip.split("\n")[0]))
-          names.push(tooltip.split("\n")[0].trim());
-        if (names.length === 1) {
-          item.name = names[0];
-          item.nameSource = "tooltip";
-          item.tooltip = tooltip;
+      await leaves.assert();
+      const tooltip = observedTip.text;
+      if (tooltip) {
+        if (
+          rawLevel !== undefined &&
+          [...tooltip.matchAll(/(?:^|\n)\s*等级\s*[：:]?\s*(\d{1,3})(?=\s|$)/g)].some(
+            (match) => Number(match[1]) !== Number(rawLevel),
+          )
+        )
+          issues?.push(`${snapshot.name}：原始穿戴装备等级与提示框等级不一致`);
+        if (tooltip.split("\n").some((line) => line.trim() === "未鉴定物品")) {
+          const level = unidentifiedEquipmentLevel(tooltip);
+          if (
+            tooltip.split("\n")[0].trim() !== attrs.data_equip_name ||
+            level === null ||
+            (expectedLevel !== null && level !== expectedLevel)
+          )
+            issues?.push(`${snapshot.name}：${item.name} 的未鉴定提示框名称或等级与物品不一致`);
+        }
+        const skillLevel =
+          attrs.data_skill_type && !item.level ? tooltipSkillLevel(tooltip) : undefined;
+        item = itemFromAttributes(
+          {
+            ...attrs,
+            ...(skillLevel !== undefined ? { data_equip_level: skillLevel } : {}),
+            data_equip_desc: preserveJewelryTooltipSections(tooltip, item.description || ""),
+          },
+          index,
+        );
+        item.readSources = {
+          ...(rawLevel !== undefined
+            ? {
+                level: "official-role-parser" as const,
+                "attributes.等级": "official-role-parser" as const,
+              }
+            : {}),
+          ...(skillLevel !== undefined ? { level: "tooltip" as const } : {}),
+          description: "tooltip",
+        };
+        if (equipmentNameUnresolved(item.name)) {
+          const names = [
+            ...new Set(observedTip.names.filter((name) => !equipmentNameUnresolved(name))),
+          ];
+          if (!names.length && !equipmentNameUnresolved(tooltip.split("\n")[0]))
+            names.push(tooltip.split("\n")[0].trim());
+          if (names.length === 1) {
+            item.name = names[0];
+            item.nameSource = "tooltip";
+            item.tooltip = tooltip;
+          }
         }
       }
+      if (!item.description && !item.attributes && item.name.startsWith("图标 "))
+        issues?.push(`${snapshot.name}：第 ${index + 1} 个物品图标没有读取到名称和属性`);
+      if (item.description || item.attributes || !item.name.startsWith("图标 "))
+        snapshot.items!.push(item);
     }
-    if (!item.description && !item.attributes && item.name.startsWith("图标 "))
-      issues?.push(`${snapshot.name}：第 ${index + 1} 个物品图标没有读取到名称和属性`);
-    if (item.description || item.attributes || !item.name.startsWith("图标 "))
-      snapshot.items!.push(item);
+    await leaves.assert();
+    await captureBrowserStep(
+      page,
+      { flow: "collection", stage: `物品读取完成-${snapshot.name}` },
+      signal,
+    );
+  } finally {
+    await leaves.dispose();
   }
-  await captureBrowserStep(
-    page,
-    { flow: "collection", stage: `物品读取完成-${snapshot.name}` },
-    signal,
-  );
 }
 
 async function inspectPets(
@@ -640,22 +677,30 @@ async function captureMountEntries(
   report: (message: string) => void,
 ) {
   const tabs: TabSnapshot[] = [];
-  const entries = (await detailRootLocator(page)).locator("[id=RoleRiders] img[data_idx]:visible");
   if ((await (await detailRootLocator(page)).locator("[id=RoleRiders]").count()) > 1)
     throw Object.assign(new Error("坐骑容器不唯一"), { name: "IncompleteDetailError" });
-  for (let index = 0; index < (await entries.count()); index++) {
-    checkAborted(signal);
-    report(`正在读取第 ${index + 1} 只坐骑…`);
-    await clickForInspection(entries.nth(index), signal);
-    await pace(signal, 250, 150);
-    tabs.push(await capture(page, `坐骑 / 第${index + 1}只`));
-    await captureBrowserStep(
-      page,
-      { flow: "collection", stage: `坐骑读取完成-${index + 1}` },
-      signal,
-    );
+  const leaves = await retainDetailLeafSelector(page, "[id=RoleRiders] img[data_idx]");
+  try {
+    for (let index = 0; index < leaves.value.paths.length; index++) {
+      checkAborted(signal);
+      report(`正在读取第 ${index + 1} 只坐骑…`);
+      await leaves.assert();
+      await clickForInspection(leaves.locator(index), signal);
+      await leaves.assert();
+      await pace(signal, 250, 150);
+      await leaves.assert();
+      tabs.push(await capture(page, `坐骑 / 第${index + 1}只`));
+      await captureBrowserStep(
+        page,
+        { flow: "collection", stage: `坐骑读取完成-${index + 1}` },
+        signal,
+      );
+    }
+    await leaves.assert();
+    return tabs;
+  } finally {
+    await leaves.dispose();
   }
-  return tabs;
 }
 
 async function inspectEquipmentTabs(
@@ -771,8 +816,19 @@ export async function collectDetail(
   let step = "详情";
   let raw: RoleDetail["raw"] = {};
   let valuation: RoleDetail["valuation"];
+  let initialRevision: string | null = null,
+    finalRevision: string | null = null;
+  const sourceEvidence = (): NonNullable<RoleDetail["sourceEvidence"]> => ({
+    version: 1,
+    serverId: item.serverId,
+    eid: item.eid,
+    initialRevision,
+    finalRevision,
+    stable: !!initialRevision && initialRevision === finalRevision,
+    fields: fieldEvidence(tabs, valuation),
+  });
   try {
-    const revision = await readDetailRevision(page, item);
+    const revision = (initialRevision = await readDetailRevision(page, item));
     for (const name of MAIN_TABS) {
       step = name;
       checkAborted(signal);
@@ -850,28 +906,36 @@ export async function collectDetail(
           signal,
         );
       }
-      const entries = (await detailRootLocator(page)).locator(
-        "[data-child-id]:visible, .child_list li:visible",
-      );
-      const entryCount = await entries.count();
-      for (let index = 0; index < entryCount; index++) {
-        checkAborted(signal);
-        report(`正在读取 ${name} 的第 ${index + 1}/${entryCount} 个条目及装备`);
-        const entry = entries.nth(index);
-        const href = await entry.getAttribute("href");
-        if (href && /^https?:|^\//.test(href)) continue;
-        await hoverForInspection(page, entry);
-        await clickForInspection(entry, signal);
-        await settled(page, signal);
-        const entryName = (await entry.innerText()).trim() || `第 ${index + 1} 项`;
-        const entrySnapshot = await capture(page, `${name} / ${entryName}`);
-        tabs.push(entrySnapshot);
-        await inspectItems(page, entrySnapshot, signal, report);
-        await captureBrowserStep(
-          page,
-          { flow: "collection", stage: `条目读取完成-${name}-${index + 1}`, key: item.key },
-          signal,
-        );
+      const leaves = await retainDetailLeafSelector(page, "[data-child-id], .child_list li");
+      try {
+        const entryCount = leaves.value.paths.length;
+        for (let index = 0; index < entryCount; index++) {
+          checkAborted(signal);
+          report(`正在读取 ${name} 的第 ${index + 1}/${entryCount} 个条目及装备`);
+          const entry = leaves.locator(index);
+          await leaves.assert();
+          const href = await entry.getAttribute("href");
+          if (href && /^https?:|^\//.test(href)) continue;
+          await hoverForInspection(page, entry);
+          await leaves.assert();
+          await clickForInspection(entry, signal);
+          await leaves.assert();
+          await settled(page, signal);
+          await leaves.assert();
+          const entryName = (await entry.innerText()).trim() || `第 ${index + 1} 项`;
+          const entrySnapshot = await capture(page, `${name} / ${entryName}`);
+          tabs.push(entrySnapshot);
+          await inspectItems(page, entrySnapshot, signal, report);
+          await leaves.assert();
+          await captureBrowserStep(
+            page,
+            { flow: "collection", stage: `条目读取完成-${name}-${index + 1}`, key: item.key },
+            signal,
+          );
+        }
+        await leaves.assert();
+      } finally {
+        await leaves.dispose();
       }
     }
     await captureBrowserStep(
@@ -896,25 +960,43 @@ export async function collectDetail(
           "role_data",
           "equip_info",
         ]) {
-          const value = globals[key];
-          if (value && typeof value === "object") {
-            try {
+          try {
+            const value = globals[key];
+            if (value && typeof value === "object") {
               result[key] = JSON.parse(JSON.stringify(value));
-            } catch {
-              throw new Error(`商品原始数据 ${key} 无法完整序列化`);
             }
+          } catch (error) {
+            return {
+              ...result,
+              rawReadIssue: {
+                key,
+                name: error instanceof Error ? error.name : "Error",
+                message: error instanceof Error ? error.message : "商品公开原文读取失败",
+              },
+            };
           }
         }
         return result;
       },
       encodedRole,
     );
+    if (raw.rawReadIssue) {
+      const issue = raw.rawReadIssue as { key: string; name: string; message: string };
+      delete raw.rawReadIssue;
+      throw Object.assign(
+        new Error(`商品原始数据 ${issue.key} 无法完整读取`, {
+          cause: Object.assign(new Error(issue.message), { name: issue.name }),
+        }),
+        { name: "IncompleteDetailError" },
+      );
+    }
     checkAborted(signal);
     report("全部标签读取完成，正在保存详情…");
     const now = new Date().toISOString();
     step = "角色本体核验";
     valuation = await captureValuation(page);
-    if (revision && revision !== (await readDetailRevision(page, item))) {
+    finalRevision = await readDetailRevision(page, item);
+    if (revision && revision !== finalRevision) {
       const issue = "详情读取期间商品原文或身份变化，本次采集未完成，需重新核验";
       valuation.issues = [...new Set([...valuation.issues, issue])];
       throw Object.assign(new Error(issue), { name: "IncompleteDetailError" });
@@ -925,6 +1007,7 @@ export async function collectDetail(
     return {
       captureMode: "all" as const,
       captureVersion: CAPTURE_VERSION,
+      sourceEvidence: sourceEvidence(),
       valuation,
       equipmentCapture: equipmentCaptureSummary(tabs, now, equipmentIssues),
       petCapture,
@@ -962,6 +1045,7 @@ export async function collectDetail(
       {
         captureMode: "all",
         captureVersion: CAPTURE_VERSION,
+        sourceEvidence: sourceEvidence(),
         url: item.url,
         collectedAt: now,
         tabs,

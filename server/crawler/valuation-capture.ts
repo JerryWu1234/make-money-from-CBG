@@ -51,8 +51,8 @@ export async function captureValuation(page: Page): Promise<ValuationCapture> {
                 }))
             : undefined;
         return {
-          riders: raw.AllRider ?? {},
-          advancedMount: raw.jinjie_rider_info ?? { isJinJie: 0 },
+          riders: raw.AllRider,
+          advancedMount: raw.jinjie_rider_info,
           artifact: raw.shenqi ?? null,
           hasArtifact: parser.result.shenqi !== false,
           idEffects: raw.idbid_desc ?? null,

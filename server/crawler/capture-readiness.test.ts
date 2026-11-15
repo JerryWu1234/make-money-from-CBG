@@ -7,28 +7,46 @@ import {
   isRetryableDetailNavigation,
 } from "./capture-readiness";
 import { CrawlStore } from "./store";
-import { analysisRecord } from "../../tests/fixtures/analysis";
+import { analysisRecord, fixtureFieldEvidence } from "../../tests/fixtures/analysis";
 import type { RoleDetail } from "./types";
 import { gunzipSync } from "node:zlib";
 
-const complete = () => ({
-  ...analysisRecord("a").detail!,
-  captureVersion: CAPTURE_VERSION,
-  valuation: {
-    version: 1 as const,
-    fields: [],
-    issues: [],
-    source: { serverId: "367", eid: "item-a" },
+const complete = () => {
+  const detail = {
+    ...analysisRecord("a").detail!,
+    captureVersion: CAPTURE_VERSION,
+    valuation: {
+      version: 1 as const,
+      fields: [],
+      issues: [],
+      source: { serverId: "367", eid: "item-a" },
+    },
+    equipmentCapture: {
+      version: 1 as const,
+      collectedAt: "now",
+      complete: true,
+      issues: [] as string[],
+      emptyProof: "explicit-text" as const,
+    },
+    petCapture: { version: 1 as const, collectedAt: "now", complete: true, issues: [] as string[] },
+  };
+  detail.sourceEvidence = fixtureFieldEvidence(detail, { serverId: "367", eid: "item-a" });
+  return detail;
+};
+
+it.each(["version-9", "missing-envelope"])(
+  "新采集完整性合同拒绝缺少本次来源证明的资料：%s",
+  (kind) => {
+    const detail = schoolCapture();
+    if (kind === "version-9") detail.captureVersion = 9;
+    else delete detail.sourceEvidence;
+    expect(captureIssues(detail, true, true)).toContain(
+      kind === "version-9"
+        ? "角色资料采集版本过旧，需重新核验"
+        : "详情字段来源和源版本尚未核验，需补采",
+    );
   },
-  equipmentCapture: {
-    version: 1 as const,
-    collectedAt: "now",
-    complete: true,
-    issues: [] as string[],
-    emptyProof: "explicit-text" as const,
-  },
-  petCapture: { version: 1 as const, collectedAt: "now", complete: true, issues: [] as string[] },
-});
+);
 
 it("读取返回时单件预算到期保留真实超时原因，不显示整轮暂停", async () => {
   const control = new AbortController();
@@ -358,6 +376,7 @@ function schoolCapture(observed = 7, textPairs = 7): RoleDetail {
         }
       : tab,
   );
+  detail.sourceEvidence = fixtureFieldEvidence(detail, { serverId: "367", eid: "item-a" });
   return detail;
 }
 const schoolTab = (detail: RoleDetail) => detail.tabs.find((tab) => tab.name === "技能")!;
@@ -445,6 +464,7 @@ it("六项师门不得入完整库，补全后才推进断点并保留归档源�
   const record = analysisRecord("school-contract");
   const partial = schoolCapture(6, 6);
   partial.valuation!.source = { serverId: record.listing.serverId, eid: record.listing.eid };
+  partial.sourceEvidence = fixtureFieldEvidence(partial, record.listing);
   const point = {
     key: record.listing.key,
     time: null,
@@ -461,6 +481,7 @@ it("六项师门不得入完整库，补全后才推进断点并保留归档源�
     expect(store.detail(record.listing.key)).toMatchObject({ status: "failed" });
     const correctable = schoolCapture(6, 7);
     correctable.valuation!.source = { serverId: record.listing.serverId, eid: record.listing.eid };
+    correctable.sourceEvidence = fixtureFieldEvidence(correctable, record.listing);
     expect(store.save(record.listing, correctable, point)).toBe(true);
     expect(store.count()).toBe(1);
     expect(store.checkpoint()).toEqual(point);

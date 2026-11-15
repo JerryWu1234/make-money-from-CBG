@@ -60,6 +60,32 @@
     while (root?.parentElement && text(root).length < 160) root = root.parentElement;
     return root;
   }
+  function contentText(root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const values = [];
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!visible(node.parentElement) || !node.textContent?.trim()) continue;
+      let excluded = false;
+      for (let el = node.parentElement; el && el !== root; el = el.parentElement) {
+        if (
+          el.matches(
+            'nav,header,script,style,textarea,[role="tooltip"],[id$="TipsBox"],[data-cbg-hover-tip]',
+          ) ||
+          new Set(
+            [...el.querySelectorAll("a,button,li")]
+              .map(text)
+              .filter((value) => MAIN_TABS.includes(value)),
+          ).size >= 4
+        ) {
+          excluded = true;
+          break;
+        }
+      }
+      const value = node.textContent.trim();
+      if (!excluded && !MAIN_TABS.includes(value)) values.push(value);
+    }
+    return values.join("\n");
+  }
   function attrs(el) {
     const result = {};
     const ancestors = [];
@@ -195,8 +221,9 @@
         })
       : [];
     const icons = itemNodes(root),
-      elements = icons.slice(0, 300).map((el) => {
+      elements = icons.slice(0, 300).map((el, index) => {
         const a = attrs(el);
+        a.data_cbg_observed_index = String(index);
         if (globals.modelMetadata?.[a.data_equip_type])
           a.data_official_model_metadata = globals.modelMetadata[a.data_equip_type];
         return a;
@@ -289,6 +316,7 @@
           .filter((node) => range.intersectsNode(node))
           .map((node) => {
             const a = attrs(node);
+            a.data_cbg_observed_index = String(icons.indexOf(node));
             const section = selectedNodes
               .filter(
                 (textNode) =>
@@ -512,6 +540,7 @@
               {
                 name: tabName || "未知标签",
                 text: text(root),
+                contentText: contentText(root),
                 fields: [
                   ...fields,
                   ...text(root)

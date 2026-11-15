@@ -93,6 +93,8 @@ export interface CrawlSource {
   cancelDetails?: (reason: Error) => Promise<void>;
 }
 export interface TabSnapshot {
+  /** Visible detail content with navigation, headers and transient tooltips excluded. */
+  contentText?: string;
   collectedAt?: string;
   itemsCollectedAt?: string;
   name: string;
@@ -121,6 +123,10 @@ export interface PetSnapshot {
   innerSkills: DetailItem[];
 }
 export interface DetailItem {
+  readSources?: Record<
+    string,
+    "element-attributes" | "tooltip" | "official-role-parser" | "visible-text"
+  >;
   /** Metadata returned for this exact model by the official page, never inferred from a name. */
   officialModel?: { modelId: string; name?: string; description?: string; category?: string };
   nameSource?: "element" | "official-model" | "tooltip";
@@ -166,6 +172,29 @@ export interface ValuationCapture {
   source: Record<string, unknown>;
 }
 export interface RoleDetail {
+  sourceEvidence?: {
+    version: 1;
+    serverId: string;
+    eid: string;
+    initialRevision: string | null;
+    finalRevision: string | null;
+    stable: boolean;
+    fields: Array<{
+      path: string;
+      source:
+        | "visible-field"
+        | "visible-text"
+        | "visible-table"
+        | "element-attributes"
+        | "tooltip"
+        | "official-role-parser"
+        | "official-container"
+        | "official-model"
+        | "official-slot"
+        | "description";
+      state: "observed" | "explicit-empty" | "unknown";
+    }>;
+  };
   accessContext?: import("../access").AccessContext;
   /** Legacy body-only captures require full recapture before reuse. */
   captureMode?: "body" | "all";

@@ -2,7 +2,6 @@ import { MAIN_TABS } from "../crawler/detail-tabs";
 import {
   CAPTURE_VERSION,
   equipmentNameUnresolved,
-  isNonRoleEquipment,
   itemFromAttributes,
   mergeWornEquipmentLevel,
 } from "../crawler/compact";
@@ -14,6 +13,8 @@ import { captureIssues, IncompleteCaptureError } from "../crawler/capture-readin
 import type { Listing, PetSnapshot, RoleDetail, TabSnapshot } from "../crawler/types";
 import type { ActionPlan, PageObserver, PageSnapshot, SemanticTarget } from "./contracts";
 import { UnsupportedAdapterOperation } from "./contracts";
+import { itemNeedsTooltip, tooltipSkillLevel } from "../crawler/item-read-policy";
+import { fieldEvidence } from "../crawler/field-evidence";
 
 export interface NativeCaptureIO {
   observer: PageObserver;
@@ -46,12 +47,22 @@ export async function collectNativeDetail(
       : { version: 1 as const, fields: [], source: {}, issues: ["网页没有可核验的角色解析数据"] };
     if (!initialRevision || !current.productRevision || initialRevision !== current.productRevision)
       valuation.issues.push("详情读取期间商品原文或解析器版本变化或未核验");
+    const capturedTabs = tabs.map(completeSchoolSkillsFromText);
     return {
       captureMode: "all",
       captureVersion: CAPTURE_VERSION,
+      sourceEvidence: {
+        version: 1,
+        serverId: listing.serverId,
+        eid: listing.eid,
+        initialRevision: initialRevision ?? null,
+        finalRevision: current.productRevision ?? null,
+        stable: !!initialRevision && initialRevision === current.productRevision,
+        fields: fieldEvidence(capturedTabs, valuation),
+      },
       url: listing.url,
       collectedAt: now,
-      tabs: tabs.map(completeSchoolSkillsFromText),
+      tabs: capturedTabs,
       raw: {
         ...current.detail?.raw,
         ...(current.wornEquipment ? { wornEquipment: current.wornEquipment } : {}),
@@ -79,29 +90,68 @@ export async function collectNativeDetail(
         : { attrs: attributes, issue: undefined };
       if (merged.issue) issues.push("装备：" + merged.issue);
       const observedAttrs = merged.attrs;
+      if (
+        observedAttrs.data_idx !== undefined &&
+        !observedAttrs.data_equip_name &&
+        !observedAttrs.data_tip_box &&
+        !observedAttrs.data_equip_desc
+      )
+        continue; // Entry portrait, not an asset.
+
       let item = itemFromAttributes(observedAttrs, index);
       if (!item) continue;
-      const needTooltip =
-        equipmentNameUnresolved(item.name) ||
-        (item.kind === "equipment" &&
-          !isNonRoleEquipment(item) &&
-          !item.description &&
-          !Object.keys(item.attributes || {}).length);
+      if ("rawLevel" in merged && merged.rawLevel !== undefined)
+        item.readSources = {
+          level: "official-role-parser",
+          "attributes.等级": "official-role-parser",
+        };
+      const needTooltip = itemNeedsTooltip(
+        item,
+        observedAttrs,
+        snapshot,
+        elements !== snapshot.elements,
+      );
       if (needTooltip) {
-        const control = current.controls?.items.find(
-          (entry) =>
-            entry.modelId === (attributes.data_equip_type || "") &&
-            entry.name === (attributes.data_equip_name || attributes.alt || "") &&
-            entry.location === (attributes.data_equip_location || ""),
-        );
+        const observedIndex = /^\d+$/.test(attributes.data_cbg_observed_index || "")
+          ? Number(attributes.data_cbg_observed_index)
+          : elements === snapshot.elements
+            ? index
+            : undefined;
+        const candidates =
+          current.controls?.items.filter(
+            (entry) =>
+              (observedIndex === undefined || entry.index === observedIndex) &&
+              entry.modelId === (attributes.data_equip_type || "") &&
+              entry.name === (attributes.data_equip_name || attributes.alt || "") &&
+              entry.location === (attributes.data_equip_location || ""),
+          ) || [];
+        const control = candidates.length === 1 ? candidates[0] : undefined;
         if (!control?.name) throw new UnsupportedAdapterOperation("缺少独立名称证明的详情图标悬停");
         current = await io.query({ kind: "inspect-item", ...control }, { kind: "changed" }, signal);
         const tooltip = current.detail?.tabs
           .flatMap((tab) => tab.tooltips)
           .find((value) => value.includes(control.name));
         if (!tooltip) throw new UnsupportedAdapterOperation("没有与物品身份关联的官网提示框");
-        const parsed = itemFromAttributes({ ...observedAttrs, data_equip_desc: tooltip }, index);
-        if (parsed) item = { ...parsed, tooltip };
+        const skillLevel =
+          observedAttrs.data_skill_type && !item.level ? tooltipSkillLevel(tooltip) : undefined;
+        const parsed = itemFromAttributes(
+          {
+            ...observedAttrs,
+            data_equip_desc: tooltip,
+            ...(skillLevel !== undefined ? { data_equip_level: skillLevel } : {}),
+          },
+          index,
+        );
+        if (parsed)
+          item = {
+            ...parsed,
+            tooltip,
+            readSources: {
+              ...item.readSources,
+              ...(skillLevel !== undefined ? { level: "tooltip" as const } : {}),
+              description: "tooltip",
+            },
+          };
       }
       snapshot.items.push(item);
     }
