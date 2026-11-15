@@ -178,8 +178,12 @@ export const comparisonLabels = {
   gt: "大于",
   gte: "大于或等于",
 };
+export function isUpliftPriceCeiling(price: PriceCondition) {
+  return price.comparison === "lte" && price.adjustment === "plus" && price.unit === "percent";
+}
 export function priceConditionLabel(price: PriceCondition) {
   if (price.comparison === "none") return "价格不限制";
+  if (isUpliftPriceCeiling(price)) return `挂牌价不超过裸号估值上涨${price.value}%后的价格`;
   if (
     price.unit === "percent" &&
     ((price.comparison === "lt" && price.adjustment === "minus") ||
@@ -334,7 +338,9 @@ export function evaluateConditions(
         result = {
           id: node.id,
           status: met ? "met" : "unmet",
-          reason: `${priceConditionLabel(p)}：挂牌价${asking.toFixed(2)}元，裸号估值${bare.toFixed(2)}元，比较目标${(target / 100).toFixed(2)}元（按分比较）`,
+          reason: isUpliftPriceCeiling(p)
+            ? `${priceConditionLabel(p)}：挂牌价${asking.toFixed(2)}元，裸号估值${bare.toFixed(2)}元，上涨后上限${(target / 100).toFixed(2)}元；挂牌价须小于或等于上限，低于原估值也通过（按分比较）`
+            : `${priceConditionLabel(p)}：挂牌价${asking.toFixed(2)}元，裸号估值${bare.toFixed(2)}元，比较目标${(target / 100).toFixed(2)}元（按分比较）`,
         };
       }
     } else

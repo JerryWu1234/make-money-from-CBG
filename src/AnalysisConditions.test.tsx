@@ -43,12 +43,12 @@ it("旧AI满足记录标为历史依据，当前程序判断展示可追溯证�
 it("价格控件默认不限制且不显示百分比输入", () => {
   const markup = renderToStaticMarkup(<AnalysisConditions onChange={() => {}} />);
   const select = markup.match(/<select\b[^>]*aria-label="C1价格比较"[\s\S]*?<\/select>/)?.[0] || "";
-  expect(select.match(/<option\b/g)).toHaveLength(3);
+  expect(select.match(/<option\b/g)).toHaveLength(2);
   expect(select).toContain('value="none"');
-  expect(select).toContain('value="lt"');
-  expect(select).toContain('value="gt"');
-  expect(select).toContain("挂牌价小于裸号估值");
-  expect(select).toContain("挂牌价大于裸号估值");
+  expect(select).toContain('value="lte"');
+  expect(select).toContain("挂牌价不超过上涨后的估值");
+  expect(select).not.toContain('value="lt"');
+  expect(select).not.toContain('value="gt"');
   expect(select).toMatch(/<option[^>]*value="none"[^>]*selected/);
   expect(markup).toContain("未自定义时，默认：价格不限制。");
   expect(markup).not.toContain('aria-label="C1估值调整"');
@@ -57,20 +57,52 @@ it("价格控件默认不限制且不显示百分比输入", () => {
 });
 
 it.each([
-  ["lt", "minus", 10, 90],
-  ["gt", "plus", 12.5, 112.5],
-] as const)("%s价格显示百分比及正确比较目标", (comparison, adjustment, value, target) => {
+  [0, 100],
+  [20, 120],
+  [12.5, 112.5],
+] as const)("上涨%s%%显示包含上限的公式，低于原估值也通过", (value, target) => {
   const tree = defaultConditions();
   tree.children = [
-    { id: "C1", text: "", price: { comparison, adjustment, value, unit: "percent" } },
+    {
+      id: "C1",
+      text: "",
+      price: { comparison: "lte", adjustment: "plus", value, unit: "percent" },
+    },
   ];
   const markup = renderToStaticMarkup(<AnalysisConditions value={tree} onChange={() => {}} />);
   expect(markup).toContain('aria-label="C1价格百分比"');
   expect(markup).toContain(`value="${value}"`);
+  expect(markup).toContain("裸号估值上涨幅度");
+  expect(markup).toContain("挂牌价 ≤ 裸号估值");
   expect(markup).toContain(`裸号估值 × ${target}%`);
+  expect(markup).toContain("低于原估值也通过");
   expect(markup).not.toContain('value="legacy"');
   expect(markup).not.toContain('aria-label="C1估值调整"');
   expect(markup).not.toContain("元</option>");
+});
+
+it("历史高于或低于条件保留旧含义，不能默改成新的上涨上限", () => {
+  for (const comparison of ["lt", "gt"] as const) {
+    const tree = defaultConditions();
+    tree.children = [
+      {
+        id: "C1",
+        text: "",
+        price: {
+          comparison,
+          adjustment: comparison === "lt" ? "minus" : "plus",
+          unit: "percent",
+          value: 20,
+        },
+      },
+    ];
+    const original = JSON.stringify(tree);
+    const markup = renderToStaticMarkup(<AnalysisConditions value={tree} onChange={() => {}} />);
+    expect(markup).toContain('value="legacy"');
+    expect(markup).toContain(`历史条件：挂牌价比裸号估值${comparison === "lt" ? "低" : "高"}20%`);
+    expect(markup).not.toContain('aria-label="C1价格百分比"');
+    expect(JSON.stringify(tree)).toBe(original);
+  }
 });
 
 it("旧版等价、包含边界及调整额条件保留历史展示和原始值", () => {

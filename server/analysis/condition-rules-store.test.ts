@@ -16,9 +16,12 @@ import { validateExactPricing } from "./pricing-integrity";
 import { calculateValuation } from "./valuation-calculator";
 import { applyValuationRange } from "./valuation-range";
 import { validateValuation } from "./valuation-contract";
-import { defaultConditions, type ConditionGroup } from "./conditions";
+import { defaultConditions, type ConditionGroup, type PriceCondition } from "./conditions";
 import { RULE_ENGINE_VERSION, describeRule, type RuleExpression } from "./condition-rule-types";
-import { validateDirectConditionResults } from "./direct-condition-review";
+import {
+  evaluateDirectConditions,
+  validateDirectConditionResults,
+} from "./direct-condition-review";
 
 const allAssets: RuleExpression = {
   op: "count",
@@ -396,6 +399,74 @@ it("完整装备宝宝估值修改条件后只重新核对结果，复用报价�
         .prepare("SELECT raw_response FROM analysis_attempts WHERE task_id=?")
         .get(x.taskId)!.raw_response,
     ).toBe(x.raw);
+  } finally {
+    await runner.shutdown();
+    x.crawl.close();
+  }
+});
+
+it("旧大于改为上涨上限时立即重算榜单，复用文字证明且不改历史", async () => {
+  const x = fullValuationFixture();
+  const price = {
+    id: "C1",
+    text: "",
+    price: { comparison: "gt", adjustment: "plus", unit: "percent", value: 20 } as PriceCondition,
+  };
+  const oldTree: ConditionGroup = {
+    ...x.profile.settings.conditions!,
+    children: [
+      price,
+      ...x.profile.settings.conditions!.children.map((n) => ({ ...n, join: "and" as const })),
+    ],
+  };
+  const oldProfile = createProfile(x.profile.template, {
+    ...x.profile.settings,
+    conditions: oldTree,
+  });
+  const original = structuredClone(x.result);
+  original.valuation!.condition_review = evaluateDirectConditions(
+    oldTree,
+    x.record,
+    { asking: original.valuation!.asking_price, bare: original.valuation!.bare_role_value ?? null },
+    original.valuation!.condition_review,
+  );
+  x.crawl.db
+    .prepare(
+      "UPDATE analysis_runs SET profile_json=? WHERE id=(SELECT run_id FROM analysis_tasks WHERE id=?)",
+    )
+    .run(JSON.stringify(oldProfile), x.taskId);
+  x.crawl.db
+    .prepare("UPDATE analysis_tasks SET result_json=? WHERE id=?")
+    .run(JSON.stringify(original), x.taskId);
+  const changedTree = structuredClone(oldTree);
+  (changedTree.children[0] as { price: PriceCondition }).price.comparison = "lte";
+  const changed = createProfile(oldProfile.template, {
+    ...oldProfile.settings,
+    conditions: changedTree,
+  });
+  const analyze = vi.fn().mockRejectedValue(new Error("价格上限调整不应调用模型"));
+  const runner = new AnalysisRunner(x.store, async () => ({
+    model: "full-condition-fixture",
+    analyze,
+  }));
+  try {
+    expect(x.store.overview({ currentProfile: oldProfile }).ranking).toHaveLength(0);
+    const before = x.store.detail(x.taskId, oldProfile)!.result!.valuation!.condition_review!;
+    expect(before.results.find((r) => r.id === "C1")?.status).toBe("unmet");
+    expect(x.store.overview({ currentProfile: changed }).ranking).toHaveLength(1);
+    const after = x.store.detail(x.taskId, changed)!.result!.valuation!.condition_review!;
+    expect(after.results.find((r) => r.id === "C1")?.status).toBe("met");
+    expect(after.results.find((r) => r.id === "C2")).toEqual(
+      before.results.find((r) => r.id === "C2"),
+    );
+    const id = await runner.start("codex", false, changed, true, "full-condition-fixture");
+    await runner.settled();
+    expect(x.store.run(id)).toMatchObject({ completed: 1, reused: 1, failed: 0 });
+    expect(analyze).not.toHaveBeenCalled();
+    expect(
+      x.crawl.db.prepare("SELECT result_json FROM analysis_tasks WHERE id=?").get(x.taskId)!
+        .result_json,
+    ).toBe(JSON.stringify(original));
   } finally {
     await runner.shutdown();
     x.crawl.close();
