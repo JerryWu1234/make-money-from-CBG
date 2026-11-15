@@ -719,6 +719,45 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
           }
           const inputPostedAt = Date.now();
           const inputConfirmedAt = inputPostedAt;
+          const priorRequests = new Set(before.business?.map((event) => event.requestId));
+          const priorEvents = new Set(before.business?.map((event) => event.eventId));
+          const freshMarketCommit = (value: PageSnapshot) => {
+            const commit = value.market?.commit;
+            if (
+              !commit ||
+              !value.market?.committed ||
+              commit.actionId !== plan.actionId ||
+              commit.queryId !== plan.queryId ||
+              !commit.requestId ||
+              !commit.eventId ||
+              priorRequests.has(commit.requestId) ||
+              priorEvents.has(commit.eventId)
+            )
+              return false;
+            const response = value.business?.find(
+              (event) => event.eventId === commit.eventId && event.requestId === commit.requestId,
+            );
+            if (
+              !response?.success ||
+              response.requestId !== commit.requestId ||
+              response.eventId !== commit.eventId ||
+              response.actionId !== plan.actionId ||
+              response.queryId !== plan.queryId ||
+              response.startedAt !== commit.startedAt ||
+              response.observedAt !== commit.completedAt ||
+              response.count !== value.market.rows.length
+            )
+              return false;
+            const started = Date.parse(commit.startedAt),
+              completed = Date.parse(commit.completedAt);
+            return (
+              Number.isFinite(started) &&
+              Number.isFinite(completed) &&
+              started >= dispatchedAt &&
+              completed >= started &&
+              completed <= Date.parse(value.context.observedAt)
+            );
+          };
           const observed = await this.waitFor(
             (value) => {
               if (
@@ -825,13 +864,13 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
                 return (
                   value.market?.category === plan.target.category &&
                   value.market.page === 1 &&
-                  value.market.committed &&
+                  freshMarketCommit(value) &&
                   value.context.queryId === plan.queryId
                 );
               if (plan.target.kind === "market-page")
                 return (
                   value.market?.page === plan.target.page &&
-                  value.market.committed &&
+                  freshMarketCommit(value) &&
                   value.context.queryId === plan.queryId
                 );
               if (plan.target.kind === "market-expand")
@@ -856,8 +895,8 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
                 );
               if (plan.target.kind === "sort")
                 return (
-                  value.market?.committed === true &&
-                  !!value.market.order &&
+                  freshMarketCommit(value) &&
+                  !!value.market?.order &&
                   value.context.queryId === plan.queryId
                 );
               if (plan.target.kind === "query-field")

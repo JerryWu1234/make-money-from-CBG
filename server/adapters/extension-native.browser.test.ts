@@ -45,26 +45,34 @@ async function fixture(body: string, query = "act=show_overall_search_equip") {
   await page.bringToFront();
   return page;
 }
-async function prepare(page: Page, target: Record<string, unknown>) {
-  return page.evaluate(async (target) => {
-    const g = window as unknown as Record<string, any>;
-    const bound = await new Promise<any>((resolve) =>
-      g.__listeners[0]({ kind: "bind" }, { id: "test-extension" }, resolve),
-    );
-    const plan = {
-      runId: "run",
-      queryId: "query",
-      actionId: "action",
-      ...bound,
-      browserSessionEpoch: "epoch",
-      stopEpoch: 0,
-      target,
-      expected: { kind: "changed" },
-    };
-    return new Promise<any>((resolve) =>
-      g.__listeners[0]({ kind: "prepare", plan }, { id: "test-extension" }, resolve),
-    );
-  }, target);
+async function prepare(
+  page: Page,
+  target: Record<string, unknown>,
+  actionId = "action",
+  queryId = "query",
+) {
+  return page.evaluate(
+    async ({ target, actionId, queryId }) => {
+      const g = window as unknown as Record<string, any>;
+      const bound = await new Promise<any>((resolve) =>
+        g.__listeners[0]({ kind: "bind" }, { id: "test-extension" }, resolve),
+      );
+      const plan = {
+        runId: "run",
+        queryId,
+        actionId,
+        ...bound,
+        browserSessionEpoch: "epoch",
+        stopEpoch: 0,
+        target,
+        expected: { kind: "changed" },
+      };
+      return new Promise<any>((resolve) =>
+        g.__listeners[0]({ kind: "prepare", plan }, { id: "test-extension" }, resolve),
+      );
+    },
+    { target, actionId, queryId },
+  );
 }
 describe("isolated extension observation and semantic targeting", () => {
   it("resolves actual public market controls while rejecting a different sensitive control", async () => {
@@ -458,4 +466,456 @@ describe("isolated extension observation and semantic targeting", () => {
       await page.close();
     }
   });
+});
+
+async function marketRequestFixture() {
+  const page = await fixture(
+    `<button id="btn_equip_search">搜索</button>
+     <div id="order_menu"><a href="#" data_attr_name="price">价格</a></div>
+     <div id="pager_bar">第 1 页 共 2 页 <a href="#" data-page="1">1</a> <a href="#" data-page="2">2</a></div>
+     <div id="search_result"><a class="soldImg" href="/equip?s=299&eid=stale">旧商品</a></div>
+     <div id="unrelated"></div><div style="height:1800px"></div>`,
+  );
+  await page.evaluate(() => {
+    const g = window as unknown as Record<string, any>;
+    g.__marketRequests = [];
+    g.__marketArgs = {
+      act: "overall_search_equip",
+      page: 1,
+      order_by: "price ASC",
+      kindid: "20",
+    };
+    g.CurSearchValue = { arg: { ...g.__marketArgs } };
+    g.ajax_with_recommend = (options: any) => {
+      g.__marketRequests.push(options);
+      if (g.__immediateMarketResponse) return options.onSuccess(g.__immediateMarketResponse);
+      return g.__marketRequests.length - 1;
+    };
+    g.__requestMarket = () =>
+      g.ajax_with_recommend({
+        data: { ...g.__marketArgs },
+        onSuccess(value: unknown) {
+          g.__siteCallbackValue = value;
+          g.__synchronousMarketRender?.();
+        },
+      });
+    document.getElementById("btn_equip_search")!.onclick = () => g.__requestMarket();
+    document.querySelector<HTMLAnchorElement>("#order_menu a")!.onclick = (event) => {
+      event.preventDefault();
+      g.__requestMarket();
+    };
+    for (const node of document.querySelectorAll<HTMLAnchorElement>("#pager_bar a"))
+      node.onclick = (event) => {
+        event.preventDefault();
+        g.__marketArgs.page = Number(node.dataset.page);
+        g.__requestMarket();
+      };
+  });
+  await page.addScriptTag({ content: script("main.js") });
+  await expect.poll(async () => (await marketSnapshot(page)).market?.conditions.kindid).toBe("20");
+  return page;
+}
+async function marketSnapshot(page: Page) {
+  return page.evaluate(async () => {
+    const g = window as unknown as Record<string, any>;
+    await new Promise((resolve) =>
+      g.__listeners[0]({ kind: "capture" }, { id: "test-extension" }, resolve),
+    );
+    return g.__snapshots.at(-1).payload;
+  });
+}
+async function resolveMarketRequest(
+  page: Page,
+  index: number,
+  value: { status: number; msg: unknown[] | string },
+  fillServer = true,
+) {
+  const before = (await marketSnapshot(page)).business.filter(
+    (event: any) => event.kind === "jsonp" && event.phase !== "request",
+  ).length;
+  await page.evaluate(
+    ({ index, value }) => {
+      const g = window as unknown as Record<string, any>;
+      g.__marketRequests[index].onSuccess(value);
+    },
+    {
+      index,
+      value: {
+        ...value,
+        msg: Array.isArray(value.msg)
+          ? value.msg.map((row) =>
+              fillServer && row && typeof row === "object" ? { serverid: 299, ...row } : row,
+            )
+          : value.msg,
+      },
+    },
+  );
+  await expect
+    .poll(
+      async () =>
+        (await marketSnapshot(page)).business.filter(
+          (event: any) => event.kind === "jsonp" && event.phase !== "request",
+        ).length,
+    )
+    .toBeGreaterThan(before);
+}
+async function renderMarketRows(page: Page, eid: string | null, currentPage = 1) {
+  await page.evaluate(
+    ({ eid, currentPage }) => {
+      const g = window as unknown as Record<string, any>;
+      g.__marketArgs.page = currentPage;
+      g.CurSearchValue = { arg: { ...g.__marketArgs } };
+      document.querySelector("#pager_bar")!.firstChild!.textContent =
+        `第 ${currentPage} 页 共 2 页 `;
+      document.querySelector("#search_result")!.innerHTML = eid
+        ? `<a class="soldImg" href="/equip?s=299&eid=${eid}">商品 ${eid}</a>`
+        : "没有符合条件的商品";
+    },
+    { eid, currentPage },
+  );
+  await expect.poll(async () => (await marketSnapshot(page)).market.page).toBe(currentPage);
+}
+async function mutateUnrelatedMarketContent(page: Page) {
+  await page.evaluate(() => {
+    document.getElementById("unrelated")!.textContent += "其他页面内容更新";
+    window.scrollTo(0, 120);
+  });
+}
+async function expectMarketCommit(page: Page, actionId: string, queryId = "query") {
+  await expect.poll(async () => (await marketSnapshot(page)).market.committed).toBe(true);
+  const snapshot = await marketSnapshot(page);
+  const response = snapshot.business.find(
+    (event: any) =>
+      event.eventId === snapshot.market.commit?.eventId &&
+      event.requestId === snapshot.market.commit?.requestId,
+  );
+  expect(response).toBeDefined();
+  expect(snapshot.market.commit).toMatchObject({
+    actionId,
+    queryId,
+    requestId: response.requestId,
+    eventId: response.eventId,
+    startedAt: response.startedAt,
+    completedAt: response.observedAt,
+  });
+}
+async function seedSuccessfulMarketRequest(page: Page) {
+  expect(
+    (
+      await prepare(
+        page,
+        { kind: "market-submit", category: "equipment" },
+        "previous-submit",
+        "previous-query",
+      )
+    ).ok,
+  ).toBe(true);
+  await page.locator("#btn_equip_search").click();
+  await resolveMarketRequest(page, 0, { status: 0, msg: [{ eid: "previous" }] });
+  await renderMarketRows(page, "previous");
+  await expectMarketCommit(page, "previous-submit", "previous-query");
+}
+
+describe("market submissions require fresh MAIN callback and corresponding result DOM", () => {
+  it("accepts a fresh callback that synchronously renders its own result DOM", async () => {
+    const page = await marketRequestFixture();
+    try {
+      expect(
+        (await prepare(page, { kind: "market-submit", category: "equipment" }, "sync-submit")).ok,
+      ).toBe(true);
+      await page.evaluate(() => {
+        const g = window as unknown as Record<string, any>;
+        g.__immediateMarketResponse = { status: 0, msg: [{ serverid: 299, eid: "synchronous" }] };
+        g.__synchronousMarketRender = () => {
+          document.querySelector("#search_result")!.innerHTML =
+            '<a class="soldImg" href="/equip?s=299&eid=synchronous">同步新商品</a>';
+        };
+      });
+      await page.locator("#btn_equip_search").click();
+      await expectMarketCommit(page, "sync-submit");
+      expect((await marketSnapshot(page)).market.rows[0].url).toContain("eid=synchronous");
+    } finally {
+      await page.close();
+    }
+  });
+  it("accepts a new successful response whose exact identities are already rendered", async () => {
+    const page = await marketRequestFixture();
+    try {
+      await seedSuccessfulMarketRequest(page);
+      expect(
+        (await prepare(page, { kind: "market-submit", category: "equipment" }, "same-rows-submit"))
+          .ok,
+      ).toBe(true);
+      await page.locator("#btn_equip_search").click();
+      await resolveMarketRequest(page, 1, { status: 0, msg: [{ eid: "previous" }] });
+      await expectMarketCommit(page, "same-rows-submit");
+      expect((await marketSnapshot(page)).market.rows[0].url).toContain("eid=previous");
+    } finally {
+      await page.close();
+    }
+  });
+  it("accepts result DOM rendered in the website callback's microtask", async () => {
+    const page = await marketRequestFixture();
+    try {
+      expect(
+        (await prepare(page, { kind: "market-submit", category: "equipment" }, "microtask-submit"))
+          .ok,
+      ).toBe(true);
+      await page.evaluate(() => {
+        const g = window as unknown as Record<string, any>;
+        g.__immediateMarketResponse = { status: 0, msg: [{ serverid: 299, eid: "microtask" }] };
+        g.__synchronousMarketRender = () => {
+          queueMicrotask(() => {
+            document.querySelector("#search_result")!.innerHTML =
+              '<a class="soldImg" href="/equip?s=299&eid=microtask">微任务新商品</a>';
+          });
+        };
+      });
+      await page.locator("#btn_equip_search").click();
+      await expectMarketCommit(page, "microtask-submit");
+      expect((await marketSnapshot(page)).market.rows[0].url).toContain("eid=microtask");
+    } finally {
+      await page.close();
+    }
+  });
+  it.each([
+    { label: "missing", row: { eid: "current" } },
+    { label: "wrong", row: { serverid: 300, eid: "current" } },
+  ])("does not commit rows with a $label response server identity", async ({ row }) => {
+    const page = await marketRequestFixture();
+    try {
+      expect(
+        (await prepare(page, { kind: "market-submit", category: "equipment" }, "identity-submit"))
+          .ok,
+      ).toBe(true);
+      await page.locator("#btn_equip_search").click();
+      await resolveMarketRequest(page, 0, { status: 0, msg: [row] }, false);
+      await renderMarketRows(page, "current");
+      const snapshot = await marketSnapshot(page);
+      expect(snapshot.business.at(-1).success).toBe(true);
+      expect(snapshot.market.rows[0].url).toContain("s=299&eid=current");
+      expect(snapshot.market.committed).toBe(false);
+      expect(snapshot.market.commit).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  });
+  it("matches response game_ordersn with the visible row's data_ordersn and server", async () => {
+    const page = await marketRequestFixture();
+    try {
+      expect(
+        (await prepare(page, { kind: "market-submit", category: "equipment" }, "ordersn-submit"))
+          .ok,
+      ).toBe(true);
+      await page.locator("#btn_equip_search").click();
+      await resolveMarketRequest(page, 0, {
+        status: 0,
+        msg: [{ serverid: 299, game_ordersn: "ordersn-current" }],
+      });
+      await renderMarketRows(page, "current");
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+      await page.evaluate(() => {
+        document
+          .querySelector("#search_result a.soldImg")!
+          .setAttribute("data_ordersn", "ordersn-current");
+      });
+      await expectMarketCommit(page, "ordersn-submit");
+    } finally {
+      await page.close();
+    }
+  });
+  it("does not assign a later background request to a target click that started no request", async () => {
+    const page = await marketRequestFixture();
+    try {
+      expect(
+        (await prepare(page, { kind: "market-submit", category: "equipment" }, "blocked-submit"))
+          .ok,
+      ).toBe(true);
+      await page.evaluate(() => {
+        const g = window as unknown as Record<string, any>;
+        document.getElementById("btn_equip_search")!.onclick = () => {};
+        g.__immediateMarketResponse = { status: 0, msg: [{ serverid: 299, eid: "background" }] };
+        g.__synchronousMarketRender = () => {
+          document.querySelector("#search_result")!.innerHTML =
+            '<a class="soldImg" href="/equip?s=299&eid=background">后台查询商品</a>';
+        };
+      });
+      await page.locator("#btn_equip_search").click();
+      expect(
+        await page.evaluate(
+          () => (window as unknown as Record<string, any>).__marketRequests.length,
+        ),
+      ).toBe(0);
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            setTimeout(() => {
+              (window as unknown as Record<string, any>).__requestMarket();
+              resolve();
+            }, 0);
+          }),
+      );
+      await expect.poll(async () => (await marketSnapshot(page)).business.length).toBe(1);
+      expect((await marketSnapshot(page)).market.rows[0].url).toContain("eid=background");
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+  it("does not reuse a previous same-condition success after prepare, DOM mutation or scroll", async () => {
+    const page = await marketRequestFixture();
+    try {
+      await seedSuccessfulMarketRequest(page);
+      expect(
+        (await prepare(page, { kind: "market-submit", category: "equipment" }, "current-submit"))
+          .ok,
+      ).toBe(true);
+      expect((await marketSnapshot(page)).actionContext.actionId).toBe("current-submit");
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+      await mutateUnrelatedMarketContent(page);
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+      await page.locator("#btn_equip_search").click();
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+      await resolveMarketRequest(page, 1, { status: 0, msg: [{ eid: "current" }] });
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+      await mutateUnrelatedMarketContent(page);
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+      await page.evaluate(() => {
+        document.querySelector("#search_result")!.classList.add("refresh-complete");
+      });
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+      await page.evaluate(() => {
+        document.querySelector("#pager_bar")!.append(" 分页状态更新");
+      });
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+      await renderMarketRows(page, "current");
+      await expectMarketCommit(page, "current-submit");
+      expect((await marketSnapshot(page)).market.rows[0].url).toContain("eid=current");
+    } finally {
+      await page.close();
+    }
+  });
+  it.each(["before", "after"])(
+    "does not attribute an older in-flight callback whose DOM renders %s the current response",
+    async (oldRenderOrder) => {
+      const page = await marketRequestFixture();
+      try {
+        await seedSuccessfulMarketRequest(page);
+        await page.locator("#btn_equip_search").click();
+        expect(
+          (await prepare(page, { kind: "market-submit", category: "equipment" }, "current-submit"))
+            .ok,
+        ).toBe(true);
+        await page.locator("#btn_equip_search").click();
+        await resolveMarketRequest(page, 1, { status: 0, msg: [{ eid: "late-old" }] });
+        if (oldRenderOrder === "before") await renderMarketRows(page, "late-old");
+        expect((await marketSnapshot(page)).market.committed).toBe(false);
+        await resolveMarketRequest(page, 2, { status: 0, msg: [{ eid: "current" }] });
+        expect((await marketSnapshot(page)).market.committed).toBe(false);
+        if (oldRenderOrder === "after") {
+          await renderMarketRows(page, "late-old");
+          expect((await marketSnapshot(page)).market.committed).toBe(false);
+        }
+        await renderMarketRows(page, "current");
+        await expectMarketCommit(page, "current-submit");
+        expect((await marketSnapshot(page)).market.rows[0].url).toContain("eid=current");
+      } finally {
+        await page.close();
+      }
+    },
+  );
+  it.each(["unchanged", "replaced"])(
+    "checks the completed current response after an old callback leaves DOM %s",
+    async (domState) => {
+      const page = await marketRequestFixture();
+      try {
+        await seedSuccessfulMarketRequest(page);
+        await page.locator("#btn_equip_search").click();
+        expect(
+          (await prepare(page, { kind: "market-submit", category: "equipment" }, "current-submit"))
+            .ok,
+        ).toBe(true);
+        await page.locator("#btn_equip_search").click();
+        await resolveMarketRequest(page, 2, { status: 0, msg: [{ eid: "current" }] });
+        await renderMarketRows(page, "current");
+        await expectMarketCommit(page, "current-submit");
+        const completed = (await marketSnapshot(page)).market.commit;
+        await resolveMarketRequest(page, 1, { status: 0, msg: [{ eid: "late-old" }] });
+        if (domState === "replaced") await renderMarketRows(page, "late-old");
+        const snapshot = await marketSnapshot(page);
+        if (domState === "unchanged") {
+          await expectMarketCommit(page, "current-submit");
+          expect(snapshot.market.commit).toEqual(completed);
+          expect(snapshot.market.rows[0].url).toContain("eid=current");
+        } else {
+          expect(snapshot.market.committed).toBe(false);
+          expect(snapshot.market.commit).toBeUndefined();
+          expect(snapshot.market.rows[0].url).toContain("eid=late-old");
+        }
+      } finally {
+        await page.close();
+      }
+    },
+  );
+  it.each([
+    { target: { kind: "market-page", page: 1 }, selector: '#pager_bar a[data-page="1"]' },
+    { target: { kind: "market-page", page: 2 }, selector: '#pager_bar a[data-page="2"]' },
+    { target: { kind: "sort", value: "price ASC" }, selector: "#order_menu a" },
+  ])("protects repeated page/sort operation $target", async ({ target, selector }) => {
+    const page = await marketRequestFixture();
+    const currentPage = target.kind === "market-page" ? target.page! : 1;
+    try {
+      await seedSuccessfulMarketRequest(page);
+      expect((await prepare(page, target, "current-page-or-sort")).ok).toBe(true);
+      await mutateUnrelatedMarketContent(page);
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+      await page.locator(selector).click();
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+      await resolveMarketRequest(page, 1, { status: 0, msg: [{ eid: "new-page-or-sort" }] });
+      expect((await marketSnapshot(page)).market.committed).toBe(false);
+      await renderMarketRows(page, "new-page-or-sort", currentPage);
+      await expectMarketCommit(page, "current-page-or-sort");
+      expect((await marketSnapshot(page)).market.page).toBe(currentPage);
+    } finally {
+      await page.close();
+    }
+  });
+  it.each(["empty", "denial"])(
+    "does not accept old rows for a fresh %s response",
+    async (response) => {
+      const page = await marketRequestFixture();
+      try {
+        await seedSuccessfulMarketRequest(page);
+        expect(
+          (await prepare(page, { kind: "market-submit", category: "equipment" }, "current-submit"))
+            .ok,
+        ).toBe(true);
+        await page.locator("#btn_equip_search").click();
+        await resolveMarketRequest(
+          page,
+          1,
+          response === "empty" ? { status: 0, msg: [] } : { status: 1, msg: "查询被拒绝" },
+        );
+        await mutateUnrelatedMarketContent(page);
+        expect((await marketSnapshot(page)).market.committed).toBe(false);
+        expect((await marketSnapshot(page)).market.rows[0].url).toContain("eid=previous");
+        if (response === "empty") {
+          await page.evaluate(() => {
+            const marker = document.createElement("p");
+            marker.textContent = "没有符合条件的商品";
+            document.querySelector("#search_result")!.append(marker);
+          });
+          expect((await marketSnapshot(page)).market.committed).toBe(false);
+          await renderMarketRows(page, null);
+          await expectMarketCommit(page, "current-submit");
+          expect((await marketSnapshot(page)).market).toMatchObject({ empty: true, rows: [] });
+        } else {
+          await renderMarketRows(page, "denied-stale-render");
+          expect((await marketSnapshot(page)).market.committed).toBe(false);
+        }
+      } finally {
+        await page.close();
+      }
+    },
+  );
 });

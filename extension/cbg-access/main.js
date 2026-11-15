@@ -6,7 +6,10 @@
     typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : String(Date.now());
-  let eventSequence = 0;
+  let eventSequence = 0,
+    requestSequence = 0,
+    activation = null;
+  const usedActivations = new WeakSet();
   const safe = (fn) => {
     try {
       fn();
@@ -52,7 +55,28 @@
         : undefined,
     success: value?.status === 0 && Array.isArray(value.msg),
     count: Array.isArray(value?.msg) ? value.msg.length : undefined,
+    resultRows:
+      Array.isArray(value?.msg) && value.msg.length <= 1000
+        ? value.msg.map((row) => {
+            const field = (value) =>
+              ["string", "number"].includes(typeof value) && /^[\w-]{1,200}$/.test(String(value))
+                ? String(value)
+                : undefined;
+            return {
+              eid: field(row?.eid),
+              serverId: field(row?.server_id ?? row?.serverid ?? row?.serverId),
+              ordersn: field(row?.game_ordersn),
+            };
+          })
+        : undefined,
   });
+  const clicked = (event) => {
+    if (event.isTrusted) activation = event;
+  };
+  if (typeof document.addEventListener === "function") {
+    document.addEventListener("click", clicked, true);
+    own.push(() => document.removeEventListener("click", clicked, true));
+  }
   function wrap(object, property, make) {
     const original = object[property];
     if (typeof original !== "function") return;
@@ -166,34 +190,60 @@
       if (!options || typeof options !== "object")
         return Reflect.apply(original, this, [options, ...rest]);
       const next = { ...options };
+      let request;
+      safe(() => {
+        request = {
+          requestId: `${observationEpoch}-request-${++requestSequence}`,
+          startedAt: new Date().toISOString(),
+          activationTime:
+            activation?.eventPhase > 0 && !usedActivations.has(activation)
+              ? activation.timeStamp
+              : null,
+          page: Number(options.data?.page || 1),
+          act: typeof options.data?.act === "string" ? options.data.act : "",
+          searchType: typeof options.data?.search_type === "string" ? options.data.search_type : "",
+          orderBy: typeof options.data?.order_by === "string" ? options.data.order_by : "",
+          conditions: Object.fromEntries(
+            Object.entries(options.data || {}).filter(
+              ([key, value]) =>
+                !["act", "search_type", "page", "order_by", "callback", "_"].includes(key) &&
+                !/cookie|token|password|fingerprint|authorization|session|signature|^fp$|^sign$/i.test(
+                  key,
+                ) &&
+                ["string", "number"].includes(typeof value),
+            ),
+          ),
+        };
+        if (request.activationTime !== null) usedActivations.add(activation);
+        emit({ kind: "jsonp", endpoint: "/cgi-bin/recommend.py", phase: "request", ...request });
+      });
       for (const name of ["onSuccess", "onFailure"]) {
         const callback = options[name];
         next[name] = function (...args) {
-          safe(() =>
-            emit({
-              kind: "jsonp",
-              endpoint: "/cgi-bin/recommend.py",
-              status: 200,
-              page: Number(options.data?.page || 1),
-              act: typeof options.data?.act === "string" ? options.data.act : "",
-              searchType:
-                typeof options.data?.search_type === "string" ? options.data.search_type : "",
-              orderBy: typeof options.data?.order_by === "string" ? options.data.order_by : "",
-              observedAt: new Date().toISOString(),
-              conditions: Object.fromEntries(
-                Object.entries(options.data || {}).filter(
-                  ([key, value]) =>
-                    !["act", "search_type", "page", "order_by", "callback", "_"].includes(key) &&
-                    !/cookie|token|password|fingerprint|authorization|session|signature|^fp$|^sign$/i.test(
-                      key,
-                    ) &&
-                    ["string", "number"].includes(typeof value),
-                ),
-              ),
-              ...(name === "onSuccess" ? summary(args[0]) : { success: false }),
-            }),
-          );
-          return typeof callback === "function" ? Reflect.apply(callback, this, args) : undefined;
+          let completed = false;
+          let evidence = { success: false };
+          safe(() => {
+            if (name === "onSuccess") evidence = summary(args[0]);
+          });
+          try {
+            const value =
+              typeof callback === "function" ? Reflect.apply(callback, this, args) : undefined;
+            completed = true;
+            return value;
+          } finally {
+            safe(() =>
+              emit({
+                kind: "jsonp",
+                endpoint: "/cgi-bin/recommend.py",
+                phase: "response",
+                ...request,
+                status: 200,
+                observedAt: new Date().toISOString(),
+                ...evidence,
+                success: completed && evidence.success,
+              }),
+            );
+          }
         };
       }
       return Reflect.apply(original, this, [next, ...rest]);

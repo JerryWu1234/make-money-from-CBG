@@ -191,6 +191,14 @@ export interface PageSnapshot {
       description?: string;
     }[];
     committed: boolean;
+    commit?: {
+      actionId: string;
+      queryId: string;
+      requestId: string;
+      eventId: string;
+      startedAt: string;
+      completedAt: string;
+    };
     empty: boolean;
     config?: Record<string, unknown>;
     menus?: { id: string; choices: { value: string; label: string; selected: boolean }[] }[];
@@ -236,6 +244,11 @@ export interface PageSnapshot {
     orderBy?: string;
     observedAt?: string;
     eventId?: string;
+    requestId?: string;
+    startedAt?: string;
+    actionId?: string;
+    queryId?: string;
+    resultRows?: { eid?: string; serverId?: string; ordersn?: string }[];
     conditions?: Record<string, string | number>;
     denial?: { status: number; msg: string };
     act?: string;

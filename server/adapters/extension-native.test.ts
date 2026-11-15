@@ -336,4 +336,115 @@ describe("extension-native runtime fences and observation", () => {
     expect(f.writes.filter((write) => write.command === "execute")).toHaveLength(1);
     f.db.close();
   });
+  it.each([
+    { kind: "market-submit", category: "equipment" },
+    { kind: "market-page", page: 1 },
+    { kind: "sort", value: "price ASC" },
+  ] as const)(
+    "$kind requires a current callback receipt as well as a fresh snapshot",
+    async (target) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      await f.bind();
+      const startedAt = new Date().toISOString();
+      const market = {
+        category: "equipment",
+        page: 1,
+        totalPages: 1,
+        order: "price ASC",
+        conditions: {},
+        rows: [],
+        empty: true,
+        committed: true,
+      };
+      const oldResponse = {
+        kind: "jsonp",
+        endpoint: "/cgi-bin/recommend.py",
+        status: 200,
+        success: true,
+        count: 0,
+        requestId: "old-request",
+        eventId: "old-event",
+        actionId: "old-action",
+        queryId: "old-query",
+        startedAt,
+        observedAt: startedAt,
+      };
+      await f.receive("snapshot", {
+        ...f.base(),
+        listing: undefined,
+        market,
+        business: [oldResponse],
+      });
+      const before = await f.runtime.snapshot();
+      const plan: ActionPlan = {
+        ...before.context,
+        actionId: "current-submit",
+        target,
+        expected: { kind: "changed" },
+      };
+      let completed = false;
+      const operation = f.runtime.execute(plan).then((value) => {
+        completed = true;
+        return value;
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      await f.internals.receive({
+        kind: "input-result",
+        actionId: plan.actionId,
+        ok: true,
+        posted: true,
+      });
+      const deliver = async (
+        requestId: string,
+        eventId: string,
+        responseOverride: Record<string, unknown> = {},
+        time = new Date().toISOString(),
+        ignoredOldResponse = false,
+      ) => {
+        const commit = {
+          actionId: plan.actionId,
+          queryId: plan.queryId,
+          requestId,
+          eventId,
+          startedAt: time,
+          completedAt: new Date().toISOString(),
+        };
+        await f.receive("snapshot", {
+          ...f.base(),
+          listing: undefined,
+          observedAt: new Date().toISOString(),
+          revision: `snapshot-${requestId}-${eventId}-${Object.keys(responseOverride).join(",")}`,
+          actionContext: plan,
+          market: { ...market, commit },
+          business: [
+            { ...oldResponse, ...commit, observedAt: commit.completedAt, ...responseOverride },
+            ...(ignoredOldResponse ? [oldResponse] : []),
+          ],
+        });
+        await vi.advanceTimersByTimeAsync(1);
+      };
+      // Merely restamping the old business receipt with the current query is insufficient.
+      await deliver("old-request", "old-event");
+      expect(completed).toBe(false);
+      await deliver("new-request", "new-event", { eventId: "another-event" });
+      expect(completed).toBe(false);
+      await deliver("new-request", "new-event", { success: false });
+      expect(completed).toBe(false);
+      await deliver(
+        "new-request",
+        "new-event",
+        {},
+        new Date(Date.parse(startedAt) - 1).toISOString(),
+      );
+      expect(completed).toBe(false);
+      await deliver("new-request", "new-event", {}, new Date().toISOString(), true);
+      await expect(operation).resolves.toMatchObject({
+        market: { committed: true, commit: { actionId: plan.actionId } },
+      });
+      expect(completed).toBe(true);
+      expect(f.risks).toHaveLength(0);
+      f.db.close();
+    },
+  );
 });

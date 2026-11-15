@@ -13,7 +13,26 @@
     actionContext = null,
     bindingContext = null,
     listCommitSequence = 0,
-    lastListCommit = null;
+    lastListCommit = null,
+    marketAction = null;
+  const marketRequests = new Map();
+  document.addEventListener(
+    "click",
+    (event) => {
+      if (
+        !event.isTrusted ||
+        !marketAction ||
+        marketAction.actionId !== actionContext?.actionId ||
+        !event.composedPath().includes(marketAction.node)
+      )
+        return;
+      marketAction.activationTime = event.timeStamp;
+      marketAction.activatedAt = new Date().toISOString();
+      marketAction.requestId = null;
+      marketAction.responseEventId = null;
+    },
+    true,
+  );
   const visible = (el) =>
     el instanceof HTMLElement &&
     el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
@@ -97,6 +116,8 @@
       nodes.clear();
       globals = {};
       business = [];
+      marketAction = null;
+      marketRequests.clear();
     }
     const body = document.body?.innerText || "";
     const pager = text(document.querySelector("#pager_bar"));
@@ -111,7 +132,11 @@
         {},
     }));
     const raw = {};
-    const marketSnapshot = globalThis.__CBGMarketRules?.snapshot(globals, business);
+    const marketSnapshot = globalThis.__CBGMarketRules?.snapshot(
+      globals,
+      business,
+      marketAction?.actionId === actionContext?.actionId ? marketAction : null,
+    );
     for (const name of [
       "EquipInfo",
       "RoleInfo",
@@ -584,7 +609,36 @@
           "/cgi-bin/role_search.py",
         ].includes(value.endpoint)
       ) {
-        business.push({
+        if (value.phase === "request") {
+          if (
+            !marketAction?.requestId &&
+            marketAction?.activationTime === value.activationTime &&
+            Number.isFinite(value.activationTime) &&
+            typeof value.requestId === "string" &&
+            value.requestId.length <= 150 &&
+            Date.parse(value.startedAt) >= Date.parse(marketAction.activatedAt)
+          ) {
+            marketRequests.set(value.requestId, {
+              actionId: marketAction.actionId,
+              queryId: marketAction.queryId,
+              startedAt: value.startedAt,
+              activationTime: value.activationTime,
+            });
+            marketAction.requestId = value.requestId;
+            if (marketRequests.size > 32) marketRequests.delete(marketRequests.keys().next().value);
+          }
+          capture();
+          return;
+        }
+        const request = marketRequests.get(value.requestId);
+        marketRequests.delete(value.requestId);
+        const owned =
+          !!request &&
+          request.actionId === marketAction?.actionId &&
+          request.queryId === marketAction?.queryId &&
+          request.startedAt === value.startedAt &&
+          request.activationTime === value.activationTime;
+        const observed = {
           kind: value.kind,
           endpoint: value.endpoint,
           denial: value.denial,
@@ -598,7 +652,18 @@
           observedAt: value.observedAt,
           eventId: value.eventId,
           conditions: value.conditions,
-        });
+          requestId: value.requestId,
+          startedAt: value.startedAt,
+          resultRows: value.resultRows,
+          ...(owned ? { actionId: request.actionId, queryId: request.queryId } : {}),
+        };
+        business.push(observed);
+        if (owned && value.phase === "response" && typeof value.eventId === "string") {
+          marketAction.responseEventId = value.eventId;
+          marketAction.requestId = value.requestId;
+          marketAction.startedAt = request.startedAt;
+          marketAction.completedAt = value.observedAt;
+        }
         if (business.length > 12) business.shift();
         capture();
       }
@@ -775,6 +840,8 @@
     if (message.kind === "stop") {
       stopped = true;
       nodes.clear();
+      marketAction = null;
+      marketRequests.clear();
       reply({ ok: true });
       return;
     }
@@ -785,6 +852,8 @@
     }
     if (message.kind === "bind") {
       stopped = false;
+      marketAction = null;
+      marketRequests.clear();
       if (message.context)
         bindingContext = {
           recoveryEpoch: message.context.recoveryEpoch,
@@ -961,6 +1030,19 @@
         },
       };
       nodes.set(plan.actionId, { node, proof });
+      if (
+        ["market-submit", "market-page", "sort"].includes(plan.target.kind) &&
+        marketAction?.actionId !== plan.actionId
+      )
+        marketAction = {
+          actionId: plan.actionId,
+          queryId: plan.queryId,
+          node,
+          activationTime: null,
+          activatedAt: null,
+          responseEventId: null,
+          requestId: null,
+        };
       if (nodes.size > 10) nodes.delete(nodes.keys().next().value);
       reply({ ok: true, proof });
     } catch (error) {

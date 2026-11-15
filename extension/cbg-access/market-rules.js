@@ -368,7 +368,7 @@
       },
     };
   }
-  function snapshot(globals, business) {
+  function snapshot(globals, business, submission) {
     const kind = category();
     if (!kind) return undefined;
     const args = globals.CurSearchValue?.arg || globals.QueryArgs || {};
@@ -384,48 +384,49 @@
         conditions[key] = value;
     const pager = text(document.querySelector("#pager_bar, #pager")),
       page = Number(pager.match(/第\s*(\d+)\s*页/)?.[1] || args.page || 1);
-    const rows = [
+    const rowNodes = [
       ...document.querySelectorAll("#search_result a.soldImg[href], #soldList a.soldImg[href]"),
-    ]
-      .filter(
-        (a) =>
-          visible(a) &&
-          (() => {
-            try {
-              const u = new URL(a.href);
-              return (
-                u.origin === location.origin &&
-                u.pathname === "/equip" &&
-                /^\d+$/.test(u.searchParams.get("s") || "") &&
-                /^[\w-]+$/.test(u.searchParams.get("eid") || "")
-              );
-            } catch {
-              return false;
-            }
-          })(),
-      )
-      .map((a) => {
-        const image = a.querySelector("img");
-        return {
-          url: a.href,
-          name:
-            a.getAttribute("data_equip_name") ||
-            image?.getAttribute("data_equip_name") ||
-            image?.getAttribute("alt") ||
-            text(a),
-          kindId: a.getAttribute("data_kindid") || image?.getAttribute("data_kindid") || undefined,
-          modelId:
-            a.getAttribute("data_equip_type") ||
-            image?.getAttribute("data_equip_type") ||
-            undefined,
-          level: a.getAttribute("data_equip_level") || undefined,
-          description: a.getAttribute("data_equip_desc") || undefined,
-        };
-      });
+    ].filter(
+      (a) =>
+        visible(a) &&
+        (() => {
+          try {
+            const u = new URL(a.href);
+            return (
+              u.origin === location.origin &&
+              u.pathname === "/equip" &&
+              /^\d+$/.test(u.searchParams.get("s") || "") &&
+              /^[\w-]+$/.test(u.searchParams.get("eid") || "")
+            );
+          } catch {
+            return false;
+          }
+        })(),
+    );
+    const rows = rowNodes.map((a) => {
+      const image = a.querySelector("img");
+      return {
+        url: a.href,
+        name:
+          a.getAttribute("data_equip_name") ||
+          image?.getAttribute("data_equip_name") ||
+          image?.getAttribute("alt") ||
+          text(a),
+        kindId: a.getAttribute("data_kindid") || image?.getAttribute("data_kindid") || undefined,
+        modelId:
+          a.getAttribute("data_equip_type") || image?.getAttribute("data_equip_type") || undefined,
+        level: a.getAttribute("data_equip_level") || undefined,
+        description: a.getAttribute("data_equip_desc") || undefined,
+      };
+    });
     const empty = /没有符合条件/.test(
       text(document.querySelector("#query_result, #search_result")),
     );
-    const last = business.at(-1),
+    const last = business.find(
+        (event) =>
+          event.eventId === submission?.responseEventId &&
+          event.requestId === submission?.requestId,
+      ),
       loading = [...document.querySelectorAll("#loading_img,.loading")].some(visible);
     const orderInfo = globals.CurSearchValue?.order_by;
     const order =
@@ -459,10 +460,38 @@
       kind === "yuanshen"
         ? typeof actualAction === "string" && /^(?!show_)[a-z_]*yuanshen[a-z_]*$/.test(actualAction)
         : actualAction === actions[kind];
+    const resultMatches =
+      Array.isArray(last?.resultRows) &&
+      last.resultRows.length === rows.length &&
+      last.resultRows.every((item, index) => {
+        if (!item || typeof item !== "object" || !item.serverId || (!item.eid && !item.ordersn))
+          return false;
+        const address = new URL(rows[index].url),
+          node = rowNodes[index],
+          image = node.querySelector("img");
+        const ordersn =
+          node.getAttribute("data_ordersn") ||
+          node.getAttribute("data-ordersn") ||
+          image?.getAttribute("data_equipid");
+        return (
+          item.serverId === address.searchParams.get("s") &&
+          (!item.eid || item.eid === address.searchParams.get("eid")) &&
+          (!item.ordersn || item.ordersn === ordersn)
+        );
+      });
     const committed =
       categoryMatches &&
       !loading &&
       last?.success === true &&
+      !!submission?.requestId &&
+      last.requestId === submission.requestId &&
+      last.actionId === submission.actionId &&
+      last.queryId === submission.queryId &&
+      last.eventId === submission.responseEventId &&
+      resultMatches &&
+      Number.isInteger(last.count) &&
+      last.count === rows.length &&
+      (last.count > 0 || empty) &&
       (!last.page || last.page === page) &&
       normalized(last.conditions) === normalized(conditions);
     const config = globals.marketConfig || {};
@@ -605,6 +634,18 @@
       rows,
       empty,
       committed,
+      ...(committed
+        ? {
+            commit: {
+              actionId: submission.actionId,
+              queryId: submission.queryId,
+              requestId: submission.requestId,
+              eventId: submission.responseEventId,
+              startedAt: submission.startedAt,
+              completedAt: submission.completedAt,
+            },
+          }
+        : {}),
       config,
       form,
       menus: menuRecords.map((menu) => ({
