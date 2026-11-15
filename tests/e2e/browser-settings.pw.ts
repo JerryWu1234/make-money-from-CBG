@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -65,6 +66,7 @@ async function mount(
   });
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     // Built assets and all API responses are fixtures; never reach 5173 or daily Chrome.
     if (url.origin !== "http://browser-settings.test") return route.abort();
     if (url.pathname.startsWith("/api/")) {

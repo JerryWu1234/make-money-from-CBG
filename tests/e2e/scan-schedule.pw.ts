@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -46,6 +47,7 @@ test("定时计划选择、清空、删除时间并保存刷新", async ({ page,
   // This browser loads the real build, with local fixture APIs and no outside traffic.
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://cbg-ui.test") return route.abort();
     if (url.pathname.startsWith("/api/")) {
       let body: unknown;

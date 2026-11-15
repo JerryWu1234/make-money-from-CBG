@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "CBG 本地只读采集桥",
+  "version": "1.0.0",
+  "minimum_chrome_version": "120",
+  "permissions": ["nativeMessaging", "storage", "tabs", "alarms", "webRequest"],
+  "host_permissions": ["https://xyq.cbg.163.com/*"],
+  "background": { "service_worker": "service-worker.js", "type": "module" },
+  "action": { "default_title": "绑定当前藏宝阁标签页 / 停止输入" },
+  "content_scripts": [
+    {
+      "matches": ["https://xyq.cbg.163.com/*"],
+      "js": ["market-config.js", "main.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["https://xyq.cbg.163.com/*"],
+      "js": ["market-rules.js", "pet-product-observation.js", "isolated.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED",
+      "all_frames": false
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-export const DEFAULT_CRAWL_CONCURRENCY = 6;
+export const DEFAULT_CRAWL_CONCURRENCY = 1;
 export type CrawlLane = "new" | "old";
 export interface HeadCheckpoint {
   time: string;
@@ -37,6 +37,7 @@ export class ListingDisappearedError extends ListingChangedError {
 }
 /** Only official detail evidence can make a listing permanently unavailable. */
 export class ListingUnavailableError extends Error {
+  accessContext?: import("../access").AccessContext;
   constructor(evidence: string) {
     super(`官网商品已不存在，无法补齐，已跳过且不再重试：${evidence}`);
     this.name = "ListingUnavailableError";
@@ -165,6 +166,7 @@ export interface ValuationCapture {
   source: Record<string, unknown>;
 }
 export interface RoleDetail {
+  accessContext?: import("../access").AccessContext;
   /** Legacy body-only captures require full recapture before reuse. */
   captureMode?: "body" | "all";
   valuation?: ValuationCapture;

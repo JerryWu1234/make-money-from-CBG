@@ -32,6 +32,9 @@ vi.mock("./chrome", async (importOriginal) => ({
   verifyCdpEndpoint,
 }));
 
+vi.mock("./official-access", () => ({ bindOfficialPage: vi.fn() }));
+vi.mock("./native-access", () => ({ closeNativeAccess: vi.fn(async () => {}) }));
+
 beforeEach(() => {
   Reflect.deleteProperty(globalThis, Symbol.for("cbg.browser-session.v1"));
   vi.resetModules();

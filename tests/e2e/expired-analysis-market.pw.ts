@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -38,6 +39,7 @@ test("过期行情显示重新分析入口，点击建立新批次而非恢复�
     resumes = 0;
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://cbg-expiry.test") return route.abort();
     if (url.pathname === "/api/runtime/settings")
       return route.fulfill({ json: { saveScreenshots: false } });

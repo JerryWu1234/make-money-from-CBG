@@ -1,0 +1,339 @@
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { DatabaseSync } from "node:sqlite";
+import { ExtensionNativeRuntime } from "./extension-native";
+import type { ActionPlan } from "./contracts";
+
+function fixture() {
+  const db = new DatabaseSync(":memory:"),
+    risks: unknown[] = [],
+    writes: any[] = [];
+  let epoch = 0,
+    sequence = 0,
+    dispatches = 0;
+  const runtime = new ExtensionNativeRuntime({
+    db,
+    socketPath: "/private/tmp/not-started-cbg-fixture.sock",
+    stopEpoch: () => epoch,
+    onRisk: async (reason, evidence) => {
+      risks.push({ reason, evidence });
+      epoch++;
+    },
+    runAction: async (_plan, dispatch) => {
+      dispatches++;
+      return dispatch();
+    },
+  });
+  const internals = runtime as any;
+  internals.socket = {
+    destroyed: false,
+    write: (value: string) => {
+      const message = JSON.parse(value);
+      writes.push(message);
+      if (message.kind === "resume" && !message.context?.recoveryEpoch)
+        queueMicrotask(() => {
+          void internals.receive({ kind: "input-result", actionId: message.actionId, ok: true });
+        });
+    },
+    destroy: () => {},
+  };
+  const envelope = (kind: string, payload: unknown) => ({
+    version: 1,
+    connectionEpoch: "connection",
+    messageId: `message-${++sequence}`,
+    sequence,
+    kind,
+    payload,
+  });
+  const receive = (kind: string, payload: unknown) => internals.receive(envelope(kind, payload));
+  const base = () => ({
+    pageId: "page-1",
+    pageGeneration: 1,
+    observedAt: new Date().toISOString(),
+    url: "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=role",
+    title: "fixture",
+    revision: "revision-1",
+    visible: true,
+    loading: false,
+    access: "normal",
+    empty: true,
+    listing: { page: 1, totalPages: 2, order: "selling_time DESC", serverType: "1,2,3", items: [] },
+    business: [],
+  });
+  const bind = async () => {
+    await receive("status", { bound: true, pageId: "page-1", pageGeneration: 1 });
+    await receive("snapshot", base());
+  };
+  return {
+    db,
+    runtime,
+    internals,
+    risks,
+    writes,
+    base,
+    bind,
+    receive,
+    envelope,
+    setEpoch: (next: number) => {
+      epoch = next;
+    },
+    dispatches: () => dispatches,
+  };
+}
+afterEach(() => vi.useRealTimers());
+describe("extension-native runtime fences and observation", () => {
+  it("restores a read-only snapshot on duplicate delivery without rewriting its old stop epoch", async () => {
+    const f = fixture();
+    await f.bind();
+    const message = f.envelope("snapshot", { ...f.base(), revision: "duplicate" });
+    await f.internals.receive(message);
+    f.internals.snapshots.clear();
+    f.setEpoch(5);
+    await f.internals.receive(message);
+    expect((await f.runtime.snapshot()).context.stopEpoch).toBe(0);
+    expect((await f.runtime.snapshot()).revision).toBe("duplicate");
+    expect(
+      f.db
+        .prepare("SELECT COUNT(*) AS n FROM access_bridge_receipts WHERE message_id=?")
+        .get(message.messageId)?.n,
+    ).toBe(1);
+    f.db.close();
+  });
+  it("archives unbound or future snapshots without making them current", async () => {
+    const f = fixture();
+    await f.receive("snapshot", f.base());
+    await expect(f.runtime.snapshot()).rejects.toThrow("缺失或过期");
+    await f.bind();
+    await f.receive("snapshot", {
+      ...f.base(),
+      revision: "future",
+      observedAt: new Date(Date.now() + 3600000).toISOString(),
+    });
+    expect((await f.runtime.snapshot()).revision).toBe("revision-1");
+    f.db.close();
+  });
+  it.each([
+    { status: 403 },
+    { status: 429 },
+    { status: 200, denial: { status: 1, msg: "请先登录" } },
+  ])("persists shared response protection before receipt/ACK: %j", async (business) => {
+    const f = fixture();
+    await f.bind();
+    await f.receive("snapshot", {
+      ...f.base(),
+      revision: "blocked",
+      business: [
+        {
+          kind: "jsonp",
+          endpoint: "/cgi-bin/recommend.py",
+          observedAt: new Date().toISOString(),
+          ...business,
+        },
+      ],
+    });
+    expect(f.risks).toHaveLength(1);
+    expect(f.runtime.status().stopped).toBe(true);
+    expect(f.writes.at(-1).kind).toBe("ack");
+    f.db.close();
+  });
+  it("skips an already-selected detail tab before acquiring an action permit", async () => {
+    const f = fixture();
+    await f.bind();
+    await f.receive("snapshot", {
+      ...f.base(),
+      detail: {
+        url: "fixture",
+        collectedAt: "now",
+        tabs: [{ name: "技能", text: "", fields: [], tables: [], elements: [], tooltips: [] }],
+        raw: {},
+      },
+    });
+    const before = await f.runtime.snapshot();
+    const plan: ActionPlan = {
+      ...before.context,
+      actionId: "noop",
+      target: { kind: "detail-tab", name: "技能" },
+      expected: { kind: "changed" },
+    };
+    expect((await f.runtime.execute(plan)).detail?.tabs[0].name).toBe("技能");
+    expect(f.dispatches()).toBe(0);
+    expect(f.writes.some((write) => write.command === "execute")).toBe(false);
+    f.db.close();
+  });
+  it("handshakes a fresh recovery binding and never relabels queued pre-recovery evidence", async () => {
+    const f = fixture();
+    await f.bind();
+    await f.receive("snapshot", { ...f.base(), authenticated: true });
+    await f.runtime.stop("manual-check");
+    f.setEpoch(1);
+    vi.spyOn(f.runtime, "nativeStatus").mockResolvedValue({
+      ok: true,
+      permissions: {
+        accessibility: true,
+        inputMonitoring: true,
+        inputMonitorActive: true,
+        locked: false,
+        frontmostChrome: true,
+      },
+    });
+    const recovery = f.runtime.prepareManualRecovery();
+    for (let index = 0; index < 10; index++) await Promise.resolve();
+    const message = f.writes.find(
+      (value) => value.kind === "resume" && value.context?.recoveryEpoch,
+    );
+    expect(message.context.recoveryEpoch).toBeTypeOf("string");
+    await f.internals.receive({ kind: "input-result", actionId: message.actionId, ok: true });
+    await f.receive("snapshot", {
+      ...f.base(),
+      authenticated: true,
+      revision: "stale-after-resume",
+    });
+    expect((await f.runtime.snapshot()).context.stopEpoch).toBe(0);
+    await f.receive("snapshot", {
+      ...f.base(),
+      authenticated: true,
+      revision: "fresh-after-resume",
+      bindingContext: { recoveryEpoch: message.context.recoveryEpoch },
+    });
+    const ticket = await recovery;
+    expect(f.runtime.status().stopped).toBe(true);
+    f.runtime.completeManualRecovery(ticket);
+    expect((await f.runtime.snapshot()).context.stopEpoch).toBe(1);
+    expect(f.runtime.status().stopped).toBe(false);
+    f.db.close();
+  });
+  it("keeps recovery stopped when native permission preflight fails", async () => {
+    const f = fixture();
+    await f.bind();
+    await f.receive("snapshot", { ...f.base(), authenticated: true });
+    await f.runtime.stop("manual-check");
+    vi.spyOn(f.runtime, "nativeStatus").mockResolvedValue({
+      ok: true,
+      permissions: { accessibility: false },
+    });
+    await expect(f.runtime.prepareManualRecovery()).rejects.toThrow("原生权限");
+    expect(f.runtime.status().stopped).toBe(true);
+    expect(f.runtime.status().recoveringStopEpoch).toBeUndefined();
+    expect(f.writes.some((value) => value.kind === "resume" && value.context?.recoveryEpoch)).toBe(
+      false,
+    );
+    f.db.close();
+  });
+  it("revokes a recovery handshake on disconnect or a newer risk", async () => {
+    const f = fixture();
+    await f.bind();
+    await f.receive("snapshot", { ...f.base(), authenticated: true });
+    await f.runtime.stop("manual-check");
+    vi.spyOn(f.runtime, "nativeStatus").mockResolvedValue({
+      ok: true,
+      permissions: {
+        accessibility: true,
+        inputMonitoring: true,
+        inputMonitorActive: true,
+        locked: false,
+        frontmostChrome: true,
+      },
+    });
+    const operation = f.runtime.prepareManualRecovery(),
+      asserted = expect(operation).rejects.toThrow("新风险");
+    for (let index = 0; index < 10; index++) await Promise.resolve();
+    expect(f.runtime.status().recoveringStopEpoch).toBe(0);
+    f.setEpoch(1);
+    await f.runtime.stop("新风险中断恢复");
+    await asserted;
+    expect(f.runtime.status().stopped).toBe(true);
+    expect(f.runtime.status().recoveringStopEpoch).toBeUndefined();
+    expect(() =>
+      f.runtime.completeManualRecovery({
+        ticketId: "stale",
+        stopEpoch: 0,
+        pageId: "page-1",
+        pageGeneration: 1,
+        browserSessionEpoch: "old",
+        verifiedAt: Date.now(),
+      }),
+    ).toThrow("票据已失效");
+    f.db.close();
+  });
+  it("re-enables two normally completed or timed runs without reviewing unknown actions", async () => {
+    const f = fixture();
+    await f.bind();
+    await f.receive("snapshot", { ...f.base(), authenticated: true });
+    vi.spyOn(f.runtime, "nativeStatus").mockResolvedValue({
+      ok: true,
+      permissions: {
+        accessibility: true,
+        inputMonitoring: true,
+        inputMonitorActive: true,
+        locked: false,
+        frontmostChrome: true,
+      },
+    });
+    for (const reason of ["completed", "time_limit"]) {
+      await f.runtime.finishRun(reason);
+      expect(f.runtime.status().idle).toBe(true);
+      expect(f.runtime.status().stopped).toBe(true);
+      const activation = f.runtime.resumeForRun();
+      for (let index = 0; index < 12; index++) await Promise.resolve();
+      const message = f.writes.filter((value) => value.kind === "resume" && value.context).at(-1);
+      await f.internals.receive({ kind: "input-result", actionId: message.actionId, ok: true });
+      await f.receive("snapshot", {
+        ...f.base(),
+        authenticated: true,
+        revision: "resumed-" + reason,
+        bindingContext: { recoveryEpoch: message.context.recoveryEpoch },
+      });
+      await activation;
+      expect(f.runtime.status().stopped).toBe(false);
+      expect(f.runtime.status().idle).toBe(false);
+    }
+    expect(
+      f.db.prepare("SELECT COUNT(*) AS n FROM access_bridge_commands WHERE state='reviewed'").get()
+        ?.n,
+    ).toBe(0);
+    f.db.close();
+  });
+  it("never converts a manual stop or an unknown dispatch into an automatic idle restart", async () => {
+    const f = fixture();
+    await f.bind();
+    await f.runtime.stop("user-stop");
+    await f.runtime.finishRun("completed");
+    expect(f.runtime.status().idle).toBe(false);
+    await expect(f.runtime.resumeForRun()).rejects.toThrow("人工停止");
+    await f.receive("status", { bound: true, pageId: "page-1", pageGeneration: 1 });
+    await f.receive("snapshot", f.base());
+    f.internals.store.authorize("unconfirmed", {});
+    await f.runtime.finishRun("time_limit");
+    expect(f.runtime.status().idle).toBe(false);
+    await expect(f.runtime.resumeForRun()).rejects.toThrow("未知动作");
+    expect(f.runtime.status().unknownActions).toBe(1);
+    f.db.close();
+  });
+  it("does not accept an old same-page snapshot as a fresh refresh/query commit", async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    await f.bind();
+    const before = await f.runtime.snapshot();
+    const plan: ActionPlan = {
+      ...before.context,
+      actionId: "refresh",
+      target: { kind: "refresh-list", url: before.url },
+      expected: { kind: "page", page: 1 },
+    };
+    const operation = f.runtime.execute(plan);
+    const asserted = expect(operation).rejects.toThrow("结果未知");
+    await vi.advanceTimersByTimeAsync(1);
+    await f.internals.receive({
+      kind: "input-result",
+      actionId: "refresh",
+      ok: true,
+      posted: true,
+    });
+    await f.receive("snapshot", { ...f.base(), revision: "unrelated-mutation" });
+    await vi.advanceTimersByTimeAsync(12001);
+    await asserted;
+    expect(f.risks).toHaveLength(1);
+    expect(f.runtime.status().unknownActions).toBe(1);
+    expect(f.writes.filter((write) => write.command === "execute")).toHaveLength(1);
+    f.db.close();
+  });
+});

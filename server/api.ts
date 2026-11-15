@@ -11,10 +11,12 @@ import {
   browserControl,
   browserBusyError,
   isBrowserMode,
+  isAccessAdapter,
   isBrowserModes,
 } from "./browser-settings";
 
 const getRoutes = new Set([
+  "/api/access/status",
   "/api/browser/status",
   "/api/browser/settings",
   "/api/crawl/status",
@@ -36,6 +38,10 @@ const getRoutes = new Set([
   "/api/analysis/settings",
 ]);
 const postRoutes = new Set([
+  "/api/access/policy",
+  "/api/access/recover",
+  "/api/access/open",
+  "/api/access/stop",
   "/api/browser/open",
   "/api/browser/settings/save",
   "/api/crawl/start",
@@ -75,6 +81,8 @@ const controlRoutes = new Set([
 ]);
 const browserUseRoutes = new Set([
   ...controlRoutes,
+  "/api/access/open",
+  "/api/access/recover",
   "/api/analysis/equipment/check",
   "/api/analysis/pet/check",
   "/api/analysis/pet-gear/check",
@@ -179,8 +187,40 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
           )
         : {};
     if (browserUseRoutes.has(pathname) && browserControl.changing) throw browserBusyError();
+    if (pathname.startsWith("/api/access/")) {
+      const { crawlDatabase } = await import("./crawler/controller");
+      const access = await import("./official-access");
+      const governor = access.officialGovernor(crawlDatabase());
+      const input = body as Record<string, unknown>;
+      let result;
+      if (pathname === "/api/access/policy") {
+        const { parseAccessPolicy } = await import("./access");
+        if (!Number.isSafeInteger(input.revision)) throw new Error("访问状态版本无效");
+        result = governor.updatePolicy(parseAccessPolicy(input.policy), Number(input.revision));
+      } else if (pathname === "/api/access/open") {
+        if (!Number.isSafeInteger(input.revision)) throw new Error("访问状态版本无效");
+        result = await access.openOfficialRecovery(Number(input.revision));
+      } else if (pathname === "/api/access/recover") {
+        if (
+          !Number.isSafeInteger(input.revision) ||
+          !Array.isArray(input.acknowledgedReasons) ||
+          input.acknowledgedReasons.some((reason) => typeof reason !== "string")
+        )
+          throw new Error("请核对当前版本的全部暂停原因");
+        result = await access.recoverOfficialAccess(
+          Number(input.revision),
+          input.acknowledgedReasons as string[],
+        );
+      } else if (pathname === "/api/access/stop") {
+        result = governor.reportRisk({ reason: "manual_stop", state: "needs_action" });
+      } else result = governor.read();
+      res.end(JSON.stringify(result));
+      return;
+    }
     if (pathname === "/api/browser/settings" || pathname === "/api/browser/settings/save") {
-      const { mode, modes, showWorkPages } = body as Record<string, unknown>;
+      const { mode, modes, showWorkPages, accessAdapter } = body as Record<string, unknown>;
+      if (accessAdapter !== undefined && !isAccessAdapter(accessAdapter))
+        throw new Error("官网交互通路无效");
       if (
         pathname.endsWith("/save") &&
         showWorkPages !== undefined &&
@@ -193,7 +233,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
       if (
         pathname.endsWith("/save") &&
         !(modes === undefined
-          ? isBrowserMode(mode) || (mode === undefined && typeof showWorkPages === "boolean")
+          ? isBrowserMode(mode) ||
+            (mode === undefined &&
+              (typeof showWorkPages === "boolean" || isAccessAdapter(accessAdapter)))
           : isBrowserModes(modes))
       ) {
         res.statusCode = 400;
@@ -211,12 +253,16 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
         workflow.isBrowserWorkflowRunning() ||
         capture.isCrawling() ||
         analysis.isAnalyzing();
-      if (pathname.endsWith("/save") && typeof showWorkPages === "boolean")
+      if (
+        pathname.endsWith("/save") &&
+        (typeof showWorkPages === "boolean" || accessAdapter !== undefined)
+      )
         await session.changeBrowserModes(
           (modes ?? [mode ?? session.getActiveBrowserMode()]) as ("daily" | "dedicated")[],
           busy,
           workflow.resetBrowserWorkflow,
-          showWorkPages,
+          showWorkPages as boolean | undefined,
+          accessAdapter as "playwright" | "extension-native" | undefined,
         );
       else if (pathname.endsWith("/save") && modes !== undefined)
         await session.changeBrowserModes(
@@ -537,10 +583,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
               concurrency !== undefined &&
               (typeof concurrency !== "number" ||
                 !Number.isSafeInteger(concurrency) ||
-                concurrency < 2 ||
-                concurrency % 2 !== 0)
+                concurrency < 1 ||
+                concurrency > 32)
             )
-              throw new Error("并发数必须是正偶数（2、4、6…）");
+              throw new Error("并发数必须是1至32之间的整数");
             if (
               keys !== undefined &&
               (!Array.isArray(keys) ||
@@ -611,6 +657,12 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
     if (pathname === "/api/browser/open" && crawler.isCrawling()) {
       res.statusCode = 409;
       res.end(JSON.stringify({ error: "请先暂停采集，再重新打开角色查询" }));
+      return;
+    }
+    const { browserSettings } = await import("./browser-settings");
+    if (browserSettings().accessAdapter === "extension-native") {
+      const { nativeBrowserState } = await import("./native-access");
+      res.end(JSON.stringify(await nativeBrowserState(pathname === "/api/browser/open")));
       return;
     }
     const browser = await import("./browser");

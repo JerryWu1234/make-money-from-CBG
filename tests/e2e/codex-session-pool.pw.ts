@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import path from "node:path";
@@ -478,6 +479,7 @@ async function fixture(
   let batch = "";
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://cbg-session-pool.test") return route.abort();
     if (url.pathname === "/api/runtime/settings")
       return route.fulfill({ json: { saveScreenshots: false } });

@@ -1,8 +1,12 @@
+import { beginPageQuery, finishPageQuery, successfulQueryEvidence } from "../query-health/runtime";
+import { officialPageContext } from "../official-access";
+import { onOfficialFirstDispatch } from "../official-access";
 import type { Page } from "playwright-core";
 import { collectDetail, isOnShelf, MAIN_TABS } from "./detail";
 import { gotoPage, hoverListing, pace, prepareList, refreshList } from "./page";
 import {
   SellingOrderUnavailableError,
+  ListingUnavailableError,
   type CrawlSource,
   type Listing,
   type SavedRoleRecord,
@@ -205,6 +209,26 @@ export function createCrawlSource({
   const available = [detailPage];
   const waitForDetailOpen = createDetailOpenQueue();
   const active = new Map<AbortController, () => Promise<void>>();
+  const acceptUnavailable = async (
+    page: Page,
+    item: Listing,
+    error: unknown,
+    localSignal = signal,
+  ) => {
+    if (!(error instanceof ListingUnavailableError)) return;
+    localSignal.throwIfAborted();
+    // This is positive evidence of an official tombstone, rather than an empty list.
+    const query = beginPageQuery(page, {
+      category: "role-availability",
+      server: item.serverId,
+      serverAge: item.serverAge ?? "",
+      conditions: { eid: item.eid, ordersn: item.ordersn },
+      page: 1,
+      sort: "detail",
+    });
+    await finishPageQuery(page, query, successfulQueryEvidence(1));
+    error.accessContext = officialPageContext(page);
+  };
   const step = async <T>(page: Page, stage: string, read: () => Promise<T>, key?: string) => {
     try {
       const result = await read();
@@ -271,7 +295,13 @@ export function createCrawlSource({
         async () => {
           await pace(signal, 600, 400);
           await waitForDetailOpen(signal);
-          const onShelf = await isOnShelf(detailPage, item, signal);
+          let onShelf: boolean;
+          try {
+            onShelf = await isOnShelf(detailPage, item, signal);
+          } catch (error) {
+            await acceptUnavailable(detailPage, item, error);
+            throw error;
+          }
           log("anchor.checked", { key: item.key, onShelf });
           return onShelf;
         },
@@ -347,19 +377,31 @@ export function createCrawlSource({
       if (local.aborted) cancel();
       active.set(control, close);
       let timer: ReturnType<typeof setTimeout> | undefined;
+      const startDeadline = () => {
+        timer ??= setTimeout(
+          () => control.abort(new CaptureDeadlineError(detailTimeoutMs, stage)),
+          detailTimeoutMs,
+        );
+      };
+      const deferredDeadline = onOfficialFirstDispatch(page, startDeadline);
       try {
         local.throwIfAborted();
-        return await collectRole(page, item, {
+        const query = beginPageQuery(page, {
+          category: "role-detail",
+          server: item.serverId,
+          serverAge: item.serverAge ?? "",
+          conditions: { eid: item.eid, ordersn: item.ordersn },
+          page: 1,
+          sort: "detail",
+        });
+        const result = await collectRole(page, item, {
           signal: local,
           savedRecord,
           waitForDetailOpen: async (openingSignal) => {
             await waitForDetailOpen(openingSignal);
             openingSignal.throwIfAborted();
             // Initial queueing is not reading time; later retries share this one deadline.
-            timer ??= setTimeout(
-              () => control.abort(new CaptureDeadlineError(detailTimeoutMs, stage)),
-              detailTimeoutMs,
-            );
+            if (!deferredDeadline) startDeadline();
           },
           log,
           onAccessFailure,
@@ -369,7 +411,11 @@ export function createCrawlSource({
             onDetailProgress(message);
           },
         });
+        await finishPageQuery(page, query, successfulQueryEvidence(1));
+        result.accessContext = officialPageContext(page);
+        return result;
       } catch (error) {
+        await acceptUnavailable(page, item, error, local);
         failureLog("detail.failed", error);
         throw error;
       } finally {

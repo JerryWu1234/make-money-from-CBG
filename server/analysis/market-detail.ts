@@ -3,6 +3,8 @@ import { assertAvailable } from "../crawler/page";
 import { clickForInspection, ensureWorkViewport } from "../viewport";
 import { captureBrowserStep, registerBrowserEvidence } from "../browser-evidence";
 import { equipmentIdentity, safeEquipmentUrl } from "./equipment-pricing";
+import { bindOfficialPage, officialGovernor, officialPageContext } from "../official-access";
+import { CrawlAccessError } from "../crawler/types";
 
 /** Own only popups opened by this query page, including late or extra popups. */
 export function createMarketDetailReader(
@@ -11,12 +13,35 @@ export function createMarketDetailReader(
   timeoutMs = 15_000,
 ) {
   const pages = new Set<Page>();
+  const bindings = new Map<Page, Promise<void>>();
   let closed = false;
   let opening: ((page: Page) => void) | undefined;
   let cancel: ((reason: unknown) => void) | undefined;
   const onPopup = (page: Page) => {
     pages.add(page);
     registerBrowserEvidence(page);
+    const parent = officialPageContext(searchPage);
+    if (parent) {
+      // Attach before awaiting document readiness: the first response can already be denied.
+      page.on("response", (response) => {
+        if (![401, 403, 429].includes(response.status())) return;
+        const request = response.request();
+        if (!request.isNavigationRequest() || response.frame().parentFrame()) return;
+        officialGovernor().reportRisk({
+          reason: "http_" + response.status(),
+          context: officialPageContext(page) || parent,
+          evidence: { status: response.status(), stage: "market_popup_first_navigation" },
+        });
+      });
+      const bound = bindOfficialPage(page, {
+        runId: parent.runId,
+        sourceKind: parent.sourceKind + "-detail",
+        signal,
+      });
+      // Keep the rejection observed even when cancellation/extra-popup cleanup wins the race.
+      bound.catch(() => {});
+      bindings.set(page, bound);
+    }
     if (!closed && opening) {
       const receive = opening;
       opening = undefined;
@@ -96,12 +121,20 @@ export function createMarketDetailReader(
           ]);
           local.throwIfAborted();
           const target = page!;
+          await bindings.get(target);
           await ensureWorkViewport(target);
           await target.waitForURL((value) => value.href !== "about:blank", { timeout: timeoutMs });
           await target.waitForLoadState("domcontentloaded", { timeout: timeoutMs });
           const status = responses.get(target)?.status();
-          if (status && [401, 403, 429].includes(status))
+          if (status && [401, 403, 429].includes(status)) {
+            if (officialPageContext(searchPage))
+              officialGovernor().reportRisk({
+                reason: "http_" + status,
+                context: officialPageContext(target),
+                evidence: { status, stage: "market_popup_first_navigation" },
+              });
             throw new Error(`商品详情访问被拒绝（HTTP ${status}），请核对登录或访问权限后继续`);
+          }
           await assertAvailable(target);
           if (equipmentIdentity(safeEquipmentUrl(target.url())) !== identity)
             throw new Error("商品详情跳转到另一商品，报价未采用");
@@ -111,6 +144,12 @@ export function createMarketDetailReader(
         };
         return await Promise.race([work(), cancelled]);
       } catch (error) {
+        if (error instanceof CrawlAccessError && officialPageContext(searchPage))
+          officialGovernor().reportRisk({
+            reason: error.kind === "busy" ? "frequency" : error.kind,
+            context: page ? officialPageContext(page) : officialPageContext(searchPage),
+            evidence: { stage: "market_popup_first_page", kind: error.kind },
+          });
         if (!page) closed = true;
         await captureBrowserStep(
           page || searchPage,

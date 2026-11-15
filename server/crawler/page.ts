@@ -1,3 +1,11 @@
+import { withOfficialAction } from "../official-access";
+import {
+  beginPageQuery,
+  finishPageQuery,
+  successfulQueryEvidence,
+  pendingPageQuery,
+  queryPageIdentity,
+} from "../query-health/runtime";
 import type { Page } from "playwright-core";
 import { ROLE_SERVER_TYPES } from "../role-search";
 import { clickForInspection, ensureWorkViewport, hoverForInspection } from "../viewport";
@@ -13,6 +21,7 @@ import {
 import { accessNavigationFailure } from "./access-navigation";
 import { hasLoginRequiredDialog, LoginRequiredDialogError } from "./login-dialog";
 import { diagnostics, workPageDiagnostic } from "../diagnostics";
+import { createPlaywrightRoleDiagnostic } from "./role-list-diagnostic-driver";
 
 export interface ListingHoverDiagnostic {
   event: "timeout" | "retry_recovered";
@@ -153,11 +162,35 @@ export async function assertAvailable(page: Page) {
     throw new CrawlAccessError(issue);
   }
 }
+const healthReviewPages = new WeakSet<Page>();
+/** Allocate identity before the action. Initial form submission binds actual public
+ * conditions when its resulting document is read; later navigation uses exact prior conditions. */
+export function beginRoleListQuery(
+  page: Page,
+  number: number,
+  options: { initial?: boolean; sort?: string } = {},
+) {
+  if (healthReviewPages.has(page)) return;
+  const prior = queryPageIdentity(page);
+  const query = beginPageQuery(page, {
+    category: "role",
+    server: prior?.server ?? "all",
+    serverAge: prior?.serverAge ?? ROLE_SERVER_TYPES.join(","),
+    conditions: options.initial
+      ? { server_type: ROLE_SERVER_TYPES.join(",") }
+      : (prior?.conditions ?? { server_type: ROLE_SERVER_TYPES.join(",") }),
+    page: number,
+    sort: options.sort ?? prior?.sort ?? "",
+  });
+  if (query) query.identityMode = options.initial || !prior ? "initial-form" : "exact";
+  return query;
+}
+
 export async function readListings(page: Page): Promise<ListingPage> {
   await assertAvailable(page);
   const data = await page.evaluate((serverTypes) => {
     const globals = window as Window & {
-      QueryArgs?: { server_type?: string; order_by?: string; page?: number };
+      QueryArgs?: Record<string, string | number>;
       QueryResult?: Record<string, unknown>[];
     };
     if (
@@ -203,11 +236,83 @@ export async function readListings(page: Page): Promise<ListingPage> {
     const empty = document
       .querySelector<HTMLElement>("#query_result")
       ?.innerText.includes("没有符合条件");
-    if (!items.length && !empty) throw new Error("列表没有可识别的商品链接，已停止以免跳过数据");
-    return { page: current, totalPages: total, order: globals.QueryArgs?.order_by || "", items };
+    const loading = Array.from(
+      document.querySelectorAll("#LoadingCover,#LoadingImg,#loading_img"),
+    ).some((node) => node.checkVisibility());
+    const conditions: Record<string, string | number> = {};
+    for (const [key, value] of Object.entries(globals.QueryArgs || {})) {
+      if (
+        ["page", "order_by"].includes(key) ||
+        /token|cookie|auth|password|fingerprint|session|signature|safe_code|nickname|account|^fp$|^sign$/i.test(
+          key,
+        )
+      )
+        continue;
+      if (typeof value === "string" || typeof value === "number") conditions[key] = value;
+    }
+    conditions.server_type = String(conditions.server_type || "")
+      .split(",")
+      .sort()
+      .join(",");
+    return {
+      page: current,
+      totalPages: total,
+      order: String(globals.QueryArgs?.order_by || ""),
+      items,
+      conditions,
+      loading,
+      empty: !!empty,
+      committed: Array.isArray(globals.QueryResult) && globals.QueryResult.length === items.length,
+    };
   }, ROLE_SERVER_TYPES);
+  if (!healthReviewPages.has(page)) {
+    const identity = {
+      category: "role",
+      server: String(data.conditions.serverid || "all"),
+      serverAge: String(data.conditions.server_type || ""),
+      conditions: data.conditions,
+      page: data.page,
+      sort: data.order,
+    };
+    const pending = pendingPageQuery(page);
+    const identityMatched =
+      !pending ||
+      ((pending.identityMode === "initial-form" ||
+        Object.keys(pending.identity.conditions).length ===
+          Object.keys(identity.conditions).length) &&
+        pending.identity.page === identity.page &&
+        (!pending.identity.sort || pending.identity.sort === identity.sort) &&
+        Object.entries(pending.identity.conditions).every(
+          ([key, value]) => String(identity.conditions[key]) === String(value),
+        ));
+    const query = pending ?? beginPageQuery(page, identity);
+    if (query && identityMatched) query.identity = { ...query.identity, ...identity };
+    await finishPageQuery(
+      page,
+      query,
+      {
+        ...successfulQueryEvidence(data.items.length, data.empty),
+        loaded: !data.loading,
+        committed: data.committed,
+        identityMatched,
+      },
+      query
+        ? createPlaywrightRoleDiagnostic(page, query.identity, {
+            available: assertAvailable,
+            observe: observeListNavigation,
+            wait: waitList,
+            clear: clearListNavigation,
+          })
+        : undefined,
+      { page: data.page, order: data.order },
+    );
+  }
+  if (!data.items.length && !data.empty)
+    throw new Error("列表没有可识别的商品链接，已停止以免跳过数据");
   return {
-    ...data,
+    page: data.page,
+    totalPages: data.totalPages,
+    order: data.order,
     // 混合服龄列表不能证明单个角色的服龄，不再统一写成三年以上服。
     items: data.items.map((item) =>
       parseListing(item.href, item.attrs, item.summary, data.order, item.raw),
@@ -319,16 +424,23 @@ export async function gotoPage(
   if (current.page === wanted && !refresh) return current;
   await pace(signal);
   await observeListNavigation(page);
+  beginRoleListQuery(page, wanted);
   try {
     // 优先点击网站现有分页链接；远距离定位使用网站自己的跳页函数。
     const link = page.locator(`#pager_bar a[href="javascript:goto(${wanted})"]`).first();
     if (await link.count()) await clickForInspection(link, signal);
     else
-      await page.evaluate((number) => {
-        const goto = (window as Window & { goto?: (page: number) => void }).goto;
-        if (typeof goto !== "function") throw new Error("网站未提供跳页函数，无法定位断点");
-        goto(number);
-      }, wanted);
+      await withOfficialAction(
+        page,
+        "query.page",
+        () =>
+          page.evaluate((number) => {
+            const goto = (window as Window & { goto?: (page: number) => void }).goto;
+            if (typeof goto !== "function") throw new Error("网站未提供跳页函数，无法定位断点");
+            goto(number);
+          }, wanted),
+        signal,
+      );
     await waitList(page, wanted, true);
     checkAborted(signal);
     return await readListings(page);
@@ -346,6 +458,7 @@ export async function refreshList(
   checkAborted(signal);
   await assertAvailable(page);
   checkAborted(signal);
+  beginRoleListQuery(page, 1, { sort: "" });
   await page.reload({ waitUntil: "domcontentloaded", timeout: 45000 });
   checkAborted(signal);
   await assertAvailable(page);
@@ -380,6 +493,7 @@ async function ensureListOrder(
     if (!(await option.count())) break;
     await pace(signal);
     await observeListNavigation(page);
+    beginRoleListQuery(page, 1, { sort: "" });
     try {
       await clickForInspection(option, signal, {
         field,

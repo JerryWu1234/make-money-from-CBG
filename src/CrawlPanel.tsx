@@ -15,7 +15,7 @@ type Status = CrawlStatus & {
 };
 const CONCURRENCY_KEY = "cbg-crawl-concurrency";
 const validConcurrency = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 2 && value % 2 === 0;
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 32;
 function savedConcurrency() {
   try {
     const value = Number(localStorage.getItem(CONCURRENCY_KEY));
@@ -143,7 +143,7 @@ export function CrawlPanel({
     async (command: "start" | "stop") => {
       const count = Number(concurrency);
       if (command === "start" && !validConcurrency(count)) {
-        setError("并发数必须是正偶数（2、4、6…）");
+        setError("并发数必须是1至32之间的整数");
         return;
       }
       setBusy(true);
@@ -205,8 +205,9 @@ export function CrawlPanel({
             并发抓取数
             <input
               type="number"
-              min="2"
-              step="2"
+              min="1"
+              max="32"
+              step="1"
               value={concurrency}
               disabled={busy || waitingForReady || !!status?.running}
               onChange={(event) => setConcurrency(event.target.value)}

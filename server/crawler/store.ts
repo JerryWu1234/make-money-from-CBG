@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { AccessGovernor, type AccessContext, type CrawlLease } from "../access";
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
@@ -23,8 +25,136 @@ import { captureIssues } from "./capture-readiness";
 import { diagnostics } from "../diagnostics";
 import { trackRecordVersions } from "../record-versions";
 
+const listingVersion = (row: Record<string, unknown>) =>
+  JSON.stringify([row.server_id, row.eid, row.ordersn, row.selling_time, row.price]);
+
 export class CrawlStore {
   readonly db: DatabaseSync;
+  private businessLease = new AsyncLocalStorage<{
+    owner: string;
+    fence: number;
+    versions: Map<string, string>;
+    revisions: Map<string, number>;
+  }>();
+  crawlLease(owner: string): CrawlLease {
+    const lease = this.db.prepare("SELECT owner,fence,expires_at FROM crawl_lock WHERE id=1").get();
+    if (!lease || lease.owner !== owner || Number(lease.expires_at) <= Date.now())
+      throw new Error("采集业务租约已失效");
+    return { owner, fence: Number(lease.fence) };
+  }
+  withCrawlLease<T>(owner: string, work: () => T): T {
+    const lease = this.crawlLease(owner);
+    this.businessLease ??= new AsyncLocalStorage();
+    return this.businessLease.run({ ...lease, versions: new Map(), revisions: new Map() }, work);
+  }
+  private assertBusinessLease() {
+    const context = this.businessLease?.getStore();
+    const lease = this.db.prepare("SELECT owner,fence,expires_at FROM crawl_lock WHERE id=1").get();
+    if (
+      !context ||
+      !lease ||
+      lease.owner !== context.owner ||
+      lease.fence !== context.fence ||
+      Number(lease.expires_at) <= Date.now()
+    )
+      throw new Error("采集业务租约或停止代次已变化，旧任务不能推进进度");
+  }
+  private progressContext?: AccessContext | (() => AccessContext | undefined);
+  private currentProgressContext() {
+    return typeof this.progressContext === "function"
+      ? this.progressContext()
+      : this.progressContext;
+  }
+  private recordRevision(key: string) {
+    return Number(
+      this.db
+        .prepare("SELECT revision FROM record_versions WHERE entity='listings' AND record_key=?")
+        .get(key)?.revision ?? 0,
+    );
+  }
+  private rememberAttemptRevision(key: string) {
+    this.businessLease?.getStore()?.revisions.set(key, this.recordRevision(key));
+  }
+  private assertAttemptRevision(key: string) {
+    const expected = this.businessLease?.getStore()?.revisions.get(key);
+    if (expected === undefined || expected !== this.recordRevision(key))
+      throw new Error("商品资料或尝试版本已变化，旧任务只能归档");
+  }
+  private archiveAttemptError(
+    key: string,
+    error: string,
+    kind: "failure" | "unavailable",
+    context?: AccessContext,
+  ) {
+    this.db
+      .prepare(
+        "INSERT INTO crawl_attempt_errors(listing_key,error,kind,context_json,created_at) VALUES(?,?,?,?,?)",
+      )
+      .run(
+        key,
+        error,
+        kind,
+        JSON.stringify(context ?? this.currentProgressContext() ?? null),
+        new Date().toISOString(),
+      );
+  }
+  private assertAvailabilityProof(key: string, context: AccessContext) {
+    const worker = this.businessLease?.getStore();
+    if (
+      !context.crawlLease ||
+      context.crawlLease.owner !== worker?.owner ||
+      context.crawlLease.fence !== worker?.fence
+    )
+      throw new Error("下架证据不属于当前业务租约");
+    const result = this.db
+      .prepare("SELECT identity_json,accepted FROM query_health_results WHERE query_id=?")
+      .get(context.queryId);
+    const listing = this.db
+      .prepare("SELECT server_id,eid,ordersn FROM listings WHERE key=?")
+      .get(key);
+    const identity = result ? JSON.parse(String(result.identity_json)) : undefined;
+    if (
+      result?.accepted !== 1 ||
+      !listing ||
+      identity?.category !== "role-availability" ||
+      identity.server !== listing.server_id ||
+      identity.conditions?.eid !== listing.eid ||
+      identity.conditions?.ordersn !== listing.ordersn
+    )
+      throw new Error("下架证据未核验当前商品身份");
+  }
+  private accessGovernor?: AccessGovernor;
+  setProgressContext(context: AccessContext | (() => AccessContext | undefined) | undefined) {
+    this.progressContext = context;
+  }
+  private progressGate() {
+    if (
+      !this.db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='access_schema'")
+        .get()
+    )
+      return undefined;
+    return (this.accessGovernor ??= new AccessGovernor(this.db));
+  }
+  private progressWrite<T>(write: () => T): T {
+    const gate = this.progressGate();
+    if (!gate) return write();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (gate) {
+        this.assertBusinessLease();
+        const context = this.currentProgressContext();
+        if (!context) throw new Error("缺少当前官网查询身份，不能推进采集进度");
+        gate.assertProgress(context);
+      }
+      const value = write();
+      this.db.exec("COMMIT");
+      return value;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
   private retrySnapshot?: { changes: number; version: number; listings: string[] };
   private pageReviewSchemaReady?: boolean;
   constructor(readonly filename = path.resolve("data/cbg.sqlite")) {
@@ -51,7 +181,15 @@ export class CrawlStore {
       CREATE TABLE IF NOT EXISTS crawl_state (id INTEGER PRIMARY KEY CHECK(id=1), checkpoint_json TEXT, backfill_complete INTEGER NOT NULL DEFAULT 0);
       CREATE TABLE IF NOT EXISTS crawl_lock (id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS role_sources (listing_key TEXT PRIMARY KEY, source_gzip BLOB NOT NULL);
+      CREATE TABLE IF NOT EXISTS crawl_attempt_errors (id INTEGER PRIMARY KEY,listing_key TEXT NOT NULL,error TEXT NOT NULL,kind TEXT NOT NULL,context_json TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS role_source_history (source_hash TEXT PRIMARY KEY, listing_key TEXT NOT NULL, source_gzip BLOB NOT NULL, archived_at TEXT NOT NULL);`);
+    if (
+      !this.db
+        .prepare("PRAGMA table_info(crawl_lock)")
+        .all()
+        .some((column) => column.name === "fence")
+    )
+      this.db.exec("ALTER TABLE crawl_lock ADD COLUMN fence INTEGER NOT NULL DEFAULT 1");
     this.ensureListingColumn("attempt_count", "INTEGER NOT NULL DEFAULT 0");
     this.ensureListingColumn("last_attempt_at", "TEXT");
     this.ensureListingColumn("capture_lane", "TEXT NOT NULL DEFAULT 'old'");
@@ -87,9 +225,9 @@ export class CrawlStore {
   acquire(owner: string, now = Date.now()): boolean {
     const result = this.db
       .prepare(
-        `INSERT INTO crawl_lock VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, expires_at=excluded.expires_at WHERE crawl_lock.expires_at < ? OR crawl_lock.owner = ?`,
+        `INSERT INTO crawl_lock(id,owner,expires_at,fence) VALUES(1,?,?,1) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, expires_at=excluded.expires_at, fence=CASE WHEN crawl_lock.owner=excluded.owner AND crawl_lock.expires_at>? THEN crawl_lock.fence ELSE crawl_lock.fence+1 END WHERE crawl_lock.expires_at < ? OR crawl_lock.owner = ?`,
       )
-      .run(owner, now + 120000, now, owner);
+      .run(owner, now + 120000, now, now, owner);
     return result.changes === 1;
   }
   release(owner: string) {
@@ -108,17 +246,19 @@ export class CrawlStore {
       : undefined;
   }
   setHeadCheckpoint(point: HeadCheckpoint) {
-    if (
-      !Number.isFinite(Date.parse(point.time)) ||
-      !point.keys.length ||
-      point.keys.some((key) => typeof key !== "string" || !key.trim()) ||
-      new Set(point.keys).size !== point.keys.length
-    )
-      throw new Error("首页巡检边界无效");
-    this.db
-      .prepare(`INSERT INTO crawl_state(id,head_checkpoint_json) VALUES(1,?)
+    return this.progressWrite(() => {
+      if (
+        !Number.isFinite(Date.parse(point.time)) ||
+        !point.keys.length ||
+        point.keys.some((key) => typeof key !== "string" || !key.trim()) ||
+        new Set(point.keys).size !== point.keys.length
+      )
+        throw new Error("首页巡检边界无效");
+      this.db
+        .prepare(`INSERT INTO crawl_state(id,head_checkpoint_json) VALUES(1,?)
       ON CONFLICT(id) DO UPDATE SET head_checkpoint_json=excluded.head_checkpoint_json`)
-      .run(JSON.stringify(point));
+        .run(JSON.stringify(point));
+    });
   }
   captureLane(key: string): CrawlLane {
     return this.db.prepare("SELECT capture_lane FROM listings WHERE key=?").get(key)
@@ -131,12 +271,14 @@ export class CrawlStore {
       ?.backfill_complete;
   }
   markBackfillComplete() {
-    if (this.pageReviews().length) return;
-    this.db
-      .prepare(
-        "INSERT INTO crawl_state(id,backfill_complete) VALUES(1,1) ON CONFLICT(id) DO UPDATE SET backfill_complete=1",
-      )
-      .run();
+    return this.progressWrite(() => {
+      if (this.pageReviews().length) return;
+      this.db
+        .prepare(
+          "INSERT INTO crawl_state(id,backfill_complete) VALUES(1,1) ON CONFLICT(id) DO UPDATE SET backfill_complete=1",
+        )
+        .run();
+    });
   }
   pageReviews(order?: string): PageReview[] {
     // The dev server retains the live store across module reloads, including pre-migration instances.
@@ -153,75 +295,83 @@ export class CrawlStore {
       .sort((left, right) => left.order.localeCompare(right.order) || left.page - right.page);
   }
   deferPageReview(order: string, page: number, signature: string) {
-    if (!order.trim() || !Number.isSafeInteger(page) || page < 1 || !signature)
-      throw new Error("待复核列表页无效");
-    const reviews = this.pageReviews();
-    const previous = reviews.find((review) => review.order === order && review.page === page);
-    if (previous) previous.signature = signature;
-    else reviews.push({ order, page, signature, detectedAt: new Date().toISOString() });
-    this.db
-      .prepare(`INSERT INTO crawl_state(id,page_reviews_json,backfill_complete) VALUES(1,?,0)
+    return this.progressWrite(() => {
+      if (!order.trim() || !Number.isSafeInteger(page) || page < 1 || !signature)
+        throw new Error("待复核列表页无效");
+      const reviews = this.pageReviews();
+      const previous = reviews.find((review) => review.order === order && review.page === page);
+      if (previous) previous.signature = signature;
+      else reviews.push({ order, page, signature, detectedAt: new Date().toISOString() });
+      this.db
+        .prepare(`INSERT INTO crawl_state(id,page_reviews_json,backfill_complete) VALUES(1,?,0)
         ON CONFLICT(id) DO UPDATE SET page_reviews_json=excluded.page_reviews_json,backfill_complete=0`)
-      .run(JSON.stringify(reviews));
+        .run(JSON.stringify(reviews));
+    });
   }
   resolvePageReview(order: string, page: number) {
-    const reviews = this.pageReviews();
-    const remaining = reviews.filter((review) => review.order !== order || review.page !== page);
-    if (remaining.length === reviews.length) return;
-    this.db
-      .prepare("UPDATE crawl_state SET page_reviews_json=? WHERE id=1")
-      .run(JSON.stringify(remaining));
+    return this.progressWrite(() => {
+      const reviews = this.pageReviews();
+      const remaining = reviews.filter((review) => review.order !== order || review.page !== page);
+      if (remaining.length === reviews.length) return;
+      this.db
+        .prepare("UPDATE crawl_state SET page_reviews_json=? WHERE id=1")
+        .run(JSON.stringify(remaining));
+    });
   }
   hasListing(key: string): boolean {
     return !!this.db.prepare("SELECT 1 FROM listings WHERE key=?").get(key);
   }
   observe(item: Listing, lane: CrawlLane = "old"): boolean {
-    if (lane !== "new" && lane !== "old") throw new Error("采集任务来源无效");
-    const now = new Date().toISOString();
-    const old = this.db
-      .prepare(
-        "SELECT status, selling_time, detail_json, json_extract(detail_json,'$.captureVersion') AS version,json_array_length(json_extract(detail_json,'$.valuation.issues')) AS valuation_issues,json_extract(detail_json,'$.equipmentCapture.complete') AS equipment_complete,json_array_length(json_extract(detail_json,'$.equipmentCapture.issues')) AS equipment_issues,json_extract(detail_json,'$.petCapture.complete') AS pet_complete,json_array_length(json_extract(detail_json,'$.petCapture.issues')) AS pet_issues FROM listings WHERE key=?",
-      )
-      .get(item.key);
-    // 同一商品重新上架时更新原记录、重采详情，不插入重复商品。
-    const complete =
-      old?.status === "complete" &&
-      old.selling_time === item.sellingTime &&
-      old.version === CAPTURE_VERSION &&
-      !old.valuation_issues &&
-      old.equipment_complete === 1 &&
-      !old.equipment_issues &&
-      old.pet_complete === 1 &&
-      !old.pet_issues &&
-      !hasUnconfirmedEmptyEquipment(old.detail_json ? JSON.parse(String(old.detail_json)) : null);
-    this.db
-      .prepare(`INSERT INTO listings(key,server_id,eid,ordersn,url,selling_time,created_time,name,price,listing_json,first_seen_at,last_seen_at)
+    return this.progressWrite(() => {
+      if (lane !== "new" && lane !== "old") throw new Error("采集任务来源无效");
+      const now = new Date().toISOString();
+      const old = this.db
+        .prepare(
+          "SELECT status, selling_time, detail_json, json_extract(detail_json,'$.captureVersion') AS version,json_array_length(json_extract(detail_json,'$.valuation.issues')) AS valuation_issues,json_extract(detail_json,'$.equipmentCapture.complete') AS equipment_complete,json_array_length(json_extract(detail_json,'$.equipmentCapture.issues')) AS equipment_issues,json_extract(detail_json,'$.petCapture.complete') AS pet_complete,json_array_length(json_extract(detail_json,'$.petCapture.issues')) AS pet_issues FROM listings WHERE key=?",
+        )
+        .get(item.key);
+      // 同一商品重新上架时更新原记录、重采详情，不插入重复商品。
+      const complete =
+        old?.status === "complete" &&
+        old.selling_time === item.sellingTime &&
+        old.version === CAPTURE_VERSION &&
+        !old.valuation_issues &&
+        old.equipment_complete === 1 &&
+        !old.equipment_issues &&
+        old.pet_complete === 1 &&
+        !old.pet_issues &&
+        !hasUnconfirmedEmptyEquipment(old.detail_json ? JSON.parse(String(old.detail_json)) : null);
+      this.db
+        .prepare(`INSERT INTO listings(key,server_id,eid,ordersn,url,selling_time,created_time,name,price,listing_json,first_seen_at,last_seen_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET ordersn=excluded.ordersn,url=excluded.url,selling_time=excluded.selling_time,
       created_time=excluded.created_time,name=excluded.name,price=excluded.price,listing_json=excluded.listing_json,last_seen_at=excluded.last_seen_at`)
-      .run(
-        item.key,
-        item.serverId,
-        item.eid,
-        item.ordersn,
-        item.url,
-        item.sellingTime,
-        item.createdTime,
-        item.name,
-        item.price,
-        JSON.stringify(compactListing(item)),
-        now,
-        now,
-      );
-    if (lane === "new")
-      this.db.prepare("UPDATE listings SET capture_lane='new' WHERE key=?").run(item.key);
-    // 列表重现不是一次详情重试；同一上架版本保留原失败原因，实际派发时才清除。
-    if (
-      !complete &&
-      old?.status !== "unavailable" &&
-      !(old?.status === "failed" && old.selling_time === item.sellingTime)
-    )
-      this.db.prepare("UPDATE listings SET status='pending',error=NULL WHERE key=?").run(item.key);
-    return complete || old?.status === "unavailable";
+        .run(
+          item.key,
+          item.serverId,
+          item.eid,
+          item.ordersn,
+          item.url,
+          item.sellingTime,
+          item.createdTime,
+          item.name,
+          item.price,
+          JSON.stringify(compactListing(item)),
+          now,
+          now,
+        );
+      if (lane === "new")
+        this.db.prepare("UPDATE listings SET capture_lane='new' WHERE key=?").run(item.key);
+      // 列表重现不是一次详情重试；同一上架版本保留原失败原因，实际派发时才清除。
+      if (
+        !complete &&
+        old?.status !== "unavailable" &&
+        !(old?.status === "failed" && old.selling_time === item.sellingTime)
+      )
+        this.db
+          .prepare("UPDATE listings SET status='pending',error=NULL WHERE key=?")
+          .run(item.key);
+      return complete || old?.status === "unavailable";
+    });
   }
   /** Steady-state dispatch reads only queued metadata; legacy validation stays in retryItems. */
   pendingItems(): Listing[] {
@@ -302,14 +452,58 @@ export class CrawlStore {
     const last = point && items.find((item) => item.key === point.key);
     return last ? [last, ...items.filter((item) => item.key !== last.key)] : items;
   }
+  /** Freeze an anchor's source version without demoting its saved complete snapshot. */
+  beginAvailabilityCheck(key: string) {
+    const gate = this.progressGate();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (gate) {
+        this.assertBusinessLease();
+        const context = this.currentProgressContext();
+        if (!context) throw new Error("缺少当前官网任务身份");
+        gate.assertActivity(context);
+      }
+      const current = this.db
+        .prepare("SELECT server_id,eid,ordersn,selling_time,price FROM listings WHERE key=?")
+        .get(key);
+      if (!current) throw new Error("待核验商品不存在");
+      this.businessLease?.getStore()?.versions.set(key, listingVersion(current));
+      this.rememberAttemptRevision(key);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
   beginRetry(key: string, refresh = false) {
-    if (!this.retryItems([key], refresh).length) throw new Error("待补采商品不存在或已完成");
-    const result = this.db
-      .prepare(
-        "UPDATE listings SET status='pending',error=NULL,attempt_count=attempt_count+1,last_attempt_at=? WHERE key=?",
-      )
-      .run(new Date().toISOString(), key);
-    if (result.changes !== 1) throw new Error("待补采商品不存在或已完成");
+    const gate = this.progressGate();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // Starting a local attempt precedes its detail query; it requires a live runnable
+      // worker, but cannot claim that the not-yet-run detail query was accepted.
+      if (gate) {
+        this.assertBusinessLease();
+        const context = this.currentProgressContext();
+        if (!context) throw new Error("缺少当前官网任务身份");
+        gate.assertActivity(context);
+      }
+      const current = this.db
+        .prepare("SELECT server_id,eid,ordersn,selling_time,price FROM listings WHERE key=?")
+        .get(key);
+      if (!this.retryItems([key], refresh).length) throw new Error("待补采商品不存在或已完成");
+      const result = this.db
+        .prepare(
+          "UPDATE listings SET status='pending',error=NULL,attempt_count=attempt_count+1,last_attempt_at=? WHERE key=?",
+        )
+        .run(new Date().toISOString(), key);
+      if (result.changes !== 1) throw new Error("待补采商品不存在或已完成");
+      if (current) this.businessLease?.getStore()?.versions.set(key, listingVersion(current));
+      this.rememberAttemptRevision(key);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
   save(item: Listing, detail: RoleDetail, checkpoint?: Checkpoint) {
     return this.persistDetail(item, detail, checkpoint, false);
@@ -331,8 +525,67 @@ export class CrawlStore {
       return false;
     const issues = captureIssues(detail, false, true, item);
     const complete = !partial && issues.length === 0;
+    const gate = this.progressGate();
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // Re-read version and status under the same write lock as the update. A newer
+      // connection may have committed between the earlier reuse checks and BEGIN.
+      const current = this.db
+        .prepare(
+          "SELECT status,collected_at,server_id,eid,ordersn,selling_time,price FROM listings WHERE key=?",
+        )
+        .get(item.key);
+      const newer =
+        current &&
+        Number.isFinite(Date.parse(String(current.collected_at))) &&
+        Number.isFinite(Date.parse(detail.collectedAt)) &&
+        Date.parse(String(current.collected_at)) > Date.parse(detail.collectedAt);
+      const differentListing =
+        current &&
+        (current.server_id !== item.serverId ||
+          current.eid !== item.eid ||
+          current.ordersn !== item.ordersn ||
+          current.selling_time !== item.sellingTime ||
+          (this.businessLease?.getStore()?.versions.has(item.key) &&
+            this.businessLease.getStore()!.versions.get(item.key) !== listingVersion(current)));
+      if (
+        current &&
+        (current.status === "unavailable" ||
+          (partial && current.status === "complete") ||
+          newer ||
+          differentListing)
+      ) {
+        this.archiveOnly(item.key, detail);
+        this.db.exec("COMMIT");
+        return false;
+      }
+      if (gate && partial) {
+        try {
+          this.assertBusinessLease();
+          this.assertAttemptRevision(item.key);
+        } catch {
+          this.archiveOnly(item.key, detail);
+          this.db.exec("COMMIT");
+          return false;
+        }
+      }
+      if (gate && !partial) {
+        const context =
+          detail.accessContext ||
+          (typeof this.progressContext === "function"
+            ? this.progressContext()
+            : this.progressContext);
+        try {
+          this.assertBusinessLease();
+          this.assertAttemptRevision(item.key);
+          if (!context) throw new Error("缺少当前官网查询身份");
+          gate.assertProgress(context);
+        } catch {
+          this.archiveOnly(item.key, detail);
+          this.db.exec("COMMIT");
+          return false;
+        }
+      }
       this.archive(item.key, detail);
       detail = compactDetail(detail);
       const result = this.db
@@ -387,6 +640,7 @@ export class CrawlStore {
             "INSERT INTO crawl_state(id,checkpoint_json) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET checkpoint_json=excluded.checkpoint_json",
           )
           .run(JSON.stringify(checkpoint));
+      this.rememberAttemptRevision(item.key);
       this.db.exec("COMMIT");
       return complete;
     } catch (error) {
@@ -395,16 +649,58 @@ export class CrawlStore {
     }
   }
   fail(key: string, error: string) {
-    this.db
-      .prepare("UPDATE listings SET status='failed',error=? WHERE key=? AND status!='unavailable'")
-      .run(error, key);
+    return this.finishAttempt(key, error, "failure");
   }
-  markUnavailable(key: string, reason: string) {
-    // Preserve every old partial/source snapshot; terminal state never publishes it as complete.
-    this.db
-      .prepare("UPDATE listings SET status='unavailable',error=? WHERE key=?")
-      .run(reason, key);
-    diagnostics.record("crawl.item_unavailable", { key, reason, action: "skip_without_retry" });
+  markUnavailable(key: string, reason: string, context?: AccessContext) {
+    return this.finishAttempt(key, reason, "unavailable", context);
+  }
+  private finishAttempt(
+    key: string,
+    error: string,
+    kind: "failure" | "unavailable",
+    proof?: AccessContext,
+  ) {
+    const gate = this.progressGate();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.archiveAttemptError(key, error, kind, proof);
+      if (gate) {
+        try {
+          this.assertBusinessLease();
+          this.assertAttemptRevision(key);
+          const context = kind === "unavailable" ? proof : this.currentProgressContext();
+          if (!context) throw new Error("缺少当前官网查询身份");
+          if (kind === "unavailable") {
+            gate.assertProgress(context);
+            this.assertAvailabilityProof(key, context);
+          } else gate.assertActivity(context);
+        } catch {
+          this.db.exec("COMMIT");
+          return false;
+        }
+      }
+      // Local errors never demote a complete snapshot. Only accepted official
+      // unavailability for this exact attempt may publish the online terminal state.
+      const result = this.db
+        .prepare(
+          kind === "unavailable"
+            ? "UPDATE listings SET status='unavailable',error=? WHERE key=?"
+            : `UPDATE listings SET status='failed',error=? WHERE key=? AND status!='unavailable'${gate ? " AND status!='complete'" : ""}`,
+        )
+        .run(error, key);
+      this.rememberAttemptRevision(key);
+      this.db.exec("COMMIT");
+      if (kind === "unavailable" && result.changes)
+        diagnostics.record("crawl.item_unavailable", {
+          key,
+          reason: error,
+          action: "skip_without_retry",
+        });
+      return result.changes === 1;
+    } catch (failure) {
+      this.db.exec("ROLLBACK");
+      throw failure;
+    }
   }
   unavailableReason(key: string): string | undefined {
     const row = this.db
@@ -540,6 +836,7 @@ export class CrawlStore {
         "role_tabs",
         "role_sources",
         "role_source_history",
+        "crawl_attempt_errors",
         "crawl_state",
         "crawl_lock",
         "listings",
@@ -573,6 +870,17 @@ export class CrawlStore {
         "INSERT INTO role_sources VALUES(?,?) ON CONFLICT(listing_key) DO UPDATE SET source_gzip=excluded.source_gzip",
       )
       .run(key, gzipSync(JSON.stringify(detail)));
+  }
+  private archiveOnly(key: string, detail: RoleDetail) {
+    const source = gzipSync(JSON.stringify(detail));
+    this.db
+      .prepare("INSERT OR IGNORE INTO role_source_history VALUES(?,?,?,?)")
+      .run(
+        createHash("sha256").update(source).digest("hex"),
+        key,
+        source,
+        new Date().toISOString(),
+      );
   }
   private ensureListingColumn(name: string, definition: string) {
     const exists = this.db

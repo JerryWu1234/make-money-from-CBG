@@ -19,7 +19,7 @@ import type { OpenCbgResult } from "./types";
 
 // Never pass page snapshots, response bodies or browser credentials to the logger.
 const privateKey =
-  /cookie|authorization|password|token|secret|qrcode|account|nickname|selectedRoleId|headers|html|^(?:raw|summary|attrs)$/i;
+  /cookie|authorization|password|token|secret|qrcode|account|nickname|selectedRoleId|headers|html|fingerprint|^fp$|^(?:raw|summary|attrs)$/i;
 export function cleanDiagnostic(value: unknown): unknown {
   if (value instanceof Error) return { name: value.name, message: cleanDiagnostic(value.message) };
   if (typeof value === "string")
@@ -35,7 +35,7 @@ export function cleanDiagnostic(value: unknown): unknown {
       })
       .replace(/<[^>]*>/g, "[element]")
       .replace(
-        /^.*(?:cookie|authorization|password|token|secret|accountUrs|nickname|selectedRoleId)\s*[=:].*$/gim,
+        /^.*(?:cookie|authorization|password|token|secret|accountUrs|nickname|selectedRoleId|fingerprint|fp|指纹)\s*(?:[=:：]|%3[dDaA]).*$/gim,
         "[private line omitted]",
       )
       .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, "[email omitted]")

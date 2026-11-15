@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node
 import path from "node:path";
 import {
   DEFAULT_HEAD_REFRESH,
+  HeadRefreshSettingsError,
   validateHeadRefreshSettings,
   type HeadRefreshSettings,
 } from "./head-refresh";
@@ -14,17 +15,24 @@ export class HeadRefreshSettingsStore {
 
   get(): HeadRefreshSettings {
     if (!this.settings) {
-      this.settings = { ...DEFAULT_HEAD_REFRESH };
+      let next: HeadRefreshSettings = { ...DEFAULT_HEAD_REFRESH };
       try {
-        this.settings = validateHeadRefreshSettings(JSON.parse(readFileSync(this.file, "utf8")));
-      } catch {
+        next = validateHeadRefreshSettings(JSON.parse(readFileSync(this.file, "utf8")));
+      } catch (error) {
+        if (error instanceof HeadRefreshSettingsError && /版本/.test(error.message)) throw error;
         // 未配置或旧配置损坏时沿用默认值，不影响已有采集。
       }
+      this.settings = next;
     }
     return { ...this.settings };
   }
 
   save(value: unknown): HeadRefreshSettings {
+    if (
+      this.get().schemaVersion === 2 &&
+      (value as { schemaVersion?: number } | null)?.schemaVersion !== 2
+    )
+      throw new HeadRefreshSettingsError("旧客户端不能覆盖版本2刷新设置，请重新读取设置");
     const next = validateHeadRefreshSettings(value);
     mkdirSync(path.dirname(this.file), { recursive: true });
     const temporary = `${this.file}.${randomUUID()}.tmp`;

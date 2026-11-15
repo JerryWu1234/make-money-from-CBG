@@ -1,3 +1,5 @@
+import { closeNativeAccess } from "./native-access";
+import { bindOfficialPage } from "./official-access";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { CONNECTION_HELP, resolveCdpEndpoint, verifyCdpEndpoint } from "./chrome";
 import { CBG_HOME_URL, showBrowserWorkPages } from "./config";
@@ -13,6 +15,7 @@ import {
   saveBrowserSettings,
   browserBusyError,
   type BrowserMode,
+  type AccessAdapter,
 } from "./browser-settings";
 
 type BrowserSession = {
@@ -235,20 +238,25 @@ function createSession(mode: BrowserMode) {
     return cache.selectedPage && !cache.selectedPage.isClosed() ? cache.selectedPage : null;
   }
 
-  async function createBackgroundPage(browser: Browser): Promise<Page> {
+  async function createBackgroundPage(browser: Browser, recoveryToken?: string): Promise<Page> {
     const existing = getCbgPage();
     if (existing) {
       await ensureWorkViewport(existing);
       registerBrowserEvidence(existing);
+      await bindOfficialPage(existing, {
+        runId: recoveryToken ? "recovery" : "browser-session",
+        sourceKind: recoveryToken ? "recovery" : "workflow",
+        recoveryToken,
+      });
       return existing;
     }
-    cache.selectedPage = await createHiddenPage(browser);
+    cache.selectedPage = await createHiddenPage(browser, recoveryToken);
     return cache.selectedPage;
   }
 
-  function createHiddenPage(browser: Browser): Promise<Page> {
+  function createHiddenPage(browser: Browser, recoveryToken?: string): Promise<Page> {
     // Only target creation shares the temporary Playwright compatibility switch.
-    const creation = pool.creation.then(() => openHiddenPage(browser));
+    const creation = pool.creation.then(() => openHiddenPage(browser, recoveryToken));
     cache.hiddenPageCreation = pool.creation = creation.then(
       () => {},
       () => {},
@@ -256,12 +264,17 @@ function createSession(mode: BrowserMode) {
     return creation;
   }
 
-  async function openHiddenPage(browser: Browser): Promise<Page> {
+  async function openHiddenPage(browser: Browser, recoveryToken?: string): Promise<Page> {
     if (cache.closing || browserControl.changing) throw browserBusyError();
     if (cache.context && cache.cachedBrowser === browser) {
       const page = await cache.context.newPage();
       try {
         await ensureWorkViewport(page);
+        await bindOfficialPage(page, {
+          runId: recoveryToken ? "recovery" : "browser-session",
+          sourceKind: recoveryToken ? "recovery" : "workflow",
+          recoveryToken,
+        });
         registerBrowserEvidence(page);
         await captureBrowserStep(page, { flow: "browser", stage: "page.created" });
         return page;
@@ -298,6 +311,11 @@ function createSession(mode: BrowserMode) {
             const { targetInfo } = await targetSession.send("Target.getTargetInfo");
             if (targetInfo.targetId === targetId) {
               await ensureWorkViewport(page);
+              await bindOfficialPage(page, {
+                runId: recoveryToken ? "recovery" : "browser-session",
+                sourceKind: recoveryToken ? "recovery" : "workflow",
+                recoveryToken,
+              });
               registerBrowserEvidence(page);
               await captureBrowserStep(page, { flow: "browser", stage: "page.created" });
               // 隐藏目标的生命周期绑定创建它的会话，不能在返回时 detach。
@@ -349,10 +367,14 @@ export function getActiveBrowserMode(): BrowserMode {
   return browserSettings().mode;
 }
 export function getBrowser(allowConnect = false, mode?: BrowserMode) {
+  if (browserSettings().accessAdapter === "extension-native")
+    throw new Error("扩展与原生通路不提供 CDP；请使用扩展绑定的 Chrome 页面");
   if (mode && mode !== getActiveBrowserMode())
     throw new Error("请先切换浏览器运行方式，再开始查询");
   return session(mode).getBrowser(allowConnect);
 }
+export const createRecoveryWorkPage = (browser: Browser, recoveryToken: string) =>
+  session().createBackgroundPage(browser, recoveryToken);
 export const getCbgPage = (mode?: BrowserMode) => session(mode).getCbgPage();
 export const createBackgroundPage = (browser: Browser, mode?: BrowserMode) =>
   session(mode).createBackgroundPage(browser);
@@ -367,6 +389,7 @@ export function browserSessionSettings() {
   const browsers = modes.map((mode) => ({ ...session(mode).browserSessionSettings(), mode }));
   return {
     mode: getActiveBrowserMode(),
+    accessAdapter: browserSettings().accessAdapter ?? "playwright",
     modes,
     browsers,
     showWorkPages: showBrowserWorkPages(),
@@ -379,6 +402,7 @@ export async function changeBrowserModes(
   busy: () => boolean,
   reset: () => void,
   showWorkPages?: boolean,
+  accessAdapter?: AccessAdapter,
 ) {
   if (!isBrowserModes(modes)) throw new Error("请只选择一种浏览器方式");
   if (
@@ -393,13 +417,17 @@ export async function changeBrowserModes(
   browserControl.changing = true;
   let saved = false;
   try {
-    if (showWorkPages === undefined) saveBrowserSettings(modes);
-    else saveBrowserSettings(modes, showWorkPages);
+    saveBrowserSettings(
+      modes,
+      showWorkPages ?? previous.showWorkPages,
+      accessAdapter ?? previous.accessAdapter,
+    );
     saved = true;
     reset();
-    const results = await Promise.allSettled(
-      Object.values(pool.sessions).map((entry) => entry.closeBrowserSession()),
-    );
+    const results = await Promise.allSettled([
+      closeNativeAccess(),
+      ...Object.values(pool.sessions).map((entry) => entry.closeBrowserSession()),
+    ]);
     const errors = results.filter((result) => result.status === "rejected");
     if (errors.length)
       throw new AggregateError(
@@ -411,8 +439,11 @@ export async function changeBrowserModes(
   } catch (error) {
     if (saved) {
       try {
-        if (showWorkPages === undefined) saveBrowserSettings(previous.modes || [previous.mode]);
-        else saveBrowserSettings(previous.modes || [previous.mode], previousVisibility);
+        saveBrowserSettings(
+          previous.modes || [previous.mode],
+          previousVisibility,
+          previous.accessAdapter ?? "playwright",
+        );
       } catch (rollbackError) {
         diagnostics.record("browser.mode_rollback_error", { error, rollbackError });
         throw new AggregateError(
@@ -431,9 +462,10 @@ export function changeBrowserMode(mode: BrowserMode, busy: () => boolean, reset:
 }
 export async function shutdownBrowserSession() {
   pool.closing = true;
-  const results = await Promise.allSettled(
-    Object.values(pool.sessions).map((entry) => entry.shutdownBrowserSession()),
-  );
+  const results = await Promise.allSettled([
+    closeNativeAccess(),
+    ...Object.values(pool.sessions).map((entry) => entry.shutdownBrowserSession()),
+  ]);
   const errors = results.filter((result) => result.status === "rejected");
   if (errors.length)
     throw new AggregateError(

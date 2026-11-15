@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -136,6 +137,7 @@ test("队列满且第2页未扫完→到点刷新→在途完成→暂停重开�
   };
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://refresh-deadline.test") return route.abort();
     if (url.pathname.startsWith("/api/")) {
       let body: unknown;

@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -179,6 +180,7 @@ test("逐商品判断宝石30段、人物当前修炼26，并展示可核对过�
     ];
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== "http://rules.test") return route.abort();
       if (!url.pathname.startsWith("/api/")) {
         const file = path.join(

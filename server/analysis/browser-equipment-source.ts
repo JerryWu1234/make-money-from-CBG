@@ -1,3 +1,19 @@
+import { browserSettings } from "../browser-settings";
+import {
+  installQueryCallbackObservation,
+  activateQueryObservation,
+  clearQueryCallbackObservation,
+} from "../query-health/callback-observer";
+import { bindOfficialPage } from "../official-access";
+import {
+  beginPageQuery,
+  finishPageQuery,
+  failPendingPageQuery,
+  pageQueryProofs,
+  queryPageContext,
+  successfulQueryEvidence,
+  QueryHealthError,
+} from "../query-health/runtime";
 import { createHash } from "node:crypto";
 import type { Page } from "playwright-core";
 import {
@@ -119,7 +135,7 @@ export type EquipmentEvidenceCapture = (
   verifyStable: () => Promise<void>,
 ) => Promise<EquipmentEvidence>;
 
-function equipmentSuitControl(value: string, config: EquipmentSearchConfig) {
+export function equipmentSuitControl(value: string, config: EquipmentSearchConfig) {
   const matches = Object.entries(config.suitTypes || {}).flatMap(([type, choices]) =>
     choices
       .filter(([id]) => String(id) === value)
@@ -250,7 +266,7 @@ function jewelryAttributeQuery(item: EquipmentPricingItem, config: EquipmentSear
   return { ...args, added_attr_num: count, added_attr_logic: "detail" };
 }
 
-const isYuanshen = (item: EquipmentPricingItem) =>
+export const isYuanshen = (item: EquipmentPricingItem) =>
   /(?:^|[·/\s])元身(?:$|[·/\s])/.test(observedEquipmentCategory(item.category, "", item.modelId));
 /** Values come from the live public menus/select, never guessed query parameter codes. */
 export function yuanshenQuery(
@@ -864,6 +880,30 @@ async function readMainEquipment(
     },
     { directPanel, excluded },
   );
+  return equipmentObservationSource(observed, page.url(), expectedKind, directPanel);
+}
+
+/** Both browser transports feed the same principal-product validator. */
+export function equipmentObservationSource(
+  observed: {
+    name: string;
+    tooltip: string;
+    description: string;
+    typeDescription: string;
+    prices: string[];
+    rawPrice: number | null;
+    body: string;
+    selling: unknown;
+    productName: unknown;
+    productId: unknown;
+    serverId: unknown;
+    modelId: unknown;
+    kindId: unknown;
+  },
+  url: string,
+  expectedKind: "equipment" | "pet-gear" = "equipment",
+  directPanel = true,
+) {
   const productId =
     typeof observed.productId === "string" || typeof observed.productId === "number"
       ? String(observed.productId)
@@ -877,7 +917,7 @@ async function readMainEquipment(
     !productId ||
     !serverId ||
     observed.productName !== observed.name ||
-    equipmentIdentity(page.url()) !== serverId + ":" + productId
+    equipmentIdentity(url) !== serverId + ":" + productId
   )
     throw new Error("无法把主商品属性绑定到当前商品ID，报价未采用");
   const knownJewelry = isJewelry({
@@ -1560,7 +1600,10 @@ export function equipmentSourceFromPages(
     if (!closing) {
       signal.removeEventListener("abort", abort);
       marketScope?.close();
-      closing = Promise.allSettled([searchPage.close(), detailPages.close()]).then(() => {});
+      closing = clearQueryCallbackObservation(searchPage)
+        .catch(() => {})
+        .then(() => Promise.allSettled([searchPage.close(), detailPages.close()]))
+        .then(() => {});
     }
     return closing;
   };
@@ -1579,6 +1622,11 @@ export function equipmentSourceFromPages(
       try {
         await pace(requestSignal, 600, 400);
         return await detailPages.read(safe, requestSignal, async (detailPage) => {
+          await bindOfficialPage(detailPage, {
+            runId: "market-equipment",
+            sourceKind: "market-equipment-detail",
+            signal: requestSignal,
+          });
           await captureBrowserStep(
             detailPage,
             { flow: "analysis", stage: "equipment.detail.opened", key: equipmentIdentity(safe) },
@@ -2164,40 +2212,7 @@ export function equipmentSourceFromPages(
             detailFailures,
           };
           stage = "query_component";
-          await searchPage.evaluate(() => {
-            const g = window as unknown as Record<string, any>;
-            const original = g.ajax_with_recommend;
-            if (typeof original !== "function") throw new Error("官网装备查询组件发生变化");
-            g.ajax_with_recommend = function (options: Record<string, any>, ...rest: unknown[]) {
-              const success = options.onSuccess,
-                failure = options.onFailure;
-              return original.call(
-                this,
-                {
-                  ...options,
-                  onSuccess(result: Record<string, any>) {
-                    g.__cbgEquipmentResult = {
-                      page: Number(options.data?.page),
-                      serverType: String(options.data?.server_type || ""),
-                      ok: result.status === 0 && Array.isArray(result.msg),
-                      count: Array.isArray(result.msg) ? result.msg.length : -1,
-                      error: typeof result.msg === "string" ? result.msg.slice(0, 200) : "",
-                    };
-                    success?.(result);
-                  },
-                  onFailure(...values: unknown[]) {
-                    failure?.(...values);
-                    g.__cbgEquipmentResult = {
-                      page: Number(options.data?.page),
-                      ok: false,
-                      error: "官网查询请求失败",
-                    };
-                  },
-                },
-                ...rest,
-              );
-            };
-          });
+          await installQueryCallbackObservation(searchPage, "Equipment");
           const readCandidate = async (url: string, modeIndex: number) => {
             details++;
             let candidate: EquipmentCandidate = {
@@ -2334,7 +2349,27 @@ export function equipmentSourceFromPages(
               sortRequests?: GlobalMarketRequest[];
               evidence?: EquipmentEvidence[];
             }>;
-            const loadPage = async (pageNumber: number, first: boolean, replay = false) => {
+            let healthProbe = false;
+            let healthReapply = false;
+            const loadPage = async (
+              pageNumber: number,
+              first: boolean,
+              replay = false,
+            ): Promise<NonNullable<typeof cachedListing>> => {
+              const healthQuery = healthProbe
+                ? undefined
+                : beginPageQuery(searchPage, {
+                    category: act,
+                    server: serverId,
+                    serverAge: String(args.server_type || ""),
+                    conditions: { ...args },
+                    page: pageNumber,
+                    sort: core ? initialSortLabel(core) + " ASC" : "default",
+                  });
+              await activateQueryObservation(
+                searchPage,
+                queryPageContext(searchPage)?.queryId || crypto.randomUUID(),
+              );
               const captureEvidence = async (
                 phase: "filled" | "results" | "sorting" | "submitted",
                 submittedArgs?: Query,
@@ -2397,7 +2432,18 @@ export function equipmentSourceFromPages(
               await pace(requestSignal);
               let form: Awaited<ReturnType<typeof applyEquipmentSearchForm>> | undefined;
               let filledEvidence: EquipmentEvidence | undefined;
-              if (first) {
+              if (first && healthProbe && !healthReapply) {
+                form = {
+                  button: yuanshen
+                    ? "btn_yuanshen_search"
+                    : jade
+                      ? "btn_yupo_search"
+                      : jewelry
+                        ? "btn_lingshi_search"
+                        : "btn_equip_search",
+                  actions: [],
+                };
+              } else if (first) {
                 stage = "ui_controls";
                 form = await applyEquipmentSearchForm(
                   searchPage,
@@ -2582,6 +2628,11 @@ export function equipmentSourceFromPages(
                   return canonical.href;
                 };
                 const result = (window as unknown as Record<string, any>).__cbgEquipmentResult;
+                if (
+                  result?.queryToken !==
+                  (window as unknown as Record<string, any>).__cbgQueryObserver?.token
+                )
+                  throw new Error("旧查询回调不能用于当前查询");
                 if (!result?.ok) throw new Error(result?.error || "官网装备查询未成功");
                 const root = document.querySelector<HTMLElement>("#search_result");
                 if (!root?.checkVisibility()) throw new Error("装备列表尚未加载");
@@ -2620,6 +2671,29 @@ export function equipmentSourceFromPages(
                 );
                 return { rows, empty, hasNext };
               }, pageNumber);
+              if (healthProbe) return listing;
+              await finishPageQuery(
+                searchPage,
+                healthQuery,
+                successfulQueryEvidence(listing.rows.length, listing.empty),
+                async (identity) => {
+                  healthProbe = true;
+                  const original = { ...args };
+                  healthReapply = JSON.stringify(identity.conditions) !== JSON.stringify(original);
+                  try {
+                    for (const key of Object.keys(args)) delete args[key];
+                    Object.assign(args, identity.conditions);
+                    const checked = await loadPage(identity.page, true, true);
+                    return successfulQueryEvidence(checked.rows.length, checked.empty);
+                  } finally {
+                    for (const key of Object.keys(args)) delete args[key];
+                    Object.assign(args, original);
+                    healthProbe = false;
+                    healthReapply = false;
+                  }
+                },
+                currentCursor(),
+              );
               await captureBrowserStep(
                 searchPage,
                 { flow: "analysis", stage: "equipment.results.read", key: item.key },
@@ -2971,7 +3045,13 @@ export function equipmentSourceFromPages(
             requestSignal,
           );
           requestSignal.throwIfAborted();
-          if (stage === "scope_confirm" || fatalEquipmentSearchError(error)) throw error;
+          failPendingPageQuery(searchPage);
+          if (
+            error instanceof QueryHealthError ||
+            stage === "scope_confirm" ||
+            fatalEquipmentSearchError(error)
+          )
+            throw error;
           // A structural failure on one item must not discard earlier verified items.
           try {
             await assertAvailable(searchPage);
@@ -3016,7 +3096,12 @@ export function equipmentSourceFromPages(
           break equipmentItems;
         }
       }
-      return { queries, items: results, searchItems: records };
+      return {
+        queries,
+        items: results,
+        searchItems: records,
+        accessProofs: pageQueryProofs(searchPage),
+      };
     },
   };
 }
@@ -3027,6 +3112,12 @@ export async function createEquipmentSource(
   onProgress?: (progress: PricingSearchProgress) => void,
   productKey?: string,
 ) {
+  if (browserSettings().accessAdapter === "extension-native")
+    return (await import("../adapters/native-market-source")).createNativeEquipmentSource(
+      signal,
+      serverId,
+      onProgress,
+    );
   assertMarketServerId(serverId);
   signal.throwIfAborted();
   let searchPage: Page | undefined;
@@ -3034,6 +3125,11 @@ export async function createEquipmentSource(
     const browser = await getBrowser(true);
     signal.throwIfAborted();
     searchPage = await createHiddenPage(browser);
+    await bindOfficialPage(searchPage, {
+      runId: productKey || "market-equipment",
+      sourceKind: "market-equipment",
+      signal,
+    });
     signal.throwIfAborted();
     const evidence = productKey
       ? (await import("./equipment-search-evidence")).equipmentSearchEvidence(

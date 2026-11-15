@@ -1,3 +1,4 @@
+import { AccessGovernor, type AccessContext } from "../access";
 import { readFileSync } from "node:fs";
 import { expect, it, vi } from "vite-plus/test";
 import { valuationRecord } from "../../tests/fixtures/analysis";
@@ -669,5 +670,55 @@ it.each([
   } finally {
     await c.runner.shutdown();
     c.crawl.db.close();
+  }
+});
+
+it("R2 restarting with a trusted saved pet proof can commit only a newly queried gear stage", () => {
+  const c = setup();
+  const owner = "gear-stage-resume";
+  try {
+    const id = c.store.createRun("codex", "test", true, c.profile);
+    expect(c.store.acquire(owner)).toBe(true);
+    let task = c.store.next(id)!;
+    const gate = new AccessGovernor(c.crawl.db);
+    const first = gate.acquireOwner("old-browser-service");
+    const oldProof: AccessContext = {
+      ...first,
+      runId: id,
+      queryId: "trusted-pet-before-restart",
+      pageId: "old-page",
+      pageGeneration: 1,
+      browserSessionEpoch: "old-session",
+      stopEpoch: 0,
+      sourceKind: "market-pet",
+    };
+    gate.registerPage(oldProof);
+    gate.registerQuery(oldProof, { accepted: true });
+    c.store.beginPetSearch(task, owner);
+    task = c.store.savePetPricing(task, { ...c.pets, accessProofs: [oldProof] }, owner);
+    gate.releaseOwner(first);
+    const restarted = gate.acquireOwner("new-browser-service");
+    const newProof: AccessContext = {
+      ...oldProof,
+      ...restarted,
+      queryId: "new-gear",
+      pageId: "new-page",
+      browserSessionEpoch: "new-session",
+      sourceKind: "market-pet-gear",
+    };
+    gate.registerPage(newProof);
+    gate.registerQuery(newProof, { accepted: true });
+    c.store.beginPetSearch(task, owner);
+    expect(() => {
+      task = c.store.savePetPricing(
+        task,
+        { ...task.petPricing!, gearPricing: { ...c.gear, accessProofs: [newProof] } },
+        owner,
+      );
+    }).not.toThrow();
+    expect(task.petPricing?.accessProofs?.[0].queryId).toBe("trusted-pet-before-restart");
+    expect(task.petPricing?.gearPricing?.accessProofs?.[0].queryId).toBe("new-gear");
+  } finally {
+    c.crawl.close();
   }
 });

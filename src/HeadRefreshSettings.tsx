@@ -30,6 +30,7 @@ async function requestSettings(body?: Settings, signal?: AbortSignal): Promise<S
 export function HeadRefreshSettings() {
   const [time, setTime] = useState("1");
   const [unit, setUnit] = useState(60);
+  const [minimum, setMinimum] = useState("5");
   const [random, setRandom] = useState(false);
   const [listingAgeMinutes, setListingAgeMinutes] = useState(String(DEFAULT_LISTING_AGE_MINUTES));
   const [saved, setSaved] = useState<Settings | null>(null);
@@ -49,6 +50,7 @@ export function HeadRefreshSettings() {
       setUnit(nextUnit);
       setTime(String(settings.intervalSeconds / nextUnit));
       setRandom(settings.random);
+      setMinimum(String(settings.minIntervalSeconds ?? 1));
       setListingAgeMinutes(String(settings.listingAgeMinutes ?? DEFAULT_LISTING_AGE_MINUTES));
     } catch (error) {
       if (!signal?.aborted)
@@ -71,6 +73,9 @@ export function HeadRefreshSettings() {
     setSaving(true);
     try {
       const settings = validateHeadRefreshSettings({
+        schemaVersion: 2,
+        minIntervalSeconds: random ? Number(minimum) : Number(time) * unit,
+        maxIntervalSeconds: Number(time) * unit,
         intervalSeconds: Number(time) * unit,
         random,
         listingAgeMinutes: Number(listingAgeMinutes),
@@ -156,14 +161,28 @@ export function HeadRefreshSettings() {
               setNotice("");
             }}
           />
-          在设定时间内随机刷新
+          在上下限之间随机刷新
         </label>
+        {random && (
+          <label>
+            随机下限（秒）
+            <input
+              type="number"
+              min={1}
+              max={MAX_HEAD_REFRESH_SECONDS}
+              step={1}
+              value={minimum}
+              disabled={disabled}
+              onChange={(event) => setMinimum(event.target.value)}
+            />
+          </label>
+        )}
       </form>
       <p className="status-note">
         {random
-          ? "勾选后，每轮从1秒到设定时长之间随机抽取等待时间。"
+          ? "勾选后，每轮在指定下限和刷新间隔之间抽取等待时间；保存时迁移到版本2。"
           : "未勾选时，每次按设定时长等待。"}
-        例如设置10分钟并勾选随机，每轮等待1秒至10分钟。可设置1秒至7天。
+        旧版随机仍按1..N秒读取。所有刷新还须等待共享访问预算，有效下限取刷新下限与访问策略下限中的较大值。可设置1秒至7天。
         每次从第1页检查，只采集上架时间在设定分钟范围内且尚未登记的商品。
         遇到第一条超出范围的商品就结束本轮，等待下次刷新。
         刷新到点后，完成当前列表动作就回首页，不等待本轮全部扫完；已开始的详情继续保存。

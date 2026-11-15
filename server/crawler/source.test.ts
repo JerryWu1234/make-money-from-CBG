@@ -13,6 +13,10 @@ import { captureBrowserStep } from "../browser-evidence";
 import { prepareList, gotoPage, hoverListing, refreshList } from "./page";
 import { CAPTURE_VERSION } from "./compact";
 import { IncompleteCaptureError } from "./capture-readiness";
+import { DatabaseSync } from "node:sqlite";
+import { AccessGovernor, type AccessContext } from "../access";
+import { bindQueryPage } from "../query-health/runtime";
+import { ListingUnavailableError } from "./types";
 
 vi.mock("./detail", () => ({
   MAIN_TABS: ["人物/修炼", "技能", "道具/法宝", "召唤兽/孩子", "坐骑", "锦衣/外观", "玩家之家"],
@@ -41,6 +45,39 @@ const options = () => ({
   signal: new AbortController().signal,
   log: vi.fn(),
   onDetailProgress: vi.fn(),
+});
+
+it("explicit official detail tombstones carry their independently accepted availability proof", async () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    const governor = new AccessGovernor(db),
+      owner = governor.acquireOwner("tombstone-source");
+    const localPage = { ...page } as Page;
+    const context: AccessContext = {
+      ...owner,
+      runId: "run",
+      queryId: "initial",
+      pageId: "detail-tombstone",
+      pageGeneration: 1,
+      browserSessionEpoch: "session",
+      stopEpoch: 0,
+      sourceKind: "crawl-detail",
+    };
+    governor.registerPage(context);
+    bindQueryPage(localPage, governor, context);
+    const unavailable = new ListingUnavailableError("目标详情返回 HTTP 410");
+    vi.mocked(collectDetail).mockRejectedValueOnce(unavailable);
+    const src = createCrawlSource({ ...options(), listPage: page, detailPage: localPage });
+    await expect(src.detail(item)).rejects.toBe(unavailable);
+    expect(unavailable.accessContext?.queryId).not.toBe("initial");
+    expect(() => governor.withProgress(unavailable.accessContext!, () => {})).not.toThrow();
+    const result = db
+      .prepare("SELECT identity_json FROM query_health_results WHERE query_id=?")
+      .get(unavailable.accessContext!.queryId);
+    expect(JSON.parse(String(result?.identity_json)).category).toBe("role-availability");
+  } finally {
+    db.close();
+  }
 });
 
 it("详情发现访问限制立即报告统一取消，不先截图或重开页面", async () => {

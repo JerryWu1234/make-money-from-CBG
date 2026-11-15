@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -43,6 +44,7 @@ test("已采集角色详情、分页和刷新恢复", async ({ page }, testInfo)
   // 构建产物与接口都由测试本地提供；其他来源一律阻断。
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://cbg-ui.test") return route.abort();
     if (url.pathname === "/api/runtime/settings")
       return route.fulfill({ json: { saveScreenshots: false } });

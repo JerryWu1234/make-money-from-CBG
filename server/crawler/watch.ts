@@ -213,7 +213,7 @@ export async function watchCrawl(
           return;
         }
         if (error instanceof ListingUnavailableError) {
-          store.markUnavailable(item.key, error.message);
+          if (!store.markUnavailable(item.key, error.message, error.accessContext)) throw error;
           failedVersions.delete(item.key);
           skipped++;
           publish({
@@ -236,13 +236,18 @@ export async function watchCrawl(
       }
     }
   };
+  const newTaskQuota = options.newTaskQuota ?? 3;
+  let consecutiveNew = 0;
+  let discoveryWaits = 0;
   const pump = () => {
     while (!failure && !signal.aborted && inFlight.size < concurrency) {
       const queues = queued();
       let lane: CrawlLane;
-      if (queues.new.length) lane = "new";
+      if (queues.old.length && (consecutiveNew >= newTaskQuota || !queues.new.length)) lane = "old";
+      else if (queues.new.length) lane = "new";
       else if (queues.old.length) lane = "old";
       else break;
+      consecutiveNew = lane === "new" ? consecutiveNew + 1 : 0;
       const item = queues[lane][0]!;
       running[lane]++;
       // 先登记在途，避免同步完成或下一次发现把同一条商品再次派发。
@@ -427,9 +432,11 @@ export async function watchCrawl(
         scheduleHeadCheck();
       } else if (historyDone) {
         await waitForWork();
-      } else if (historyPage > 1 && queued().new.length) {
+      } else if (historyPage > 1 && queued().new.length && discoveryWaits++ < newTaskQuota) {
+        // Bound history discovery starvation even with continuous new arrivals.
         await waitForWork(true);
       } else {
+        discoveryWaits = 0;
         const discovered = await retryDiscovery(async () => {
           if (!currentPage) {
             let page = await source.page(historyPage);

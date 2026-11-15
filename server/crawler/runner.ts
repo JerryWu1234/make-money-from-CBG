@@ -33,16 +33,24 @@ export interface CrawlOptions {
   backfillOnly?: boolean;
   keys?: string[];
   refresh?: boolean;
+  newTaskQuota?: number;
 }
 export function validateCrawlOptions(options: CrawlOptions) {
+  if (
+    options.newTaskQuota !== undefined &&
+    (!Number.isSafeInteger(options.newTaskQuota) ||
+      options.newTaskQuota < 1 ||
+      options.newTaskQuota > 100)
+  )
+    throw new Error("连续新任务配额必须为1至100之间的整数");
   if (options.headRefresh !== undefined) validateHeadRefreshSettings(options.headRefresh);
   if (
     options.concurrency !== undefined &&
     (!Number.isSafeInteger(options.concurrency) ||
-      options.concurrency < 2 ||
-      options.concurrency % 2 !== 0)
+      options.concurrency < 1 ||
+      options.concurrency > 32)
   )
-    throw new Error("并发数必须是正偶数（2、4、6…）");
+    throw new Error("并发数必须是1至32之间的整数");
   if (
     options.headIntervalMs !== undefined &&
     (!Number.isSafeInteger(options.headIntervalMs) || options.headIntervalMs < 1)
@@ -199,7 +207,7 @@ export async function crawl(
           store.savePartial(item, error.detail);
         signal.throwIfAborted();
         if (error instanceof ListingUnavailableError) {
-          store.markUnavailable(item.key, error.message);
+          if (!store.markUnavailable(item.key, error.message, error.accessContext)) throw error;
           settled = true;
           skipped++;
           publish({
@@ -433,7 +441,7 @@ export async function crawl(
           store.savePartial(item, error.detail);
         signal.throwIfAborted();
         if (error instanceof ListingUnavailableError) {
-          store.markUnavailable(item.key, error.message);
+          if (!store.markUnavailable(item.key, error.message, error.accessContext)) throw error;
           skipped++;
           publish({
             skipped,

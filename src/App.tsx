@@ -1,3 +1,4 @@
+import { AccessSettings } from "./AccessSettings";
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { OpenCbgResult, WorkflowStep } from "../server/types";
 import { normalizeBrowserState } from "./browser-state";
@@ -262,6 +263,7 @@ export function App() {
             )}
           </div>
           <aside className="workspace-browser-options" aria-label="浏览器设置">
+            <AccessSettings />
             <BrowserSettings
               active={starting || running || crawling}
               onBusy={setSettingsBusy}

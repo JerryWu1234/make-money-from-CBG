@@ -22,6 +22,9 @@ vi.mock("./store", () => ({
     constructor() {
       mocks.createStore();
     }
+    setProgressContext = vi.fn();
+    withCrawlLease = (_owner: string, work: () => unknown) => work();
+    crawlLease = (owner: string) => ({ owner, fence: 1 });
     count = () => 42;
     checkpoint = () => undefined;
     pageReviews = () => [];
@@ -43,6 +46,12 @@ vi.mock("./source", () => ({ createCrawlSource: () => ({}) }));
 vi.mock("./access-guard", () => ({ watchCrawlAccess: mocks.watchLogin }));
 vi.mock("../analysis/controller", () => ({ appendCapturedAnalysis: mocks.enqueue }));
 vi.mock("../diagnostics", () => ({ diagnostics: { record: vi.fn() }, watchWorkPage: vi.fn() }));
+
+vi.mock("../official-access", () => ({
+  officialGovernor: () => ({ read: () => ({ state: "ready", policy: { newTaskQuota: 3 } }) }),
+  bindOfficialPage: vi.fn(),
+  officialPageContext: vi.fn(),
+}));
 
 const key = Symbol.for("cbg.crawl-runtime.v1");
 let initial: typeof import("./controller") | undefined;
@@ -156,7 +165,7 @@ it.each([
   const reason = issue === "login" ? new LoginRequiredDialogError() : new CrawlAccessError(issue);
   call[2](reason);
   expect(readingSignal?.aborted).toBe(true);
-  expect(mocks.listPage.close).toHaveBeenCalledOnce();
+  expect(mocks.listPage.close).not.toHaveBeenCalled();
   expect(mocks.detailPage.close).toHaveBeenCalled();
   await expect(started.activity!.completion).resolves.toMatchObject({
     phase: "paused",
@@ -193,7 +202,7 @@ it("连续三件失败立即取消，保留失败原因和计数，不等待在�
     message: expect.stringContaining("连续 3 件采集失败"),
     error: undefined,
   });
-  expect(mocks.listPage.close).toHaveBeenCalledOnce();
+  expect(mocks.listPage.close).not.toHaveBeenCalled();
   expect(mocks.detailPage.close).toHaveBeenCalled();
   expect(mocks.release).toHaveBeenCalledOnce();
 });

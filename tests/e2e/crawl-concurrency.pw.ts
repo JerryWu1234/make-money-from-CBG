@@ -1,6 +1,7 @@
+import { accessState } from "../fixtures/access-state";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { crawl, validateCrawlOptions } from "../../server/crawler/runner";
 import { createCrawlSource } from "../../server/crawler/source";
 import { CrawlStore } from "../../server/crawler/store";
@@ -48,6 +49,7 @@ test("新号优先状态显示实际在途，10并发上限不会显示成已满
   };
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://capture-status.test") return route.abort();
     if (url.pathname.startsWith("/api/")) {
       let body: unknown;
@@ -224,38 +226,28 @@ for (const concurrency of [2, 6, 10]) {
     let phase = "probe";
     let inFlight = 0;
     let maximum = 0;
-    const prototype = Object.getPrototypeOf(workers[0].locator("button"));
-    const evaluateAll: Locator["evaluateAll"] = prototype.evaluateAll;
-    // Hold the actual CDP evaluation open; an event handler counter alone cannot show RPC overlap.
-    prototype.evaluateAll = async function (
-      this: Locator,
-      ...args: Parameters<Locator["evaluateAll"]>
-    ) {
-      const [callback] = args;
-      if (typeof callback !== "function" || !/\.click\(\)/.test(String(callback)))
-        return evaluateAll.apply(this, args);
-      const eid = new URL(this.page().url()).searchParams.get("eid")!;
-      maximum = Math.max(maximum, ++inFlight);
-      dispatches.push({ phase, eid, inFlight });
-      try {
-        return await evaluateAll.call(
-          this,
-          async (elements, metadata) => {
-            const { source, phase } = metadata as { source: string; phase: string };
-            // oxlint-disable-next-line typescript/no-implied-eval -- Run the original click callback inside the gated browser RPC.
-            const dispatch = new Function("elements", `return (${source})(elements)`);
-            const clicked: unknown = dispatch(elements);
+    const clicks = workers.map((worker) => ({
+      worker,
+      click: worker.mouse.click.bind(worker.mouse),
+    }));
+    // Hold the actual mouse-command pipeline after delivery, so overlapping calls would be observable.
+    for (const { worker, click } of clicks)
+      worker.mouse.click = async (...args) => {
+        const eid = new URL(worker.url()).searchParams.get("eid")!;
+        maximum = Math.max(maximum, ++inFlight);
+        dispatches.push({ phase, eid, inFlight });
+        try {
+          await click(...args);
+          await worker.evaluate(async (phase) => {
             await fetch(`/click-rpc?phase=${phase}`);
-            return clicked;
-          },
-          { source: String(callback), phase },
-        );
-      } finally {
-        inFlight--;
-      }
-    };
+          }, phase);
+        } finally {
+          inFlight--;
+        }
+      };
     await context.route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== origin) return route.abort();
       if (url.pathname === "/click-rpc") {
         if (url.searchParams.get("phase") === "probe") {
@@ -380,7 +372,7 @@ for (const concurrency of [2, 6, 10]) {
       releaseLoading();
       control.abort(new Error("测试清理"));
       await Promise.allSettled([...(probe ? [probe] : []), ...(capture ? [capture] : [])]);
-      prototype.evaluateAll = evaluateAll;
+      for (const { worker, click } of clicks) worker.mouse.click = click;
       await Promise.allSettled([...workers, listPage].map((worker) => worker.close()));
       store?.close();
     }
@@ -434,6 +426,7 @@ for (const persistent of [false, true]) {
     });
     await context.route("**/*", (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== "https://xyq.cbg.163.com" || url.pathname !== "/equip")
         return route.abort();
       return route.fulfill({
@@ -577,6 +570,7 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
   const listPage = await context.newPage();
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin === "https://xyq.cbg.163.com") {
       const body =
         url.pathname === "/list"
@@ -705,9 +699,9 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
     await listPage.goto("https://xyq.cbg.163.com/list");
     await page.goto("http://cbg-ui.test/");
     const count = page.getByRole("spinbutton", { name: "并发抓取数" });
-    await expect(count).toHaveValue("6");
-    await expect(count).toHaveAttribute("min", "2");
-    await expect(count).toHaveAttribute("step", "2");
+    await expect(count).toHaveValue("1");
+    await expect(count).toHaveAttribute("min", "1");
+    await expect(count).toHaveAttribute("step", "1");
     const start = page.getByRole("button", { name: /开始采集详情|继续采集 \/ 检查新增/ });
     await expect(start).toBeEnabled();
     await count.fill("4");
@@ -727,10 +721,10 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
     expect(store.count()).toBe(0);
     expect(store.retryItems()).toHaveLength(4);
     expect(active).toBe(0);
-    for (const invalid of ["0", "1", "3", "5"]) {
+    for (const invalid of ["0", "33", "1.5"]) {
       await count.fill(invalid);
       await start.click();
-      await expect(page.getByRole("alert")).toHaveText("并发数必须是正偶数（2、4、6…）");
+      await expect(page.getByRole("alert")).toHaveText("并发数必须是1至32之间的整数");
     }
     expect(runs).toHaveLength(1);
     await count.fill("2");

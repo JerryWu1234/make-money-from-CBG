@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -20,6 +21,7 @@ test("分析只等待已完成资料，开始和暂停均不启动或暂停采�
   try {
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== "http://cbg-capture.test") return route.abort();
       if (url.pathname === "/api/runtime/settings")
         return route.fulfill({ json: { saveScreenshots: false } });

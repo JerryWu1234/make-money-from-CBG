@@ -1,3 +1,4 @@
+import { markOfficialAuthenticated } from "./official-access";
 import { createBackgroundPage, getBrowser, getCbgPage, getActiveBrowserMode } from "./session";
 import { buildPageState, disconnectedState } from "./page-state";
 import { isNavigationTransition, readStableSnapshot, runFixedWorkflow } from "./workflow";
@@ -64,6 +65,7 @@ function createWorkflow(mode: BrowserMode) {
         cache.state = { ...cache.state, ...update };
         recordState();
       });
+      if (cache.state.isLoggedIn) markOfficialAuthenticated(page);
       recordState();
       diagnostics.record("workflow.completed", { durationMs: Date.now() - started });
     })()

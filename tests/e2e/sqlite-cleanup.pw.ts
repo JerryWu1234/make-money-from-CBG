@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
@@ -157,6 +158,7 @@ async function fixture(page: Page, testInfo: TestInfo) {
   };
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== origin) return route.abort();
     if (url.pathname === "/api/crawl/clear") {
       expect(route.request().method()).toBe("POST");

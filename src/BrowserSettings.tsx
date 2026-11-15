@@ -1,10 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export type BrowserMode = "dedicated" | "daily";
-type Settings = { mode: BrowserMode; showWorkPages: boolean; connected: boolean; busy: boolean };
+type AccessAdapter = "playwright" | "extension-native";
+type Settings = {
+  mode: BrowserMode;
+  accessAdapter?: AccessAdapter;
+  showWorkPages: boolean;
+  connected: boolean;
+  busy: boolean;
+};
 
 async function request(
-  body?: { mode: BrowserMode; showWorkPages: boolean },
+  body?: { mode: BrowserMode; showWorkPages: boolean; accessAdapter?: AccessAdapter },
   signal?: AbortSignal,
 ): Promise<Settings> {
   const response = await fetch(body ? "/api/browser/settings/save" : "/api/browser/settings", {
@@ -103,16 +110,25 @@ export function BrowserSettings({
     };
   }, [active, load, saving, settings]);
 
-  const save = async (next: BrowserMode, showWorkPages = visibility.current ?? false) => {
+  const save = async (
+    next: BrowserMode,
+    showWorkPages = visibility.current ?? false,
+    accessAdapter = settings?.accessAdapter ?? "playwright",
+  ) => {
     if (pending.current || active || settings?.busy) return;
-    if (next === mode.current && showWorkPages === visibility.current) return;
+    if (
+      next === mode.current &&
+      showWorkPages === visibility.current &&
+      accessAdapter === (settings?.accessAdapter ?? "playwright")
+    )
+      return;
     ++generation.current;
     pending.current = true;
     setSaving(true);
     onBusy(true);
     setError("");
     try {
-      const data = await request({ mode: next, showWorkPages });
+      const data = await request({ mode: next, showWorkPages, accessAdapter });
       if (data.mode !== next || data.showWorkPages !== showWorkPages)
         throw new Error("浏览器设置未保存，请重试");
       mode.current = data.mode;
@@ -138,6 +154,23 @@ export function BrowserSettings({
           调试授权；登录过期仍需扫码。
         </p>
         <div className="browser-mode-options">
+          <label>
+            官网交互通路
+            <select
+              value={settings?.accessAdapter ?? "playwright"}
+              onChange={(event) => {
+                if (settings)
+                  void save(
+                    settings.mode,
+                    settings.showWorkPages,
+                    event.target.value as AccessAdapter,
+                  );
+              }}
+            >
+              <option value="playwright">现有浏览器通路</option>
+              <option value="extension-native">扩展读取与 macOS 输入</option>
+            </select>
+          </label>
           <label>
             <input
               type="checkbox"

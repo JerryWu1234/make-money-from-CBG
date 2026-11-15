@@ -12,6 +12,19 @@ import { CrawlStore } from "./store";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { analysisRecord } from "../../tests/fixtures/analysis";
 
+// This suite isolates browser transport/capture behavior; shared access integration has its own browser suite.
+vi.mock("../official-access", () => ({
+  bindOfficialPage: vi.fn(),
+  officialPageContext: vi.fn(),
+  markOfficialAuthenticated: vi.fn(),
+  onOfficialFirstDispatch: () => false,
+  withOfficialAction: (_page: unknown, _action: string, execute: () => Promise<unknown>) =>
+    execute(),
+  officialGovernor: () => ({
+    read: () => ({ state: "ready", policy: { newTaskQuota: 3, detailReadBudgetMs: 900000 } }),
+  }),
+}));
+
 vi.mock("./detail", () => ({
   MAIN_TABS: ["人物/修炼", "技能", "道具/法宝", "召唤兽/孩子", "坐骑", "锦衣/外观", "玩家之家"],
   collectDetail: vi.fn(),
@@ -205,7 +218,10 @@ it.each([
     db.observe(complete.listing);
     expect(db.save(complete.listing, complete.detail!)).toBe(true);
     const queued = Array.from({ length: 8 }, (_, index) => analysisRecord(`pending-${index}`));
-    queued.forEach((row) => db.observe(row.listing));
+    queued.forEach((row) => {
+      row.listing.sellingTime = new Date().toISOString();
+      db.observe(row.listing);
+    });
     disposers.push(await watchCrawlAccess(listPage, control.signal, notify));
     const source = createCrawlSource({
       listPage,

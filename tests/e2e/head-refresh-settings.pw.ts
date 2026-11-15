@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -18,6 +19,7 @@ async function mount(page: Page, file: string) {
   };
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     // 仅本地构建和临时配置文件；禁止请求真实官网或运行中的项目服务。
     if (url.origin !== "http://head-refresh-ui.test") return route.abort();
     if (url.pathname === "/api/crawl/head-refresh")
@@ -76,7 +78,7 @@ test("固定秒、10分钟随机和1小时随机保存并跨配置重载恢复�
   const panel = page.getByRole("region", { name: "列表首页刷新设置" });
   const time = panel.getByLabel("刷新间隔", { exact: true });
   const unit = panel.getByLabel("时间单位");
-  const random = panel.getByLabel("在设定时间内随机刷新");
+  const random = panel.getByLabel("在上下限之间随机刷新");
   const save = panel.getByRole("button", { name: "保存刷新设置" });
   await expect(save).toBeEnabled();
   await unit.selectOption("1");
@@ -84,7 +86,7 @@ test("固定秒、10分钟随机和1小时随机保存并跨配置重载恢复�
   await save.click();
   await expect
     .poll(() => state.store.get())
-    .toEqual({ intervalSeconds: 90, random: false, listingAgeMinutes: 10 });
+    .toMatchObject({ intervalSeconds: 90, random: false, listingAgeMinutes: 10 });
   await expect(panel.getByRole("status")).toContainText("已保存");
   await unit.selectOption("60");
   await time.fill("10");
@@ -92,7 +94,7 @@ test("固定秒、10分钟随机和1小时随机保存并跨配置重载恢复�
   await save.click();
   await expect
     .poll(() => state.store.get())
-    .toEqual({ intervalSeconds: 600, random: true, listingAgeMinutes: 10 });
+    .toMatchObject({ intervalSeconds: 600, random: true, listingAgeMinutes: 10 });
   state.store = new HeadRefreshSettingsStore(file);
   await page.reload();
   await expect(time).toHaveValue("10");
@@ -104,7 +106,7 @@ test("固定秒、10分钟随机和1小时随机保存并跨配置重载恢复�
   await save.click();
   await expect
     .poll(() => state.store.get())
-    .toEqual({ intervalSeconds: 3600, random: true, listingAgeMinutes: 10 });
+    .toMatchObject({ intervalSeconds: 3600, random: true, listingAgeMinutes: 10 });
   await expect(panel.getByRole("status")).toContainText("下次开始或继续采集时生效");
   expect(state.starts).toBe(0);
   await panel.screenshot({ path: testInfo.outputPath("head-refresh-settings.png") });
@@ -114,7 +116,7 @@ test("无效输入不提交；写入失败保留已保存值，可重试和取�
   const state = await mount(page, testInfo.outputPath("head-refresh.json"));
   const panel = page.getByRole("region", { name: "列表首页刷新设置" });
   const time = panel.getByLabel("刷新间隔", { exact: true });
-  const random = panel.getByLabel("在设定时间内随机刷新");
+  const random = panel.getByLabel("在上下限之间随机刷新");
   const save = panel.getByRole("button", { name: "保存刷新设置" });
   await expect(save).toBeEnabled();
   await time.fill("0");
@@ -126,18 +128,22 @@ test("无效输入不提交；写入失败保留已保存值，可重试和取�
   state.failSave = true;
   await save.click();
   await expect(panel.getByRole("alert")).toContainText("模拟保存失败");
-  expect(state.store.get()).toEqual({ intervalSeconds: 60, random: false, listingAgeMinutes: 10 });
+  expect(state.store.get()).toMatchObject({
+    intervalSeconds: 60,
+    random: false,
+    listingAgeMinutes: 10,
+  });
   await expect(panel).toContainText("当前已保存：每1分钟刷新一次");
   state.failSave = false;
   await save.click();
   await expect
     .poll(() => state.store.get())
-    .toEqual({ intervalSeconds: 600, random: true, listingAgeMinutes: 10 });
+    .toMatchObject({ intervalSeconds: 600, random: true, listingAgeMinutes: 10 });
   await random.uncheck();
   await save.click();
   await expect
     .poll(() => state.store.get())
-    .toEqual({ intervalSeconds: 600, random: false, listingAgeMinutes: 10 });
+    .toMatchObject({ intervalSeconds: 600, random: false, listingAgeMinutes: 10 });
 });
 
 test("设置读取失败时禁止提交默认值，重新读取后恢复", async ({ page }, testInfo) => {
@@ -152,7 +158,7 @@ test("设置读取失败时禁止提交默认值，重新读取后恢复", async
   await panel.getByRole("button", { name: "重新读取刷新设置" }).click();
   await expect(panel.getByLabel("刷新间隔", { exact: true })).toHaveValue("1");
   await expect(panel.getByLabel("时间单位")).toHaveValue("3600");
-  await expect(panel.getByLabel("在设定时间内随机刷新")).toBeChecked();
+  await expect(panel.getByLabel("在上下限之间随机刷新")).toBeChecked();
 });
 
 test("上架多少分钟以内默认10，可保存重载，拒绝零和小数，运行中保存不触发采集", async ({
