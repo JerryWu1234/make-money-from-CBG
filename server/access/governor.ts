@@ -7,6 +7,7 @@ import {
   type AccessPolicy,
 } from "./policy";
 import { redactEvidence, redactText } from "./redaction";
+import type { QueryDiagnosticState } from "../query-health/diagnostic-state";
 
 export type AccessStatus = "ready" | "suspect" | "cooldown" | "needs_action";
 export interface AccessReason {
@@ -29,6 +30,7 @@ export interface AccessState {
   updatedAt: number;
   lastWallAt: number;
   lastDispatchAt: number | null;
+  queryDiagnostic?: QueryDiagnosticState;
 }
 export interface OwnerFence {
   owner: string;
@@ -82,6 +84,7 @@ export interface RiskInput {
   retryAfter?: string;
   evidence?: unknown;
   context?: Partial<AccessContext>;
+  queryDiagnostic?: QueryDiagnosticState;
 }
 export interface AccessClock {
   now(): number;
@@ -340,6 +343,7 @@ export class AccessGovernor {
     state.updatedAt = now;
     state.occurredAt ??= now;
     state.lastEvidenceId = evidenceId;
+    if (input.queryDiagnostic) state.queryDiagnostic = structuredClone(input.queryDiagnostic);
     if (!state.reasons.some((r) => r.code === reason))
       state.reasons.push({ code: reason, occurredAt: now, evidenceId });
     // A weaker event must never remove a previously required manual action.
@@ -1039,6 +1043,7 @@ export class AccessGovernor {
       this.db.prepare("UPDATE access_recovery SET used=1 WHERE token=?").run(token.token);
       state.state = "ready";
       state.reasons = [];
+      delete state.queryDiagnostic;
       state.retryNotBefore = null;
       state.occurredAt = null;
       state.revision++;

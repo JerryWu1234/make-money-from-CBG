@@ -3,6 +3,10 @@ import type { NativeActivityLease } from "./native-activity";
 import { MAIN_TABS } from "../crawler/detail-tabs";
 import type { Listing, ListingPage, RoleDetail } from "../crawler/types";
 import { captureIssues, IncompleteCaptureError } from "../crawler/capture-readiness";
+import type {
+  RoleDiagnosticControl,
+  RoleDiagnosticField,
+} from "../query-health/role-list-diagnostics";
 
 export const ADAPTER_SCHEMA_VERSION = 1 as const;
 export type AccessAdapterMode = "playwright" | "extension-native";
@@ -235,6 +239,8 @@ export interface PageSnapshot {
     loading: boolean;
   };
   formValues?: Record<string, string>;
+  roleQueryControls?: Partial<Record<RoleDiagnosticField, RoleDiagnosticControl>>;
+  roleQueryDimensions?: Partial<Record<"server_type" | "serverid", string>>;
   empty: boolean;
   business?: {
     kind: "fetch" | "xhr" | "jsonp";

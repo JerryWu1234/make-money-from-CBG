@@ -132,6 +132,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     pending?: Promise<void>;
     detach: () => void;
     closed: boolean;
+    suspended?: boolean;
     recoveryId?: string;
   };
   readonly activity: NativeActivityDriver = { begin: (signal) => this.beginActivity(signal) };
@@ -191,7 +192,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
         throw new Error(textValue(result.error, "防休眠断言申请失败，禁止输入"));
       signal.throwIfAborted();
       state.timer = setInterval(() => {
-        if (state.pending || state.closed) return;
+        if (state.pending || state.closed || state.suspended) return;
         void this.queueActivityRenew(state).catch(() => {});
       }, NATIVE_ACTIVITY_HEARTBEAT_MS);
       state.timer.unref();
@@ -208,6 +209,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
           await state.pending;
           if (this.workflowActivity !== state) return;
           this.workflowActivity = undefined;
+          if (state.suspended) return; // The assertion was already released at the pause boundary.
           try {
             const ended = await this.request({
               kind: "activity",
@@ -318,6 +320,134 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
       });
     } catch {
       this.reason = "活动停止状态保存失败，禁止继续输入";
+    }
+  }
+  /** End the ordinary lease without aborting the enclosing diagnostic workflow. */
+  async suspendDiagnosticActivity() {
+    const state = this.workflowActivity;
+    if (!state || state.closed || state.suspended) return;
+    const workflow = nativeWorkflowActivity();
+    if (
+      workflow?.driver !== this.activity ||
+      workflow.handle.signal.aborted ||
+      workflow.handle.lease.activityId !== state.lease.activityId ||
+      workflow.handle.lease.authorizationEpoch !== state.lease.authorizationEpoch
+    )
+      throw new Error("旧工作流不能释放当前原生活动");
+    if (this.activePlan) throw new Error("输入尚未结束，不能切换诊断授权");
+    state.suspended = true;
+    clearInterval(state.timer);
+    try {
+      await state.pending;
+      const ended = await this.request({
+        kind: "activity",
+        command: "end",
+        actionId: randomUUID(),
+        activity: state.lease,
+      });
+      if (!ended.ok) throw new Error("诊断前释放原生活动未确认");
+    } catch (error) {
+      await this.failActivity("诊断前释放原生活动失败", state.lease);
+      throw error;
+    }
+  }
+  /** Called only inside the governor-authorized dispatch, never from page messages. */
+  private async activateDiagnosticActivity(plan: ActionPlan, signal: AbortSignal) {
+    const state = this.workflowActivity,
+      context = nativeWorkflowScope()?.context(plan);
+    if (
+      !state?.suspended ||
+      state.closed ||
+      this.stopped ||
+      this.activePlan ||
+      this.store.unknownCommands().length ||
+      context?.purpose !== "diagnostic" ||
+      !context.diagnosticPlanId ||
+      context.stopEpoch !== plan.stopEpoch ||
+      plan.stopEpoch !== this.options.stopEpoch() ||
+      context.pageId !== plan.pageId ||
+      context.pageGeneration !== plan.pageGeneration ||
+      context.browserSessionEpoch !== this.sessionEpoch
+    )
+      throw new Error("当前动作没有诊断授权，不能切换原生活动");
+    const pageContext = this.pageContexts.get(plan.pageId);
+    if (!pageContext || pageContext.pageGeneration !== plan.pageGeneration)
+      throw new Error("诊断页面绑定已变化");
+    signal.throwIfAborted();
+    try {
+      pageContext.stopEpoch = plan.stopEpoch;
+      pageContext.runId = plan.runId;
+      pageContext.queryId = plan.queryId;
+      pageContext.boundAt = Date.now();
+      pageContext.requiredBindingEpoch = randomUUID();
+      const resumed = await this.request({
+        kind: "resume",
+        actionId: randomUUID(),
+        context: {
+          ...pageContext,
+          pageId: plan.pageId,
+          recoveryEpoch: pageContext.requiredBindingEpoch,
+        },
+      });
+      if (!resumed.ok) throw new Error("诊断授权握手未确认");
+      signal.throwIfAborted();
+      if (
+        this.workflowActivity !== state ||
+        this.stopped ||
+        this.options.stopEpoch() !== plan.stopEpoch
+      )
+        throw new Error("诊断授权已被新的停止撤销");
+      const now = Date.now();
+      state.lease = {
+        activityId: randomUUID(),
+        authorizationEpoch: ++this.activityEpoch,
+        stopEpoch: plan.stopEpoch,
+        browserSessionEpoch: this.sessionEpoch,
+        expiresAt: now + NATIVE_ACTIVITY_TTL_MS,
+        progressExpiresAt: now + NATIVE_ACTIVITY_PROGRESS_MS,
+        progressSequence: 0,
+      };
+      const granted = await this.request({
+        kind: "activity",
+        command: "begin",
+        actionId: randomUUID(),
+        activity: state.lease,
+      });
+      if (
+        !granted.ok ||
+        granted.awake !== true ||
+        granted.activityId !== state.lease.activityId ||
+        this.workflowActivity !== state ||
+        this.stopped ||
+        this.options.stopEpoch() !== plan.stopEpoch
+      )
+        throw new Error("诊断防休眠断言未获准，禁止输入");
+      state.suspended = false;
+      state.timer = setInterval(() => {
+        if (state.pending || state.closed || state.suspended) return;
+        void this.queueActivityRenew(state).catch(() => {});
+      }, NATIVE_ACTIVITY_HEARTBEAT_MS);
+      state.timer.unref();
+      await this.waitFor(
+        (value) =>
+          value.context.stopEpoch === plan.stopEpoch &&
+          value.context.pageGeneration === plan.pageGeneration &&
+          value.authenticated === true &&
+          value.access === "normal" &&
+          !value.loading &&
+          value.visible,
+        { pageId: plan.pageId, after: "", timeoutMs: 5000, signal },
+      );
+      signal.throwIfAborted();
+      if (
+        this.workflowActivity !== state ||
+        this.stopped ||
+        this.options.stopEpoch() !== plan.stopEpoch
+      )
+        throw new Error("诊断页面等待期间授权已撤销");
+    } catch (error) {
+      await this.failActivity("诊断授权切换失败，已停止输入", state.lease);
+      throw error;
     }
   }
   status(): NativeRuntimeStatus {
@@ -708,6 +838,11 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
       snapshot.valuationSource = input.valuationSource as Record<string, unknown>;
     if (input.formValues && typeof input.formValues === "object")
       snapshot.formValues = input.formValues as Record<string, string>;
+    if (input.roleQueryControls && typeof input.roleQueryControls === "object")
+      snapshot.roleQueryControls = input.roleQueryControls as PageSnapshot["roleQueryControls"];
+    if (input.roleQueryDimensions && typeof input.roleQueryDimensions === "object")
+      snapshot.roleQueryDimensions =
+        input.roleQueryDimensions as PageSnapshot["roleQueryDimensions"];
     if (Array.isArray(input.business))
       snapshot.business = input.business.slice(-12) as PageSnapshot["business"];
     if (input.listing && typeof input.listing === "object") {
@@ -848,7 +983,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
             activity: this.activity,
           });
     }
-    const activity = this.workflowActivity;
+    let activity = this.workflowActivity;
     if (
       !activity ||
       activity.closed ||
@@ -885,7 +1020,9 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
                     : "selectedChild"
               ] === target.index
             : target.kind === "query-field" || target.kind === "market-field"
-              ? before.formValues?.[target.field] === target.value
+              ? (target.kind === "query-field"
+                  ? before.roleQueryControls?.[target.field]?.value
+                  : before.formValues?.[target.field]) === target.value
               : target.kind === "market-choice"
                 ? before.market?.menus
                     ?.find((menu) => menu.id === target.panel)
@@ -924,6 +1061,11 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     const outcome = await this.options.runAction(
       plan,
       async () => {
+        if (activity!.suspended) {
+          await this.activateDiagnosticActivity(plan, signal!);
+          activity = this.workflowActivity!;
+          plan = { ...plan, activity: { ...activity.lease } };
+        }
         this.startDetailReadBudget();
         this.activePlan = plan;
         const abort = () => {
@@ -1139,7 +1281,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
                   value.context.queryId === plan.queryId
                 );
               if (plan.target.kind === "query-field")
-                return value.formValues?.[plan.target.field] === plan.target.value;
+                return value.roleQueryControls?.[plan.target.field]?.value === plan.target.value;
               return false; // No generic mutation or sent-event success counts as a confirmed business result.
             },
             {
@@ -1273,7 +1415,8 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     if (
       target.kind !== "scroll" &&
       target.kind !== "return-to-list" &&
-      target.kind !== "refresh-list"
+      target.kind !== "refresh-list" &&
+      !this.workflowActivity?.suspended
     ) {
       for (let attempt = 0; attempt < 12; attempt++) {
         const inspectionPlan = {

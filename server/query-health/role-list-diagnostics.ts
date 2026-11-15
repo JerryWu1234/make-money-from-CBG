@@ -1,18 +1,29 @@
 import type { QueryDiagnostic } from "./runtime";
 import type { QueryEvidence, QueryIdentity } from "./store";
+import { QueryDiagnosticError } from "./diagnostic-state";
 
 export const ROLE_DIAGNOSTIC_FIELDS = ["price_min", "price_max", "level_min", "level_max"] as const;
 export type RoleDiagnosticField = (typeof ROLE_DIAGNOSTIC_FIELDS)[number];
+export type RoleDiagnosticControl = {
+  value: string;
+  min?: string;
+  max?: string;
+  step?: string;
+};
 export type RoleDiagnosticSnapshot = {
   conditions: QueryIdentity["conditions"];
   page: number;
   sort: string;
   /** Actual form values and committed page revision, never an intended query. */
   fields: Partial<Record<RoleDiagnosticField, string>>;
+  controls?: Partial<Record<RoleDiagnosticField, RoleDiagnosticControl>>;
+  /** When the fixed server controls are exposed, they must also match before submission. */
+  dimensions?: Partial<Record<"server_type" | "serverid", string>>;
   revision: string;
   evidence: QueryEvidence;
 };
 export type RoleDiagnosticDriver = {
+  suspend?: () => Promise<void>;
   snapshot(): Promise<RoleDiagnosticSnapshot>;
   field(field: RoleDiagnosticField, value: string): Promise<void>;
   submit(): Promise<void>;
@@ -26,6 +37,30 @@ const valueFor = (key: string, value: string | number | undefined) =>
 const filters = (conditions: QueryIdentity["conditions"]) =>
   Object.fromEntries(Object.entries(conditions).filter(([, value]) => text(value) !== ""));
 const known = new Set<string>(["server_type", "serverid", ...ROLE_DIAGNOSTIC_FIELDS]);
+
+/** Local input bounds plus any stricter constraints read from the actual public control. */
+export function validRoleDiagnosticValue(
+  field: RoleDiagnosticField,
+  value: string,
+  control?: RoleDiagnosticControl,
+): boolean {
+  if (value === "") return true;
+  if (!(field.startsWith("price_") ? /^\d{1,8}(?:\.\d{1,2})?$/ : /^\d{1,8}$/).test(value))
+    return false;
+  const number = Number(value);
+  const bound = (text: string | undefined) =>
+    text !== undefined && text !== "" && Number.isFinite(Number(text)) ? Number(text) : undefined;
+  const min = bound(control?.min),
+    max = bound(control?.max),
+    step = bound(control?.step);
+  return (
+    (min === undefined || number >= min) &&
+    (max === undefined || number <= max) &&
+    (step === undefined ||
+      step <= 0 ||
+      Math.abs((number - (min ?? 0)) / step - Math.round((number - (min ?? 0)) / step)) < 1e-8)
+  );
+}
 
 export function roleConditionsMatch(
   actual: QueryIdentity["conditions"],
@@ -44,34 +79,89 @@ export function createRoleListDiagnostic(
   let originalRevision: string | undefined;
   let captured: RoleDiagnosticSnapshot | undefined;
   let restored = false;
+  const unsupported = (fields: string[], message: string): never => {
+    throw new QueryDiagnosticError("unsupported_condition", fields, message);
+  };
   const validate = (identity: QueryIdentity) => {
+    const unknown = Object.keys(identity.conditions).filter((key) => !known.has(key));
+    if (unknown.length) unsupported(unknown, "角色诊断存在未支持的公开条件，已暂停保留原查询");
+    const invalid = ROLE_DIAGNOSTIC_FIELDS.filter(
+      (key) => !validRoleDiagnosticValue(key, text(identity.conditions[key])),
+    );
+    for (const prefix of ["price", "level"]) {
+      const lower = text(identity.conditions[`${prefix}_min`]),
+        upper = text(identity.conditions[`${prefix}_max`]);
+      if (lower && upper && Number(lower) > Number(upper))
+        invalid.push(
+          `${prefix}_min` as RoleDiagnosticField,
+          `${prefix}_max` as RoleDiagnosticField,
+        );
+    }
+    if (invalid.length) unsupported([...new Set(invalid)], "角色诊断条件不是合法的数值范围");
+    const serverTypes = text(identity.conditions.server_type).split(",");
+    if (
+      serverTypes.some((value) => !["1", "2", "3"].includes(value)) ||
+      new Set(serverTypes).size !== serverTypes.length ||
+      !/^\d{0,8}$/.test(text(identity.conditions.serverid))
+    )
+      unsupported(["server_type", "serverid"], "角色诊断服龄或服务器条件无效");
     if (
       identity.category !== "role" ||
       identity.schemaVersion !== saved.schemaVersion ||
       identity.server !== saved.server ||
       identity.serverAge !== saved.serverAge ||
       identity.browserSessionEpoch !== saved.browserSessionEpoch ||
+      !Number.isSafeInteger(identity.page) ||
+      identity.page < 1 ||
       !["selling_time DESC", "expire_time DESC"].includes(identity.sort) ||
-      Object.keys(filters(identity.conditions)).some((key) => !known.has(key)) ||
       ["server_type", "serverid"].some(
         (key) => valueFor(key, identity.conditions[key]) !== valueFor(key, saved.conditions[key]),
-      ) ||
-      ROLE_DIAGNOSTIC_FIELDS.some((key) => !/^\d{0,8}$/.test(text(identity.conditions[key])))
+      )
     )
-      throw new Error("角色诊断缺少可核验的公开条件或排序入口，已暂停保留原查询");
+      unsupported(
+        ["order_by", "page", "server_type", "serverid"],
+        "角色诊断缺少可核验的公开条件或排序入口，已暂停保留原查询",
+      );
   };
   const matches = (snapshot: RoleDiagnosticSnapshot, identity: QueryIdentity) =>
     snapshot.page === identity.page &&
     snapshot.sort === identity.sort &&
     roleConditionsMatch(snapshot.conditions, identity.conditions) &&
+    Object.entries(snapshot.dimensions || {}).every(
+      ([key, value]) => valueFor(key, value) === valueFor(key, identity.conditions[key]),
+    ) &&
     ROLE_DIAGNOSTIC_FIELDS.every(
       (key) => text(snapshot.fields[key]) === text(identity.conditions[key]),
     );
+  const preflight = (snapshot: RoleDiagnosticSnapshot, identity: QueryIdentity) => {
+    const dimensions = Object.entries(snapshot.dimensions || {})
+      .filter(([key, value]) => valueFor(key, value) !== valueFor(key, identity.conditions[key]))
+      .map(([key]) => key);
+    if (dimensions.length)
+      unsupported(dimensions, "角色诊断的可见服务器或服龄表单与原提交条件不一致");
+    const invalid = ROLE_DIAGNOSTIC_FIELDS.filter((key) => {
+      const wanted = text(identity.conditions[key]);
+      return (
+        (snapshot.fields[key] === undefined &&
+          (wanted !== "" ||
+            text(snapshot.conditions[key]) !== "" ||
+            text(captured?.fields[key]) !== "")) ||
+        !validRoleDiagnosticValue(key, wanted, snapshot.controls?.[key])
+      );
+    });
+    if (invalid.length) unsupported(invalid, "角色诊断缺少唯一可见可编辑的合法表单字段");
+  };
   const read = async () => {
     const snapshot = await driver.snapshot();
     if (snapshot.evidence.blocked) throw new Error("角色诊断发现明确访问限制，停止诊断及恢复动作");
     if (!snapshot.revision || !snapshot.evidence.loaded)
       throw new Error("角色诊断页面版本或加载状态未确认");
+    validate({
+      ...saved,
+      conditions: snapshot.conditions,
+      sort: snapshot.sort,
+      page: snapshot.page,
+    });
     return snapshot;
   };
   const evidence = (snapshot: RoleDiagnosticSnapshot, identity: QueryIdentity) => ({
@@ -82,6 +172,7 @@ export function createRoleListDiagnostic(
     if (captured) return structuredClone(captured);
     validate(saved);
     const snapshot = await read();
+    preflight(snapshot, saved);
     if (
       !matches(snapshot, saved) ||
       !snapshot.evidence.committed ||
@@ -98,11 +189,7 @@ export function createRoleListDiagnostic(
     let snapshot = await read();
     // Preflight every required field before changing any control. Missing controls never
     // become an excuse to inject QueryArgs or silently broaden another condition.
-    for (const key of ROLE_DIAGNOSTIC_FIELDS) {
-      const wanted = text(identity.conditions[key]);
-      if (snapshot.fields[key] === undefined && wanted !== text(snapshot.fields[key]))
-        throw new Error(`角色诊断缺少可见表单字段 ${key}`);
-    }
+    preflight(snapshot, identity);
     for (const key of ROLE_DIAGNOSTIC_FIELDS) {
       const wanted = text(identity.conditions[key]);
       if (text(snapshot.fields[key]) === wanted) continue;
@@ -129,9 +216,10 @@ export function createRoleListDiagnostic(
     return result;
   };
   const diagnostic: QueryDiagnostic = (identity) => execute(identity);
+  diagnostic.suspend = driver.suspend;
   diagnostic.prepare = async () => {
-    const { revision, conditions, page, sort, fields } = await capture();
-    return { revision, conditions, page, sort, fields };
+    const { revision, conditions, page, sort, fields, controls, dimensions } = await capture();
+    return { revision, conditions, page, sort, fields, controls, dimensions };
   };
   diagnostic.restore = async (identity) => {
     if (restored) throw new Error("角色诊断恢复已使用，拒绝重复动作");

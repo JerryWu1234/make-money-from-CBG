@@ -336,6 +336,52 @@
       }
     }
     const formValues = {};
+    const roleQueryControls = {};
+    const roleQueryDimensions = {};
+    const roleServerControls = [
+      ...document.querySelectorAll(
+        'form input[name="serverid"],form select[name="serverid"],input#serverid,select#serverid',
+      ),
+    ].filter(visible);
+    if (roleServerControls.length === 1) roleQueryDimensions.serverid = roleServerControls[0].value;
+    else if (roleServerControls.length > 1) roleQueryDimensions.serverid = "unsupported";
+    const roleAgeLabels = ["1年以内服", "1到3年服", "3年以上服"];
+    const roleAgeOptions = ["#server_type", "#server_type_panel"]
+      .map((selector) => [...document.querySelectorAll(`${selector} li`)].filter(visible))
+      .filter((options) => options.length > 0);
+    if (roleAgeOptions.length === 1)
+      roleQueryDimensions.server_type = roleAgeOptions[0]
+        .filter((node) => node.classList.contains("on"))
+        .map((node) =>
+          String(
+            roleAgeLabels.indexOf(text(node).replace(/\s/g, "").replace("1年内服", "1年以内服")) +
+              1,
+          ),
+        )
+        .sort()
+        .join(",");
+    else if (roleAgeOptions.length > 1) roleQueryDimensions.server_type = "unsupported";
+    for (const field of ["price_min", "price_max", "level_min", "level_max"]) {
+      const controls = [
+        ...document.querySelectorAll(`form input[name="${field}"],input#${field}`),
+      ].filter(
+        (node) =>
+          visible(node) &&
+          ["text", "number", "search"].includes(node.type) &&
+          !node.disabled &&
+          !node.readOnly &&
+          !node.closest('[inert],[aria-disabled="true"]'),
+      );
+      if (controls.length === 1) {
+        const node = controls[0];
+        roleQueryControls[field] = {
+          value: node.value,
+          min: node.min,
+          max: node.max,
+          step: node.step || (node.type === "number" ? "1" : "any"),
+        };
+      }
+    }
     for (const field of [
       "price_min",
       "price_max",
@@ -489,6 +535,8 @@
         : undefined,
       controls,
       formValues,
+      roleQueryControls,
+      roleQueryDimensions,
       valuationSource,
       wornEquipment: globals.wornEquipment,
       petProof,
@@ -528,6 +576,8 @@
       page,
       tab: tabName,
       formValues,
+      roleQueryControls,
+      roleQueryDimensions,
       controls,
       business: snapshot.business,
       market: snapshot.market,
@@ -815,10 +865,22 @@
     if (target.kind === "query-field") {
       if (
         !["price_min", "price_max", "level_min", "level_max"].includes(target.field) ||
-        !/^\d{0,8}$/.test(target.value)
+        !(target.field.startsWith("price_") ? /^\d{0,8}(?:\.\d{1,2})?$/ : /^\d{0,8}$/).test(
+          target.value,
+        )
       )
         throw new Error("unsupported:field");
-      return one([...document.querySelectorAll(`form input[name="${target.field}"]`)]);
+      return one(
+        [
+          ...document.querySelectorAll(`form input[name="${target.field}"],input#${target.field}`),
+        ].filter(
+          (node) =>
+            ["text", "number", "search"].includes(node.type) &&
+            !node.disabled &&
+            !node.readOnly &&
+            !node.closest('[inert],[aria-disabled="true"]'),
+        ),
+      );
     }
     if (target.kind === "sort") {
       if (

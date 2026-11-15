@@ -63,6 +63,12 @@ function fixture(empty = false, canary = false) {
     listingCommitted: true,
     queryArgs: { server_type: "1,2,3", order_by: "selling_time DESC", page: 1 },
     formValues: { price_min: "", price_max: "", level_min: "", level_max: "" },
+    roleQueryControls: {
+      price_min: { value: "" },
+      price_max: { value: "" },
+      level_min: { value: "" },
+      level_max: { value: "" },
+    },
     listing: {
       page: 1,
       totalPages: 1,
@@ -91,7 +97,12 @@ function fixture(empty = false, canary = false) {
     snapshot.business![0].count = noItems ? 0 : 1;
   };
   const adapter = {
-    snapshot: async () => structuredClone(snapshot),
+    suspendDiagnosticActivity: async () => {}, // This suite checks query identity, not host authority.
+    snapshot: async () => {
+      for (const [key, control] of Object.entries(snapshot.roleQueryControls || {}))
+        control.value = snapshot.formValues![key];
+      return structuredClone(snapshot);
+    },
     beginQuery: (_run: string, query: string) => {
       snapshot.context.queryId = query;
     },
@@ -256,4 +267,20 @@ it("native role diagnostic uses bounded semantic UI actions and restores origina
   );
   expect(x.governor.read().state).toBe("needs_action");
   expect(() => x.governor.withProgress(x.wrapped.context()!, () => {})).toThrow();
+});
+
+it("native diagnostics do not trust legacy formValues without a verified public control observation", async () => {
+  const x = fixture(false, true);
+  x.snapshot.queryArgs!.price_min = "100";
+  x.snapshot.formValues!.price_min = "100";
+  await x.wrapped.source.prepare();
+  delete x.snapshot.roleQueryControls;
+  x.emptyTarget();
+  await expect(x.wrapped.source.prepare()).rejects.toThrow("健康核验");
+  expect(x.diagnosticActions).toEqual([]);
+  expect(x.governor.read().queryDiagnostic).toMatchObject({
+    code: "unsupported_condition",
+    unsupportedFields: ["price_min"],
+    restoration: "not_attempted",
+  });
 });

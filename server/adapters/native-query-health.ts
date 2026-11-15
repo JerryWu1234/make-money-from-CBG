@@ -313,6 +313,7 @@ export function bindNativeCrawlSource(
       query
         ? createRoleListDiagnostic(
             {
+              suspend: () => adapter.suspendDiagnosticActivity(),
               snapshot: async (): Promise<RoleDiagnosticSnapshot> => {
                 const checked = await adapter.snapshot();
                 if (!checked.queryArgs || !checked.listing)
@@ -323,7 +324,16 @@ export function bindNativeCrawlSource(
                       ([key]) => !["page", "order_by"].includes(key),
                     ),
                   ),
-                  fields: checked.formValues || {},
+                  fields: checked.roleQueryControls
+                    ? Object.fromEntries(
+                        Object.entries(checked.roleQueryControls).map(([key, control]) => [
+                          key,
+                          control.value,
+                        ]),
+                      )
+                    : {},
+                  controls: checked.roleQueryControls,
+                  dimensions: checked.roleQueryDimensions,
                   revision: checked.revision,
                   page: checked.listing.page,
                   sort: checked.listing.order,

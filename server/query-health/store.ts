@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import type { QueryDiagnosticState } from "./diagnostic-state";
 
 export type QueryIdentity = {
   schemaVersion: 1;
@@ -106,6 +107,24 @@ export class QueryHealthStore {
             .prepare("PRAGMA table_info(query_diagnostic_events)")
             .all()
             .some((row) => row.name === "restoration_claimed")
+        )
+          throw error;
+      }
+    }
+    if (
+      !db
+        .prepare("PRAGMA table_info(query_diagnostic_events)")
+        .all()
+        .some((row) => row.name === "outcome_json")
+    ) {
+      try {
+        db.exec("ALTER TABLE query_diagnostic_events ADD COLUMN outcome_json TEXT");
+      } catch (error) {
+        if (
+          !db
+            .prepare("PRAGMA table_info(query_diagnostic_events)")
+            .all()
+            .some((row) => row.name === "outcome_json")
         )
           throw error;
       }
@@ -278,11 +297,11 @@ export class QueryHealthStore {
     )
       throw new Error("原查询恢复证据已保存或诊断事件不可写，拒绝覆盖");
   }
-  finish(eventId: string, conclusion: string) {
+  finish(eventId: string, conclusion: string, outcome?: QueryDiagnosticState) {
     this.db
       .prepare(
-        "UPDATE query_diagnostic_events SET status='needs_action',conclusion=?,updated_at=? WHERE event_id=?",
+        "UPDATE query_diagnostic_events SET status='needs_action',conclusion=?,outcome_json=?,updated_at=? WHERE event_id=?",
       )
-      .run(conclusion, this.now(), eventId);
+      .run(conclusion, outcome ? JSON.stringify(outcome) : null, this.now(), eventId);
   }
 }

@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright-core";
 import { createHash } from "node:crypto";
-import { officialPageContext, officialPageSignal } from "../official-access";
+import { officialPageContext, officialPageSignal, withOfficialAction } from "../official-access";
 import { clickForInspection } from "../viewport";
 import {
   createRoleListDiagnostic,
@@ -43,14 +43,60 @@ export function createPlaywrightRoleDiagnostic(
           ),
         );
         const form: Record<string, string> = {};
+        const controls: Record<string, { value: string; min: string; max: string; step: string }> =
+          {};
         for (const key of fields) {
-          const controls = [
+          const candidates = [
             ...document.querySelectorAll<HTMLInputElement>(
               `form input[name="${key}"],input#${key}`,
             ),
-          ].filter((node) => node.checkVisibility());
-          if (controls.length === 1) form[key] = controls[0].value;
+          ].filter(
+            (node) =>
+              node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+              ["text", "number", "search"].includes(node.type) &&
+              !node.disabled &&
+              !node.readOnly &&
+              !node.closest('[inert],[aria-disabled="true"]'),
+          );
+          if (candidates.length === 1) {
+            const node = candidates[0];
+            form[key] = node.value;
+            controls[key] = {
+              value: node.value,
+              min: node.min,
+              max: node.max,
+              step: node.step || (node.type === "number" ? "1" : "any"),
+            };
+          }
         }
+        const dimensions: Partial<Record<"server_type" | "serverid", string>> = {};
+        const serverControls = [
+          ...document.querySelectorAll<HTMLInputElement | HTMLSelectElement>(
+            'form input[name="serverid"],form select[name="serverid"],input#serverid,select#serverid',
+          ),
+        ].filter((node) => node.checkVisibility());
+        if (serverControls.length === 1) dimensions.serverid = serverControls[0].value;
+        else if (serverControls.length > 1) dimensions.serverid = "unsupported";
+        const labels = ["1年以内服", "1到3年服", "3年以上服"];
+        const panels = ["#server_type", "#server_type_panel"].map((selector) =>
+          [...document.querySelectorAll<HTMLElement>(`${selector} li`)].filter((node) =>
+            node.checkVisibility(),
+          ),
+        );
+        const ageOptions = panels.filter((options) => options.length > 0);
+        if (ageOptions.length === 1)
+          dimensions.server_type = ageOptions[0]
+            .filter((node) => node.classList.contains("on"))
+            .map((node) =>
+              String(
+                labels.indexOf(
+                  (node.innerText || "").replace(/\s/g, "").replace("1年内服", "1年以内服"),
+                ) + 1,
+              ),
+            )
+            .sort()
+            .join(",");
+        else if (ageOptions.length > 1) dimensions.server_type = "unsupported";
         const count = document.querySelectorAll("#soldList a.soldImg[href]").length;
         const pager = document.querySelector<HTMLElement>("#pager_bar")?.innerText || "";
         const empty = !!document
@@ -62,6 +108,8 @@ export function createPlaywrightRoleDiagnostic(
         return {
           conditions,
           fields: form,
+          controls,
+          dimensions,
           page: Number(pager.match(/第\s*(\d+)\s*页/)?.[1] || args.page || 1),
           sort: String(args.order_by || ""),
           evidence: {
@@ -107,7 +155,16 @@ export function createPlaywrightRoleDiagnostic(
           page.locator(`form input[name="${field}"],input#${field}`).filter({ visible: true }),
           field,
         );
-        await target.fill(value);
+        await withOfficialAction(
+          page,
+          "diagnostic.field",
+          async () => {
+            signal.throwIfAborted();
+            await lifecycle.available(page);
+            await target.fill(value);
+          },
+          signal,
+        );
       },
       submit: async () => {
         const target = page

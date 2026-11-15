@@ -1,5 +1,11 @@
 import type { AccessContext, AccessGovernor } from "../access";
 import {
+  QueryDiagnosticError,
+  type QueryDiagnosticCode,
+  type QueryDiagnosticState,
+  type QueryRestorationStatus,
+} from "./diagnostic-state";
+import {
   QueryHealthStore,
   type QueryEvidence,
   type QueryIdentity,
@@ -16,6 +22,8 @@ type Binding = {
 const bindings = new WeakMap<object, Binding>();
 const latest = new Map<string, Binding>();
 export type QueryDiagnostic = ((identity: QueryIdentity) => Promise<QueryEvidence>) & {
+  /** Revoke the ordinary input lease before advancing the stop epoch. No recovery is implied. */
+  suspend?: () => Promise<void>;
   prepare?: () => Promise<{
     revision: string;
     conditions: QueryIdentity["conditions"];
@@ -105,12 +113,21 @@ export async function finishPageQuery(
   if (verdict.result === "unknown" && verdict.access !== "blocked")
     throw new QueryHealthError(query.queryId);
   const anomalyEpoch = binding.context.stopEpoch;
-  const risk = governor.reportRisk({
-    reason: "query_" + verdict.access,
-    state: verdict.access === "blocked" ? "needs_action" : "suspect",
-    context: binding.context,
-    evidence: { queryId: query.queryId, ...verdict },
-  });
+  let suspensionError: unknown;
+  try {
+    await diagnose?.suspend?.();
+  } catch (error) {
+    suspensionError = error;
+  }
+  const risk = governor.reportRisk(
+    {
+      reason: "query_" + verdict.access,
+      state: verdict.access === "blocked" ? "needs_action" : "suspect",
+      context: binding.context,
+      evidence: { queryId: query.queryId, ...verdict },
+    },
+    binding.context,
+  );
   const eventId = store.event(query, anomalyEpoch, cursor);
   binding.context = {
     ...binding.context,
@@ -119,6 +136,14 @@ export async function finishPageQuery(
     diagnosticPlanId: eventId,
   };
   let conclusion = verdict.access === "blocked" ? "blocked_no_probe" : "diagnostics_disabled";
+  let probeCode: Exclude<QueryDiagnosticCode, "restoration_failed"> =
+    verdict.access === "blocked"
+      ? "blocked_no_probe"
+      : !policy.canaryEnabled
+        ? "diagnostics_disabled"
+        : "diagnostics_unavailable";
+  let restorationStatus: QueryRestorationStatus = "not_attempted";
+  let unsupportedFields: string[] = [];
   let diagnosticsStarted = false;
   let restoration = "not_confirmed_task_paused";
   const probe = async (
@@ -143,16 +168,22 @@ export async function finishPageQuery(
     }
     const observed = store.observe(record, result, policy.baselineTtlMs);
     governor.registerQuery(binding.context, { accepted: false });
-    if (observed.access === "blocked")
-      governor.reportRisk({
-        reason: "query_blocked",
-        state: "needs_action",
-        context: binding.context,
-        evidence: { queryId: record.queryId, eventId, purpose },
-      });
+    if (observed.access === "blocked") {
+      await diagnose?.suspend?.();
+      governor.reportRisk(
+        {
+          reason: "query_blocked",
+          state: "needs_action",
+          context: binding.context,
+          evidence: { queryId: record.queryId, eventId, purpose },
+        },
+        binding.context,
+      );
+    }
     return observed;
   };
   try {
+    if (suspensionError) throw suspensionError;
     if (
       verdict.access !== "blocked" &&
       policy.canaryEnabled &&
@@ -162,24 +193,37 @@ export async function finishPageQuery(
       verdict.result === "empty"
     ) {
       governor.registerDiagnosticPlan(eventId, binding.context, policy.diagnosticMaxActions);
-      if (!store.claim(eventId, "target")) conclusion = "target_already_spent_or_unknown";
-      else {
-        diagnosticsStarted = true;
+      if (!store.claim(eventId, "target")) {
+        conclusion = "target_already_spent_or_unknown";
+        probeCode = "budget_already_spent";
+      } else {
         if (diagnose.prepare) store.saveOriginalSnapshot(eventId, await diagnose.prepare());
+        diagnosticsStarted = true;
         const reviewed = await probe(query.identity, "target_review", diagnose);
         conclusion = "target_" + reviewed.result;
+        probeCode =
+          reviewed.access === "blocked" ? "blocked_no_probe" : "manual_verification_required";
         if (reviewed.result === "empty" && reviewed.access !== "blocked") {
           const baseline = store.broadBaseline(query.identity, policy.baselineTtlMs);
-          if (!baseline) conclusion = "no_valid_broad_baseline";
-          else if (store.claim(eventId, "canary")) {
+          if (!baseline) {
+            conclusion = "no_valid_broad_baseline";
+            probeCode = "no_valid_baseline";
+          } else if (store.claim(eventId, "canary")) {
             const control = await probe(baseline, "canary", diagnose);
             conclusion = "canary_" + control.result + "_manual_verification_required";
+            probeCode =
+              control.access === "blocked" ? "blocked_no_probe" : "manual_verification_required";
           }
         }
       }
     }
-  } catch {
-    conclusion = "diagnostic_failed_or_unknown_no_replay";
+  } catch (error) {
+    probeCode = error instanceof QueryDiagnosticError ? error.code : "diagnostic_failed";
+    unsupportedFields = error instanceof QueryDiagnosticError ? error.fields : [];
+    conclusion =
+      probeCode === "unsupported_condition"
+        ? "unsupported_condition"
+        : "diagnostic_failed_or_unknown_no_replay";
   } finally {
     // A hard block or a newer stop epoch forbids even a restoration action. Claims are
     // spent before dispatch so neither reconnect nor another connection can replay it.
@@ -196,22 +240,47 @@ export async function finishPageQuery(
           verified.result !== "unknown" && verified.access !== "blocked"
             ? "original_query_verified_task_paused"
             : "restore_unknown_task_paused";
+        restorationStatus =
+          verified.result !== "unknown" && verified.access !== "blocked" ? "verified" : "failed";
       } catch {
         restoration = "restore_failed_or_unknown_task_paused";
+        restorationStatus = "failed";
       }
     }
-    store.finish(eventId, conclusion);
-    governor.reportRisk({
-      reason: "query_manual_verification",
-      state: "needs_action",
-      context: binding.context,
-      evidence: {
-        queryId: query.queryId,
-        eventId,
-        conclusion,
-        restoration,
+    try {
+      await diagnose?.suspend?.();
+    } catch {
+      probeCode = "diagnostic_failed";
+      conclusion = "activity_release_unconfirmed_manual_verification";
+    }
+    const summary: QueryDiagnosticState = {
+      eventId,
+      queryId: query.queryId,
+      probeCode,
+      code: restorationStatus === "failed" ? "restoration_failed" : probeCode,
+      restoration: restorationStatus,
+      unsupportedFields,
+      nextAction:
+        restorationStatus === "verified" || !diagnosticsStarted
+          ? "verify_original_query"
+          : "restore_original_query",
+    };
+    store.finish(eventId, conclusion, summary);
+    governor.reportRisk(
+      {
+        reason: "query_manual_verification",
+        state: "needs_action",
+        context: binding.context,
+        queryDiagnostic: summary,
+        evidence: {
+          queryId: query.queryId,
+          eventId,
+          conclusion,
+          restoration,
+        },
       },
-    });
+      binding.context,
+    );
   }
   throw new QueryHealthError(query.queryId, eventId);
 }

@@ -1,5 +1,36 @@
 import { useEffect, useState } from "react";
 import type { AccessState, AccessPolicy } from "../server/access";
+import type { QueryDiagnosticState } from "../server/query-health/diagnostic-state";
+
+const diagnosticMessages: Record<QueryDiagnosticState["code"], string> = {
+  diagnostics_disabled:
+    "自动对照诊断已关闭；请人工核对原条件下的空结果。可在下方开启后供后续事件使用，本事件不会重放。",
+  diagnostics_unavailable: "当前页面没有可核验的诊断入口，请人工核对原查询。",
+  unsupported_condition: "当前条件或公开控件尚不支持自动诊断，请保留条件并人工核对。",
+  no_valid_baseline: "没有同会话、同服务器和服龄、同排序的有效宽条件非空基线；请人工核对原查询。",
+  blocked_no_probe: "已发现明确访问限制，已停止对照和恢复动作，请先在绑定页面处理限制。",
+  diagnostic_failed: "诊断结果未确认，已消耗的动作不会重放，请人工核对页面和原查询。",
+  budget_already_spent: "本事件的诊断额度已使用，请人工核对，重新连接不会重置额度。",
+  manual_verification_required: "对照证据已归档；即使对照出现商品，也需要人工核对原查询后继续。",
+  restoration_failed: "原条件、排序或页码未确认恢复，请先在绑定页面恢复并逐项核对。",
+};
+export function QueryDiagnosticSummary({ value }: { value: QueryDiagnosticState }) {
+  return (
+    <div className="access-query-diagnostic" role="status">
+      <p>{diagnosticMessages[value.code]}</p>
+      {value.unsupportedFields.length > 0 && (
+        <p>需人工核对的字段：{value.unsupportedFields.join("、")}</p>
+      )}
+      <p>
+        {value.restoration === "verified"
+          ? "已核验原条件、排序和页码恢复，采集仍暂停。"
+          : value.nextAction === "restore_original_query"
+            ? "下一步：恢复原条件、排序和页码，再核对未确认动作的结果。"
+            : "下一步：在绑定页面核对原条件、排序、页码和查询结果。"}
+      </p>
+    </div>
+  );
+}
 
 const labels: Partial<Record<keyof AccessPolicy, string>> = {
   minIntervalMs: "最小动作间隔（毫秒）",
@@ -21,7 +52,10 @@ const reasons: Record<string, string> = {
   clock_anomaly: "系统时间异常",
   manual_stop: "人工立即停止",
   query_suspect: "查询结果异常",
+  query_blocked: "查询发现访问限制，请在绑定页面处理后核对原查询条件、排序和页码",
   query_manual_verification: "查询需人工核实",
+  "native-activity-stopped":
+    "原生活动已停止；请核对桌面状态、原查询条件、排序和页码，以及未确认操作；必要时人工恢复原查询。",
 };
 async function request(path = "status", body?: unknown): Promise<AccessState> {
   const response = await fetch(`/api/access/${path}`, {
@@ -112,6 +146,7 @@ export function AccessSettings() {
               ))}
             </ul>
           )}
+          {state.queryDiagnostic && <QueryDiagnosticSummary value={state.queryDiagnostic} />}
           {state.retryNotBefore && (
             <p>
               最早可人工继续：{new Date(state.retryNotBefore).toLocaleString()}

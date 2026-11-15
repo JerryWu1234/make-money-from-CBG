@@ -294,6 +294,11 @@ static NSString *key(CGKeyCode code, CGEventFlags flags) {
   CFRelease(up);
   return check();
 }
+static bool queryFieldValueAllowed(NSString *field, NSString *value) {
+  if (![value isKindOfClass:NSString.class] || ![@[@"price_min", @"price_max", @"level_min", @"level_max"] containsObject:field]) return false;
+  NSString *pattern = [field hasPrefix:@"price_"] ? @"^(?:[0-9]{1,8}(?:\\.[0-9]{1,2})?)?$" : @"^(?:[0-9]{1,8})?$";
+  return [value rangeOfString:pattern options:NSRegularExpressionSearch].location != NSNotFound;
+}
 static NSString *inputText(NSString *text, bool numeric) {
   if (![text isKindOfClass:NSString.class] ||
       text.length > (numeric ? 8 : 80) ||
@@ -335,6 +340,8 @@ static NSString *validateAndExecute(NSDictionary *request) {
       ![r isKindOfClass:NSDictionary.class] ||
       ![v isKindOfClass:NSDictionary.class])
     return @"invalid-target-proof";
+  if ([target[@"kind"] isEqual:@"query-field"] && !queryFieldValueAllowed(target[@"field"], target[@"value"]))
+    return @"native-query-field-value-not-allowed";
   if (![plan[@"actionId"] isEqual:proof[@"actionId"]] ||
       ![plan[@"pageId"] isEqual:proof[@"pageId"]] ||
       ![plan[@"pageGeneration"] isEqual:proof[@"pageGeneration"]] ||
@@ -795,7 +802,7 @@ static NSString *validateAndExecute(NSDictionary *request) {
       error = key(36, 0);
   }
   if (!error && [kind isEqual:@"query-field"])
-    error = inputText(target[@"value"], true);
+    error = inputText(target[@"value"], false);
   if (!error && [kind isEqual:@"market-field"]) {
     NSString *type = control[@"type"], *tag = control[@"tagName"];
     if ([tag isEqual:@"SELECT"]) {
@@ -879,7 +886,11 @@ int main(int argc, const char **argv) {
         return 1;
       if (!timely(9, 10, 11) || timely(10, 10, 11) || timely(10, 11, 10) ||
         assertionCreated(kIOReturnError, 1) || assertionCreated(kIOReturnSuccess, 0) || !assertionCreated(kIOReturnSuccess, 1)) return 1;
-      puts("native activity, coordinate and desktop-guard self-tests passed (26 "
+      if (!queryFieldValueAllowed(@"price_min", @"100.50") || !queryFieldValueAllowed(@"price_max", @"99999999.99") ||
+        !queryFieldValueAllowed(@"price_min", @"") || !queryFieldValueAllowed(@"level_max", @"175") ||
+        queryFieldValueAllowed(@"level_min", @"175.5") || queryFieldValueAllowed(@"price_min", @"1;open") ||
+        queryFieldValueAllowed(@"price_max", @"100000000") || queryFieldValueAllowed(@"password", @"1")) return 1;
+      puts("native activity, query-field, coordinate and desktop-guard self-tests passed (34 "
            "assertions, no input posted)");
       return 0;
     }

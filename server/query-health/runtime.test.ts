@@ -12,6 +12,7 @@ import {
   successfulQueryEvidence,
   type QueryDiagnostic,
 } from "./runtime";
+import { QueryDiagnosticError } from "./diagnostic-state";
 
 const dbs: DatabaseSync[] = [];
 afterEach(() => {
@@ -209,7 +210,8 @@ it.each(["verified", "unknown", "failed", "hard-block"])(
           .get()?.evidence_json,
       ),
     );
-    expect(archived.restoration).toBe(
+    if (scenario === "hard-block") expect(archived.disposition).toBe("stale_source_archive_only");
+    expect((archived.summary ?? archived).restoration).toBe(
       scenario === "verified"
         ? "original_query_verified_task_paused"
         : scenario === "unknown"
@@ -218,5 +220,68 @@ it.each(["verified", "unknown", "failed", "hard-block"])(
             ? "restore_failed_or_unknown_task_paused"
             : "not_confirmed_task_paused",
     );
+    const persisted = JSON.parse(
+      String(x.db.prepare("SELECT outcome_json FROM query_diagnostic_events").get()?.outcome_json),
+    );
+    if (scenario === "hard-block") {
+      // A newer hard block owns the current pause; the old diagnostic is archive-only.
+      expect(x.governor.read().queryDiagnostic).toBeUndefined();
+      expect(x.governor.read().reasons.some((reason) => reason.code === "query_blocked")).toBe(true);
+    } else expect(persisted).toEqual(x.governor.read().queryDiagnostic);
+    expect(persisted.restoration).toBe(
+      scenario === "verified" ? "verified" : scenario === "hard-block" ? "not_attempted" : "failed",
+    );
+    expect(persisted.code).toBe(
+      scenario === "unknown" || scenario === "failed"
+        ? "restoration_failed"
+        : scenario === "hard-block"
+          ? "blocked_no_probe"
+          : "no_valid_baseline",
+    );
+  },
+);
+
+it.each(["disabled", "unavailable", "unsupported", "no-baseline"])(
+  "persists a concrete %s next action across store/governor recreation",
+  async (scenario) => {
+    const x = fixture(scenario !== "disabled");
+    await finishPageQuery(x.page, beginPageQuery(x.page, x.identity), successfulQueryEvidence(1));
+    const diagnostic: QueryDiagnostic = async () => successfulQueryEvidence(0);
+    if (scenario === "unsupported")
+      diagnostic.prepare = async () => {
+        throw new QueryDiagnosticError("unsupported_condition", ["school"], "unsupported field");
+      };
+    await expect(
+      finishPageQuery(
+        x.page,
+        beginPageQuery(x.page, x.identity),
+        successfulQueryEvidence(0),
+        scenario === "unavailable" ? undefined : diagnostic,
+      ),
+    ).rejects.toBeInstanceOf(QueryHealthError);
+    const summary = new AccessGovernor(x.db).read().queryDiagnostic!;
+    expect(summary.code).toBe(
+      {
+        disabled: "diagnostics_disabled",
+        unavailable: "diagnostics_unavailable",
+        unsupported: "unsupported_condition",
+        "no-baseline": "no_valid_baseline",
+      }[scenario],
+    );
+    expect(summary.unsupportedFields).toEqual(scenario === "unsupported" ? ["school"] : []);
+    expect(
+      JSON.parse(
+        String(
+          x.db.prepare("SELECT outcome_json FROM query_diagnostic_events").get()?.outcome_json,
+        ),
+      ),
+    ).toEqual(summary);
+    expect(
+      x.db
+        .prepare(
+          "SELECT count(*) AS n FROM query_health_results WHERE purpose!='ordinary' AND accepted=1",
+        )
+        .get()?.n,
+    ).toBe(0);
   },
 );
