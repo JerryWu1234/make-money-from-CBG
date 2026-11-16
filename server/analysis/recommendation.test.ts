@@ -123,6 +123,28 @@ it.each(["and", "or"] as const)("价格不限制不会使其他%s条件被绕过
   expect(recommendationFor(record(), valuation(18000), tree).status).toBe("manual");
 });
 
+it.each([
+  [999, "recommended"],
+  [1000, "recommended"],
+  [1100, "recommended"],
+  [1200, "recommended"],
+  [1200.01, "excluded"],
+] as const)("上涨20%%的上限决定入榜，挂牌%s => %s", (asking, status) => {
+  const source = record();
+  source.listing.price = String(asking);
+  const tree = defaultConditions();
+  tree.children = [
+    {
+      id: "C1",
+      text: "",
+      price: { comparison: "lte", adjustment: "plus", unit: "percent", value: 20 },
+    },
+  ];
+  expect(recommendationFor(source, { ...valuation(1000), asking_price: asking }, tree).status).toBe(
+    status,
+  );
+});
+
 it("无效金额、缺少估值和待补资料不能入榜", () => {
   const r = record();
   for (const bare of [NaN, Infinity, -1])

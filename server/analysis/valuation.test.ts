@@ -634,6 +634,66 @@ describe("裸号估值的复算与可追溯输入", () => {
     }
   });
 
+  it.each([1500, 10000])("密集资料不裁剪证据，1 MiB内可发送、超限仍暂停：%s字段", async (count) => {
+    const crawl = new CrawlStore(":memory:"),
+      record = completeRecord(),
+      configured = profile();
+    configured.settings.conditions = {
+      id: "G1",
+      operator: "and",
+      evaluation: "sequence",
+      children: [{ id: "C1", text: "扩展字段是否有指定内容" }],
+    };
+    record.detail!.tabs[0].fields.push(
+      ...Array.from({ length: count }, (_, index) => ({
+        name: `扩展字段${index}`,
+        value: "完整原始资料".repeat(10),
+      })),
+    );
+    const analyze = vi.fn().mockResolvedValue({
+      text: JSON.stringify({
+        decision: calculateValuation(record, configured).decision,
+        reason: "保留完整资料核对",
+        extracted_facts: [],
+        condition_results: [
+          {
+            id: "C1",
+            sourceText: "扩展字段是否有指定内容",
+            matched: null,
+            reason: "没有给出指定内容",
+            observations: [],
+            calculation: null,
+            comparison: null,
+          },
+        ],
+      }),
+    });
+    const store = new AnalysisStore(crawl.db);
+    const runner = new AnalysisRunner(store, async () => ({ model: "test", analyze }));
+    try {
+      crawl.observe(record.listing);
+      crawl.save(record.listing, record.detail!);
+      const request = valuationPrompt(buildProductDocument(record), record, configured);
+      expect(Buffer.byteLength(request)).toBeGreaterThan(256 * 1024);
+      const id = await runner.start("codex", true, configured, true);
+      await runner.settled();
+      if (count === 1500) {
+        expect(Buffer.byteLength(request)).toBeLessThan(1024 * 1024);
+        expect(store.run(id)).toMatchObject({ completed: 1, failed: 0 });
+        expect(analyze).toHaveBeenCalledOnce();
+        expect(analyze.mock.calls[0][0]).toBe(request);
+        expect(request).toContain(`扩展字段${count - 1}`);
+      } else {
+        expect(Buffer.byteLength(request)).toBeGreaterThan(1024 * 1024);
+        expect(store.run(id)).toMatchObject({ status: "paused", completed: 0, failed: 1 });
+        expect(analyze).not.toHaveBeenCalled();
+      }
+    } finally {
+      await runner.shutdown();
+      crawl.close();
+    }
+  });
+
   it("裸号只发送核算投影，金额严格复算；AI改写待确认项时保留程序完整列表", () => {
     const record = completeRecord(),
       configured = profile(),
