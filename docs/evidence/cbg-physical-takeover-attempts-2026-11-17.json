@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "scope": "Historical isolated real-helper attempts preceding the completed long-idle retry. Neither historical run proves physical takeover or website collection.",
+  "sourceAtCapture": {
+    "gitHead": "084b6917aed2830e40cb2238fd3d4b1a2d02892e",
+    "extensionMainSha256": "361a6b35a91d968ad281b1a1b64252edcb2d62bf8d119da6bf0aee818a4f3f9b",
+    "nativeInputSha256": "224348ba03a4c93bdc37e23a654a9243d2b64ff1839455d7950fb7d998469e15",
+    "helperBinarySha256": "ece793eb4b1eb3c8da58b5e50dbb39574ebd3d0d975b60ee86954b40e5942223"
+  },
+  "runs": [
+    {
+      "artifactId": "cbg-installed-ctg0vI",
+      "rawReportSha256": "dd084509f0115136e91c83782e1025acb54d38e34577a21f4532a7635fb9f4bb",
+      "outcome": "failed-or-blocked",
+      "failureMessage": "Physical takeover inconclusive: no real event; no automatic input was generated",
+      "physicalAcceptancePassed": false,
+      "cleanup": {
+        "observedFixedHelperPids": [62480],
+        "processes": [
+          {
+            "pid": 62480,
+            "alive": false
+          }
+        ],
+        "observers": [
+          {
+            "pid": 62479,
+            "alive": false
+          }
+        ]
+      },
+      "firstFieldCompleted": true,
+      "assessment": {
+        "status": "inconclusive",
+        "reason": "no-real-helper-preemption-within-action-window",
+        "producerIdentityProven": false
+      },
+      "actionWindow": {
+        "id": "1ef7d24c-15db-4243-84e3-8db984712e45",
+        "inputKind": "keyboard-escape",
+        "openedAt": 1794922438750,
+        "closesAt": 1794922458750,
+        "noticeShownAt": 1794922438751,
+        "closedNoticeAt": 1794922458812
+      },
+      "firstFieldActionId": "6aff6b75-07ed-412d-9d96-c247dd9936bf",
+      "fieldValue": "120",
+      "helperPreemptionObserved": false,
+      "postActionUserAttestation": null,
+      "nativeActiveBeforeWindow": true
+    },
+    {
+      "artifactId": "cbg-installed-Ps86tc",
+      "rawReportSha256": "3fc7314d059ba71e8e74f9470f9c81a0b8cc0fdafe1543335fa6bd2225a48ef2",
+      "outcome": "failed-or-blocked",
+      "failureMessage": "Timed out waiting for actual native evidence",
+      "physicalAcceptancePassed": false,
+      "cleanup": {
+        "observedFixedHelperPids": [64056],
+        "processes": [
+          {
+            "pid": 64056,
+            "alive": false
+          }
+        ],
+        "observers": [
+          {
+            "pid": 64055,
+            "alive": false
+          }
+        ]
+      },
+      "firstFieldCompleted": false,
+      "startGateReleased": false,
+      "startSignalPresent": false,
+      "nativeIdleBeforeGate": {
+        "active": false,
+        "expired": false,
+        "lease": {}
+      },
+      "businessActions": 0,
+      "note": "Idle preparation timed out after 180 seconds; no native workflow or business input was started."
+    }
+  ],
+  "humanFeedback": {
+    "earlier": "User reported not seeing the preparation page or prompt.",
+    "latest": "User later said they were away from the computer and asked to restart.",
+    "scope": "Conversation evidence only; does not establish the precise absence interval, window visibility, a physical input event or producer identity."
+  },
+  "producerIdentityProven": false,
+  "strictCausationProven": false,
+  "remaining": [
+    "At the time of these two historical attempts, physical Escape takeover still required a new actual run and user confirmation; see followup for the later completed retry.",
+    "Second display unavailable; lock-screen test deferred; first official query remains manual."
+  ],
+  "followup": {
+    "status": "superseded-by-completed-long-idle-retry",
+    "evidence": "cbg-physical-takeover-live-2026-11-17.json",
+    "handoff": "The completed retry used a file start gate with actual fresh conversation confirmation and a 15-minute pre-activity idle wait. An in-page start-button UI was not delivered."
+  }
+}

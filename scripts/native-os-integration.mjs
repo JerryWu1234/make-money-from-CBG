@@ -1347,7 +1347,7 @@ searchForm.onsubmit=e=>{e.preventDefault();LoadingCover.style.display='block';se
     result.startGate = { signalPath, waitingAt: Date.now(), idleStatus: ready };
     await save();
     console.log(`AWAIT_NATIVE_START: ${signalPath}`);
-    await until(() => existsSync(signalPath), 180000);
+    await until(() => existsSync(signalPath), 900000);
     if (scenario === "physical-takeover") {
       const intent = JSON.parse(await readFile(signalPath, "utf8"));
       result.physicalTakeover = {

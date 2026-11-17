@@ -1,6 +1,6 @@
 # PR #77 原生后续验收（2026-11-17）
 
-> **后续更新：** OBS-02 网站回调故障隔离已在 `14aec82` 修复并经两位独立复审；当前全量为204文件、3683/3683通过，见[回调复核](./reviews/cbg-observer-callback-isolation-2026-11-17.md)和[当前回归](./evidence/cbg-observer-contract-regression-2026-11-17.json)。受控Esc入口及63项纯判据已准备，见[准备证据](./evidence/cbg-physical-takeover-preparation-2026-11-17.json)；尚无真实用户意图/事后回执，不算物理通过。以下四轮原生实机记录于 `98318d6`，Input/host/Runtime字节仍未变；它们不证明新MAIN回调或新物理模式已实机重跑。
+> **后续更新：** OBS-02 网站回调故障隔离已在 `14aec82` 修复并经两位独立复审；当前全量为204文件、3683/3683通过，见[回调复核](./reviews/cbg-observer-callback-isolation-2026-11-17.md)和[当前回归](./evidence/cbg-observer-contract-regression-2026-11-17.json)。受控 Esc 实机重试 `bs9yzU` 已记录用户确认、窗口内 helper 未标记 keydown、可信 DOM Escape/27、撤权及旧 scope 拒绝，见[本次实机证据](./evidence/cbg-physical-takeover-live-2026-11-17.json)。此前两次未通过记录见[历史尝试](./evidence/cbg-physical-takeover-attempts-2026-11-17.json)，63项纯判据的[准备证据](./evidence/cbg-physical-takeover-preparation-2026-11-17.json)仍保留为当时快照。以下四轮原生实机记录于 `98318d6`，Input/host/Runtime字节仍未变；它们不证明新MAIN回调或新物理模式已实机重跑。
 
 当前生产 `Input.m` 为 `224348ba03a4c93bdc37e23a654a9243d2b64ff1839455d7950fb7d998469e15`，正常编译 helper 为 `ece793eb4b1eb3c8da58b5e50dbb39574ebd3d0d975b60ee86954b40e5942223`。host 和 Runtime 分别保持 `d8fc9471…`、`e407714d…`。本记录补充原六项交付，取代旧记录中“当前冷启动/独立过期尚未通过”的状态摘要；原始失败与旧版本证据仍按原结果保留。
 
@@ -38,6 +38,14 @@ watchdog 已判定租约过期时先按原 lease 身份撤权，不再先查询�
 
 `9mAQdg` 的 Runtime 更早因原有 10 秒回执超时停止；helper 的独立到期晚于该事件。故只能证明 helper 在暂停 host 下自行撤权，不能声称 Runtime 是被 expired 通知停止。历史 `RV6KYg` 仍为 failed-or-blocked，未把恢复后的 inactive 冒充独立过期。
 
+## 受控 Esc 实机重试
+
+`bs9yzU` 在新的临时 profile 中运行真实扩展、Native Messaging、host、正常 helper 和 AX 读取。用户先确认看到了最低价格 100 的准备页，才释放空闲 gate；空闲期间 `active=false/lease={}`。为等待人工确认，只有输入授权之前的 gate 从 3 分钟延长到 15 分钟；活动有效期、20秒操作窗口和60秒事后回执限时均未变。实际临时入口与本次交付 runner 字节一致。
+
+真实输入先把价格改为120，保留 proof、成功 posted、可信 DOM 与 completed permit/Bridge。黄色提示后，用户确认只按一次 Esc 且没有其他操作。helper 首次未标记抢占为 type10，保守事件区间完整落在提示窗口内；操作窗口内该字段首个可信 keydown 为 `Escape/27`。随后 helper inactive、lease清空，Runtime stopped、governor needs_action。原 ALS scope 的后续140尝试被缺失/过期观察拦截，没有新 proof、execute、输入或 permit；该次不能单独证明后续授权守卫的拒绝原因。runner 终端0，五个实际进程全部退出。
+
+本次结论限定为“用户确认的 Esc 与原生 keydown 撤权对齐”。helper 未记录键码，不能仅凭 PID0、state1 或时序认定事件生产者；不能排除同类型自发事件恰好先于人工操作。历史未明鼠标事件仍未定位，官网、多屏与锁屏未因此变为通过。
+
 ## 可复现入口
 
 在仓库目录、沙箱外依次运行，使用项目管理的 Node 26.13.1。每次使用新的临时 profile/SQLite；出现 `AWAIT_NATIVE_START` 后，为该次目录创建 `start-native.signal`。先确认桌面时间窗口，避免与其他 Chrome 测试重叠。
@@ -54,6 +62,6 @@ vp exec node --test scripts/native-helper-stdio-observer-regression.mjs
 
 ## 尚未完成
 
-用户确认未操作时的历史未标记鼠标事件来源仍未解；本轮通过不代表它已消失。没有按 PID、坐标、时间或零位移增加豁免。受控物理用户接管尚未验收；多屏、负坐标和跨屏缩放缺第二块实际显示器；锁屏按用户要求延期。本轮没有访问真实官网或登录，官网首次查询继续由用户人工操作。
+用户确认未操作时的历史未标记鼠标事件来源仍未解；本轮通过不代表它已消失。没有按 PID、坐标、时间或零位移增加豁免。本次受控 Esc 仅证明人工确认与原生 keydown 停止对齐，不能证明底层事件生产者或严格因果。多屏、负坐标和跨屏缩放缺第二块实际显示器；锁屏按用户要求延期。本轮没有访问真实官网或登录，官网首次查询继续由用户人工操作。
 
-goal 尚未全部完成；剩余实机需要实际用户操作和硬件后继续，不能用准备或离线通过替代。高斯轨迹和无业务目的随机浏览仍为可选实验。
+goal 尚未全部完成；剩余实机需要相应硬件与用户安排后继续，不能用准备或离线通过替代。高斯轨迹和无业务目的随机浏览仍为可选实验。

@@ -1,0 +1,273 @@
+{
+  "schemaVersion": 1,
+  "scope": "Isolated actual native-input acceptance: user-confirmed single Escape aligned with helper unmarked keydown and input revocation. Not official-site collection, producer identity or strict-causation proof.",
+  "artifactId": "cbg-installed-bs9yzU",
+  "sourceBase": "084b6917aed2830e40cb2238fd3d4b1a2d02892e",
+  "sourceSha256": {
+    "scripts/native-os-integration.mjs": "629f0c5851c1d7fd5065eebf62ce5cf8f20678a7a1867f99a14e3d2d1640ab9e",
+    "scripts/native-physical-takeover-evidence.mjs": "d569c9c070d85a65813782f88ae9feba6f2340e26f1f770ce42721a67b9b29e5",
+    "scripts/native-physical-takeover-regression.mjs": "653346b4558af54d95d4070348f9692145fc4a6fe657da2e703b11ddbac635af",
+    "extension/cbg-access/main.js": "361a6b35a91d968ad281b1a1b64252edcb2d62bf8d119da6bf0aee818a4f3f9b",
+    "native/cbg-access/Input.m": "224348ba03a4c93bdc37e23a654a9243d2b64ff1839455d7950fb7d998469e15",
+    "native/cbg-access/host.mjs": "d8fc9471f4b7e11dc367e9ffa26200ecb2ea2b2ef16534e3a8a171bc779a0507",
+    "server/adapters/extension-native.ts": "e407714d4b21ded72ea1d4d54df3d1c96d5f0c3dc6a07eb9fe7ee5db90e97066"
+  },
+  "runner": {
+    "command": "node scripts/native-os-integration.mjs --run --scenario=physical-takeover --await-start --observe-helper-stdio --ax-preflight",
+    "actualEntryPoint": "scripts/.native-os-integration-long-idle.mjs",
+    "entryPointByteIdenticalToTrackedRunner": true,
+    "onlyChangeFromSourceBase": "Idle pre-activity start gate 180000 -> 900000 ms. Activity TTL, 20-second action window, 60-second post-action reply and acceptance predicates unchanged.",
+    "nodeVersion": "26.13.1",
+    "sandbox": "outside; temporary Chrome profile and SQLite",
+    "exitCode": 0,
+    "outcome": "passed-human-confirmed-Escape-with-native-keydown-stop-alignment-only",
+    "noPlaywrightBusinessInput": true
+  },
+  "captureSha256": {
+    "os-result.json": "7074a76fec9fa9bfd261ecf62f8340016bf3330dc3f0589d5b8008abed83b37e",
+    "plan.json": "20ea74111fd77d5253d1ffd54edcc0ee7f4c177792e5d466fd2cf51036afb9a1",
+    "native-wire.jsonl": "c7810892925c6c019ec49c9cb48dee57e259fdac7a686af056b0dffa56e32692",
+    "helper-stdio.jsonl": "b7ab5260fe71658793a4500f3d3b615d4b893bc25271ecd9fa0a82ec512995fe",
+    "access.sqlite": "4bcbce87e106f7c73f8d3f93031fd39e0a946bf1f59557bd75d4383b5ede3aec"
+  },
+  "installedExtensionScriptHashes": {
+    "main.js": "361a6b35a91d968ad281b1a1b64252edcb2d62bf8d119da6bf0aee818a4f3f9b",
+    "isolated.js": "d46286d86390c2186a18f700b3e5617ed1ca951182b30c65212c5f9926697117",
+    "service-worker.js": "84866e2798b3df30caf80fcada3a1ad3f60a91af462da7b4983daca7f6651119",
+    "market-config.js": "a2c11c2bee12fdc7957cdd91f5bfab42dd1be11b10a09093f80734e559a0dedf",
+    "market-rules.js": "c22b78f92e96cbb8ab3a792a39798229a7a600bfb60b039f0474ea7e2309b03e",
+    "pet-product-observation.js": "ef3ad8d17c06ca14dbda510e6a3c2fe24197f48c80c4aa1d77928838658691cc"
+  },
+  "helperObserver": {
+    "binarySha256": "ece793eb4b1eb3c8da58b5e50dbb39574ebd3d0d975b60ee86954b40e5942223",
+    "observerSha256": "7a5cda9a205c6b1ce1234c21e17894170bf03c3a1d1ce0f8705aa082b9533235",
+    "temporaryHostBeforeSha256": "e0957822020c1ad1be3be16fc4db84d8808c4e68b10aa3db5156f3320e5554f1",
+    "temporaryHostAfterSha256": "ffaae4d2a6b7e05665bee6624a4b8a69e853e19d0ca2c24148a2cffe53c788cf",
+    "scope": "Transparent byte forwarding in a temporary host copy; no generated proof, ACK, native permission or input result."
+  },
+  "processes": {
+    "runnerPid": 66537,
+    "browserPid": 66562,
+    "hostPid": 66582,
+    "observerPid": 66583,
+    "helperPid": 66584
+  },
+  "idleGate": {
+    "waitingAt": 1794924550204,
+    "releasedAt": 1794924594374,
+    "activity": {
+      "active": false,
+      "expired": false,
+      "lease": {}
+    },
+    "userSawPreparationPage": true,
+    "evidenceSource": "Actual current conversation reply; not an OS input proof."
+  },
+  "humanIntent": {
+    "statement": "已看到，准备开始；本轮按先前说明仅按一次Esc",
+    "receivedAt": "2026-11-17T14:09:54.260882+00:00",
+    "inputKind": "keyboard-escape",
+    "inputDevice": "built-in-keyboard",
+    "oneActionOnly": true
+  },
+  "field120": {
+    "actionId": "747523cd-9f24-4206-ba43-9b4ddc320352",
+    "proofObserved": true,
+    "helperPosted": true,
+    "permitStatus": "completed",
+    "bridgeState": "completed",
+    "trustedDomInput": true,
+    "domValue": "120"
+  },
+  "window": {
+    "id": "dedc643b-8ed7-4860-b845-4553a496ce47",
+    "inputKind": "keyboard-escape",
+    "openedAt": 1794924596802,
+    "closesAt": 1794924616802,
+    "noticeShownAt": 1794924596803,
+    "stoppedNoticeAt": 1794924598167
+  },
+  "originalGrant": {
+    "requestAt": 1794924596380,
+    "ackAt": 1794924596384,
+    "actionId": "546cba82-286e-445a-a691-6679bca67351",
+    "lease": {
+      "activityId": "2156a08a-6519-4c8e-85f9-4a7dfb7bcead",
+      "authorizationEpoch": 1,
+      "stopEpoch": 0,
+      "browserSessionEpoch": "d48fd205-bbb2-48b9-be37-4ce8844ea153",
+      "expiresAt": 1794924611378,
+      "progressExpiresAt": 1794924776378,
+      "progressSequence": 0
+    },
+    "hostGeneration": 1,
+    "hostInstanceEpoch": "8da062a1-d1f2-403b-8616-70ed19bd1325"
+  },
+  "firstInvalidation": {
+    "receivedAt": 1794924598054,
+    "message": {
+      "activityId": "2156a08a-6519-4c8e-85f9-4a7dfb7bcead",
+      "authorizationEpoch": 1,
+      "browserSessionEpoch": "d48fd205-bbb2-48b9-be37-4ce8844ea153",
+      "hostGeneration": 1,
+      "hostInstanceEpoch": "8da062a1-d1f2-403b-8616-70ed19bd1325",
+      "inputPreemption": {
+        "authorizationEpoch": 1,
+        "callbackTimestampNs": "268537043263958",
+        "coordinateSource": "CGEventGetLocation-global-display-coordinates",
+        "deltaSource": "kCGMouseEventDeltaX/Y-since-prior-mouse-movement",
+        "diagnosticSchema": 2,
+        "eventTimestampNs": "268537043006875",
+        "eventType": 10,
+        "grantPointer": {
+          "x": 584.28515625,
+          "y": 659.57421875
+        },
+        "grantPointerAvailable": true,
+        "grantTimestampNs": "268535426399166",
+        "helperPid": 66584,
+        "ownsInput": true,
+        "recordScope": "first-preemption-in-helper-process",
+        "sourcePid": 0,
+        "sourceStateID": 1,
+        "tapDisabled": false,
+        "userData": 0
+      },
+      "kind": "activity-invalidated",
+      "reason": "input-stopped-or-user-preempted",
+      "stopEpoch": 0
+    }
+  },
+  "assessment": {
+    "status": "verified",
+    "eventInterval": {
+      "earliest": 1794924597996.6077,
+      "latest": 1794924598000.6077
+    },
+    "scope": "human-confirmed-Escape-with-aligned-unmarked-keydown-stop",
+    "osEventProof": "helper-unmarked-keydown-no-keycode;fixture-trusted-Escape-code-keyCode27",
+    "domEscape": {
+      "type": "keydown",
+      "id": "price_min",
+      "trusted": true,
+      "at": 1794924598012,
+      "eventTimeStamp": 48421.30000001192,
+      "phase": "capture",
+      "code": "Escape",
+      "keyCode": 27,
+      "metaKey": false,
+      "ctrlKey": false,
+      "altKey": false,
+      "shiftKey": false,
+      "repeat": false,
+      "isComposing": false,
+      "value": "120",
+      "selectionStart": 3,
+      "selectionEnd": 3,
+      "selectionDirection": "none",
+      "activeElementId": "price_min",
+      "documentFocused": true
+    },
+    "producerIdentityProven": false,
+    "strictCausationProven": false,
+    "limitations": "Operator confirmation and OS records are separate evidence. The visible stopped notice is delayed, so a same-kind spontaneous event stopping the helper just before the user's action cannot be excluded. This proves alignment only, not strict causation, a helper-observed keycode, low-level producer, or historical unexplained mouse source. Escape code/keyCode are observed only in the isolated fixture DOM."
+  },
+  "postActionUserReply": {
+    "statement": "看到黄色提示后，只按了一次 Esc，随后看到“原生输入已停止”；没有其他操作",
+    "receivedAt": "2026-11-17T14:10:27.914758+00:00",
+    "windowId": "dedc643b-8ed7-4860-b845-4553a496ce47",
+    "inputKind": "keyboard-escape",
+    "actionOnceAfterPrompt": true,
+    "stopObservedAfterAction": true,
+    "noOtherInput": true
+  },
+  "inactiveAfterInvalidation": {
+    "active": false,
+    "expired": false,
+    "lease": {}
+  },
+  "runtimeStopped": {
+    "adapter": "extension-native",
+    "listening": true,
+    "connected": true,
+    "stopped": true,
+    "idle": false,
+    "pageId": "6b5a4a99-a5cc-4844-9bae-5c5fad0ae07c",
+    "reason": "input-stopped-or-user-preempted",
+    "unknownActions": 0
+  },
+  "oldScope": {
+    "attempt": {
+      "rejected": true,
+      "message": "官网观察快照缺失或过期，请重新绑定扩展标签页"
+    },
+    "no140InputOrPermit": true,
+    "permitCount": 1,
+    "bridgeCommandCount": 1,
+    "scope": "Resumed the same original ALS workflow; its attempt was rejected before another proof, execute, posted input or permit. In this capture the rejection was a missing/stale observation, so this does not isolate the later authorization guard as the cause."
+  },
+  "cleanup": {
+    "runnerBrowserHostObserverHelperAllExited": true,
+    "checkedBy": "Independent agent kill(pid,0): ESRCH for all five exact PIDs",
+    "recordedHelperAndObserverCleanup": {
+      "observedFixedHelperPids": [66584],
+      "processes": [
+        {
+          "pid": 66584,
+          "alive": false
+        }
+      ],
+      "observers": [
+        {
+          "pid": 66583,
+          "alive": false
+        }
+      ]
+    }
+  },
+  "review": {
+    "status": "two-independent-raw-audits-passed",
+    "reviewers": ["/root/review_native_probe_fresh", "/root/observer_impl_continued"],
+    "historyPolicy": "Agents originally spawned with no parent conversation fork and instructed not to read memory; no persistent memory consulted.",
+    "audited": [
+      "Original 28-row helper byte stream and real acceptance predicate recalculation",
+      "Exact helper/host/lease/scope, grant/event/DOM/user-confirmation timing",
+      "SQLite permit/Bridge state and absence of subsequent input/proof/permit",
+      "Installed/production hashes and only-one-line idle-gate difference",
+      "All five exact process PIDs exited and public summaries match raw records"
+    ],
+    "findingsFixed": [
+      "Reworded the historical attempts report so it does not promise an in-page start-button UI.",
+      "Clarified that the old ALS attempt was refused by stale/missing observation, without claiming isolated coverage of the later authorization guard.",
+      "Distinguished this actual retry from historical preparation-only and failed captures."
+    ],
+    "remainingConfirmedFindings": 0,
+    "report": "../reviews/cbg-physical-takeover-review-2026-11-17.md"
+  },
+  "limitations": [
+    "Helper records unmarked keydown type 10, not a keycode; Escape/code/keyCode27 are corroborated by trusted isolated fixture DOM and the actual user statement.",
+    "Producer identity and strict causation remain unproven. This single run does not resolve historical unexplained mouse events.",
+    "Mock page and preflight only: no authenticated official-site query; no multi-monitor, lock-screen or fault-during-key-delivery acceptance.",
+    "Second display unavailable and lock-screen test deferred by user."
+  ],
+  "validation": {
+    "pureAcceptanceRegression": {
+      "command": "node --test scripts/native-physical-takeover-regression.mjs",
+      "tests": 63,
+      "passed": 63,
+      "failed": 0,
+      "skipped": 0,
+      "exitCode": 0,
+      "rawLogSha256": "10d7140ba6344af0653234305267352159d00577edd1e7eaf45e36ee77e6cf68",
+      "scope": "Pure acceptance predicates only, separate from actual physical evidence."
+    },
+    "check": {
+      "command": "vp check",
+      "exitCode": 0,
+      "errors": 0,
+      "existingWarnings": 29,
+      "rawLogSha256": "333199d92018660f118e94cbb323aeaea5394e29d90b261006676d76a88db521"
+    },
+    "fullRegression": "Previously recorded 204 files / 3683 passed remains pinned to its original capture. This follow-up changes only the idle test gate and evidence/docs; no production source or acceptance predicate changed, so the full suite and build were not repeated."
+  }
+}
