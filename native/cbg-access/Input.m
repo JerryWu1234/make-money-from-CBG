@@ -320,6 +320,17 @@ static NSString *activityFailure(NSDictionary *lease) {
   pthread_mutex_unlock(&activityLock);
   return error;
 }
+static void checkActivityWatchdog(NSDictionary *lease, bool expired,
+    CGDirectDisplayID display, NSString *(^checkDesktop)(void),
+    bool (^checkDisplay)(CGDirectDisplayID),
+    void (^invalidate)(NSDictionary *, NSString *)) {
+  if (!lease) return;
+  // An already-expired lease must lose authority before any WindowServer query.
+  if (expired) { invalidate(lease, @"native-workflow-activity-expired"); return; }
+  NSString *failure = checkDesktop();
+  if (failure || (display && !checkDisplay(display)))
+    invalidate(lease, failure ?: @"activity-display-unavailable");
+}
 static NSString *activityCommand(NSDictionary *request) {
   NSDictionary *lease = request[@"activity"];
   if (![lease isKindOfClass:NSDictionary.class] || ![request[@"hostInstanceEpoch"] isEqual:acceptedHostInstance] ||
@@ -437,6 +448,134 @@ static NSString *textInputGuard(NSDictionary *request, pid_t expectedPid) {
   if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != expectedPid)
     return @"native-text-application-changed";
   return nil;
+}
+static NSString *pageInputGuard(NSDictionary *request, pid_t expectedPid) {
+  if (!authorityMatches(request)) return @"stale-native-dispatch-generation";
+  NSString *error = activityFailure(request[@"plan"][@"activity"]);
+  if (error) return error;
+  double now = NSDate.date.timeIntervalSince1970 * 1000;
+  if (now < [request[@"proof"][@"sampledAt"] doubleValue] || now >= proofDeadline)
+    return @"target-proof-expired-before-input";
+  error = check();
+  if (error) return error;
+  if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != expectedPid)
+    return @"native-page-application-changed";
+  // Desktop queries can themselves take time; recheck local authority afterwards.
+  if (!authorityMatches(request)) return @"stale-native-dispatch-generation";
+  error = activityFailure(request[@"plan"][@"activity"]);
+  if (error) return error;
+  now = NSDate.date.timeIntervalSince1970 * 1000;
+  if (now < [request[@"proof"][@"sampledAt"] doubleValue] || now >= proofDeadline)
+    return @"target-proof-expired-before-input";
+  return stopped || preempted ? @"input-stopped-or-user-preempted" : nil;
+}
+// Readiness retries never create a new proof or dispatch. These callbacks also let
+// pure regressions exercise the exact traversal without accessing another app.
+typedef id (^PageAXRead)(id element, CFStringRef attribute, double timeout, AXError *status);
+typedef NSString *(^PageAXGuard)(void);
+typedef double (^PageAXClock)(void);
+static id guardedPageAXRead(id element, CFStringRef attribute, PageAXRead read,
+    PageAXGuard guard, PageAXClock clock, double deadline, NSString **error,
+    bool optional) {
+  *error = guard();
+  if (*error) return nil;
+  double remaining = deadline - clock();
+  if (remaining <= 0) { *error = @"native-page-url-unverified"; return nil; }
+  AXError status = kAXErrorFailure;
+  id value = read(element, attribute, MIN(0.1, remaining / 1000), &status);
+  // AX IPC can finish after the deadline or a concurrent authorization change.
+  *error = guard();
+  if (*error) return nil;
+  if (clock() >= deadline) { *error = @"native-page-url-unverified"; return nil; }
+  // Only AXChildren's explicit absence is a leaf. Messaging failures, or an
+  // unreadable WebArea URL, never count as a zero-match/complete scan.
+  bool absentChildren = optional && !value &&
+    (status == kAXErrorNoValue || status == kAXErrorAttributeUnsupported);
+  if (!absentChildren && (status != kAXErrorSuccess || !value)) {
+    *error = @"native-page-ax-read-failed";
+    return nil;
+  }
+  return value;
+}
+static NSString *pageAXString(id value) {
+  return [value isKindOfClass:NSString.class] ? value :
+    [value isKindOfClass:NSURL.class] ? [value absoluteString] : @"";
+}
+static bool scanPageAX(id element, int depth, int *budget, NSString *url,
+    PageAXRead read, PageAXGuard guard, PageAXClock clock, double deadline,
+    NSMutableArray *nodes, NSMutableArray *areas, NSString **error) {
+  if (depth > 14 || --*budget < 0) {
+    *error = @"native-page-ax-scan-incomplete";
+    return false;
+  }
+  id children = guardedPageAXRead(element, kAXChildrenAttribute, read, guard, clock,
+    deadline, error, true);
+  if (*error) return false;
+  if (!children) return true;
+  if (![children isKindOfClass:NSArray.class] || [children count] > 200) {
+    *error = @"native-page-ax-scan-incomplete";
+    return false;
+  }
+  for (id child in children) {
+    [nodes addObject:child];
+    id role = guardedPageAXRead(child, kAXRoleAttribute, read, guard, clock,
+      deadline, error, false);
+    if (*error) return false;
+    if (![role isKindOfClass:NSString.class] || ![role length]) {
+      *error = @"native-page-ax-read-failed"; return false;
+    }
+    if ([role isEqual:@"AXWebArea"]) {
+      id actualURL = guardedPageAXRead(child, CFSTR("AXURL"), read, guard, clock,
+        deadline, error, false);
+      if (*error) return false;
+      NSString *urlString = pageAXString(actualURL);
+      if (!urlString.length) { *error = @"native-page-ax-read-failed"; return false; }
+      if ([urlString isEqual:url]) [areas addObject:child];
+      if (areas.count > 1) { *error = @"native-page-url-unverified"; return false; }
+    }
+    if (!scanPageAX(child, depth + 1, budget, url, read, guard, clock, deadline,
+        nodes, areas, error)) return false;
+  }
+  return true;
+}
+static NSString *waitForPageAX(id app, NSString *url, PageAXRead read,
+    PageAXGuard guard, PageAXClock clock, void (^pause)(double), double deadline,
+    id *verifiedWindow, NSArray **verifiedNodes, id *verifiedArea) {
+  NSString *error = nil;
+  id role = guardedPageAXRead(app, kAXRoleAttribute, read, guard, clock, deadline, &error, false);
+  if (error) return error;
+  if (![role isKindOfClass:NSString.class] || ![role isEqual:@"AXApplication"])
+    return @"native-application-role-unverified";
+  id window = guardedPageAXRead(app, kAXFocusedWindowAttribute, read, guard, clock,
+    deadline, &error, false);
+  if (error) return error;
+  if (!window) return @"chrome-window-unavailable";
+  PageAXGuard sameWindow = ^NSString *{
+    NSString *failure = nil;
+    id current = guardedPageAXRead(app, kAXFocusedWindowAttribute, read, guard, clock,
+      deadline, &failure, false);
+    if (failure) return failure;
+    return current && CFEqual((__bridge CFTypeRef)current, (__bridge CFTypeRef)window) ?
+      nil : @"native-page-window-changed";
+  };
+  while (true) {
+    NSMutableArray *nodes = [NSMutableArray new], *areas = [NSMutableArray new];
+    int budget = 20000;
+    if (!scanPageAX(window, 0, &budget, url, read, sameWindow, clock, deadline,
+        nodes, areas, &error)) return error;
+    error = sameWindow();
+    if (error) return error;
+    if (areas.count == 1) {
+      *verifiedWindow = window; *verifiedNodes = nodes; *verifiedArea = areas[0];
+      return nil;
+    }
+    // Only a complete scan with zero matches may retry. No input is posted here.
+    double remaining = deadline - clock();
+    if (remaining <= 0) return @"native-page-url-unverified";
+    pause(MIN(10, remaining));
+    error = sameWindow();
+    if (error) return error;
+  }
 }
 static NSString *waitForTextReadiness(NSDictionary *request, AXUIElementRef target,
     AXUIElementRef app, pid_t expectedPid, CGRect expectedFrame, double deadline,
@@ -575,30 +714,34 @@ static NSString *validateAndExecute(NSDictionary *request) {
     return @"invalid-coordinate-space";
   pid_t pid =
       NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
-  AXUIElementRef app = AXUIElementCreateApplication(pid);
-  // Chrome exposes its renderer AX tree after this normal read-only AT handshake.
-  NSString *appRole = str(app, kAXRoleAttribute);
-  id window = [appRole isEqual:@"AXApplication"] ? attr(app, kAXFocusedWindowAttribute) : nil;
-  CFRelease(app);
-  if (![appRole isEqual:@"AXApplication"])
-    return @"native-application-role-unverified";
-  if (!window)
-    return @"chrome-window-unavailable";
+  id app = CFBridgingRelease(AXUIElementCreateApplication(pid));
+  double readinessDeadline = monotonicMs() + MIN(700,
+    proofDeadline - NSDate.date.timeIntervalSince1970 * 1000);
+  PageAXRead read = ^id(id element, CFStringRef attribute, double timeout, AXError *status) {
+    if (!element || CFGetTypeID((__bridge CFTypeRef)element) != AXUIElementGetTypeID()) {
+      *status = kAXErrorInvalidUIElement; return nil;
+    }
+    AXUIElementRef el = (__bridge AXUIElementRef)element;
+    *status = AXUIElementSetMessagingTimeout(el, (float)timeout);
+    if (*status != kAXErrorSuccess) return nil;
+    CFTypeRef value = NULL;
+    *status = AXUIElementCopyAttributeValue(el, attribute, &value);
+    return CFBridgingRelease(value);
+  };
+  id window = nil, area = nil;
+  NSArray *nodes = nil;
+  // Normal read-only AT handshake, then bounded zero-match readiness sampling.
+  // The original proof deadline, activity and focused window never change.
+  error = waitForPageAX(app, proof[@"url"], read,
+    ^{ return pageInputGuard(request, pid); }, ^{ return monotonicMs(); },
+    ^(double ms) { usleep((useconds_t)(ms * 1000)); }, readinessDeadline,
+    &window, &nodes, &area);
+  if (error) return error;
   NSValue *windowValue = bounds((__bridge AXUIElementRef)window);
   if (!windowValue)
     return @"native-window-frame-unavailable";
   CGRect windowFrame = NSRectToCGRect(windowValue.rectValue);
-  NSArray *nodes = tree((__bridge AXUIElementRef)window, 0);
-  NSMutableArray *areas = [NSMutableArray array];
-  for (id node in nodes) {
-    AXUIElementRef el = (__bridge AXUIElementRef)node;
-    if ([str(el, kAXRoleAttribute) isEqual:@"AXWebArea"] &&
-        [str(el, CFSTR("AXURL")) isEqual:proof[@"url"]])
-      [areas addObject:node];
-  }
-  if (areas.count != 1)
-    return @"native-page-url-unverified";
-  NSValue *web = bounds((__bridge AXUIElementRef)areas[0]);
+  NSValue *web = bounds((__bridge AXUIElementRef)area);
   if (!web)
     return @"native-content-frame-unavailable";
   CGRect content =
@@ -1365,9 +1508,9 @@ int main(int argc, const char **argv) {
         bool expired = active && !timely(monotonicMs(), activityDeadline, progressDeadline);
         CGDirectDisplayID display = activityDisplay;
         pthread_mutex_unlock(&activityLock);
-        NSString *failure = active ? check() : nil;
-        if (expired || failure || (active && display && !displayAvailable(display)))
-          invalidateActivityFor(lease, failure ?: (expired ? @"native-workflow-activity-expired" : @"activity-display-unavailable"), true);
+        checkActivityWatchdog(active ? lease : nil, expired, display,
+          ^{ return check(); }, ^bool(CGDirectDisplayID value) { return displayAvailable(value); },
+          ^(NSDictionary *expected, NSString *reason) { invalidateActivityFor(expected, reason, true); });
       }
     });
     dispatch_resume(activityWatchdog);
