@@ -89,6 +89,24 @@ test("暂停原因、人工继续与策略更新保留同一风险版本", async
     await expect.poll(() => gate.read().policy.minIntervalMs).toBe(8000);
     expect(gate.read().state).toBe("needs_action");
     await panel.screenshot({ path: info.outputPath("access-protection.png") });
+    gate.reportRisk({
+      reason: "query_manual_verification",
+      queryDiagnostic: {
+        eventId: "offline-diagnostic-restoration",
+        queryId: "offline-original-query",
+        code: "restoration_failed",
+        probeCode: "unsupported_condition",
+        restoration: "failed",
+        unsupportedFields: ["price_min"],
+        nextAction: "restore_original_query",
+      },
+    });
+    await expect(panel).toContainText("原条件、排序或页码未确认恢复");
+    await expect(panel).toContainText("下一步：恢复原条件、排序和页码");
+    await expect(panel).toContainText("需人工核对的字段：price_min");
+    await expect(resume).toBeDisabled();
+    await panel.getByText("访问节奏与诊断设置").click();
+    await panel.screenshot({ path: info.outputPath("query-restoration-required.png") });
     rejectRecovery = false;
     await panel.getByRole("checkbox", { name: "我已在绑定页面处理全部暂停原因" }).check();
     await resume.click();

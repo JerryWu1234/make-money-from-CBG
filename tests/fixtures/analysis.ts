@@ -167,6 +167,17 @@ export function analysisRecord(key = "a"): SavedRoleRecord {
       url: record.listing.url,
       formatVersion: 3,
       captureVersion: CAPTURE_VERSION,
+      valuation: {
+        version: 1,
+        fields: [],
+        issues: [],
+        source: {
+          serverId: record.listing.serverId,
+          eid: record.listing.eid,
+          holyLevel: 0,
+          assets: { iCash: 0, iSaving: 0, iLearnCash: 0, xianyu: 0 },
+        },
+      },
       equipmentCapture: {
         version: 1,
         collectedAt: record.detail!.collectedAt,
@@ -292,7 +303,9 @@ export function valuationRecord(key = "a"): SavedRoleRecord {
         { index: 8, kind: "skill", category: "技能", name: "神速", level: "0" },
       ],
     },
+    ...record.detail!.tabs.filter((tab) => ["坐骑", "锦衣/外观", "玩家之家"].includes(tab.name)),
   ];
+  record.detail!.sourceEvidence = fixtureFieldEvidence(record.detail!, record.listing);
   return record;
 }
 export function analysisResponse(

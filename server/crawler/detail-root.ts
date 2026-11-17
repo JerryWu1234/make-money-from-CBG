@@ -1,4 +1,4 @@
-import type { ElementHandle, Locator, Page } from "playwright-core";
+import type { ElementHandle, JSHandle, Locator, Page } from "playwright-core";
 import { MAIN_TABS } from "./detail-tabs";
 import { readDetailIdentity } from "./detail-identity";
 
@@ -263,13 +263,23 @@ export async function retainDetailLeaves<A, R extends { paths: string[] }>(
       if (disposed || roots.get(page) !== root || handles.length !== value.paths.length)
         throw incomplete();
       await assertDetailRoot(page);
+      let current: JSHandle<{ value: R; elements: Element[] }> | undefined;
       try {
+        // Keep the whole discovered set stable as well as each retained node.
+        // Appending an entry can leave every old path valid while omitting assets.
+        current = await root.element.evaluateHandle(
+          discover as (root: HTMLElement, arg: unknown) => { value: R; elements: Element[] },
+          arg,
+        );
         if (
-          !(await root.element.evaluate(
-            (element, { leaves, paths, rootSelector }) =>
+          !(await current.evaluate(
+            (next, { element, leaves, paths, rootSelector, expected }) =>
               element.isConnected &&
               element.ownerDocument === document &&
               document.querySelector(rootSelector) === element &&
+              JSON.stringify(next.value) === JSON.stringify(expected) &&
+              next.elements.length === leaves.length &&
+              next.elements.every((leaf, index) => leaf === leaves[index]) &&
               leaves.every(
                 (leaf, index) =>
                   leaf.isConnected &&
@@ -278,13 +288,21 @@ export async function retainDetailLeaves<A, R extends { paths: string[] }>(
                   element.querySelectorAll(paths[index]).length === 1 &&
                   element.querySelector(paths[index]) === leaf,
               ),
-            { leaves: handles, paths: value.paths, rootSelector: root.selector },
+            {
+              element: root.element,
+              leaves: handles,
+              paths: value.paths,
+              rootSelector: root.selector,
+              expected: value,
+            },
           ))
         )
           throw incomplete();
       } catch (error) {
         if (page.isClosed()) throw error;
         throw incomplete();
+      } finally {
+        await current?.dispose().catch(() => {});
       }
       if (roots.get(page) !== root || disposed) throw incomplete();
     };

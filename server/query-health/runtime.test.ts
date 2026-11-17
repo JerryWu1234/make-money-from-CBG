@@ -226,7 +226,9 @@ it.each(["verified", "unknown", "failed", "hard-block"])(
     if (scenario === "hard-block") {
       // A newer hard block owns the current pause; the old diagnostic is archive-only.
       expect(x.governor.read().queryDiagnostic).toBeUndefined();
-      expect(x.governor.read().reasons.some((reason) => reason.code === "query_blocked")).toBe(true);
+      expect(x.governor.read().reasons.some((reason) => reason.code === "query_blocked")).toBe(
+        true,
+      );
     } else expect(persisted).toEqual(x.governor.read().queryDiagnostic);
     expect(persisted.restoration).toBe(
       scenario === "verified" ? "verified" : scenario === "hard-block" ? "not_attempted" : "failed",

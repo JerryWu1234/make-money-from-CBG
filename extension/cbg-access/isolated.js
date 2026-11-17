@@ -3,6 +3,7 @@
   const pageId = crypto.randomUUID();
   let generation = 1,
     globals = {},
+    hasMainRender = false,
     business = [],
     revision = 0,
     lastUrl = location.href,
@@ -143,6 +144,7 @@
       generation++;
       nodes.clear();
       globals = {};
+      hasMainRender = false;
       business = [];
       marketAction = null;
       marketRequests.clear();
@@ -496,6 +498,7 @@
       visible: document.visibilityState === "visible",
       viewport: { width: innerWidth, height: innerHeight, scrollX, scrollY, dpr: devicePixelRatio },
       loading:
+        !hasMainRender ||
         document.readyState !== "complete" ||
         [
           ...document.querySelectorAll(
@@ -515,9 +518,11 @@
           ? "login"
           : /系统繁忙|访问过于频繁|请求过于频繁/.test(body)
             ? "busy"
-            : "normal",
+            : hasMainRender
+              ? "normal"
+              : "unknown",
       listing:
-        document.querySelector("#soldList") && !marketSnapshot
+        hasMainRender && document.querySelector("#soldList") && !marketSnapshot
           ? {
               page,
               totalPages: Number(pager.match(/共\s*(\d+)\s*页/)?.[1] || page),
@@ -577,7 +582,7 @@
       market: marketSnapshot,
       marketProduct,
       productState,
-      authenticated,
+      authenticated: hasMainRender ? authenticated : undefined,
       targetObservation: targetRect
         ? {
             actionId: actionContext.actionId,
@@ -687,6 +692,7 @@
       const value = event.data.value;
       if (value?.kind === "render") {
         globals = value.globals || {};
+        hasMainRender = true;
         capture();
       } else if (
         ["fetch", "xhr", "jsonp"].includes(value?.kind) &&
@@ -800,6 +806,7 @@
     stopped = false;
     lifecycle++;
     globals = {};
+    hasMainRender = false;
     business = [];
     lastListCommit = null;
     lastFingerprint = "";

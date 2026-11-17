@@ -19,7 +19,12 @@ const complete = () => {
       version: 1 as const,
       fields: [],
       issues: [],
-      source: { serverId: "367", eid: "item-a" },
+      source: {
+        serverId: "367",
+        eid: "item-a",
+        holyLevel: 0,
+        assets: { iCash: 0, iSaving: 0, iLearnCash: 0, xianyu: 0 },
+      },
     },
     equipmentCapture: {
       version: 1 as const,
@@ -463,7 +468,11 @@ it("六项师门不得入完整库，补全后才推进断点并保留归档源�
   const store = new CrawlStore(":memory:");
   const record = analysisRecord("school-contract");
   const partial = schoolCapture(6, 6);
-  partial.valuation!.source = { serverId: record.listing.serverId, eid: record.listing.eid };
+  partial.valuation!.source = {
+    ...partial.valuation!.source,
+    serverId: record.listing.serverId,
+    eid: record.listing.eid,
+  };
   partial.sourceEvidence = fixtureFieldEvidence(partial, record.listing);
   const point = {
     key: record.listing.key,
@@ -480,7 +489,11 @@ it("六项师门不得入完整库，补全后才推进断点并保留归档源�
     expect(store.checkpoint()).toBeUndefined();
     expect(store.detail(record.listing.key)).toMatchObject({ status: "failed" });
     const correctable = schoolCapture(6, 7);
-    correctable.valuation!.source = { serverId: record.listing.serverId, eid: record.listing.eid };
+    correctable.valuation!.source = {
+      ...correctable.valuation!.source,
+      serverId: record.listing.serverId,
+      eid: record.listing.eid,
+    };
     correctable.sourceEvidence = fixtureFieldEvidence(correctable, record.listing);
     expect(store.save(record.listing, correctable, point)).toBe(true);
     expect(store.count()).toBe(1);

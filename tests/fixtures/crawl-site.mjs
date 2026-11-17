@@ -1,4 +1,5 @@
 export const primaryPetSkill = "高级必杀";
+const currencyFixture = { iCash: 0, iSaving: 0, iLearnCash: 0, xianyu: 0 };
 
 const pages = { 1: ["a", "b"], 2: ["b", "c"] };
 
@@ -24,6 +25,9 @@ export const tabContent = {
   技能: "<p>主技能：150</p><p>烹饪技巧：140</p>",
   "道具/法宝":
     "<p>道具和法宝</p>" +
+    Object.entries({ iCash: "现金", iSaving: "存银", iLearnCash: "储备金", xianyu: "仙玉" })
+      .map(([key, name]) => `<p>${name}：${currencyFixture[key]}</p>`)
+      .join("") +
     gear("测试刀", "等级：160#r伤害：500#r特技：罗汉金钟") +
     gear("测试头盔", "等级：150#r防御：90#r宝石：12"),
   "召唤兽/孩子":
@@ -42,7 +46,7 @@ export const tabContent = {
 };
 
 export const detailDocument = (missing, mainTabs) =>
-  `<meta charset="utf-8"><script>var IsLogin=1;var LoginInfo={login:1,urs:'private-login-should-not-be-collected'};var EquipInfo={eid:'a',name:'测试角色',raw_info:{AllEquip:[{name:'测试刀',damage:500}],AllSummon:[{name:'测试吸血鬼',skills:['${primaryPetSkill}'],equips:[{name:'项圈',speed:20}]}]}};window.decode_desc=value=>value;window.RoleInfoParser=class{constructor(){this.raw_info={AllRider:{},jinjie_rider_info:{isJinJie:0},all_skills:{201:140},i3FlyLv:0};this.result={shenqi:false,basic_info:{is_gold_id:false}}}};window.visited=[];window.gearHovers=0;function selectPet(n){fetch('/mock-pet?n='+n).then(r=>r.text()).then(text=>document.querySelector('#petData').innerHTML=text)}function tab(name){window.visited.push(name);document.querySelector('#panel').innerText='正在读取…';fetch('/mock-tab?name='+encodeURIComponent(name)).then(r=>r.text()).then(text=>document.querySelector('#panel').innerHTML=text);}</script><p>顶部账号：private-login-should-not-be-collected</p><section id="role-detail"><nav>${mainTabs
+  `<meta charset="utf-8"><script>var IsLogin=1;var LoginInfo={login:1,urs:'private-login-should-not-be-collected'};var EquipInfo={eid:'a',name:'测试角色',raw_info:{AllEquip:[{name:'测试刀',damage:500}],AllSummon:[{name:'测试吸血鬼',skills:['${primaryPetSkill}'],equips:[{name:'项圈',speed:20}]}]}};window.decode_desc=value=>value;window.RoleInfoParser=class{constructor(){this.raw_info={AllRider:{},jinjie_rider_info:{isJinJie:0},all_skills:{201:140},i3FlyLv:0,...${JSON.stringify(currencyFixture)}};this.result={shenqi:false,basic_info:{is_gold_id:false}}}};window.visited=[];window.gearHovers=0;function selectPet(n){fetch('/mock-pet?n='+n).then(r=>r.text()).then(text=>document.querySelector('#petData').innerHTML=text)}function tab(name){window.visited.push(name);document.querySelector('#panel').innerText='正在读取…';fetch('/mock-tab?name='+encodeURIComponent(name)).then(r=>r.text()).then(text=>document.querySelector('#panel').innerHTML=text);}</script><p>顶部账号：private-login-should-not-be-collected</p><section id="role-detail"><nav>${mainTabs
     .filter((name) => !missing || name !== "玩家之家")
     .map((name) => `<button onclick="tab('${name}')">${name}</button>`)
     .join(

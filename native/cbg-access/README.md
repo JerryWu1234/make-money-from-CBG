@@ -13,7 +13,7 @@
 
    安装器使用系统 clang 构建 Objective-C 宿主，将程序放入当前用户的 `~/Library/Application Support/CBGAccess/`，并注册固定扩展 ID 的 Native Messaging 允许名单。不会修改浏览器配置或访问官网。
 
-3. 在 macOS 系统设置中为安装后的 `cbg-input` 授予辅助功能及输入监控权限。宿主只检查授权，不循环弹窗。读取 AX/DOM 证据不需要屏幕录制；状态接口另行报告屏幕录制权限。
+3. 在 macOS 系统设置中为实际宿主启动链的 TCC 责任程序授予辅助功能及输入监控权限。责任程序取决于启动方式，不能用终端直接运行 `cbg-input` 的权限代替 Chrome 扩展链的检查；本轮实机记录的责任身份是安装入口使用的 Node 可执行文件。可先核对安装目录 `launch-host` 固定的 Node 路径，再以真实宿主 `status` 和 TCC 归属为准。宿主只检查授权，不循环弹窗。读取 AX/DOM 证据不需要屏幕录制；状态接口另行报告屏幕录制权限。
 4. 服务中选择“扩展与 macOS 输入”。在官网完成登录和角色查询后，点击扩展按钮绑定当前标签页。再次点击立即停止输入。
 
 原生输入只在已绑定标签页、Chrome 前台窗口、解锁会话和有效访问许可下执行。用户鼠标/键盘输入、切窗或锁屏会停止输入；切回或解锁不会自动重放结果未知的动作。网站限制仍需通过项目的人工继续流程恢复，换模式不清除限制。
@@ -30,10 +30,12 @@ node native/cbg-access/install.mjs --uninstall
 
 ```sh
 clang -fobjc-arc -fblocks native/cbg-access/Input.m -o /private/tmp/cbg-input-check \
-  -framework Cocoa -framework ApplicationServices -framework IOKit
+  -framework Cocoa -framework ApplicationServices
 /private/tmp/cbg-input-check --self-test
 ```
 
 自检不投递输入。模拟页面测试、协议故障测试与原生编译记录在代码测试中；真实权限授予、AX 在不同 Chrome/macOS 版本的可用性和实际 OS 输入仍须在隔离环境验证。缺少可独立核验的 AX 目标、原生入口、范围、坐标或动作结果时明确返回不支持/未知，并保留进度。
+
+实机记录及可复现的隔离脚本见[交付记录](../../docs/cbg-pr77-six-step-delivery.md)与[原生故障场景](../../docs/native-os-fault-scenarios.md)。正常helper已按当前display mode的物理/逻辑维度校验Retina倍率，非0屏幕旋转明确拒绝；读取Chrome应用级AXRole完成标准只读握手，再严格核对唯一页面URL和实际命中。用户已取消任务执行及等待期间的自动防休眠，不再申请系统防休眠断言；活动状态与ACK使用`active`表示有效输入授权。用户抢占、权限/显示器变化、活动过期、停止、取消或断连仍会撤销授权。历史IOPM/pmset实机记录保留为旧需求证据，不能作为当前验收要求。原始抢占元数据仅作诊断，不据来源PID、零位移或时间早晚豁免事件。
 
 扩展只接受本地有限语义计划，不提供任意脚本、系统命令、下单或支付。MAIN 的旁路数据不能指定最终点击坐标；ISOLATED 重新解析目标，原生端再核验内容区、AX 语义和屏幕坐标。网页 DOM 本身仍受网页控制，这不构成对被完全篡改网站的防御保证。

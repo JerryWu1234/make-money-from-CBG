@@ -40,6 +40,7 @@ try {
   const { collectPets } = await load("server/crawler/pets.ts");
   const { collectDetail, MAIN_TABS } = await load("server/crawler/detail.ts");
   const { retainDetailRoot } = await load("server/crawler/detail-root.ts");
+  const { captureIssues } = await load("server/crawler/capture-readiness.ts");
   const { prepareList, gotoPage, hoverListing, readListings } =
     await load("server/crawler/page.ts");
   const { CrawlStore } = await load("server/crawler/store.ts");
@@ -81,10 +82,12 @@ try {
     let body = listDocument;
     if (url.pathname === "/equip") {
       detailRequests++;
-      body = detailDocument(url.searchParams.get("eid") === "missing", MAIN_TABS).replace(
-        "var EquipInfo={eid:",
-        "var EquipInfo={server_id:367,eid:",
-      );
+      body = detailDocument(url.searchParams.get("eid") === "missing", MAIN_TABS)
+        .replace(
+          "var EquipInfo={eid:'a',",
+          `var EquipInfo={server_id:${JSON.stringify(url.searchParams.get("s"))},eid:${JSON.stringify(url.searchParams.get("eid"))},`,
+        )
+        .replace("AllRider:{}", "AllRider:{fixture:{iGrow:230,exgrow:0,mattrib:'力量'}}");
     } else if (url.pathname === "/mock-list") {
       await new Promise((resolve) => setTimeout(resolve, 250));
       body = listHtml(Number(url.searchParams.get("page")));
@@ -103,6 +106,12 @@ try {
               `<img width="30" height="30" data_skill_type="school_skill" data_equip_name="测试师门${index}" data_equip_level="140">`,
           ).join("");
     }
+    // The website renders the item name on its own line and expands #r in its
+    // tooltip. Preserve that layout now that equipment is read on demand.
+    body = body.replaceAll(
+      "getAttribute('data_equip_name')+' '+this.parentElement.getAttribute('data_equip_desc')",
+      "getAttribute('data_equip_name')+'\\n'+this.parentElement.getAttribute('data_equip_desc').replaceAll('#r','\\n');(window.gearHoverNames ||= []).push(this.parentElement.getAttribute('data_equip_name'))",
+    );
     await route.fulfill({ contentType: "text/html; charset=utf-8", body });
   });
   const listPage = await createHiddenPage(browser),
@@ -157,8 +166,24 @@ try {
     page: (number) => gotoPage(listPage, number, control.signal),
     onShelf: async () => true,
     hover: (item) => hoverListing(listPage, item, control.signal),
-    detail: (item) =>
-      collectDetail(detailPage, item, control.signal, (message) => progress.push(message)),
+    detail: async (item) => {
+      const detail = await collectDetail(detailPage, item, control.signal, (message) =>
+        progress.push(message),
+      );
+      assert.deepEqual(captureIssues(detail, true, true, item), []);
+      assert.equal(detail.sourceEvidence.serverId, item.serverId);
+      assert.equal(detail.sourceEvidence.eid, item.eid);
+      assert.match(detail.sourceEvidence.initialRevision, /^[a-f0-9]{64}$/);
+      assert.equal(detail.sourceEvidence.finalRevision, detail.sourceEvidence.initialRevision);
+      assert.equal(detail.sourceEvidence.stable, true);
+      for (const name of ["坐骑", "锦衣/外观", "玩家之家"])
+        assert.ok(
+          detail.sourceEvidence.fields.some(
+            (field) => field.path === `tabs.${name}.content` && field.state === "observed",
+          ),
+        );
+      return detail;
+    },
   };
   await crawl(source, store, control.signal, (state) => states.push(state));
   assert.equal(detailRequests, 1);
@@ -185,7 +210,13 @@ try {
     assert.ok(petTab.pets[n].equipment[0].description.includes("速度：" + (20 + n)));
     assert.equal(petTab.pets[n].innerSkills[0].level, "5");
   }
-  assert.equal(await detailPage.evaluate(() => window.gearHovers), 0);
+  const expectedGearReads = [
+    "测试刀",
+    "测试头盔",
+    ...Array.from({ length: 8 }, (_, n) => "宝宝项圈" + (n + 1)),
+  ];
+  assert.deepEqual(await detailPage.evaluate(() => window.gearHoverNames), expectedGearReads);
+  assert.equal(await detailPage.evaluate(() => window.gearHovers), expectedGearReads.length);
   assert.ok(!JSON.stringify(saved).includes("通用功效"));
   assert.deepEqual(saved.detail.raw, {});
   assert.ok(!JSON.stringify(saved).includes("private-login-should-not-be-collected"));
@@ -216,7 +247,7 @@ try {
   assert.ok(hovered.filter((id) => id === "b").length >= 2);
   assert.equal(saved.listing.attrs.mouse_over_begin, undefined);
   console.log(
-    "PASS: actual hidden pages hover list metadata, visit seven tabs + subtabs + all eight pets, read gear core attributes without hover, follow pagination and commit SQLite",
+    "PASS: actual hidden pages hover list metadata, visit seven tabs + subtabs + all eight pets, read each exact gear tooltip on demand, follow pagination and commit SQLite with matching source revisions",
   );
   await crawl(source, store, control.signal, () => {});
   assert.equal(detailRequests, 1);

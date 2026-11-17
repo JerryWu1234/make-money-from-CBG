@@ -55,7 +55,7 @@ async function fixture(holdRotation = false) {
   let unknownInput = false;
   let helperResume: Message | undefined;
   let extensionResume: Message | undefined;
-  let assertion: Message | undefined;
+  let grant: Message | undefined;
   let holdFreshSnapshot = false;
   let freshBinding: Message | undefined;
   let holdOldEnd = false;
@@ -146,7 +146,7 @@ async function fixture(holdRotation = false) {
           message.command === "activity-begin" &&
           message.activity.stopEpoch > 0
         )
-          assertion = message;
+          grant = message;
         else queueMicrotask(() => acknowledgeHelper(message));
       },
     },
@@ -177,7 +177,7 @@ async function fixture(holdRotation = false) {
         ok: true,
         actionId: message.actionId,
         activityId: message.activity.activityId,
-        awake: message.command !== "activity-end",
+        active: message.command !== "activity-end",
       });
     else if (message.command === "resume" || message.command === "status")
       helperResult({ ok: true, actionId: message.actionId });
@@ -347,7 +347,7 @@ async function fixture(holdRotation = false) {
     drain,
     helperResume: () => helperResume,
     extensionResume: () => extensionResume,
-    assertion: () => assertion,
+    grant: () => grant,
     ackHelperResume: () => {
       expect(helperResume).toBeDefined();
       acknowledgeHelper(helperResume!);
@@ -359,21 +359,21 @@ async function fixture(holdRotation = false) {
       extensionResume = undefined;
     },
     ackAssertion: () => {
-      expect(assertion).toBeDefined();
-      acknowledgeHelper(assertion!);
-      assertion = undefined;
+      expect(grant).toBeDefined();
+      acknowledgeHelper(grant!);
+      grant = undefined;
       holdRotation = false;
     },
-    denyAssertion: () => {
-      expect(assertion).toBeDefined();
+    denyActivityGrant: () => {
+      expect(grant).toBeDefined();
       helperResult({
         ok: false,
-        actionId: assertion!.actionId,
-        activityId: assertion!.activity.activityId,
-        awake: false,
-        error: "isolated-assertion-denied",
+        actionId: grant!.actionId,
+        activityId: grant!.activity.activityId,
+        active: false,
+        error: "isolated-activity-grant-denied",
       });
-      assertion = undefined;
+      grant = undefined;
     },
     deferOldEnd: () => {
       holdOldEnd = true;
@@ -400,7 +400,7 @@ async function fixture(holdRotation = false) {
   };
 }
 
-it("native anomaly waits for old end, both new-epoch resume ACKs and the new assertion before query/execute; Canary stays manual", async () => {
+it("native anomaly waits for old end, both new-epoch resume ACKs and the new grant before query/execute; Canary stays manual", async () => {
   const f = await fixture(true);
   f.deferOldEnd();
   const operation = f.start();
@@ -420,11 +420,11 @@ it("native anomaly waits for old end, both new-epoch resume ACKs and the new ass
   expect(f.helperInputs()).toHaveLength(0);
   f.ackHelperResume();
   await drain();
-  expect(f.assertion()).toBeUndefined();
+  expect(f.grant()).toBeUndefined();
   expect(f.helperInputs()).toHaveLength(0);
   f.ackExtensionResume();
   await drain();
-  expect(f.assertion()?.activity.stopEpoch).toBe(1);
+  expect(f.grant()?.activity.stopEpoch).toBe(1);
   expect(f.helperInputs()).toHaveLength(0);
   f.ackAssertion();
   await rejected;
@@ -477,7 +477,7 @@ it("manual stop while the new epoch is awaiting ACK cannot authorize or replay i
   await drain();
   await rejected;
   expect(f.helperInputs()).toHaveLength(0);
-  expect(f.assertion()).toBeUndefined();
+  expect(f.grant()).toBeUndefined();
   expect(f.host.activities.current).toBeNull();
   expect(f.host.authority.stopped).toBe(true);
   expect(f.governor.read().state).toBe("needs_action");
@@ -537,7 +537,7 @@ it("an unconfirmed posted diagnostic input is not replayed or continued into Can
   ).toBe(0);
 });
 
-it("a denied new-epoch assertion never posts diagnostic input and archives a manual outcome", async () => {
+it("a denied new-epoch grant never posts diagnostic input and archives a manual outcome", async () => {
   const f = await fixture(true);
   const operation = f.start();
   const rejected = expect(operation).rejects.toThrow();
@@ -545,8 +545,8 @@ it("a denied new-epoch assertion never posts diagnostic input and archives a man
   f.ackExtensionResume();
   f.ackHelperResume();
   await drain();
-  expect(f.assertion()).toBeDefined();
-  f.denyAssertion();
+  expect(f.grant()).toBeDefined();
+  f.denyActivityGrant();
   await rejected;
   expect(f.helperInputs()).toHaveLength(0);
   expect(f.host.activities.current).toBeNull();
@@ -606,7 +606,7 @@ it("a late diagnostic suspension from a completed workflow cannot end the next w
   }
 });
 
-it("a diagnostic rotation holds its new awake assertion and heartbeat while fresh binding evidence is delayed", async () => {
+it("a diagnostic rotation holds its new activity grant and heartbeat while fresh binding evidence is delayed", async () => {
   const f = await fixture(true);
   f.deferFreshSnapshot();
   const operation = f.start();
@@ -615,7 +615,7 @@ it("a diagnostic rotation holds its new awake assertion and heartbeat while fres
   f.ackHelperResume();
   f.ackExtensionResume();
   await drain();
-  expect(f.assertion()?.activity.stopEpoch).toBe(1);
+  expect(f.grant()?.activity.stopEpoch).toBe(1);
   f.ackAssertion();
   await drain();
   expect(f.host.activities.current?.granted).toBe(true);

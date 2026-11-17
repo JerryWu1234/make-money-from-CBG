@@ -40,13 +40,29 @@ function fixture(initial?: unknown) {
       handlers[name] = fn;
     },
   });
-  const port = {
-    postMessage: (message: unknown) => sent.push(structuredClone(message)),
-    onDisconnect: event("disconnect"),
-    onMessage: event("native"),
+  const ports: any[] = [];
+  const connectNative = () => {
+    const local: Record<string, (...args: any[]) => any> = {};
+    const connection = {
+      disconnected: false,
+      handlers: local,
+      postMessage: (message: unknown) => {
+        if (connection.disconnected) throw new Error("disconnected-port");
+        sent.push(structuredClone(message));
+      },
+      disconnect: () => (connection.disconnected = true),
+      onDisconnect: {
+        addListener: (fn: (...args: any[]) => any) => (handlers.disconnect = local.disconnect = fn),
+      },
+      onMessage: {
+        addListener: (fn: (...args: any[]) => any) => (handlers.native = local.native = fn),
+      },
+    };
+    ports.push(connection);
+    return connection;
   };
   const chrome = {
-    runtime: { id: "extension", connectNative: () => port, onMessage: event("snapshot") },
+    runtime: { id: "extension", connectNative, onMessage: event("snapshot") },
     storage: {
       local: {
         get: async () => ({ bridge: structuredClone(saved) }),
@@ -127,6 +143,7 @@ function fixture(initial?: unknown) {
     );
   return {
     handlers,
+    ports,
     sent,
     tabMessages,
     observerTokens,
@@ -152,6 +169,110 @@ const sender = {
   url: "https://xyq.cbg.163.com/cgi-bin/equipquery.py?act=role",
 };
 describe("MV3 trust boundary and durable outbox", () => {
+  it.each(["size", "buffer"])(
+    "%s failure closes the Native connection before persistence and fences a pending proof",
+    async (failure) => {
+      const outbox =
+        failure === "buffer"
+          ? Array.from({ length: 128 }, (_, index) => ({
+              version: 1,
+              connectionEpoch: "connection",
+              messageId: `pending-${index}`,
+              sequence: index + 1,
+              kind: "snapshot",
+              payload: {},
+            }))
+          : [];
+      const f = fixture({
+        version: 1,
+        connectionEpoch: "connection",
+        nextSequence: outbox.length + 1,
+        outbox,
+        bound: {
+          tabId: 1,
+          windowId: 1,
+          pageId: "page-1",
+          pageGeneration: 1,
+          observerToken: "active-observer",
+        },
+        stopped: false,
+        authority: { stopEpoch: 0, browserSessionEpoch: "session" },
+      });
+      await settle();
+      f.deferProof();
+      f.handlers.native({
+        kind: "command",
+        command: "execute",
+        plan: {
+          actionId: "pending-input",
+          pageId: "page-1",
+          pageGeneration: 1,
+          stopEpoch: 0,
+          browserSessionEpoch: "session",
+          target: { kind: "query-field", field: "price_min", value: "1" },
+        },
+      });
+      await settle();
+      expect(f.tabMessages.some((message) => message.kind === "revalidate")).toBe(true);
+      f.holdNext("save");
+      const rejected = f.snapshot(sender, {
+        pageId: "page-1",
+        pageGeneration: 1,
+        ...(failure === "size" ? { text: "x".repeat(451000) } : {}),
+      });
+      await settle();
+      expect(f.ports[0].disconnected).toBe(true);
+      f.releaseProof({ ok: true, proof: { actionId: "pending-input", targetVersion: "one" } });
+      await settle();
+      expect(f.sent.some((message) => message.kind === "command-proof")).toBe(false);
+      f.release();
+      expect(await rejected).toMatchObject({
+        ok: false,
+        error: failure === "size" ? "bridge-message-size" : "bridge-buffer-full",
+      });
+      expect(f.saved()).toMatchObject({ stopped: true, observing: false });
+      expect(f.saved().outbox).toHaveLength(outbox.length);
+      expect(f.observerTokens.has(1)).toBe(false);
+    },
+  );
+  it("late messages and disconnect from a failed port cannot stop or command a fresh binding", async () => {
+    const f = fixture();
+    await f.bind();
+    const oldPort = f.ports[0];
+    await f.snapshot(sender, { pageId: "page-1", pageGeneration: 1, text: "x".repeat(451000) });
+    // Acknowledge the existing bound message after reconnect, then bind a new tab.
+    f.handlers.alarm({ name: "cbg-flush" });
+    await settle();
+    const pending = f.saved().outbox[0];
+    if (pending) f.handlers.native({ ...pending, kind: "ack" });
+    await settle();
+    await f.bind(2);
+    const freshPort = f.ports.at(-1);
+    const token = f.observerTokens.get(2);
+    oldPort.handlers.disconnect();
+    oldPort.handlers.native({ kind: "command", command: "stop", actionId: "old-port-stop" });
+    await settle();
+    expect(freshPort).not.toBe(oldPort);
+    expect(freshPort.disconnected).toBe(false);
+    expect(f.saved()).toMatchObject({ stopped: false, bound: { tabId: 2 } });
+    expect(f.observerTokens.get(2)).toBe(token);
+  });
+  it("a stop held on persistence cannot reply through a new Native connection", async () => {
+    const f = fixture();
+    await f.bind();
+    f.holdNext("save");
+    f.handlers.native({ kind: "command", command: "stop", actionId: "old-held-stop" });
+    await settle();
+    f.ports[0].handlers.disconnect();
+    await settle();
+    await f.bind(2);
+    const token = f.observerTokens.get(2);
+    f.release();
+    await settle();
+    expect(f.saved()).toMatchObject({ stopped: false, bound: { tabId: 2 } });
+    expect(f.observerTokens.get(2)).toBe(token);
+    expect(f.sent.some((message) => message.actionId === "old-held-stop")).toBe(false);
+  });
   it.each(["get", "bind"])(
     "an old observe held at %s cannot stop a newer successful resume",
     async (stage) => {

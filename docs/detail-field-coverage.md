@@ -38,6 +38,10 @@
 
 每条记录的 state 为 observed、explicit-empty 或 unknown。动态字段表用于保留实际读取的全部字段，另由师门、装备、宝宝完整性契约及三个正文必需项判断完整性，不把“列出了已有字段”当作“缺失字段不存在”。原文 getter 或序列化失败也保留此前已读标签和失败原因。
 
+角色解析来源的 `holyLevel` 与 `assets.iCash/iSaving/iLearnCash/xianyu` 分别记录字段来源；缺失、类型错误、非有限值或负数均为 unknown，并逐项记录 issues，阻止完整保存。化圣层数还须为 0 至 9 的整数；合法 0 表示明确未化圣。货币沿用非负有限数值契约，明确余额 0 为 observed，不把缺值或 false 当作 0；explicit-empty 仍用于有明确无资产证据的清单/正文。人物详情标签或角色解析组（如 riders、advancedMount、allSkills、hasArtifact）建立角色上下文，不凭普通市场商品的 serverId/eid/价格要求人物资产；source组全部缺失不能豁免人物详情的必需字段。
+
+当前v10角色的完整保存与复用会重验原始数值和五条唯一的 `official-role-parser/observed` 子字段记录，不信任归档的空 issues 或旧 assets 汇总记录。字段表须为版本1，商品身份与目标listing一致；没有listing时用有效官网详情URL或独立估值身份核验，两者冲突则拒绝。initialRevision/finalRevision须为相同的非空64位十六进制哈希且stable严格为true，旧归档伪stable、错商品或空/不同哈希均不能作为完整证据。
+
 ## 完整离线样本与证据边界
 
 `tests/fixtures/complete-role.mjs` 在页面渲染和采集前登记同一份独立期望账本：人物名称/175级/修炼25/25/气血5000、七师门及辅助/生活技能、身上武器与仓库头盔各一件（含提示框额外命中/魔法字段）、两只宝宝（每只六资质、成长、两个技能、一个装备、一个五层内丹）、两只普通坐骑、孩子、锦衣/祥瑞、房屋/庭院及四项货币。页面原始解析数据与期望账本独立传入真实采集器。

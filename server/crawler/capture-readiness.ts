@@ -4,6 +4,7 @@ import { crawlAccessFailure } from "./types";
 import { completeSchoolSkillsFromText, schoolSkillsComplete } from "./school-skills";
 import { isCurrentRoleCapture, roleIdentityIssues } from "./role-identity";
 import { browserConnectionFailure } from "../browser-connection";
+import { isRoleValuationSource, ROLE_NUMERIC_FIELDS, roleNumericIssues } from "./valuation-source";
 import { fieldEvidence } from "./field-evidence";
 
 export class IncompleteCaptureError extends Error {
@@ -82,6 +83,64 @@ function hasSchoolSkillContract(detail: RoleDetail) {
   );
 }
 
+function fieldEvidenceIdentityIssues(
+  detail: RoleDetail,
+  listing?: Pick<Listing, "serverId" | "eid">,
+) {
+  const issues: string[] = [];
+  const evidence = detail.sourceEvidence;
+  let address: Pick<Listing, "serverId" | "eid"> | undefined;
+  try {
+    const url = new URL(detail.url);
+    const identity = {
+      serverId: url.searchParams.get("s") || "",
+      eid: url.searchParams.get("eid") || "",
+    };
+    if (
+      url.origin === "https://xyq.cbg.163.com" &&
+      url.pathname === "/equip" &&
+      !url.username &&
+      !url.password &&
+      !roleIdentityIssues(identity).length
+    )
+      address = identity;
+  } catch {
+    /* A validated valuation identity can independently identify historical fixtures. */
+  }
+  const observed = !roleIdentityIssues(detail.valuation?.source).length
+    ? (detail.valuation!.source as { serverId: string; eid: string })
+    : undefined;
+  const expected = listing || observed || address;
+  if (!expected || roleIdentityIssues(expected).length)
+    issues.push("详情字段来源商品身份无法独立核验，需补采");
+  if (
+    !listing &&
+    observed &&
+    address &&
+    (observed.serverId !== address.serverId || observed.eid !== address.eid)
+  )
+    issues.push("详情URL与角色来源商品身份冲突，需补采");
+  if (
+    !evidence ||
+    roleIdentityIssues(evidence).length ||
+    !expected ||
+    evidence.serverId !== expected.serverId ||
+    evidence.eid !== expected.eid
+  )
+    issues.push("详情字段来源商品身份与目标不一致或缺失，需补采");
+  if (!evidence || evidence.version !== 1 || !Array.isArray(evidence.fields))
+    issues.push("详情逐字段来源结构未核验，需补采");
+  if (
+    !evidence ||
+    evidence.stable !== true ||
+    !/^[a-f0-9]{64}$/i.test(evidence.initialRevision || "") ||
+    !/^[a-f0-9]{64}$/i.test(evidence.finalRevision || "") ||
+    evidence.initialRevision !== evidence.finalRevision
+  )
+    issues.push("详情字段来源源版本无效或不一致，需补采");
+  return issues;
+}
+
 function normalizeSchoolSkillCapture(detail: RoleDetail): RoleDetail {
   if (!hasSchoolSkillContract(detail)) return detail;
   const tabs = detail.tabs.map(completeSchoolSkillsFromText);
@@ -110,6 +169,13 @@ export function captureIssues(
   listing?: Pick<Listing, "serverId" | "eid">,
 ): string[] {
   const issues = [...(detail.valuation?.issues || [])];
+  const evidenceFields = Array.isArray(detail.sourceEvidence?.fields)
+    ? detail.sourceEvidence.fields
+    : [];
+  const roleContext =
+    detail.tabs.some((tab) => tab.name === "人物/修炼") ||
+    isRoleValuationSource(detail.valuation?.source || {});
+  const roleEvidenceRequired = roleContext && (requireEvidence || isCurrentRoleCapture(detail));
   if (requireEvidence && !detail.sourceEvidence)
     issues.push("详情字段来源和源版本尚未核验，需补采");
   for (const tab of detail.tabs)
@@ -124,8 +190,8 @@ export function captureIssues(
   if (detail.sourceEvidence && includeAssets) {
     for (const name of ["坐骑", "锦衣/外观", "玩家之家"])
       if (
-        !detail.sourceEvidence.fields.some(
-          (field) => field.path === `tabs.${name}.content` && field.state !== "unknown",
+        !evidenceFields.some(
+          (field) => field?.path === `tabs.${name}.content` && field.state !== "unknown",
         )
       )
         issues.push(`「${name}」正文或明确无资产证据未完整读取，需补采`);
@@ -135,6 +201,21 @@ export function captureIssues(
   if (requireEvidence && !detail.valuation) issues.push("角色本体资料未核验");
   if (isCurrentRoleCapture(detail))
     issues.push(...roleIdentityIssues(detail.valuation?.source, listing));
+  if (roleEvidenceRequired) {
+    const source = detail.valuation?.source || {};
+    issues.push(...fieldEvidenceIdentityIssues(detail, listing));
+    issues.push(...roleNumericIssues(source, true));
+    for (const field of ROLE_NUMERIC_FIELDS) {
+      const records =
+        evidenceFields.filter((entry) => entry?.path === `valuation.source.${field.path}`) || [];
+      if (
+        records.length !== 1 ||
+        records[0].source !== "official-role-parser" ||
+        records[0].state !== "observed"
+      )
+        issues.push(`${field.name}（${field.path}）逐字段来源未核验，需补采`);
+    }
+  }
   if (hasSchoolSkillContract(detail)) {
     if (!schoolSkillsComplete(detail.tabs, detail.valuation?.source))
       issues.push(

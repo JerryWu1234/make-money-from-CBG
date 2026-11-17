@@ -17,6 +17,8 @@ import { DatabaseSync } from "node:sqlite";
 import { AccessGovernor, type AccessContext } from "../access";
 import { bindQueryPage } from "../query-health/runtime";
 import { ListingUnavailableError } from "./types";
+import { createHash } from "node:crypto";
+import { fieldEvidence } from "./field-evidence";
 
 vi.mock("./detail", () => ({
   MAIN_TABS: ["人物/修炼", "技能", "道具/法宝", "召唤兽/孩子", "坐骑", "锦衣/外观", "玩家之家"],
@@ -195,27 +197,7 @@ it("统一读取入口将导航中的登录地址分类为访问暂停，不增�
 });
 
 it("完整详情通过校验后才记录读取完成", async () => {
-  const complete = {
-    tabs: [],
-    raw: {},
-    url: "https://xyq.cbg.163.com/equip",
-    collectedAt: "now",
-    captureVersion: CAPTURE_VERSION,
-    valuation: {
-      version: 1,
-      fields: [],
-      issues: [],
-      source: { serverId: item.serverId, eid: item.eid },
-    },
-    equipmentCapture: {
-      version: 1,
-      collectedAt: "now",
-      complete: true,
-      issues: [],
-      emptyProof: "explicit-text",
-    },
-    petCapture: { version: 1, collectedAt: "now", complete: true, issues: [] },
-  } as RoleDetail;
+  const complete = reusableDetail();
   vi.mocked(collectDetail).mockResolvedValue(complete);
   const opts = options();
   await expect(collectRole(page, item, opts)).resolves.toBe(complete);
@@ -356,11 +338,24 @@ it("无法切换上架倒序的真实失败仍记录原错，不冒充可恢复�
   expect(opts.log).not.toHaveBeenCalledWith("list.selling_order_unavailable", expect.anything());
 });
 
-const reusableDetail = (): RoleDetail => ({
-  tabs: ["人物/修炼", "技能", "道具/法宝", "召唤兽/孩子", "坐骑", "锦衣/外观", "玩家之家"].map(
-    (name) => ({
+const reusableDetail = (listing: Pick<Listing, "serverId" | "eid"> = item): RoleDetail => {
+  const content: Record<string, string> = {
+    "人物/修炼": "名称：测试角色\n等级：175\n攻击修炼：25/25",
+    技能:
+      "师门技能\n" +
+      Array.from({ length: 7 }, (_, index) => `150\n师门${index}`).join("\n") +
+      "\n生活技能",
+    "道具/法宝": "无装备",
+    "召唤兽/孩子": "召唤兽(0/10)\n无召唤兽",
+    坐骑: "无坐骑",
+    "锦衣/外观": "无锦衣\n无祥瑞",
+    玩家之家: "无房屋\n无庭院",
+  };
+  const detail: RoleDetail = {
+    tabs: Object.entries(content).map(([name, text]) => ({
       name,
-      text: "已读",
+      text,
+      contentText: text,
       fields: [],
       tables: [],
       elements: [],
@@ -375,28 +370,55 @@ const reusableDetail = (): RoleDetail => ({
               level: "150",
             }))
           : [],
-    }),
-  ),
-  raw: {},
-  url: item.url,
-  collectedAt: "saved-at",
-  captureVersion: CAPTURE_VERSION,
-  captureMode: "all",
-  valuation: {
-    version: 1,
-    fields: [],
-    issues: [],
-    source: { serverId: item.serverId, eid: item.eid },
-  },
-  equipmentCapture: {
-    version: 1,
+    })),
+    raw: {},
+    url: `https://xyq.cbg.163.com/equip?s=${listing.serverId}&eid=${listing.eid}`,
     collectedAt: "saved-at",
-    complete: true,
-    issues: [],
-    emptyProof: "explicit-text",
-  },
-  petCapture: { version: 1, collectedAt: "saved-at", complete: true, issues: [] },
-});
+    captureVersion: CAPTURE_VERSION,
+    captureMode: "all",
+    valuation: {
+      version: 1,
+      fields: [],
+      issues: [],
+      source: {
+        serverId: listing.serverId,
+        eid: listing.eid,
+        holyLevel: 0,
+        assets: { iCash: 0, iSaving: 0, iLearnCash: 0, xianyu: 0 },
+      },
+    },
+    equipmentCapture: {
+      version: 1,
+      collectedAt: "saved-at",
+      complete: true,
+      issues: [],
+      emptyProof: "explicit-text",
+    },
+    petCapture: { version: 1, collectedAt: "saved-at", complete: true, issues: [] },
+  };
+  // Synthetic source proof belongs to this exact fixture body and product identity.
+  const revision = createHash("sha256")
+    .update(
+      JSON.stringify({
+        ...listing,
+        captureVersion: detail.captureVersion,
+        tabs: detail.tabs,
+        raw: detail.raw,
+        valuation: detail.valuation,
+      }),
+    )
+    .digest("hex");
+  detail.sourceEvidence = {
+    version: 1,
+    serverId: listing.serverId,
+    eid: listing.eid,
+    initialRevision: revision,
+    finalRevision: revision,
+    stable: true,
+    fields: fieldEvidence(detail.tabs, detail.valuation),
+  };
+  return detail;
+};
 it("初次导航网络变化先重置旧文档再重试，重试仍经过开页队列", async () => {
   const original = new Error(
     "page.goto: net::ERR_NETWORK_CHANGED at https://xyq.cbg.163.com/equip?s=367&eid=abc",
@@ -504,13 +526,7 @@ it("六个在途详情共用五秒开页间隔，读取仍可并行，补位也�
   vi.mocked(collectDetail).mockImplementation(async (_page, listing) => {
     starts.push(Date.now() - beginning);
     await reading;
-    return {
-      ...reusableDetail(),
-      valuation: {
-        ...reusableDetail().valuation!,
-        source: { serverId: listing.serverId, eid: listing.eid },
-      },
-    };
+    return reusableDetail(listing);
   });
   const makePage = () =>
     ({ ...page, close: vi.fn().mockResolvedValue(undefined) }) as unknown as Page;
@@ -562,13 +578,7 @@ it("38个详情排队超过180秒仍能开页，最后一件从开页起保留�
       });
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
-    return {
-      ...reusableDetail(),
-      valuation: {
-        ...reusableDetail().valuation!,
-        source: { serverId: listing.serverId, eid: listing.eid },
-      },
-    };
+    return reusableDetail(listing);
   });
   const close = vi.fn().mockResolvedValue(undefined);
   const makePage = () => ({ ...page, close }) as unknown as Page;

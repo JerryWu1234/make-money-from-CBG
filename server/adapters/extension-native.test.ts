@@ -10,7 +10,8 @@ function fixture() {
   let epoch = 0,
     sequence = 0,
     dispatches = 0,
-    assertionGranted = true,
+    activityGranted = true,
+    legacyAwakeOnly = false,
     holdRenewals = false,
     holdEnds = false;
   const runtime = new ExtensionNativeRuntime({
@@ -41,10 +42,10 @@ function fixture() {
           void internals.receive({
             kind: "input-result",
             actionId: message.actionId,
-            ok: assertionGranted,
-            awake: message.command !== "end",
+            ok: activityGranted,
+            ...(legacyAwakeOnly ? { awake: true } : { active: message.command !== "end" }),
             activityId: message.activity.activityId,
-            error: assertionGranted ? undefined : "native-awake-assertion-create-failed",
+            error: activityGranted ? undefined : "native-activity-grant-failed",
           });
         });
       if (message.kind === "resume" && !message.context?.recoveryEpoch)
@@ -95,8 +96,11 @@ function fixture() {
       epoch = next;
     },
     dispatches: () => dispatches,
-    denyAssertion: () => {
-      assertionGranted = false;
+    denyActivityGrant: () => {
+      activityGranted = false;
+    },
+    legacyAwakeOnly: () => {
+      legacyAwakeOnly = true;
     },
     holdRenewals: () => {
       holdRenewals = true;
@@ -108,11 +112,11 @@ function fixture() {
 }
 afterEach(() => vi.useRealTimers());
 describe("extension-native runtime fences and observation", () => {
-  it("binding and idle hold no assertion; a failed awake grant prevents any input", async () => {
+  it("binding and idle hold no activity; a failed activity grant prevents any input", async () => {
     const f = fixture();
     await f.bind();
     expect(f.writes.filter((write) => write.kind === "activity")).toHaveLength(0);
-    f.denyAssertion();
+    f.denyActivityGrant();
     const before = await f.runtime.snapshot();
     await expect(
       f.runtime.execute({
@@ -121,9 +125,44 @@ describe("extension-native runtime fences and observation", () => {
         target: { kind: "refresh-list", url: before.url },
         expected: { kind: "page", page: 1 },
       }),
-    ).rejects.toThrow("assertion-create-failed");
+    ).rejects.toThrow("activity-grant-failed");
     expect(f.writes.filter((write) => write.command === "execute")).toHaveLength(0);
     expect(f.runtime.status().stopped).toBe(true);
+    f.db.close();
+  });
+  it("a legacy awake-only ACK cannot grant input authorization", async () => {
+    const f = fixture();
+    await f.bind();
+    f.legacyAwakeOnly();
+    await expect(f.runtime.activity.begin(new AbortController().signal)).rejects.toThrow(
+      "输入活动授权申请失败",
+    );
+    expect(f.runtime.status().stopped).toBe(true);
+    expect(f.writes.some((message) => message.command === "execute")).toBe(false);
+    f.db.close();
+  });
+  it("a matching end ACK that still claims active cannot confirm authorization revocation", async () => {
+    const f = fixture();
+    await f.bind();
+    const activity = await f.runtime.activity.begin(new AbortController().signal);
+    f.holdEnds(true);
+    const closing = activity.close();
+    const rejected = expect(closing).rejects.toThrow("活动结束未确认");
+    await Promise.resolve();
+    await Promise.resolve();
+    const ended = f.writes
+      .filter((message) => message.kind === "activity" && message.command === "end")
+      .at(-1);
+    await f.internals.receive({
+      kind: "input-result",
+      actionId: ended.actionId,
+      activityId: ended.activity.activityId,
+      ok: true,
+      active: true,
+    });
+    await rejected;
+    expect(f.runtime.status().stopped).toBe(true);
+    expect(f.writes.some((message) => message.command === "execute")).toBe(false);
     f.db.close();
   });
   it("retains the activity throughout a page wait and releases only after business confirmation", async () => {
@@ -177,7 +216,7 @@ describe("extension-native runtime fences and observation", () => {
       kind: "input-result",
       actionId: pendingRenewal.actionId,
       ok: true,
-      awake: true,
+      active: true,
       activityId: pendingRenewal.activity.activityId,
     });
     await operation;
@@ -191,10 +230,10 @@ describe("extension-native runtime fences and observation", () => {
     const f = fixture();
     await f.bind();
     const activity = await f.runtime.activity.begin(new AbortController().signal);
-    f.denyAssertion();
+    f.denyActivityGrant();
     await expect(
       f.internals.queueActivityRenew(f.internals.workflowActivity, "confirmed-business"),
-    ).rejects.toThrow("assertion-create-failed");
+    ).rejects.toThrow("activity-grant-failed");
     expect(f.runtime.status().stopped).toBe(true);
     expect(f.risks).toHaveLength(1);
     expect(activity.signal.aborted).toBe(true);

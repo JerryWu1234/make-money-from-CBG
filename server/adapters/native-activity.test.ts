@@ -34,7 +34,7 @@ function fixture() {
     },
   };
 }
-it("binding and idle grant no activity; input requires a successful assertion ACK", () => {
+it("binding and idle grant no activity; input requires a successful activity grant ACK", () => {
   const x = fixture();
   expect(x.activity.accepts(x.lease, x.authority)).toBe(false);
   x.activity.begin(x.lease, x.authority);

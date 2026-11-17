@@ -1,0 +1,40 @@
+{
+  "capturedAt": "2026-11-15T14:32:48.545500+00:00",
+  "sandbox": "require_escalated",
+  "testMacros": [],
+  "request": {
+    "command": "status",
+    "actionId": "read-only-unsandboxed-permission-preflight"
+  },
+  "exitCode": 0,
+  "records": [
+    {
+      "kind": "input-ready",
+      "version": 1
+    },
+    {
+      "actionId": "read-only-unsandboxed-permission-preflight",
+      "activity": {
+        "assertionId": 0,
+        "awake": 0,
+        "expired": 0,
+        "lease": {}
+      },
+      "ok": true,
+      "permissions": {
+        "accessibility": 1,
+        "displayAvailable": true,
+        "frontmostChrome": true,
+        "inputMonitorActive": true,
+        "inputMonitoring": true,
+        "locked": false,
+        "screenRecording": true
+      }
+    }
+  ],
+  "stderr": "",
+  "requestedActivity": false,
+  "requestedInput": false,
+  "scope": "Real production helper read-only permission preflight after the user enabled Input Monitoring; before the JSON boolean serialization fix. No activity or input command was sent.",
+  "binarySha256": "6c055406c1e63c2e52c3ed149d543a94424a65e76f4114cd14a08d9d69c5828b"
+}

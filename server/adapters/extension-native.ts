@@ -35,9 +35,108 @@ import { CaptureDeadlineError } from "../crawler/capture-readiness";
 import { classifyBusinessResponse } from "../access/response-classifier";
 import { collectNativeDetail } from "./native-capture";
 import { ROLE_SERVER_TYPES } from "../role-search";
+import {
+  ROLE_DIAGNOSTIC_FIELDS,
+  validRoleDiagnosticValue,
+  type RoleDiagnosticControl,
+  type RoleDiagnosticField,
+} from "../query-health/role-list-diagnostics";
 
 const textValue = (value: unknown, fallback = "") =>
   typeof value === "string" ? value.slice(0, 2000) : fallback;
+
+const roleQueryValue = (
+  field: RoleDiagnosticField,
+  value: unknown,
+  control: RoleDiagnosticControl,
+): string | undefined => {
+  if (typeof value !== "string" && (typeof value !== "number" || !Number.isFinite(value)))
+    return undefined;
+  const text = String(value);
+  if (!validRoleDiagnosticValue(field, text, control)) return undefined;
+  return text === "" ? "" : String(Number(text));
+};
+
+const ROLE_QUERY_DIMENSIONS = ["serverid", "server_type"] as const;
+type RoleQueryDimension = (typeof ROLE_QUERY_DIMENSIONS)[number];
+const roleQueryDimensionValue = (field: RoleQueryDimension, value: unknown) => {
+  if (typeof value !== "string" && (typeof value !== "number" || !Number.isFinite(value)))
+    return undefined;
+  const text = String(value).trim();
+  if (field === "serverid") return /^\d{0,8}$/.test(text) ? text : undefined;
+  const types = text.split(",");
+  return types.every((type) => ROLE_SERVER_TYPES.includes(type)) &&
+    new Set(types).size === types.length
+    ? types.sort().join(",")
+    : undefined;
+};
+
+function submittedRoleQueryControls(snapshot: PageSnapshot) {
+  const fields: Partial<Record<RoleDiagnosticField, string>> = {};
+  for (const field of ROLE_DIAGNOSTIC_FIELDS) {
+    const control = snapshot.roleQueryControls?.[field];
+    if (control === undefined) continue; // Only controls independently observed in the form.
+    const value =
+      control && typeof control.value === "string"
+        ? roleQueryValue(field, control.value, control)
+        : undefined;
+    if (value === undefined)
+      throw new UnsupportedAdapterOperation(`角色查询字段 ${field} 的实际值未核验`);
+    fields[field] = value;
+  }
+  const dimensions: Partial<Record<RoleQueryDimension, string>> = {};
+  for (const field of ROLE_QUERY_DIMENSIONS) {
+    const observed = snapshot.roleQueryDimensions?.[field];
+    if (observed === undefined) continue;
+    const value =
+      typeof observed === "string" ? roleQueryDimensionValue(field, observed) : undefined;
+    if (value === undefined)
+      throw new UnsupportedAdapterOperation(`角色查询维度 ${field} 的实际值未核验`);
+    dimensions[field] = value;
+  }
+  return { fields, dimensions };
+}
+
+function roleQuerySubmissionMatches(
+  snapshot: PageSnapshot,
+  submitted: ReturnType<typeof submittedRoleQueryControls>,
+) {
+  const fieldsMatch = ROLE_DIAGNOSTIC_FIELDS.every((field) => {
+    if (!Object.hasOwn(submitted.fields, field)) return true;
+    const control = snapshot.roleQueryControls?.[field];
+    if (
+      !control ||
+      typeof control.value !== "string" ||
+      !snapshot.queryArgs ||
+      Array.isArray(snapshot.queryArgs)
+    )
+      return false;
+    // A cleared form may omit an argument; an observed numeric zero remains distinct.
+    const argument = Object.hasOwn(snapshot.queryArgs, field) ? snapshot.queryArgs[field] : "";
+    return (
+      roleQueryValue(field, control.value, control) === submitted.fields[field] &&
+      roleQueryValue(field, argument, control) === submitted.fields[field]
+    );
+  });
+  return (
+    fieldsMatch &&
+    ROLE_QUERY_DIMENSIONS.every((field) => {
+      if (!Object.hasOwn(submitted.dimensions, field)) return true;
+      const observed = snapshot.roleQueryDimensions?.[field];
+      const argument =
+        snapshot.queryArgs && Object.hasOwn(snapshot.queryArgs, field)
+          ? snapshot.queryArgs[field]
+          : "";
+      return (
+        typeof observed === "string" &&
+        !!snapshot.queryArgs &&
+        !Array.isArray(snapshot.queryArgs) &&
+        roleQueryDimensionValue(field, observed) === submitted.dimensions[field] &&
+        roleQueryDimensionValue(field, argument) === submitted.dimensions[field]
+      );
+    })
+  );
+}
 
 export interface NativeRuntimeOptions {
   db: DatabaseSync;
@@ -102,7 +201,11 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
   >();
   private readonly pending = new Map<
     string,
-    { resolve: (value: Record<string, unknown>) => void; reject: (error: Error) => void }
+    {
+      requestKind: "status" | "other";
+      resolve: (value: Record<string, unknown>) => void;
+      reject: (error: Error) => void;
+    }
   >();
   private socket?: Socket;
   private server?: Server;
@@ -193,11 +296,11 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
       });
       if (
         !result.ok ||
-        result.awake !== true ||
+        result.active !== true ||
         result.activityId !== state.lease.activityId ||
         this.workflowActivity !== state
       )
-        throw new Error(textValue(result.error, "防休眠断言申请失败，禁止输入"));
+        throw new Error(textValue(result.error, "输入活动授权申请失败，禁止输入"));
       signal.throwIfAborted();
       state.timer = setInterval(() => {
         if (state.pending || state.closed || state.suspended) return;
@@ -217,7 +320,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
           await state.pending;
           if (this.workflowActivity !== state) return;
           this.workflowActivity = undefined;
-          if (state.suspended) return; // The assertion was already released at the pause boundary.
+          if (state.suspended) return; // Input authorization was already revoked at the pause boundary.
           try {
             const ended = await this.request({
               kind: "activity",
@@ -225,7 +328,8 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
               actionId: randomUUID(),
               activity: state.lease,
             });
-            if (!ended.ok) throw new Error(textValue(ended.error, "活动结束未确认"));
+            if (!ended.ok || ended.active !== false || ended.activityId !== state.lease.activityId)
+              throw new Error(textValue(ended.error, "活动结束未确认"));
           } catch (error) {
             if (
               this.activityEpoch === state.lease.authorizationEpoch &&
@@ -295,7 +399,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     });
     if (
       !result.ok ||
-      result.awake !== true ||
+      result.active !== true ||
       result.activityId !== lease.activityId ||
       this.workflowActivity !== state
     )
@@ -353,7 +457,8 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
         actionId: randomUUID(),
         activity: state.lease,
       });
-      if (!ended.ok) throw new Error("诊断前释放原生活动未确认");
+      if (!ended.ok || ended.active !== false || ended.activityId !== state.lease.activityId)
+        throw new Error("诊断前释放原生活动未确认");
     } catch (error) {
       await this.failActivity("诊断前释放原生活动失败", state.lease);
       throw error;
@@ -423,13 +528,13 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
       });
       if (
         !granted.ok ||
-        granted.awake !== true ||
+        granted.active !== true ||
         granted.activityId !== state.lease.activityId ||
         this.workflowActivity !== state ||
         this.stopped ||
         this.options.stopEpoch() !== plan.stopEpoch
       )
-        throw new Error("诊断防休眠断言未获准，禁止输入");
+        throw new Error("诊断输入活动授权未获准，禁止输入");
       state.suspended = false;
       state.timer = setInterval(() => {
         if (state.pending || state.closed || state.suspended) return;
@@ -578,8 +683,13 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
       if (message.reason !== "server-stop") this.idle = false;
       this.stopped = true;
       this.reason = String(message.reason);
-      for (const pending of this.pending.values()) pending.reject(new Error(this.reason));
-      this.pending.clear();
+      for (const [id, pending] of this.pending) {
+        // An earlier stop notification may overtake a new read-only status request.
+        // Keep waiting for its real, same-action reply; never preserve input authorization.
+        if (message.reason === "server-stop" && pending.requestKind === "status") continue;
+        this.pending.delete(id);
+        pending.reject(new Error(this.reason));
+      }
       this.events.emit("change");
       if (activity && message.reason !== "server-stop") {
         try {
@@ -964,6 +1074,8 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
         reject(new Error("原生输入回执未知，禁止自动重放"));
       }, timeoutMs);
       this.pending.set(id, {
+        requestKind:
+          message.kind === "command" && message.command === "status" ? "status" : "other",
         resolve: (value) => {
           clearTimeout(timer);
           resolve(value);
@@ -1088,6 +1200,17 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
           activity = this.workflowActivity!;
           plan = { ...plan, activity: { ...activity.lease } };
         }
+        let submittedRoleControls: ReturnType<typeof submittedRoleQueryControls> | undefined;
+        if (plan.target.kind === "query" && plan.expected.kind === "page") {
+          const submitting = await this.snapshot(plan.pageId);
+          if (
+            submitting.context.pageGeneration !== plan.pageGeneration ||
+            submitting.context.browserSessionEpoch !== plan.browserSessionEpoch ||
+            plan.stopEpoch !== this.options.stopEpoch()
+          )
+            throw new Error("角色查询提交时页面或授权代次已变化");
+          submittedRoleControls = submittedRoleQueryControls(submitting);
+        }
         this.startDetailReadBudget();
         this.activePlan = plan;
         const abort = () => {
@@ -1191,6 +1314,11 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
                 )
                   return false;
                 if (plan.target.kind === "sort" && value.listing.order !== plan.target.value)
+                  return false;
+                if (
+                  submittedRoleControls &&
+                  !roleQuerySubmissionMatches(value, submittedRoleControls)
+                )
                   return false;
                 return (
                   value.context.pageId !== before.context.pageId ||

@@ -39,7 +39,7 @@ it.each(["official-map", "missing-map"])(
         <textarea id="equip_desc_value">synthetic-five-skills</textarea></section><script>
         window.EquipInfo={server_id:299,eid:"sparse-fixture"};window.decode_desc=x=>x;
         window.RoleInfoParser=class {constructor(){
-          this.raw_info={AllRider:{},all_skills:${JSON.stringify(allSkills)},i3FlyLv:0};
+          this.raw_info={AllRider:{},all_skills:${JSON.stringify(allSkills)},i3FlyLv:0,iCash:0,iSaving:0,iLearnCash:0,xianyu:0};
           this.result={shenqi:false,basic_info:{is_gold_id:false}};
           ${mode === "official-map" ? `this.conf={skill:{school_skill:${JSON.stringify(mapping)}}};` : ""}
         }};</script>`);
@@ -94,7 +94,7 @@ it.each(["lexical", "equip", "conflict", "partial-conflict", "array-config", "id
       await page.setContent(`<section id="detail-fixture"><p>价格：￥100</p>
         <textarea id="equip_desc_value">fixture</textarea></section><script>${script}
         window.decode_desc=x=>x;
-        window.RoleInfoParser=class {constructor(){${mode === "identity-changes" ? 'window.EquipInfo.eid="different-role";' : ""}this.raw_info={AllRider:{},jinjie_rider_info:{isJinJie:0},all_skills:{},i3FlyLv:0};this.result={shenqi:false,basic_info:{is_gold_id:false}}}};
+        window.RoleInfoParser=class {constructor(){${mode === "identity-changes" ? 'window.EquipInfo.eid="different-role";' : ""}this.raw_info={AllRider:{},jinjie_rider_info:{isJinJie:0},all_skills:{},i3FlyLv:0,iCash:0,iSaving:0,iLearnCash:0,xianyu:0};this.result={shenqi:false,basic_info:{is_gold_id:false}}}};
         </script>`);
       await retainDetailRoot(page, page.locator("#detail-fixture"));
       const capture = await captureValuation(page);

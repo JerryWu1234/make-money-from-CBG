@@ -64,7 +64,7 @@ async function fixture() {
             kind: "input-result",
             actionId: message.actionId,
             ok: true,
-            awake: message.command !== "end",
+            active: message.command !== "end",
             activityId: message.activity.activityId,
           });
         });

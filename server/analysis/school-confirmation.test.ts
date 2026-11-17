@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import { analysisResponse, valuationRecord } from "../../tests/fixtures/analysis";
+import {
+  analysisResponse,
+  fixtureFieldEvidence,
+  valuationRecord,
+} from "../../tests/fixtures/analysis";
 import { CrawlStore } from "../crawler/store";
 import type { SavedRoleRecord } from "../crawler/types";
 import { AnalysisStore } from "./store";
@@ -38,13 +42,15 @@ function currentAscendedRecord() {
   const record = ascendedRecord();
   record.listing.eid = "school-a";
   record.listing.url = "https://xyq.cbg.163.com/equip?s=367&eid=school-a";
+  record.detail!.url = record.listing.url;
   record.detail!.captureMode = "all";
   record.detail!.valuation = {
     version: 1,
     fields: [],
     issues: [],
-    source: { serverId: "367", eid: "school-a" },
+    source: { ...record.detail!.valuation!.source, serverId: "367", eid: "school-a" },
   };
+  record.detail!.sourceEvidence = fixtureFieldEvidence(record.detail!, record.listing);
   return record;
 }
 

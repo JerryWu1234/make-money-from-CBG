@@ -20,6 +20,14 @@ import { captureIssues, IncompleteCaptureError } from "./capture-readiness";
 import { cleanDiagnostic } from "../diagnostics";
 import { CrawlStore } from "./store";
 
+// Equipment-focused cases still provide explicit normal parser values; missing
+// identity overrides below deliberately bypass this complete-source fixture.
+const normalRoleSource = vi.hoisted(() => (identity: Record<string, unknown>) => ({
+  ...identity,
+  holyLevel: 0,
+  assets: { iCash: 0, iSaving: 0, iLearnCash: 0, xianyu: 0 },
+}));
+
 vi.mock("./page", async (original) => ({
   ...(await original<typeof import("./page")>()),
   pace: async () => {},
@@ -29,7 +37,7 @@ vi.mock("./valuation-capture", () => ({
     version: 1,
     fields: [],
     issues: [],
-    source: { serverId: "367", eid: "equipment-fixture" },
+    source: normalRoleSource({ serverId: "367", eid: "equipment-fixture" }),
   })),
 }));
 
@@ -96,7 +104,7 @@ const fixture = (
     eid: publicSource.eid || listing.eid,
   };
   const source = identity
-    ? `<textarea id="equip_desc_value" hidden>${JSON.stringify({ ...identity, role: "fixture-role-source" })}</textarea><script>window.EquipInfo=${JSON.stringify(identity)}</script>`
+    ? `<textarea id="equip_desc_value" hidden>${JSON.stringify({ ...identity, role: "fixture-role-source", i3FlyLv: 0, iCash: 0, iSaving: 0, iLearnCash: 0, xianyu: 0 })}</textarea><script>window.EquipInfo=${JSON.stringify(identity)}</script>`
     : "";
   const assetBodies: Record<string, string> = {
     坐骑: "<p>坐骑：新资料</p><p>坐骑成长：2.3</p>",
@@ -402,10 +410,12 @@ describe("装备局部补采", () => {
         expect(error.detail.tabs.map((tab) => tab.name)).toEqual(MAIN_TABS);
         expect(error.detail.equipmentCapture?.complete).toBe(true);
         expect(error.detail.petCapture?.complete).toBe(true);
-        expect(error.detail.valuation?.source).toEqual({
-          serverId: listing.serverId,
-          eid: listing.eid,
-        });
+        expect(error.detail.valuation?.source).toEqual(
+          normalRoleSource({
+            serverId: listing.serverId,
+            eid: listing.eid,
+          }),
+        );
         expect(captureIssues(error.detail, true, true, listing)).toEqual(
           expect.arrayContaining([
             expect.stringContaining(
@@ -1322,12 +1332,14 @@ describe("装备局部补采", () => {
       version: 1,
       fields: [],
       issues: [],
-      source: await page.evaluate(() => {
-        const info = (
-          window as unknown as Window & { EquipInfo: { server_id: string; eid: string } }
-        ).EquipInfo;
-        return { serverId: info.server_id, eid: info.eid };
-      }),
+      source: normalRoleSource(
+        await page.evaluate(() => {
+          const info = (
+            window as unknown as Window & { EquipInfo: { server_id: string; eid: string } }
+          ).EquipInfo;
+          return { serverId: info.server_id, eid: info.eid };
+        }),
+      ),
     }));
     try {
       const page = await context.newPage();
@@ -1363,7 +1375,7 @@ describe("装备局部补采", () => {
         version: 1,
         fields: [],
         issues: [],
-        source: { serverId: "367", eid: "equipment-fixture" },
+        source: normalRoleSource({ serverId: "367", eid: "equipment-fixture" }),
       }));
     }
   }, 30000);
@@ -1388,7 +1400,7 @@ describe("装备局部补采", () => {
         version: 1,
         fields: [],
         issues: [],
-        source: { serverId: "367", eid: foreign.eid },
+        source: normalRoleSource({ serverId: "367", eid: foreign.eid }),
       });
       const old = structuredClone(await collectDetail(page, foreign, new AbortController().signal));
       const oldSkills = old.tabs.find((tab) => tab.name === "技能")!.items!;
@@ -1406,7 +1418,9 @@ describe("装备局部补采", () => {
         log: vi.fn(),
       });
       const result = await source.detail(listing);
-      expect(result.valuation!.source).toEqual({ serverId: "367", eid: "equipment-fixture" });
+      expect(result.valuation!.source).toEqual(
+        normalRoleSource({ serverId: "367", eid: "equipment-fixture" }),
+      );
       const names = result.tabs
         .find((tab) => tab.name === "技能")!
         .items!.map((skill) => skill.name);
@@ -2137,6 +2151,11 @@ describe("装备局部补采", () => {
           .join("\n");
         const gear = `<div id="RoleEquip"><img width="40" height="40" data_equip_name="${name}" data_equip_type="31301" data_equip_location="role_using_equip_6" data_equip_desc="${description}" data_tip_box="WornRawTipsBox" onmouseover="document.getElementById('WornRawTipsBox').style.display='block'"><div id="WornRawTipsBox" style="display:none;white-space:pre-line">${tooltip}</div></div>`;
         const raw = {
+          i3FlyLv: 0,
+          iCash: 0,
+          iSaving: 0,
+          iLearnCash: 0,
+          xianyu: 0,
           AllEquip: {
             6: {
               iType: 31301,
@@ -2222,6 +2241,11 @@ describe("装备局部补采", () => {
           server_id: listing.serverId,
           eid: listing.eid,
           role: "fixture-role-source",
+          i3FlyLv: 0,
+          iCash: 0,
+          iSaving: 0,
+          iLearnCash: 0,
+          xianyu: 0,
         }),
       });
       expect(saved.raw).toEqual({ AllSummon: [{ name: "旧宝宝原始数据" }] });

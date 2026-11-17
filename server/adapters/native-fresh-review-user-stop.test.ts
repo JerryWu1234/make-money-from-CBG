@@ -24,7 +24,7 @@ async function fixture() {
             kind: "input-result",
             actionId: message.actionId,
             activityId: message.activity?.activityId,
-            awake: message.command !== "end",
+            active: message.command !== "end",
             ok: true,
           }),
         );

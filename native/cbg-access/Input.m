@@ -1,14 +1,87 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <Cocoa/Cocoa.h>
-#import <IOKit/pwr_mgt/IOPMLib.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <mach/mach_time.h>
 
+#ifndef CBG_INPUT_STARTUP_TIMEOUT_MS
+#define CBG_INPUT_STARTUP_TIMEOUT_MS 5000
+#endif
+// Compile-only monitor backend for protocol/startup regressions. It never posts OS input.
+#ifdef CBG_INPUT_TEST_MONITOR
+#ifndef CBG_INPUT_TEST_MONITOR_DELAY_MS
+#define CBG_INPUT_TEST_MONITOR_DELAY_MS 0
+#endif
+#ifndef CBG_INPUT_TEST_MONITOR_READY
+#define CBG_INPUT_TEST_MONITOR_READY 1
+#endif
+#define CGEventPost(...) ((void)0)
+#endif
+
 static const int64_t marker = 0x43424741;
-static _Atomic bool stopped = false, preempted = false, tapReady = false;
-static IOPMAssertionID awake = 0;
+static _Atomic bool stopped = false, preempted = false, tapReady = false, ownsInput = false;
+_Static_assert(ATOMIC_LLONG_LOCK_FREE == 2 && ATOMIC_INT_LOCK_FREE == 2 && ATOMIC_BOOL_LOCK_FREE == 2,
+  "event tap diagnostics require lock-free atomics");
+static mach_timebase_info_data_t inputTimebase;
+static _Atomic uint64_t inputGrantAtNs = 0, inputGrantEpoch = 0;
+static _Atomic uint64_t grantPointerXBits = 0, grantPointerYBits = 0;
+static _Atomic bool grantPointerAvailable = false;
+static _Atomic unsigned preemptionRecordState = 0, firstPreemptionType = 0;
+static _Atomic uint64_t firstEventAtNs = 0, firstCallbackAtNs = 0, firstGrantAtNs = 0, firstGrantEpoch = 0;
+static _Atomic int64_t firstSourcePid = 0, firstUserData = 0;
+static _Atomic int64_t firstSourceStateID = 0, firstMouseDeltaX = 0, firstMouseDeltaY = 0;
+static _Atomic uint64_t firstMouseXBits = 0, firstMouseYBits = 0, firstGrantPointerXBits = 0, firstGrantPointerYBits = 0;
+static _Atomic bool firstOwnedInput = false, firstTapDisabled = false;
+static _Atomic bool firstHasMouse = false, firstMouseLocationAvailable = false, firstGrantPointerAvailable = false;
+_Static_assert(sizeof(double) == sizeof(uint64_t), "diagnostic coordinates use lock-free uint64 bit storage");
+static uint64_t coordinateBits(double value) {
+  union { double coordinate; uint64_t bits; } storage = {.coordinate = value};
+  return storage.bits;
+}
+static double coordinateValue(uint64_t bits) {
+  union { double coordinate; uint64_t bits; } storage = {.bits = bits};
+  return storage.coordinate;
+}
+typedef struct {
+  uint32_t type;
+  uint64_t timestampNs;
+  int64_t sourcePid, userData, sourceStateID, deltaX, deltaY;
+  CGPoint location;
+  bool hasMouse, locationAvailable;
+} InputEventMetadata;
+static uint64_t inputAbsoluteNs(void) {
+  return (uint64_t)((__uint128_t)mach_absolute_time() * inputTimebase.numer / inputTimebase.denom);
+}
+static NSDictionary *inputPreemptionDiagnostic(void) {
+  if (atomic_load_explicit(&preemptionRecordState, memory_order_acquire) != 2) return @{};
+  NSMutableDictionary *value = [@{@"diagnosticSchema": @2,
+    @"recordScope": @"first-preemption-in-helper-process", @"helperPid": @(getpid()),
+    @"eventType": @(atomic_load(&firstPreemptionType)),
+    @"eventTimestampNs": [NSString stringWithFormat:@"%llu", (unsigned long long)atomic_load(&firstEventAtNs)],
+    @"callbackTimestampNs": [NSString stringWithFormat:@"%llu", (unsigned long long)atomic_load(&firstCallbackAtNs)],
+    @"grantTimestampNs": [NSString stringWithFormat:@"%llu", (unsigned long long)atomic_load(&firstGrantAtNs)],
+    @"authorizationEpoch": @(atomic_load(&firstGrantEpoch)),
+    @"sourcePid": @(atomic_load(&firstSourcePid)), @"userData": @(atomic_load(&firstUserData)),
+    @"sourceStateID": @(atomic_load(&firstSourceStateID)),
+    @"ownsInput": @(atomic_load(&firstOwnedInput)), @"tapDisabled": @(atomic_load(&firstTapDisabled)),
+    @"coordinateSource": @"CGEventGetLocation-global-display-coordinates",
+    @"deltaSource": @"kCGMouseEventDeltaX/Y-since-prior-mouse-movement",
+    @"grantPointerAvailable": @(atomic_load(&firstGrantPointerAvailable))} mutableCopy];
+  if (atomic_load(&firstGrantPointerAvailable))
+    value[@"grantPointer"] = @{@"x": @(coordinateValue(atomic_load(&firstGrantPointerXBits))),
+      @"y": @(coordinateValue(atomic_load(&firstGrantPointerYBits)))};
+  if (atomic_load(&firstHasMouse)) {
+    NSMutableDictionary *mouse = [@{@"deltaX": @(atomic_load(&firstMouseDeltaX)),
+      @"deltaY": @(atomic_load(&firstMouseDeltaY)),
+      @"locationAvailable": @(atomic_load(&firstMouseLocationAvailable))} mutableCopy];
+    if (atomic_load(&firstMouseLocationAvailable))
+      mouse[@"location"] = @{@"x": @(coordinateValue(atomic_load(&firstMouseXBits))),
+        @"y": @(coordinateValue(atomic_load(&firstMouseYBits)))};
+    value[@"mouse"] = mouse;
+  }
+  return value;
+}
 static bool postedAny = false;
 static double proofDeadline = 0;
 static uint64_t acceptedGeneration = 0;
@@ -28,7 +101,6 @@ static double monotonicMs(void) {
   return (double)mach_continuous_time() * timebase.numer / timebase.denom / 1000000.0;
 }
 static bool timely(double now, double lease, double progress) { return now < lease && now < progress; }
-static bool assertionCreated(IOReturn result, IOPMAssertionID value) { return result == kIOReturnSuccess && value != kIOPMNullAssertionID; }
 static bool displayAvailable(CGDirectDisplayID display) {
   return display != kCGNullDirectDisplay && CGDisplayIsOnline(display) && CGDisplayIsActive(display) && !CGDisplayIsAsleep(display);
 }
@@ -64,6 +136,9 @@ static CFMachPortRef activeMonitorTap = NULL;
 static pthread_mutex_t monitorLock = PTHREAD_MUTEX_INITIALIZER;
 static bool monitorState(bool ready, bool enabled) { return ready && enabled; }
 static bool inputMonitorActive(void) {
+#ifdef CBG_INPUT_TEST_MONITOR
+  return monitorState(tapReady, tapReady);
+#else
   pthread_mutex_lock(&monitorLock);
   CFMachPortRef tap = activeMonitorTap;
   if (tap)
@@ -73,6 +148,7 @@ static bool inputMonitorActive(void) {
   if (tap)
     CFRelease(tap);
   return monitorState(tapReady, enabled);
+#endif
 }
 static id attr(AXUIElementRef el, CFStringRef name) {
   CFTypeRef value = NULL;
@@ -164,11 +240,46 @@ static bool mapCssRect(CGRect content, CGRect css, double width, double height,
                        css.size.width * sx, css.size.height * sy);
   return CGRectContainsRect(content, *mapped);
 }
-static void releaseAwake(void) {
-  if (awake) {
-    IOPMAssertionRelease(awake);
-    awake = 0;
+typedef struct {
+  double pointWidth, pointHeight, pixelWidth, pixelHeight, rotation;
+} NativeDisplayMode;
+static bool displayScaleMatches(CGSize desktop, NativeDisplayMode mode,
+                                double cssScale, double dpr) {
+  if (!isfinite(desktop.width + desktop.height + mode.pointWidth + mode.pointHeight +
+      mode.pixelWidth + mode.pixelHeight + mode.rotation + cssScale + dpr) ||
+      desktop.width <= 0 || desktop.height <= 0 || mode.pointWidth <= 0 ||
+      mode.pointHeight <= 0 || mode.pixelWidth <= 0 || mode.pixelHeight <= 0 ||
+      cssScale <= 0 || dpr <= 0 || fabs(mode.rotation) > 0.001 ||
+      fabs(desktop.width - mode.pointWidth) > 0.5 ||
+      fabs(desktop.height - mode.pointHeight) > 0.5) return false;
+  // Use pixel/point dimensions from the same mode, never mix rotated axes.
+  double backingX = mode.pixelWidth / mode.pointWidth,
+         backingY = mode.pixelHeight / mode.pointHeight;
+  return isfinite(backingX + backingY) && fabs(backingX - backingY) <= 0.02 &&
+    fabs(dpr - backingX * cssScale) <= 0.15;
+}
+// Lifecycle callers hold activityLock. The event tap only reads this atomic
+// mirror and never waits for lifecycle system calls or touches Objective-C state.
+static void publishInputOwnership(void) {
+  bool granted = activeActivity != nil;
+  if (granted) {
+    atomic_store(&inputGrantEpoch, [activeActivity[@"authorizationEpoch"] unsignedLongLongValue]);
+    atomic_store(&inputGrantAtNs, inputAbsoluteNs());
   }
+  atomic_store_explicit(&ownsInput, granted, memory_order_release);
+}
+static void captureGrantPointer(void) {
+  // Ordinary grant thread only. A snapshot is read, never posted or modified.
+  CGEventRef snapshot = CGEventCreate(NULL);
+  CGPoint point = snapshot ? CGEventGetLocation(snapshot) : CGPointZero;
+  bool available = snapshot && isfinite(point.x + point.y);
+  atomic_store(&grantPointerXBits, coordinateBits(point.x));
+  atomic_store(&grantPointerYBits, coordinateBits(point.y));
+  atomic_store(&grantPointerAvailable, available);
+  if (snapshot) CFRelease(snapshot);
+}
+static void releaseInputOwnership(void) {
+  atomic_store_explicit(&ownsInput, false, memory_order_release);
 }
 static void invalidateActivityFor(NSDictionary *expected, NSString *reason, bool notify) {
   pthread_mutex_lock(&activityLock);
@@ -179,19 +290,21 @@ static void invalidateActivityFor(NSDictionary *expected, NSString *reason, bool
   activeActivity = nil;
   activityDeadline = progressDeadline = 0;
   activityDisplay = kCGNullDirectDisplay;
-  releaseAwake();
+  releaseInputOwnership();
   pthread_mutex_unlock(&activityLock);
   stopped = true;
   if (notify && activityId) writeResult(@{@"kind": @"activity-invalidated", @"activityId": activityId,
     @"authorizationEpoch": invalidated[@"authorizationEpoch"], @"stopEpoch": invalidated[@"stopEpoch"],
     @"browserSessionEpoch": invalidated[@"browserSessionEpoch"], @"hostGeneration": invalidated[@"hostGeneration"],
-    @"hostInstanceEpoch": invalidated[@"hostInstanceEpoch"], @"reason": reason});
+    @"hostInstanceEpoch": invalidated[@"hostInstanceEpoch"], @"reason": reason,
+    @"inputPreemption": inputPreemptionDiagnostic()});
 }
 static void invalidateActivity(NSString *reason, bool notify) { invalidateActivityFor(nil, reason, notify); }
 static NSDictionary *activityStatus(void) {
   pthread_mutex_lock(&activityLock);
-  NSDictionary *value = @{@"awake": @(awake != 0), @"assertionId": @(awake), @"lease": activeActivity ?: @{},
-    @"expired": @(activeActivity && !timely(monotonicMs(), activityDeadline, progressDeadline))};
+  NSDictionary *value = @{@"active": @((bool)(activeActivity && ownsInput && !stopped && !preempted &&
+      timely(monotonicMs(), activityDeadline, progressDeadline))), @"lease": activeActivity ?: @{},
+    @"expired": @((bool)(activeActivity && !timely(monotonicMs(), activityDeadline, progressDeadline)))};
   pthread_mutex_unlock(&activityLock);
   return value;
 }
@@ -202,7 +315,7 @@ static bool sameActivity(NSDictionary *lease) {
 }
 static NSString *activityFailure(NSDictionary *lease) {
   pthread_mutex_lock(&activityLock);
-  NSString *error = !sameActivity(lease) || !awake ? @"native-workflow-activity-required" :
+  NSString *error = !sameActivity(lease) || !ownsInput ? @"native-workflow-activity-required" :
     !timely(monotonicMs(), activityDeadline, progressDeadline) ? @"native-workflow-activity-expired" : nil;
   pthread_mutex_unlock(&activityLock);
   return error;
@@ -218,7 +331,7 @@ static NSString *activityCommand(NSDictionary *request) {
   NSString *error = nil;
   if ([command isEqual:@"activity-end"]) {
     if (!sameActivity(lease)) error = @"stale-native-activity-end";
-    else { activeActivity = nil; activityDeadline = progressDeadline = 0; releaseAwake(); }
+    else { activeActivity = nil; activityDeadline = progressDeadline = 0; releaseInputOwnership(); }
   } else {
     double now = NSDate.date.timeIntervalSince1970 * 1000;
     double ttl = [lease[@"expiresAt"] doubleValue] - now, progress = [lease[@"progressExpiresAt"] doubleValue] - now;
@@ -228,20 +341,21 @@ static NSString *activityCommand(NSDictionary *request) {
       if (activeActivity || !epoch || epoch <= highestActivityEpoch) error = @"stale-or-busy-native-activity";
       else if ((error = check())) {}
       else {
-        IOPMAssertionID assertion = kIOPMNullAssertionID;
-        IOReturn created = IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep, kIOPMAssertionLevelOn, CFSTR("CBG active authorized workflow"), &assertion);
-        if (!assertionCreated(created, assertion) || stopped || preempted || [lease[@"expiresAt"] doubleValue] <= NSDate.date.timeIntervalSince1970 * 1000) {
-          if (assertion) IOPMAssertionRelease(assertion);
-          error = @"native-awake-assertion-create-failed";
+        captureGrantPointer();
+        double grantedAt = NSDate.date.timeIntervalSince1970 * 1000;
+        if (stopped || preempted || [lease[@"expiresAt"] doubleValue] <= grantedAt || [lease[@"progressExpiresAt"] doubleValue] <= grantedAt) {
+          error = @"native-workflow-activity-grant-failed";
         } else {
-          awake = assertion; highestActivityEpoch = epoch;
+          highestActivityEpoch = epoch;
           NSMutableDictionary *saved = [lease mutableCopy]; saved[@"hostGeneration"] = @(acceptedGeneration); saved[@"hostInstanceEpoch"] = acceptedHostInstance; activeActivity = [saved copy];
-          activityDeadline = monotonicMs() + ttl; progressDeadline = monotonicMs() + progress;
+          activityDeadline = monotonicMs() + [lease[@"expiresAt"] doubleValue] - grantedAt;
+          progressDeadline = monotonicMs() + [lease[@"progressExpiresAt"] doubleValue] - grantedAt;
           activityDisplay = kCGNullDirectDisplay; lastPostedAction = nil; creditedActions = [NSMutableSet new];
+          publishInputOwnership();
         }
       }
     } else if ([command isEqual:@"activity-renew"]) {
-      if (!sameActivity(lease) || !awake || !timely(monotonicMs(), activityDeadline, progressDeadline)) error = @"stale-native-activity-renewal";
+      if (!sameActivity(lease) || !ownsInput || !timely(monotonicMs(), activityDeadline, progressDeadline)) error = @"stale-native-activity-renewal";
       else {
         NSInteger sequence = [lease[@"progressSequence"] integerValue], prior = [activeActivity[@"progressSequence"] integerValue];
         if (sequence == prior && ![lease[@"progressExpiresAt"] isEqual:activeActivity[@"progressExpiresAt"]]) error = @"heartbeat-cannot-extend-progress";
@@ -258,7 +372,7 @@ static NSString *activityCommand(NSDictionary *request) {
 }
 static NSString *post(CGEventRef event) {
   NSString *error = check();
-  if (!error) { pthread_mutex_lock(&activityLock); error = !activeActivity || !awake || !timely(monotonicMs(), activityDeadline, progressDeadline) ? @"native-workflow-activity-expired" : nil; pthread_mutex_unlock(&activityLock); }
+  if (!error) { pthread_mutex_lock(&activityLock); error = !activeActivity || !ownsInput || !timely(monotonicMs(), activityDeadline, progressDeadline) ? @"native-workflow-activity-expired" : nil; pthread_mutex_unlock(&activityLock); }
   if (!error && proofDeadline > 0 &&
       NSDate.date.timeIntervalSince1970 * 1000 > proofDeadline)
     error = @"target-proof-expired-before-input";
@@ -299,7 +413,82 @@ static bool queryFieldValueAllowed(NSString *field, NSString *value) {
   NSString *pattern = [field hasPrefix:@"price_"] ? @"^(?:[0-9]{1,8}(?:\\.[0-9]{1,2})?)?$" : @"^(?:[0-9]{1,8})?$";
   return [value rangeOfString:pattern options:NSRegularExpressionSearch].location != NSNotFound;
 }
-static NSString *inputText(NSString *text, bool numeric) {
+static bool completeTextSelection(NSString *value, CFRange range) {
+  return [value isKindOfClass:NSString.class] && range.location == 0 &&
+    range.length >= 0 && (NSUInteger)range.length == value.length;
+}
+static bool unchangedTextFrame(CGRect expected, CGRect actual) {
+  return isfinite(actual.origin.x + actual.origin.y + actual.size.width + actual.size.height) &&
+    actual.size.width > 0 && actual.size.height > 0 &&
+    fabs(expected.origin.x - actual.origin.x) <= 0.5 &&
+    fabs(expected.origin.y - actual.origin.y) <= 0.5 &&
+    fabs(expected.size.width - actual.size.width) <= 0.5 &&
+    fabs(expected.size.height - actual.size.height) <= 0.5;
+}
+static NSString *textInputGuard(NSDictionary *request, pid_t expectedPid) {
+  NSString *error = check();
+  if (error) return error;
+  if (!authorityMatches(request)) return @"stale-native-dispatch-generation";
+  error = activityFailure(request[@"plan"][@"activity"]);
+  if (error) return error;
+  double now = NSDate.date.timeIntervalSince1970 * 1000;
+  if (proofDeadline <= 0 || now < [request[@"proof"][@"sampledAt"] doubleValue] || now > proofDeadline)
+    return @"target-proof-expired-before-input";
+  if (NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier != expectedPid)
+    return @"native-text-application-changed";
+  return nil;
+}
+static NSString *waitForTextReadiness(NSDictionary *request, AXUIElementRef target,
+    AXUIElementRef app, pid_t expectedPid, CGRect expectedFrame, double deadline,
+    bool selecting, NSString **originalValue) {
+  do {
+    NSString *error = textInputGuard(request, expectedPid);
+    if (error) return error;
+    if (monotonicMs() >= deadline) break;
+    id focused = attr(app, kAXFocusedUIElementAttribute), value = attr(target, kAXValueAttribute);
+    NSValue *frame = bounds(target);
+    if (!frame || !unchangedTextFrame(expectedFrame, NSRectToCGRect(frame.rectValue)) ||
+        ![str(target, kAXRoleAttribute) isEqual:@"AXTextField"])
+      return @"native-text-target-changed";
+    if (![value isKindOfClass:NSString.class]) return @"native-text-value-unverified";
+    if (selecting && ![value isEqual:*originalValue]) return @"native-text-value-changed";
+    pid_t focusedPid = 0;
+    bool hasFocus = focused && CFGetTypeID((__bridge CFTypeRef)focused) == AXUIElementGetTypeID() &&
+      AXUIElementGetPid((__bridge AXUIElementRef)focused, &focusedPid) == kAXErrorSuccess &&
+      focusedPid == expectedPid && CFEqual((__bridge CFTypeRef)focused, target);
+    bool ready = hasFocus;
+    if (hasFocus && selecting) {
+      id selected = attr(target, kAXSelectedTextRangeAttribute);
+      CFRange range = CFRangeMake(kCFNotFound, 0);
+      ready = selected && CFGetTypeID((__bridge CFTypeRef)selected) == AXValueGetTypeID() &&
+        AXValueGetType((__bridge AXValueRef)selected) == kAXValueCFRangeType &&
+        AXValueGetValue((__bridge AXValueRef)selected, kAXValueCFRangeType, &range) &&
+        completeTextSelection(value, range);
+    }
+    // AX IPC may consume the remaining budget; never accept a stale read.
+    error = textInputGuard(request, expectedPid);
+    if (error) return error;
+    if (monotonicMs() >= deadline) break;
+    if (ready) {
+      if (!selecting) *originalValue = [value copy];
+      return nil;
+    }
+    usleep(10000);
+  } while (monotonicMs() < deadline);
+  return selecting ? @"native-text-selection-unverified" : @"native-text-focus-unverified";
+}
+static void configurePlainTextEvent(CGEventRef event, NSString *text, bool down) {
+  if (!event) return;
+  // Per-event flags must not inherit Command from the preceding select-all.
+  CGEventSetFlags(event, 0);
+  if (down) {
+    UniChar chars[80];
+    [text getCharacters:chars range:NSMakeRange(0, text.length)];
+    CGEventKeyboardSetUnicodeString(event, text.length, chars);
+  }
+}
+static NSString *inputText(NSString *text, bool numeric, NSDictionary *request,
+    AXUIElementRef target, pid_t expectedPid, CGRect expectedFrame) {
   if (![text isKindOfClass:NSString.class] ||
       text.length > (numeric ? 8 : 80) ||
       [text rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet]
@@ -309,21 +498,42 @@ static NSString *inputText(NSString *text, bool numeric) {
                                          .invertedSet]
                .location != NSNotFound))
     return @"input-text-not-allowed";
-  NSString *error = key(0, kCGEventFlagMaskCommand);
+  if (!target) return @"native-text-target-unavailable";
+  AXUIElementRef app = AXUIElementCreateApplication(expectedPid);
+  if (!app) return @"native-text-application-unavailable";
+  // Local read-message timeouts do not write AX attributes or selection state.
+  if (AXUIElementSetMessagingTimeout(app, 0.1) != kAXErrorSuccess ||
+      AXUIElementSetMessagingTimeout(target, 0.1) != kAXErrorSuccess) {
+    CFRelease(app);
+    return @"native-text-read-timeout-unavailable";
+  }
+  double deadline = monotonicMs() + 700;
+  NSString *originalValue = nil;
+  NSString *error = waitForTextReadiness(request, target, app, expectedPid, expectedFrame,
+    deadline, false, &originalValue);
+  if (!error) error = textInputGuard(request, expectedPid);
+  if (!error) error = key(0, kCGEventFlagMaskCommand);
+  if (!error) error = waitForTextReadiness(request, target, app, expectedPid, expectedFrame,
+    deadline, true, &originalValue);
+  CFRelease(app);
+  if (!error) error = textInputGuard(request, expectedPid);
   if (error)
     return error;
-  UniChar chars[80];
-  [text getCharacters:chars range:NSMakeRange(0, text.length)];
+  if (text.length == 0) return key(51, 0); // Backspace clears only the confirmed full selection.
   CGEventRef event = CGEventCreateKeyboardEvent(NULL, 0, true);
-  CGEventKeyboardSetUnicodeString(event, text.length, chars);
+  configurePlainTextEvent(event, text, true);
   error = post(event);
   CGEventRef up = CGEventCreateKeyboardEvent(NULL, 0, false);
+  configurePlainTextEvent(up, text, false);
   CGEventSetIntegerValueField(up, kCGEventSourceUserData, marker);
   CGEventPost(kCGHIDEventTap, up);
   CFRelease(up);
   return error;
 }
 static NSString *validateAndExecute(NSDictionary *request) {
+#ifdef CBG_INPUT_TEST_MONITOR
+  return @"startup-test-input-disabled";
+#endif
   NSString *activityError = activityFailure(request[@"plan"][@"activity"]);
   if (activityError) return activityError;
   if (!authorityMatches(request))
@@ -366,8 +576,12 @@ static NSString *validateAndExecute(NSDictionary *request) {
   pid_t pid =
       NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
   AXUIElementRef app = AXUIElementCreateApplication(pid);
-  id window = attr(app, kAXFocusedWindowAttribute);
+  // Chrome exposes its renderer AX tree after this normal read-only AT handshake.
+  NSString *appRole = str(app, kAXRoleAttribute);
+  id window = [appRole isEqual:@"AXApplication"] ? attr(app, kAXFocusedWindowAttribute) : nil;
   CFRelease(app);
+  if (![appRole isEqual:@"AXApplication"])
+    return @"native-application-role-unverified";
   if (!window)
     return @"chrome-window-unavailable";
   NSValue *windowValue = bounds((__bridge AXUIElementRef)window);
@@ -419,9 +633,18 @@ static NSString *validateAndExecute(NSDictionary *request) {
   if (!displayAvailable(displays[0])) return @"native-screen-unavailable";
   pthread_mutex_lock(&activityLock); activityDisplay = displays[0]; pthread_mutex_unlock(&activityLock);
   CGRect screen = CGDisplayBounds(displays[0]);
-  double backing = (double)CGDisplayPixelsWide(displays[0]) / screen.size.width;
+  CGDisplayModeRef displayMode = CGDisplayCopyDisplayMode(displays[0]);
+  if (!displayMode) return @"native-screen-mode-unavailable";
+  NativeDisplayMode dimensions = {
+    CGDisplayModeGetWidth(displayMode), CGDisplayModeGetHeight(displayMode),
+    CGDisplayModeGetPixelWidth(displayMode), CGDisplayModeGetPixelHeight(displayMode),
+    CGDisplayRotation(displays[0])};
+  CGDisplayModeRelease(displayMode);
+  // Rotated displays require separate physical validation; do not guess axis mapping.
+  if (!isfinite(dimensions.rotation) || fabs(dimensions.rotation) > 0.001)
+    return @"native-screen-rotation-unsupported";
   if (!CGRectContainsRect(screen, targetRect) ||
-      fabs([v[@"dpr"] doubleValue] - backing * sx) > 0.15)
+      !displayScaleMatches(screen.size, dimensions, sx, [v[@"dpr"] doubleValue]))
     return @"native-screen-scale-mismatch";
   AXUIElementRef hit = NULL, system = AXUIElementCreateSystemWide();
   AXError status =
@@ -754,7 +977,7 @@ static NSString *validateAndExecute(NSDictionary *request) {
       error = @"native-field-semantic-unverified";
   } else
     error = @"unsupported-native-target";
-  CFRelease(hit);
+  id verifiedHit = CFBridgingRelease(hit);
   if (error)
     return error;
   if ([kind isEqual:@"return-to-list"] || [kind isEqual:@"refresh-list"]) {
@@ -797,12 +1020,14 @@ static NSString *validateAndExecute(NSDictionary *request) {
     releaseButton(point);
   if (!error && [kind isEqual:@"jump-page"] &&
       ![control[@"tagName"] isEqual:@"A"]) {
-    error = inputText([target[@"page"] stringValue], true);
+    error = inputText([target[@"page"] stringValue], true, request,
+      (__bridge AXUIElementRef)verifiedHit, pid, NSRectToCGRect(nativeHitFrame.rectValue));
     if (!error)
       error = key(36, 0);
   }
   if (!error && [kind isEqual:@"query-field"])
-    error = inputText(target[@"value"], false);
+    error = inputText(target[@"value"], false, request,
+      (__bridge AXUIElementRef)verifiedHit, pid, NSRectToCGRect(nativeHitFrame.rectValue));
   if (!error && [kind isEqual:@"market-field"]) {
     NSString *type = control[@"type"], *tag = control[@"tagName"];
     if ([tag isEqual:@"SELECT"]) {
@@ -817,20 +1042,59 @@ static NSString *validateAndExecute(NSDictionary *request) {
           error = key(36, 0);
       }
     } else if (![@[ @"checkbox", @"radio" ] containsObject:type])
-      error = inputText(target[@"value"], false);
+      error = inputText(target[@"value"], false, request,
+        (__bridge AXUIElementRef)verifiedHit, pid, NSRectToCGRect(nativeHitFrame.rectValue));
   }
   return error ?: check();
 }
-static CGEventRef tapCallback(CGEventTapProxy proxy, CGEventType type,
-                              CGEventRef event, void *refcon) {
-  if (type == kCGEventTapDisabledByTimeout ||
-      type == kCGEventTapDisabledByUserInput) {
+static void observeInputPreemption(bool disabled, bool foreignInput, const InputEventMetadata *event) {
+  bool owned = atomic_load_explicit(&ownsInput, memory_order_acquire);
+  if (event && (disabled || (foreignInput && owned))) {
+    unsigned empty = 0;
+    // Immutable first-event snapshot: no lock, allocation, Objective-C or I/O here.
+    if (atomic_compare_exchange_strong_explicit(&preemptionRecordState, &empty, 1,
+        memory_order_acq_rel, memory_order_relaxed)) {
+      atomic_store(&firstPreemptionType, event->type);
+      atomic_store(&firstEventAtNs, event->timestampNs);
+      atomic_store(&firstCallbackAtNs, inputAbsoluteNs());
+      atomic_store(&firstGrantAtNs, atomic_load(&inputGrantAtNs));
+      atomic_store(&firstGrantEpoch, atomic_load(&inputGrantEpoch));
+      atomic_store(&firstSourcePid, event->sourcePid); atomic_store(&firstUserData, event->userData);
+      atomic_store(&firstSourceStateID, event->sourceStateID);
+      atomic_store(&firstHasMouse, event->hasMouse); atomic_store(&firstMouseLocationAvailable, event->locationAvailable);
+      atomic_store(&firstMouseXBits, coordinateBits(event->location.x));
+      atomic_store(&firstMouseYBits, coordinateBits(event->location.y));
+      atomic_store(&firstMouseDeltaX, event->deltaX); atomic_store(&firstMouseDeltaY, event->deltaY);
+      atomic_store(&firstGrantPointerAvailable, atomic_load(&grantPointerAvailable));
+      atomic_store(&firstGrantPointerXBits, atomic_load(&grantPointerXBits));
+      atomic_store(&firstGrantPointerYBits, atomic_load(&grantPointerYBits));
+      atomic_store(&firstOwnedInput, owned); atomic_store(&firstTapDisabled, disabled);
+      atomic_store_explicit(&preemptionRecordState, 2, memory_order_release);
+    }
+  }
+  if (disabled) {
     tapReady = false;
     preempted = true;
-    return event;
+    return;
   }
-  if (CGEventGetIntegerValueField(event, kCGEventSourceUserData) != marker)
-    preempted = true;
+  if (!foreignInput) return;
+  // Idle input must not poison the next workflow; active page waits still own
+  // input. Never wait for activityLock on the event tap's deadline-sensitive thread.
+  if (owned) preempted = true;
+}
+static CGEventRef tapCallback(CGEventTapProxy proxy, CGEventType type,
+                              CGEventRef event, void *refcon) {
+  bool disabled = type == kCGEventTapDisabledByTimeout ||
+                  type == kCGEventTapDisabledByUserInput;
+  CGPoint location = event ? CGEventGetLocation(event) : CGPointZero;
+  InputEventMetadata metadata = {(uint32_t)type, event ? CGEventGetTimestamp(event) : 0,
+    event ? CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID) : 0,
+    event ? CGEventGetIntegerValueField(event, kCGEventSourceUserData) : 0,
+    event ? CGEventGetIntegerValueField(event, kCGEventSourceStateID) : 0,
+    event && type == kCGEventMouseMoved ? CGEventGetIntegerValueField(event, kCGMouseEventDeltaX) : 0,
+    event && type == kCGEventMouseMoved ? CGEventGetIntegerValueField(event, kCGMouseEventDeltaY) : 0,
+    location, event && type == kCGEventMouseMoved, event && isfinite(location.x + location.y)};
+  observeInputPreemption(disabled, !disabled && metadata.userData != marker, &metadata);
   return event;
 }
 static void writeResult(NSDictionary *value) {
@@ -846,6 +1110,120 @@ static void writeResult(NSDictionary *value) {
 }
 int main(int argc, const char **argv) {
   @autoreleasepool {
+    mach_timebase_info(&inputTimebase);
+    if (argc > 1 && strcmp(argv[1], "--text-event-self-test") == 0) {
+      CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+      CGEventRef down = source ? CGEventCreateKeyboardEvent(source, 0, true) : NULL,
+                 up = source ? CGEventCreateKeyboardEvent(source, 0, false) : NULL;
+      if (!source || !down || !up) {
+        writeResult(@{@"kind": @"input-text-event-self-test", @"ok": @NO, @"available": @NO,
+          @"error": @"graphics-event-source-unavailable", @"osInputPosted": @NO});
+        if (down) CFRelease(down); if (up) CFRelease(up); if (source) CFRelease(source);
+        return 2;
+      }
+      CGEventSetFlags(down, kCGEventFlagMaskCommand | kCGEventFlagMaskShift);
+      CGEventSetFlags(up, kCGEventFlagMaskCommand | kCGEventFlagMaskControl);
+      configurePlainTextEvent(down, @"120", true);
+      configurePlainTextEvent(up, @"120", false);
+      UniChar actual[80]; UniCharCount count = 0;
+      CGEventKeyboardGetUnicodeString(down, 80, &count, actual);
+      bool valid = CGEventGetFlags(down) == 0 && CGEventGetFlags(up) == 0 && count == 3 &&
+        actual[0] == '1' && actual[1] == '2' && actual[2] == '0' &&
+        CGEventGetType(down) == kCGEventKeyDown && CGEventGetType(up) == kCGEventKeyUp;
+      writeResult(@{@"kind": @"input-text-event-self-test", @"ok": @(valid), @"available": @YES,
+        @"downFlags": @(CGEventGetFlags(down)), @"upFlags": @(CGEventGetFlags(up)),
+        @"unicode": [NSString stringWithCharacters:actual length:count], @"osInputPosted": @NO});
+      CFRelease(down); CFRelease(up); CFRelease(source);
+      return valid ? 0 : 1;
+    }
+    if (argc > 1 && strcmp(argv[1], "--preemption-self-test") == 0) {
+      // Pure authorization transitions through the exact callback guard; no event
+      // tap or OS input is created.
+      if (!atomic_is_lock_free(&ownsInput)) return 1;
+      stopped = preempted = false; tapReady = true;
+      observeInputPreemption(false, true, NULL);
+      if (preempted || stopped || !tapReady) return 1;
+      acceptedHostInstance = @"guard-host"; acceptedGeneration = 1;
+      acceptedStopEpoch = 0; acceptedSessionEpoch = @"guard-session";
+      NSDictionary *oldLease = @{@"activityId": @"old-guard", @"authorizationEpoch": @1,
+        @"stopEpoch": @0, @"browserSessionEpoch": acceptedSessionEpoch};
+      NSDictionary *newLease = @{@"activityId": @"new-guard", @"authorizationEpoch": @2,
+        @"stopEpoch": @0, @"browserSessionEpoch": acceptedSessionEpoch};
+      NSDictionary *oldEnd = @{@"command": @"activity-end", @"activity": oldLease,
+        @"hostInstanceEpoch": acceptedHostInstance, @"hostGeneration": @1};
+      NSDictionary *newEnd = @{@"command": @"activity-end", @"activity": newLease,
+        @"hostInstanceEpoch": acceptedHostInstance, @"hostGeneration": @1};
+      pthread_mutex_lock(&activityLock);
+      activeActivity = oldLease; publishInputOwnership();
+      pthread_mutex_unlock(&activityLock);
+      if (activityCommand(oldEnd) || ownsInput || activeActivity) return 1;
+      pthread_mutex_lock(&activityLock);
+      activeActivity = newLease; publishInputOwnership();
+      pthread_mutex_unlock(&activityLock);
+      DesktopGuard ready = {stopped, preempted, tapReady, true, true, false, true, true};
+      if (!ownsInput || guardFailure(ready)) return 1; // Idle input allows a new owner.
+      observeInputPreemption(false, false, NULL);
+      if (preempted) return 1; // Marked native events do not preempt their own workflow.
+      if (![activityCommand(oldEnd) isEqual:@"stale-native-activity-end"] ||
+        !ownsInput || activeActivity != newLease) return 1;
+      invalidateActivityFor(oldLease, @"stale-guard", false);
+      if (!ownsInput || activeActivity != newLease || stopped) return 1;
+      postedAny = true;
+      atomic_store(&grantPointerXBits, coordinateBits(100.5));
+      atomic_store(&grantPointerYBits, coordinateBits(-12.25));
+      atomic_store(&grantPointerAvailable, true);
+      InputEventMetadata event = {kCGEventMouseMoved, atomic_load(&inputGrantAtNs) - 1, 123, 456, 0, 0, 0,
+        CGPointMake(100.5, -12.25), true, true};
+      // This would deadlock if the callback guard waited for activityLock.
+      pthread_mutex_lock(&activityLock);
+      observeInputPreemption(false, true, &event);
+      pthread_mutex_unlock(&activityLock);
+      ready.preempted = preempted;
+      NSDictionary *observed = inputPreemptionDiagnostic();
+      if (!preempted || !guardFailure(ready) || ![observed[@"ownsInput"] boolValue] ||
+        [observed[@"tapDisabled"] boolValue] || [observed[@"sourcePid"] intValue] != 123 ||
+        [observed[@"userData"] intValue] != 456 || [observed[@"authorizationEpoch"] intValue] != 2 ||
+        [observed[@"diagnosticSchema"] intValue] != 2 || [observed[@"sourceStateID"] intValue] != 0 ||
+        [observed[@"mouse"][@"deltaX"] intValue] != 0 || [observed[@"mouse"][@"deltaY"] intValue] != 0 ||
+        ![observed[@"grantPointerAvailable"] boolValue] ||
+        ![observed[@"mouse"][@"location"] isEqual:observed[@"grantPointer"]] ||
+        strtoull([observed[@"eventTimestampNs"] UTF8String], NULL, 10) >=
+        strtoull([observed[@"grantTimestampNs"] UTF8String], NULL, 10)) return 1;
+      event.deltaX = 7; event.deltaY = -3; event.location = CGPointMake(107.5, -15.25);
+      observeInputPreemption(false, true, &event);
+      if (![inputPreemptionDiagnostic() isEqual:observed]) return 1;
+      preempted = false; postedAny = false;
+      observeInputPreemption(false, true, NULL);
+      ready.preempted = preempted;
+      if (!preempted || !guardFailure(ready)) return 1; // Waiting still owns input.
+      preempted = false;
+      if (activityCommand(newEnd) || ownsInput || activeActivity) return 1;
+      observeInputPreemption(false, true, NULL);
+      if (preempted) return 1; // Input after activity end is idle input.
+      pthread_mutex_lock(&activityLock);
+      activeActivity = newLease; releaseInputOwnership();
+      pthread_mutex_unlock(&activityLock);
+      observeInputPreemption(false, true, NULL);
+      if (preempted) return 1;
+      pthread_mutex_lock(&activityLock);
+      publishInputOwnership();
+      pthread_mutex_unlock(&activityLock);
+      invalidateActivityFor(newLease, @"current-guard", false);
+      if (ownsInput || activeActivity || !stopped) return 1;
+      atomic_store(&preemptionRecordState, 0); // Only this no-input state test resets the immutable record.
+      tapCallback(NULL, kCGEventTapDisabledByTimeout, NULL, NULL);
+      if (!preempted || tapReady || ![inputPreemptionDiagnostic()[@"tapDisabled"] boolValue] ||
+        inputPreemptionDiagnostic()[@"mouse"]) return 1;
+      preempted = false; tapReady = true;
+      tapCallback(NULL, kCGEventTapDisabledByUserInput, NULL, NULL);
+      if (!preempted || tapReady) return 1; // Both disabled events are unconditional.
+      stopped = true; preempted = false;
+      observeInputPreemption(false, true, NULL);
+      if (!stopped || tapReady) return 1; // Idle gating never clears an explicit stop/disabled tap.
+      writeResult(@{@"kind": @"input-preemption-self-test", @"ok": @YES,
+        @"checks": @14, @"osInputPosted": @NO});
+      return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--self-test") == 0) {
       CGRect mapped, content = CGRectMake(-1400, 80, 1200, 800),
                      css = CGRectMake(10, 20, 30, 40);
@@ -884,19 +1262,49 @@ int main(int argc, const char **argv) {
       if (monitorState(true, false) || monitorState(false, true) ||
           !monitorState(true, true))
         return 1;
-      if (!timely(9, 10, 11) || timely(10, 10, 11) || timely(10, 11, 10) ||
-        assertionCreated(kIOReturnError, 1) || assertionCreated(kIOReturnSuccess, 0) || !assertionCreated(kIOReturnSuccess, 1)) return 1;
+      if (!timely(9, 10, 11) || timely(10, 10, 11) || timely(10, 11, 10)) return 1;
       if (!queryFieldValueAllowed(@"price_min", @"100.50") || !queryFieldValueAllowed(@"price_max", @"99999999.99") ||
         !queryFieldValueAllowed(@"price_min", @"") || !queryFieldValueAllowed(@"level_max", @"175") ||
         queryFieldValueAllowed(@"level_min", @"175.5") || queryFieldValueAllowed(@"price_min", @"1;open") ||
         queryFieldValueAllowed(@"price_max", @"100000000") || queryFieldValueAllowed(@"password", @"1")) return 1;
-      puts("native activity, query-field, coordinate and desktop-guard self-tests passed (34 "
+      if (!completeTextSelection(@"100", CFRangeMake(0, 3)) ||
+        completeTextSelection(@"100", CFRangeMake(3, 0)) ||
+        completeTextSelection(@"100", CFRangeMake(0, 2)) ||
+        completeTextSelection(@"100", CFRangeMake(1, 3)) ||
+        completeTextSelection(@"100", CFRangeMake(kCFNotFound, 0)) ||
+        !completeTextSelection(@"", CFRangeMake(0, 0)) ||
+        completeTextSelection(nil, CFRangeMake(0, 0)) ||
+        !completeTextSelection(@"😀3", CFRangeMake(0, 3)) ||
+        !unchangedTextFrame(CGRectMake(10, 20, 100, 30), CGRectMake(10, 20, 100, 30)) ||
+        unchangedTextFrame(CGRectMake(10, 20, 100, 30), CGRectMake(12, 20, 100, 30))) return 1;
+      CGSize desktop = CGSizeMake(1440, 900);
+      NativeDisplayMode one = {1440, 900, 1440, 900, 0}, two = {1440, 900, 2880, 1800, 0};
+      if (!displayScaleMatches(desktop, one, 1, 1) ||
+        !displayScaleMatches(desktop, two, 1, 2) ||
+        !displayScaleMatches(desktop, two, 1.25, 2.5) ||
+        displayScaleMatches(desktop, two, 1, 1) ||
+        displayScaleMatches(desktop, (NativeDisplayMode){0, 0, 0, 0, 0}, 1, 2) ||
+        displayScaleMatches(desktop, (NativeDisplayMode){1440, 900, 0, 1800, 0}, 1, 2) ||
+        displayScaleMatches(desktop, (NativeDisplayMode){1440, 900, NAN, 1800, 0}, 1, 2) ||
+        displayScaleMatches(desktop, (NativeDisplayMode){1440, 900, 2880, 900, 0}, 1, 2) ||
+        displayScaleMatches(desktop, (NativeDisplayMode){1280, 900, 2560, 1800, 0}, 1, 2) ||
+        displayScaleMatches(desktop, (NativeDisplayMode){1440, 900, 2880, 1800, 90}, 1, 2) ||
+        displayScaleMatches(desktop, (NativeDisplayMode){1440, 900, 2880, 1800, 270}, 1, 2) ||
+        displayScaleMatches(desktop, two, 1, -2) ||
+        displayScaleMatches(desktop, two, 0, 2) ||
+        displayScaleMatches(desktop, two, 1, NAN)) return 1;
+      puts("native activity, query-field, coordinate and desktop-guard self-tests passed (55 "
            "assertions, no input posted)");
       return 0;
     }
     signal(SIGUSR1, emergencyStop);
-    writeResult(@{@"kind" : @"input-ready", @"version" : @1});
+    dispatch_semaphore_t monitorStarted = dispatch_semaphore_create(0);
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+#ifdef CBG_INPUT_TEST_MONITOR
+      usleep(CBG_INPUT_TEST_MONITOR_DELAY_MS * 1000);
+      tapReady = CBG_INPUT_TEST_MONITOR_READY != 0;
+      dispatch_semaphore_signal(monitorStarted);
+#else
       CGEventMask mask = CGEventMaskBit(kCGEventMouseMoved) |
                          CGEventMaskBit(kCGEventLeftMouseDown) |
                          CGEventMaskBit(kCGEventRightMouseDown) |
@@ -907,23 +1315,46 @@ int main(int argc, const char **argv) {
           kCGEventTapOptionListenOnly, mask, tapCallback, NULL);
       if (!tap) {
         stopped = true;
+        dispatch_semaphore_signal(monitorStarted);
         return;
       }
       CFRunLoopSourceRef source = CFMachPortCreateRunLoopSource(NULL, tap, 0);
+      if (!source) {
+        stopped = true;
+        CFRelease(tap);
+        dispatch_semaphore_signal(monitorStarted);
+        return;
+      }
       CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopCommonModes);
       CGEventTapEnable(tap, true);
       pthread_mutex_lock(&monitorLock);
       activeMonitorTap = tap;
       pthread_mutex_unlock(&monitorLock);
       tapReady = CGEventTapIsEnabled(tap);
-      CFRunLoopRun();
+      if (tapReady) {
+        // Signal from the running loop, after its event tap source is installed.
+        CFRunLoopPerformBlock(CFRunLoopGetCurrent(), kCFRunLoopCommonModes, ^{
+          dispatch_semaphore_signal(monitorStarted);
+        });
+        CFRunLoopRun();
+      } else dispatch_semaphore_signal(monitorStarted);
       tapReady = false;
       pthread_mutex_lock(&monitorLock);
       activeMonitorTap = NULL;
       pthread_mutex_unlock(&monitorLock);
       CFRelease(source);
       CFRelease(tap);
+#endif
     });
+    long startup = dispatch_semaphore_wait(monitorStarted,
+      dispatch_time(DISPATCH_TIME_NOW, CBG_INPUT_STARTUP_TIMEOUT_MS * NSEC_PER_MSEC));
+    if (startup != 0 || !inputMonitorActive()) {
+      stopped = true;
+      writeResult(@{@"kind": @"input-unavailable", @"version": @1,
+        @"error": startup != 0 ? @"input-monitor-startup-timeout" : @"input-monitor-startup-failed"});
+      return 1;
+    }
+    writeResult(@{@"kind" : @"input-ready", @"version" : @1});
     dispatch_source_t activityWatchdog = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
     dispatch_source_set_timer(activityWatchdog, dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), 100 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(activityWatchdog, ^{
@@ -962,16 +1393,18 @@ int main(int argc, const char **argv) {
           if ([command hasPrefix:@"activity-"]) {
             NSString *error = activityCommand(request);
             pthread_mutex_lock(&activityLock);
-            bool asserted = awake != 0;
+            bool active = activeActivity && ownsInput && !stopped && !preempted &&
+              timely(monotonicMs(), activityDeadline, progressDeadline);
             pthread_mutex_unlock(&activityLock);
-            writeResult(@{@"ok": @(!error), @"actionId": actionId, @"activityId": request[@"activity"][@"activityId"] ?: @"", @"awake": @(asserted), @"error": error ?: @""});
+            writeResult(@{@"ok": @((bool)!error), @"actionId": actionId, @"activityId": request[@"activity"][@"activityId"] ?: @"", @"active": @(active), @"error": error ?: @""});
           } else if ([command isEqual:@"status"])
             writeResult(@{
               @"ok" : @YES,
               @"actionId" : actionId,
               @"activity": activityStatus(),
+              @"inputPreemption": inputPreemptionDiagnostic(),
               @"permissions" : @{
-                @"accessibility" : @(AXIsProcessTrusted()),
+                @"accessibility" : @((bool)AXIsProcessTrusted()),
                 @"inputMonitoring" : @(CGPreflightListenEventAccess()),
                 @"inputMonitorActive" : @(inputMonitorActive()),
                 @"screenRecording" : @(CGPreflightScreenCaptureAccess()),
@@ -1035,6 +1468,7 @@ int main(int argc, const char **argv) {
               @"ok" : @NO,
               @"actionId" : actionId,
               @"error" : error,
+              @"inputPreemption": inputPreemptionDiagnostic(),
               @"posted" : @(postedAny)
             }
                               : @{

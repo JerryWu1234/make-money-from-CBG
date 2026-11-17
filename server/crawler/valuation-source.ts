@@ -27,13 +27,70 @@ const MAIN_ATTRIBUTES: Record<string, string> = {
 };
 const ELEMENTS: Record<number, string> = { 1: "金", 2: "木", 4: "土", 8: "水", 16: "火" };
 
+export const ROLE_NUMERIC_FIELDS = [
+  { key: "holyLevel", path: "holyLevel", name: "化圣层数", tab: "人物/修炼" },
+  { key: "iCash", path: "assets.iCash", name: "现金", tab: "道具/法宝" },
+  { key: "iSaving", path: "assets.iSaving", name: "存银", tab: "道具/法宝" },
+  { key: "iLearnCash", path: "assets.iLearnCash", name: "储备金", tab: "道具/法宝" },
+  { key: "xianyu", path: "assets.xianyu", name: "仙玉", tab: "道具/法宝" },
+] as const;
+type RoleNumericKey = (typeof ROLE_NUMERIC_FIELDS)[number]["key"];
+
+/** Only role-parser groups establish this context; a market product identity/price does not. */
+export function isRoleValuationSource(source: Record<string, unknown>): boolean {
+  return [
+    "riders",
+    "advancedMount",
+    "allSkills",
+    "schoolSkills",
+    "holyLevel",
+    "hasArtifact",
+    "goldIdFlag",
+    "idEffects",
+  ].some((key) => Object.hasOwn(source, key));
+}
+
+/** Shared by normalization and the field ledger so invalid raw values never look observed. */
+export function roleNumericObservation(source: Record<string, unknown>, key: RoleNumericKey) {
+  const parent = key === "holyLevel" ? source : object(source.assets);
+  const raw = parent?.[key];
+  const number = finite(raw);
+  const valid =
+    number !== null &&
+    number >= 0 &&
+    (key !== "holyLevel" || (Number.isInteger(number) && number <= 9));
+  return {
+    value: valid ? number : undefined,
+    missing:
+      raw === undefined && (key === "holyLevel" || source.assets === undefined || parent !== null),
+  };
+}
+
+export function roleNumericIssues(
+  source: Record<string, unknown>,
+  roleCapture = isRoleValuationSource(source),
+): string[] {
+  if (!roleCapture) return [];
+  return ROLE_NUMERIC_FIELDS.flatMap((field) => {
+    const observed = roleNumericObservation(source, field.key);
+    return observed.value === undefined
+      ? [`${field.name}（${field.path}）${observed.missing ? "缺失" : "无效"}，需补采`]
+      : [];
+  });
+}
+
 /** Source is the website's decoded role object, never login or account state. */
 export function normalizeValuationSource(source: Record<string, unknown>): ValuationCapture {
   const fields: ValuationCapture["fields"] = [],
-    issues: string[] = [];
+    issues: string[] = roleNumericIssues(source);
   const add = (name: string, value: string | number, tab: string) =>
     fields.push({ name, value: String(value), tab });
   const issue = (text: string) => issues.push(text);
+  const role = isRoleValuationSource(source);
+  const numeric = (field: (typeof ROLE_NUMERIC_FIELDS)[number]) => {
+    const observed = roleNumericObservation(source, field.key);
+    if (observed.value !== undefined) add(field.name, observed.value, field.tab);
+  };
   const skills = object(source.allSkills);
   if (
     skills &&
@@ -42,9 +99,7 @@ export function normalizeValuationSource(source: Record<string, unknown>): Valua
     add("强壮", finite(skills["230"]) ?? 0, "技能");
     add("神速", finite(skills["237"]) ?? 0, "技能");
   }
-  const holy = finite(source.holyLevel);
-  if (holy !== null && Number.isInteger(holy) && holy >= 0 && holy <= 9)
-    add("化圣层数", holy, "人物/修炼");
+  if (role) numeric(ROLE_NUMERIC_FIELDS[0]);
   const advanced = object(source.advancedMount);
   if (advanced?.isJinJie === 1) {
     add("坐骑总数", 1, "坐骑");
@@ -205,15 +260,6 @@ export function normalizeValuationSource(source: Record<string, unknown>): Valua
     add("靓号特效", gold ? "土豪金" : "无土豪金", "人物/修炼");
   } else if (source.goldIdFlag === false) add("靓号特效", "无土豪金", "人物/修炼");
   else issue("靓号具体特效未完整读取");
-  const assets = object(source.assets);
-  for (const [key, label] of [
-    ["iCash", "现金"],
-    ["iSaving", "存银"],
-    ["iLearnCash", "储备金"],
-    ["xianyu", "仙玉"],
-  ]) {
-    const quantity = finite(assets?.[key]);
-    if (quantity !== null && quantity >= 0) add(label, quantity, "道具/法宝");
-  }
+  if (role) for (const field of ROLE_NUMERIC_FIELDS.slice(1)) numeric(field);
   return { version: 1, fields, issues: [...new Set(issues)], source };
 }

@@ -4,11 +4,11 @@ import { MAIN_TABS } from "../crawler/detail-tabs";
 import { captureIssues, IncompleteCaptureError } from "../crawler/capture-readiness";
 import { analysisRecord } from "../../tests/fixtures/analysis";
 import type { PageSnapshot } from "./contracts";
+import { createHash } from "node:crypto";
 
 function fixture() {
   const listing = analysisRecord("a").listing;
-  let revision = "product-version-1",
-    selected = "人物/修炼";
+  let selected = "人物/修炼";
   const names = [
     "师门一式",
     "师门二式",
@@ -29,6 +29,9 @@ function fixture() {
     allSkills: Object.fromEntries(names.map((_, index) => [String(index + 1), 1])),
     assets: { iCash: 0, iSaving: 0, iLearnCash: 0, xianyu: 0 },
   };
+  let revision = createHash("sha256")
+    .update(JSON.stringify({ source, version: 1 }))
+    .digest("hex");
   const assetContent: Record<string, string> = {
     坐骑: "无坐骑",
     "锦衣/外观": "无锦衣\n无祥瑞",
@@ -122,7 +125,9 @@ function fixture() {
     io,
     snapshot,
     setRevision: (value: string) => {
-      revision = value;
+      revision = createHash("sha256")
+        .update(JSON.stringify({ source, version: value }))
+        .digest("hex");
     },
   };
 }

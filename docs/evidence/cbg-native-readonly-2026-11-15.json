@@ -1,0 +1,294 @@
+{
+  "schemaVersion": 1,
+  "scope": "real Chrome installed extension and read-only Native Messaging; synthetic routed page; no OS input",
+  "outcome": "passed-read-only-scope",
+  "createdAt": "2026-11-15T14:18:28.790Z",
+  "finishedAt": "2026-11-15T14:18:35.363Z",
+  "browserVersion": "157.0.8103.79",
+  "extensionId": "fkbbhnajbmfgonkpeibdblgmmnaipolj",
+  "extensionScripts": [
+    {
+      "file": "isolated.js",
+      "productionSha256": "56752a100e3a8dfa6aa1623e7e13dc18fc926dbcb006d6b8fe34d98673f340a8",
+      "installedSha256": "56752a100e3a8dfa6aa1623e7e13dc18fc926dbcb006d6b8fe34d98673f340a8"
+    },
+    {
+      "file": "main.js",
+      "productionSha256": "e4f5de510da9caed23918b3cfcb7f416a1e6a1ccc2bd94cf505215811ee21d9c",
+      "installedSha256": "e4f5de510da9caed23918b3cfcb7f416a1e6a1ccc2bd94cf505215811ee21d9c"
+    },
+    {
+      "file": "market-config.js",
+      "productionSha256": "a2c11c2bee12fdc7957cdd91f5bfab42dd1be11b10a09093f80734e559a0dedf",
+      "installedSha256": "a2c11c2bee12fdc7957cdd91f5bfab42dd1be11b10a09093f80734e559a0dedf"
+    },
+    {
+      "file": "market-rules.js",
+      "productionSha256": "c22b78f92e96cbb8ab3a792a39798229a7a600bfb60b039f0474ea7e2309b03e",
+      "installedSha256": "c22b78f92e96cbb8ab3a792a39798229a7a600bfb60b039f0474ea7e2309b03e"
+    },
+    {
+      "file": "pet-product-observation.js",
+      "productionSha256": "ef3ad8d17c06ca14dbda510e6a3c2fe24197f48c80c4aa1d77928838658691cc",
+      "installedSha256": "ef3ad8d17c06ca14dbda510e6a3c2fe24197f48c80c4aa1d77928838658691cc"
+    },
+    {
+      "file": "service-worker.js",
+      "productionSha256": "cb7d279d53738195c2208782932c79a478564aacc2adc85198f5dc8e3b7f5409",
+      "installedSha256": "cb7d279d53738195c2208782932c79a478564aacc2adc85198f5dc8e3b7f5409"
+    }
+  ],
+  "nativeProductionHostSha256": "e8a5a49515c8b0ba091e10758c34a831f286dc29da8eca71ac8d3fb0e993c9b9",
+  "helperSourceSha256": "9afb2a115408e2849b808badd7f5c376aab0486cf710b46cb841d58172812da7",
+  "temporaryDifferences": [
+    "Temporary manifest adds only the fixed public key; extension scripts are copied unchanged.",
+    "Temporary host.mjs changes only configPath to the temporary mode-0600 host.json.",
+    "The local Unix-socket fixture records and ACKs envelopes, and sends status only. It never sends resume/activity/execute.",
+    "CDP installs the real extension and triggers its real toolbar action in this temporary profile. No chrome.runtime replacement or content-script injection is used."
+  ],
+  "assertions": [
+    {
+      "name": "production helper build and no-input self-test",
+      "status": "passed",
+      "evidence": "native activity, query-field, coordinate and desktop-guard self-tests passed (34 assertions, no input posted)"
+    },
+    {
+      "name": "real unpacked extension installation",
+      "status": "passed",
+      "evidence": {
+        "id": "fkbbhnajbmfgonkpeibdblgmmnaipolj",
+        "manifestKeyOnly": true
+      }
+    },
+    {
+      "name": "real MV3 service worker",
+      "status": "passed",
+      "evidence": {
+        "url": "chrome-extension://fkbbhnajbmfgonkpeibdblgmmnaipolj/service-worker.js",
+        "id": "fkbbhnajbmfgonkpeibdblgmmnaipolj"
+      }
+    },
+    {
+      "name": "automatic MAIN and ISOLATED content-script installation",
+      "status": "passed",
+      "evidence": {
+        "tabId": 184867685,
+        "reply": {
+          "ok": true
+        }
+      }
+    },
+    {
+      "name": "real toolbar action and observer snapshot",
+      "status": "passed",
+      "evidence": {
+        "via": "real SW durable outbox",
+        "snapshot": {
+          "access": "normal",
+          "actionContext": null,
+          "authenticated": true,
+          "bindingContext": null,
+          "business": [],
+          "controls": {
+            "children": [],
+            "items": [],
+            "mounts": [],
+            "petCount": null,
+            "pets": [],
+            "selectedChild": null,
+            "selectedMount": null,
+            "selectedPet": null,
+            "subtabs": [],
+            "tabs": []
+          },
+          "empty": true,
+          "formValues": {
+            "price_min": "100"
+          },
+          "listing": {
+            "items": [],
+            "order": "selling_time DESC",
+            "page": 1,
+            "serverType": "1,2,3",
+            "totalPages": 1
+          },
+          "listingCommit": null,
+          "listingCommitted": true,
+          "loading": false,
+          "observedAt": "2026-11-15T14:18:31.337Z",
+          "pageGeneration": 1,
+          "pageId": "bca17e02-3447-4778-992b-8ef4e0a48122",
+          "productState": "unknown",
+          "queryArgs": {
+            "order_by": "selling_time DESC",
+            "page": 1,
+            "price_min": "100",
+            "server_type": "1,2,3"
+          },
+          "revision": "bca17e02-3447-4778-992b-8ef4e0a48122:1:2",
+          "roleQueryControls": {
+            "price_min": {
+              "max": "",
+              "min": "",
+              "step": "any",
+              "value": "100"
+            }
+          },
+          "roleQueryDimensions": {},
+          "title": "Installed extension isolation fixture",
+          "url": "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&installed_fixture=1",
+          "viewport": {
+            "dpr": 1,
+            "height": 720,
+            "scrollX": 0,
+            "scrollY": 0,
+            "width": 1280
+          },
+          "visible": true
+        }
+      }
+    },
+    {
+      "name": "temporary-profile Native host registration",
+      "status": "passed",
+      "evidence": {
+        "registration": "/private/tmp/cbg-installed-rkOWuq/chrome-profile/NativeMessagingHosts/com.cbg.access_bridge.json",
+        "realHostConnections": 3,
+        "pids": ["27241", "27244", "27248"]
+      }
+    },
+    {
+      "name": "new real host process after native port termination",
+      "status": "passed",
+      "evidence": {
+        "pids": ["27241", "27244", "27248"],
+        "newPidsAfterTermination": ["27248"],
+        "scope": "Read-only connection/relaunch only; active-input restart remains untested"
+      }
+    },
+    {
+      "name": "real helper permission/startup outcome",
+      "status": "rejected-as-expected",
+      "evidence": {
+        "denied": [
+          {
+            "connection": 1,
+            "receivedAt": "2026-11-15T14:18:31.503Z",
+            "message": {
+              "kind": "host-status",
+              "stopped": true,
+              "reason": "input-monitor-startup-failed"
+            }
+          },
+          {
+            "connection": 2,
+            "receivedAt": "2026-11-15T14:18:31.519Z",
+            "message": {
+              "kind": "host-status",
+              "stopped": true,
+              "reason": "input-monitor-startup-failed"
+            }
+          },
+          {
+            "connection": 3,
+            "receivedAt": "2026-11-15T14:18:31.609Z",
+            "message": {
+              "kind": "host-status",
+              "stopped": true,
+              "reason": "input-monitor-startup-failed"
+            }
+          }
+        ],
+        "startupUnconfirmed": [],
+        "permissions": []
+      }
+    },
+    {
+      "name": "OS business input",
+      "status": "not-run",
+      "evidence": "The socket fixture sent ACK/status only; no resume, activity lease, execute, permission spoof or TCC grant was issued."
+    }
+  ],
+  "finalSnapshotsReceivedAtUnixSocket": [
+    {
+      "connection": 1,
+      "receivedAt": "2026-11-15T14:18:31.469Z",
+      "payload": {
+        "pageId": "bca17e02-3447-4778-992b-8ef4e0a48122",
+        "pageGeneration": 1,
+        "observedAt": "2026-11-15T14:18:31.337Z",
+        "url": "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&installed_fixture=1",
+        "title": "Installed extension isolation fixture",
+        "revision": "bca17e02-3447-4778-992b-8ef4e0a48122:1:2",
+        "visible": true,
+        "viewport": {
+          "width": 1280,
+          "height": 720,
+          "scrollX": 0,
+          "scrollY": 0,
+          "dpr": 1
+        },
+        "loading": false,
+        "access": "normal",
+        "listing": {
+          "page": 1,
+          "totalPages": 1,
+          "order": "selling_time DESC",
+          "serverType": "1,2,3",
+          "items": []
+        },
+        "controls": {
+          "tabs": [],
+          "subtabs": [],
+          "pets": [],
+          "mounts": [],
+          "children": [],
+          "petCount": null,
+          "selectedPet": null,
+          "selectedMount": null,
+          "selectedChild": null,
+          "items": []
+        },
+        "formValues": {
+          "price_min": "100"
+        },
+        "roleQueryControls": {
+          "price_min": {
+            "value": "100",
+            "min": "",
+            "max": "",
+            "step": "any"
+          }
+        },
+        "roleQueryDimensions": {},
+        "actionContext": null,
+        "bindingContext": null,
+        "productState": "unknown",
+        "authenticated": true,
+        "empty": true,
+        "business": [],
+        "queryArgs": {
+          "server_type": "1,2,3",
+          "page": 1,
+          "order_by": "selling_time DESC",
+          "price_min": "100"
+        },
+        "listingCommit": null,
+        "listingCommitted": true
+      }
+    }
+  ],
+  "notRun": [
+    "OS business input",
+    "TCC grants",
+    "AX target execution",
+    "lock screen",
+    "display disconnection / second display",
+    "user takeover during input",
+    "active-input host restart"
+  ],
+  "priorAttempt": {
+    "outcome": "failed test harness protocol target",
+    "message": "Extensions.triggerAction requires a tab target; initial script used a page target. Test harness corrected; production unchanged."
+  }
+}

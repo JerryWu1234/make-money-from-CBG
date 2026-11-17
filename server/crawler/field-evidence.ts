@@ -1,5 +1,10 @@
 import type { DetailItem, RoleDetail, TabSnapshot, ValuationCapture } from "./types";
 import { MAIN_TABS } from "./detail-tabs";
+import {
+  isRoleValuationSource,
+  ROLE_NUMERIC_FIELDS,
+  roleNumericObservation,
+} from "./valuation-source";
 
 type FieldEvidence = NonNullable<RoleDetail["sourceEvidence"]>["fields"][number];
 /** Field paths refer to the archived capture; the enclosing evidence binds every path to one product/revision. */
@@ -132,7 +137,17 @@ export function fieldEvidence(tabs: TabSnapshot[], valuation?: ValuationCapture)
   }
   for (const [index, field] of (valuation?.fields || []).entries())
     add(`valuation.fields[${index}].${field.name}`, "official-role-parser", field.value);
-  for (const key of ["riders", "advancedMount", "allSkills", "schoolSkills", "assets"])
+  for (const key of ["riders", "advancedMount", "allSkills", "schoolSkills"])
     add(`valuation.source.${key}`, "official-role-parser", valuation?.source[key]);
+  if (
+    tabs.some((tab) => tab.name === "人物/修炼") ||
+    isRoleValuationSource(valuation?.source || {})
+  )
+    for (const field of ROLE_NUMERIC_FIELDS)
+      add(
+        `valuation.source.${field.path}`,
+        "official-role-parser",
+        roleNumericObservation(valuation?.source || {}, field.key).value,
+      );
   return fields;
 }

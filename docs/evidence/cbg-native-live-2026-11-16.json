@@ -1,0 +1,4005 @@
+{
+  "description": "Selected actual fresh-isolation evidence; no business OS input completion has passed; conservative posted true/ok false is unknown, not helper success.",
+  "attempts": [
+    {
+      "artifact": "cbg-installed-CxThOa",
+      "sha256": "17fe3ed3dcbf34d3ebabbe31a78267a60f02a60c9f763e8b8211566164955b0d",
+      "mode": "real-os-input",
+      "outcome": "failed-or-blocked",
+      "failure": "host-stop-invalidated",
+      "permissions": {
+        "accessibility": true,
+        "displayAvailable": true,
+        "frontmostChrome": true,
+        "inputMonitorActive": true,
+        "inputMonitoring": true,
+        "locked": false,
+        "screenRecording": false
+      },
+      "activityGranted": [
+        {
+          "activityId": "8848def4-3349-4962-a678-8862b170a7f3",
+          "authorizationEpoch": 1,
+          "acknowledged": true
+        }
+      ],
+      "proofActionIds": ["47180b4f-dbda-4fa6-8629-31258f98e2c7"],
+      "successfulHelperPosted": [],
+      "conservativeUnknown": [
+        {
+          "actionId": "47180b4f-dbda-4fa6-8629-31258f98e2c7",
+          "error": "host-stop-invalidated"
+        }
+      ],
+      "hostReasons": [
+        "input-stopped-or-user-preempted",
+        "server-stop",
+        "server-stop",
+        "server-stop"
+      ],
+      "unknownPermits": 1,
+      "cleanup": {
+        "observedFixedHelperPids": [],
+        "processes": [],
+        "remainingAssertions": []
+      },
+      "notRun": [
+        "lock screen (explicitly deferred this round)",
+        "second display",
+        "user takeover",
+        "disconnect",
+        "lease expiry",
+        "host restart during active input"
+      ]
+    },
+    {
+      "artifact": "cbg-installed-HTO6R5",
+      "sha256": "fd37d682b49c4a07369a4dd02eb951d78aeeb251e61dd9054ec426ba57699b76",
+      "mode": "real-os-input",
+      "outcome": "failed-or-blocked",
+      "failure": "host-stop-invalidated",
+      "permissions": {
+        "accessibility": true,
+        "displayAvailable": true,
+        "frontmostChrome": true,
+        "inputMonitorActive": true,
+        "inputMonitoring": true,
+        "locked": false,
+        "screenRecording": false
+      },
+      "activityGranted": [
+        {
+          "activityId": "60d163e7-4bd6-4ee2-934f-8f4f06d160ee",
+          "authorizationEpoch": 1,
+          "acknowledged": true
+        }
+      ],
+      "proofActionIds": ["e3197d30-bfc6-4a58-bf91-d475bc694866"],
+      "successfulHelperPosted": [],
+      "conservativeUnknown": [
+        {
+          "actionId": "e3197d30-bfc6-4a58-bf91-d475bc694866",
+          "error": "host-stop-invalidated"
+        }
+      ],
+      "hostReasons": ["native-screen-scale-mismatch", "server-stop", "server-stop", "server-stop"],
+      "fixture": {
+        "price": "100",
+        "events": [],
+        "at": 1794789992748
+      },
+      "unknownPermits": 1,
+      "cleanup": {
+        "observedFixedHelperPids": [52786],
+        "processes": [
+          {
+            "pid": 52786,
+            "alive": false
+          }
+        ],
+        "remainingAssertions": []
+      },
+      "notRun": [
+        "lock screen (explicitly deferred this round)",
+        "second display",
+        "user takeover",
+        "disconnect",
+        "lease expiry",
+        "host restart during active input"
+      ]
+    },
+    {
+      "artifact": "cbg-installed-WvDyEC",
+      "sha256": "b0ff7d531bdd5a15730295b0653ea5f3e06f70cee82a8df67af3b2419215206e",
+      "mode": "real-os-input",
+      "outcome": "failed-or-blocked",
+      "failure": "host-stop-invalidated",
+      "permissions": {
+        "accessibility": true,
+        "displayAvailable": true,
+        "frontmostChrome": true,
+        "inputMonitorActive": true,
+        "inputMonitoring": true,
+        "locked": false,
+        "screenRecording": false
+      },
+      "activityGranted": [
+        {
+          "activityId": "d55c7cf1-1f9a-45fc-98c6-ce4e9373639b",
+          "authorizationEpoch": 1,
+          "acknowledged": true
+        }
+      ],
+      "proofActionIds": ["9e9de623-6861-4068-8329-9d20acfc81d6"],
+      "successfulHelperPosted": [],
+      "conservativeUnknown": [
+        {
+          "actionId": "9e9de623-6861-4068-8329-9d20acfc81d6",
+          "error": "host-stop-invalidated"
+        }
+      ],
+      "hostReasons": ["native-page-url-unverified", "server-stop", "server-stop", "server-stop"],
+      "fixture": {
+        "price": "100",
+        "events": [],
+        "at": 1794790524007
+      },
+      "unknownPermits": 1,
+      "cleanup": {
+        "observedFixedHelperPids": [53737],
+        "processes": [
+          {
+            "pid": 53737,
+            "alive": false
+          }
+        ],
+        "remainingAssertions": []
+      },
+      "notRun": [
+        "lock screen (explicitly deferred this round)",
+        "second display",
+        "user takeover",
+        "disconnect",
+        "lease expiry",
+        "host restart during active input"
+      ]
+    },
+    {
+      "artifact": "cbg-installed-rKUn70",
+      "sha256": "c775a9cfa04ea5ae47f321d282d223adfafc084bf7b8aca3daf72a1375ecdec9",
+      "mode": "read-only-ax-diagnostic",
+      "outcome": "completed-read-only-ax-diagnostic",
+      "permissions": {
+        "accessibility": true,
+        "displayAvailable": true,
+        "frontmostChrome": true,
+        "inputMonitorActive": true,
+        "inputMonitoring": true,
+        "locked": false,
+        "screenRecording": false
+      },
+      "activityGranted": [],
+      "proofActionIds": [],
+      "successfulHelperPosted": [],
+      "conservativeUnknown": [],
+      "hostReasons": ["server-stop"],
+      "unknownPermits": 0,
+      "axDiagnostic": {
+        "cdpBrowser": {
+          "type": "browser",
+          "id": 65471,
+          "cpuTime": 1.520236
+        },
+        "actual": {
+          "kind": "real-readonly-ax-diagnostic",
+          "osAssertionCreated": false,
+          "osInputPosted": false,
+          "parentPid": 65446,
+          "pid": 65498,
+          "productionMainCalled": false,
+          "samples": [
+            {
+              "accessibility": true,
+              "actualOffsetMs": 6.776000022888184,
+              "expectedBrowserPid": 65471,
+              "expectedURLHits": 0,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 65471,
+              "nodeCount": 41,
+              "requestedOffsetMs": 0,
+              "roles": {
+                "AXButton": 11,
+                "AXGroup": 20,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXTabGroup": 1,
+                "AXTextField": 1,
+                "AXToolbar": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": []
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 101.98362505435944,
+              "expectedBrowserPid": 65471,
+              "expectedURLHits": 0,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 65471,
+              "nodeCount": 41,
+              "requestedOffsetMs": 100,
+              "roles": {
+                "AXButton": 11,
+                "AXGroup": 20,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXTabGroup": 1,
+                "AXTextField": 1,
+                "AXToolbar": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": []
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 305.0692083835602,
+              "expectedBrowserPid": 65471,
+              "expectedURLHits": 0,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 65471,
+              "nodeCount": 41,
+              "requestedOffsetMs": 300,
+              "roles": {
+                "AXButton": 11,
+                "AXGroup": 20,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXTabGroup": 1,
+                "AXTextField": 1,
+                "AXToolbar": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": []
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 803.3790833950043,
+              "expectedBrowserPid": 65471,
+              "expectedURLHits": 0,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 65471,
+              "nodeCount": 42,
+              "requestedOffsetMs": 800,
+              "roles": {
+                "AXButton": 11,
+                "AXGroup": 21,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXTabGroup": 1,
+                "AXTextField": 1,
+                "AXToolbar": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": []
+            }
+          ]
+        }
+      },
+      "cleanup": {
+        "observedFixedHelperPids": [65496],
+        "processes": [
+          {
+            "pid": 65496,
+            "alive": false
+          }
+        ],
+        "remainingAssertions": []
+      },
+      "notRun": [
+        "lock screen (explicitly deferred this round)",
+        "second display",
+        "user takeover",
+        "disconnect",
+        "lease expiry",
+        "host restart during active input",
+        "all real OS business input (read-only diagnostic scenario)"
+      ]
+    },
+    {
+      "artifact": "cbg-installed-7WT7Eh",
+      "sha256": "d8914ecedafe4d5a811a308f799dfd5fcf03684ecea5f505e19db050a318a7d1",
+      "mode": "read-only-ax-diagnostic",
+      "outcome": "completed-read-only-ax-diagnostic",
+      "permissions": {
+        "accessibility": true,
+        "displayAvailable": true,
+        "frontmostChrome": true,
+        "inputMonitorActive": true,
+        "inputMonitoring": true,
+        "locked": false,
+        "screenRecording": false
+      },
+      "activityGranted": [],
+      "proofActionIds": [],
+      "successfulHelperPosted": [],
+      "conservativeUnknown": [],
+      "hostReasons": ["server-stop"],
+      "unknownPermits": 0,
+      "axDiagnostic": {
+        "cdpBrowser": {
+          "type": "browser",
+          "id": 67174,
+          "cpuTime": 1.33374
+        },
+        "actual": {
+          "applicationRoleRead": {
+            "readPerformed": true,
+            "role": "AXApplication",
+            "sameOwnedBrowser": true
+          },
+          "axAttributeWritten": false,
+          "kind": "real-readonly-ax-diagnostic",
+          "osAssertionCreated": false,
+          "osInputPosted": false,
+          "parentPid": 67135,
+          "pid": 67216,
+          "productionMainCalled": false,
+          "samples": [
+            {
+              "accessibility": true,
+              "actualOffsetMs": 2.1446667909622192,
+              "expectedBrowserPid": 67174,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67174,
+              "nodeCount": 60,
+              "phase": "baseline",
+              "requestedOffsetMs": 0,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 103.57683336734772,
+              "expectedBrowserPid": 67174,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67174,
+              "nodeCount": 60,
+              "phase": "baseline",
+              "requestedOffsetMs": 100,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 305.05191683769226,
+              "expectedBrowserPid": 67174,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67174,
+              "nodeCount": 60,
+              "phase": "baseline",
+              "requestedOffsetMs": 300,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 805.0872083902359,
+              "expectedBrowserPid": 67174,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67174,
+              "nodeCount": 60,
+              "phase": "baseline",
+              "requestedOffsetMs": 800,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 0.0005832910537719727,
+              "expectedBrowserPid": 67174,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67174,
+              "nodeCount": 60,
+              "phase": "after-read-application-role",
+              "requestedOffsetMs": 0,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 104.3683750629425,
+              "expectedBrowserPid": 67174,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67174,
+              "nodeCount": 60,
+              "phase": "after-read-application-role",
+              "requestedOffsetMs": 100,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 305.0220832824707,
+              "expectedBrowserPid": 67174,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67174,
+              "nodeCount": 60,
+              "phase": "after-read-application-role",
+              "requestedOffsetMs": 300,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 805.0217082500458,
+              "expectedBrowserPid": 67174,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67174,
+              "nodeCount": 60,
+              "phase": "after-read-application-role",
+              "requestedOffsetMs": 800,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "cleanup": {
+        "observedFixedHelperPids": [67212],
+        "processes": [
+          {
+            "pid": 67212,
+            "alive": false
+          }
+        ],
+        "remainingAssertions": []
+      },
+      "notRun": [
+        "lock screen (explicitly deferred this round)",
+        "second display",
+        "user takeover",
+        "disconnect",
+        "lease expiry",
+        "host restart during active input",
+        "all real OS business input (read-only diagnostic scenario)"
+      ]
+    },
+    {
+      "artifact": "cbg-installed-wRaGIc",
+      "sha256": "ff25ea9ac6581cc013a8e6627cb93fe08e50b702ceac6c07f2266c236c87de85",
+      "mode": "read-only-ax-diagnostic",
+      "outcome": "completed-read-only-ax-diagnostic",
+      "permissions": {
+        "accessibility": true,
+        "displayAvailable": true,
+        "frontmostChrome": true,
+        "inputMonitorActive": true,
+        "inputMonitoring": true,
+        "locked": false,
+        "screenRecording": false
+      },
+      "activityGranted": [],
+      "proofActionIds": [],
+      "successfulHelperPosted": [],
+      "conservativeUnknown": [],
+      "hostReasons": ["server-stop"],
+      "unknownPermits": 0,
+      "axDiagnostic": {
+        "cdpBrowser": {
+          "type": "browser",
+          "id": 67725,
+          "cpuTime": 0.978901
+        },
+        "actual": {
+          "applicationRoleRead": {
+            "readPerformed": true,
+            "role": "AXApplication",
+            "sameOwnedBrowser": true
+          },
+          "axAttributeWritten": false,
+          "kind": "real-readonly-ax-diagnostic",
+          "osAssertionCreated": false,
+          "osInputPosted": false,
+          "parentPid": 67702,
+          "pid": 67749,
+          "productionMainCalled": false,
+          "samples": [
+            {
+              "accessibility": true,
+              "actualOffsetMs": 1.3249167203903198,
+              "expectedBrowserPid": 67725,
+              "expectedURLHits": 0,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67725,
+              "nodeCount": 41,
+              "phase": "baseline",
+              "requestedOffsetMs": 0,
+              "roles": {
+                "AXButton": 11,
+                "AXGroup": 20,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXTabGroup": 1,
+                "AXTextField": 1,
+                "AXToolbar": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": []
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 105.02729165554047,
+              "expectedBrowserPid": 67725,
+              "expectedURLHits": 0,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67725,
+              "nodeCount": 41,
+              "phase": "baseline",
+              "requestedOffsetMs": 100,
+              "roles": {
+                "AXButton": 11,
+                "AXGroup": 20,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXTabGroup": 1,
+                "AXTextField": 1,
+                "AXToolbar": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": []
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 305.18545830249786,
+              "expectedBrowserPid": 67725,
+              "expectedURLHits": 0,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67725,
+              "nodeCount": 42,
+              "phase": "baseline",
+              "requestedOffsetMs": 300,
+              "roles": {
+                "AXButton": 11,
+                "AXGroup": 21,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXTabGroup": 1,
+                "AXTextField": 1,
+                "AXToolbar": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": []
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 805.0332082509995,
+              "expectedBrowserPid": 67725,
+              "expectedURLHits": 0,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67725,
+              "nodeCount": 42,
+              "phase": "baseline",
+              "requestedOffsetMs": 800,
+              "roles": {
+                "AXButton": 11,
+                "AXGroup": 21,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXTabGroup": 1,
+                "AXTextField": 1,
+                "AXToolbar": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": []
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 0.0027916431427001953,
+              "expectedBrowserPid": 67725,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67725,
+              "nodeCount": 60,
+              "phase": "after-read-application-role",
+              "requestedOffsetMs": 0,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 105.04716670513153,
+              "expectedBrowserPid": 67725,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67725,
+              "nodeCount": 60,
+              "phase": "after-read-application-role",
+              "requestedOffsetMs": 100,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 303.9317500591278,
+              "expectedBrowserPid": 67725,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67725,
+              "nodeCount": 60,
+              "phase": "after-read-application-role",
+              "requestedOffsetMs": 300,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            },
+            {
+              "accessibility": true,
+              "actualOffsetMs": 805.0288749933243,
+              "expectedBrowserPid": 67725,
+              "expectedURLHits": 1,
+              "focusedWindowAvailable": true,
+              "frontmostChrome": true,
+              "frontmostPid": 67725,
+              "nodeCount": 60,
+              "phase": "after-read-application-role",
+              "requestedOffsetMs": 800,
+              "roles": {
+                "AXButton": 12,
+                "AXGroup": 27,
+                "AXHeading": 1,
+                "AXLink": 1,
+                "AXPopUpButton": 5,
+                "AXRadioButton": 2,
+                "AXScrollArea": 1,
+                "AXStaticText": 6,
+                "AXTabGroup": 1,
+                "AXTextField": 2,
+                "AXToolbar": 1,
+                "AXWebArea": 1
+              },
+              "sameOwnedBrowser": true,
+              "webAreas": [
+                {
+                  "bounds": {
+                    "height": 665,
+                    "width": 1200,
+                    "x": 216,
+                    "y": 139
+                  },
+                  "expectedURLMatch": true,
+                  "hasBounds": true,
+                  "role": "AXWebArea",
+                  "urlType": "NSURL"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "cleanup": {
+        "observedFixedHelperPids": [67747],
+        "processes": [
+          {
+            "pid": 67747,
+            "alive": false
+          }
+        ],
+        "remainingAssertions": []
+      },
+      "notRun": [
+        "lock screen (explicitly deferred this round)",
+        "second display",
+        "user takeover",
+        "disconnect",
+        "lease expiry",
+        "host restart during active input",
+        "all real OS business input (read-only diagnostic scenario)"
+      ]
+    },
+    {
+      "artifact": "cbg-installed-afeEtf",
+      "sha256": "0798a79661de077602ce2d8c85fb5f9dd61756df2ab00fe18d21174094b4830b",
+      "mode": "real-os-input",
+      "outcome": "failed-or-blocked",
+      "failure": "input-stopped-or-user-preempted",
+      "permissions": {
+        "accessibility": true,
+        "displayAvailable": true,
+        "frontmostChrome": true,
+        "inputMonitorActive": true,
+        "inputMonitoring": true,
+        "locked": false,
+        "screenRecording": false
+      },
+      "activityGranted": [
+        {
+          "activityId": "c2023225-2d5d-4c8b-a2c1-14a0bcb322db",
+          "authorizationEpoch": 1,
+          "acknowledged": true
+        }
+      ],
+      "proofActionIds": [],
+      "successfulHelperPosted": [],
+      "conservativeUnknown": [],
+      "hostReasons": [
+        "input-stopped-or-user-preempted",
+        "server-stop",
+        "server-stop",
+        "server-stop"
+      ],
+      "fixture": {
+        "price": "100",
+        "events": [],
+        "at": 1794834003164
+      },
+      "unknownPermits": 1,
+      "cleanup": {
+        "observedFixedHelperPids": [68405],
+        "processes": [
+          {
+            "pid": 68405,
+            "alive": false
+          }
+        ],
+        "remainingAssertions": []
+      },
+      "notRun": [
+        "lock screen (explicitly deferred this round)",
+        "second display",
+        "user takeover",
+        "disconnect",
+        "lease expiry",
+        "host restart during active input"
+      ]
+    }
+  ],
+  "schemaVersion": 1,
+  "scope": "Selected real single-screen installed-chain evidence. Latest basic input/wait/heartbeat/completion/cancellation passes with explicit read-only AX setup; disconnect/restart after input also pass. Historical unexplained unmarked-input attempts remain unresolved, not reclassified as human or successful.",
+  "nativePreemptionObservation": {
+    "artifact": "cbg-installed-YYxCQe",
+    "sha256": "fc6696b616011c854fefb140301be385fc8583111fac76a7da38529228352da0",
+    "scope": "Real native activity and an external unmarked mouse event; zero query/execute/proof, not a completed business input or independently verified human takeover.",
+    "outcome": "completed-native-preemption-diagnostic-no-input",
+    "diagnostic": {
+      "authorizationEpoch": 1,
+      "callbackTimestampNs": "207176779415750",
+      "eventTimestampNs": "207176777559000",
+      "eventType": 5,
+      "grantTimestampNs": "207175957240458",
+      "helperPid": 71120,
+      "ownsInput": true,
+      "recordScope": "first-preemption-in-helper-process",
+      "sourcePid": 0,
+      "tapDisabled": false,
+      "userData": 0
+    },
+    "eventAfterGrantNs": "820318542",
+    "callbackAfterEventNs": "1856750",
+    "active": {
+      "status": {
+        "kind": "input-result",
+        "actionId": "a5ea6e2e-df9d-4dfc-a5bf-4eeb8c0c045a",
+        "activity": {
+          "assertionId": 40467,
+          "awake": true,
+          "expired": false,
+          "lease": {
+            "activityId": "78409ffd-c6f2-4875-b94c-471bed040a17",
+            "authorizationEpoch": 1,
+            "browserSessionEpoch": "cbc433df-4a2b-4cb3-acd3-c4165dc28ed0",
+            "expiresAt": 1794835035352,
+            "hostGeneration": 1,
+            "hostInstanceEpoch": "bfab6d61-d604-4af2-abd5-bea8a66f9bf7",
+            "progressExpiresAt": 1794835200352,
+            "progressSequence": 0,
+            "stopEpoch": 0
+          }
+        },
+        "inputPreemption": {},
+        "ok": true,
+        "permissions": {
+          "accessibility": true,
+          "displayAvailable": true,
+          "frontmostChrome": true,
+          "inputMonitorActive": true,
+          "inputMonitoring": true,
+          "locked": false,
+          "screenRecording": false
+        }
+      },
+      "fixedHelperPids": [71120],
+      "power": [
+        "   pid 71120(cbg-input): [0x0003294700019e13] 00:00:00 PreventUserIdleSystemSleep named: \"CBG active authorized workflow\"  "
+      ]
+    },
+    "workflow": {
+      "rejected": true,
+      "message": "input-stopped-or-user-preempted"
+    },
+    "cleanup": {
+      "observedFixedHelperPids": [71120],
+      "processes": [
+        {
+          "pid": 71120,
+          "alive": false
+        }
+      ],
+      "remainingAssertions": []
+    },
+    "limits": [
+      "sourcePid 0 does not independently identify human intent or permit an exemption",
+      "not a completed business input or full manual takeover acceptance"
+    ]
+  },
+  "pointerSchema2Observation": "Implemented and pure-tested after this run; not executed on hardware in this evidence bundle.",
+  "currentNotVerified": [
+    "lease expiry under stopped host",
+    "controlled physical user takeover",
+    "lock screen (user deferred)",
+    "physical second display, negative coordinates and cross-screen scaling",
+    "authenticated official-site query",
+    "unexplained unmarked-input source across earlier no-user-operation attempts",
+    "default cold-start without the explicit AX preflight setup"
+  ],
+  "userScopeChange": {
+    "automaticSleepPrevention": "Removed at user request on 2026-11-16; user keeps the computer awake. Historical awake/assertion records below are superseded acceptance scope.",
+    "retained": "Activity authorization, TTL, stop/cancel/disconnect, locked/display/permission and preemption input guards."
+  },
+  "readonlyHitDiagnostic": {
+    "scope": "Native AX read-only mapping on frozen isolated fixture. No extension, NativeMessaging, runtime or host; not SW proof or successful business input.",
+    "rawReportSha256": "7eb812af06f731bc48daaadbb0f64753ddf24a20417710c23bcfe6e123ee35db",
+    "activityRequests": 0,
+    "executeRequests": 0,
+    "osInputPosted": false,
+    "osAssertionCreated": false,
+    "outcome": "completed-read-only-mapping-diagnostic-not-input-proof",
+    "baselineUniqueUrlHits": [0, 0, 0, 0],
+    "afterApplicationRoleRead": [
+      {
+        "sameOwnedBrowser": true,
+        "expectedURLHits": 1,
+        "priceField": [
+          {
+            "bounds": {
+              "available": true,
+              "height": 22,
+              "width": 147,
+              "x": 288,
+              "y": 290
+            },
+            "centerHit": {
+              "bounds": {
+                "available": true,
+                "height": 22,
+                "width": 147,
+                "x": 288,
+                "y": 290
+              },
+              "bundleId": "com.google.Chrome",
+              "hitAvailable": true,
+              "hitPid": 89204,
+              "pidStatus": 0,
+              "point": {
+                "x": 361.5,
+                "y": 301
+              },
+              "role": "AXTextField",
+              "sameOwnedBrowser": true,
+              "status": 0
+            },
+            "pid": 89204,
+            "pidStatus": 0,
+            "priceLabelMatches": true,
+            "role": "AXTextField",
+            "sameOwnedBrowser": true
+          }
+        ],
+        "productionMapping": {
+          "centerHit": {
+            "bounds": {
+              "available": true,
+              "height": 22,
+              "width": 147,
+              "x": 288,
+              "y": 290
+            },
+            "bundleId": "com.google.Chrome",
+            "hitAvailable": true,
+            "hitPid": 89204,
+            "pidStatus": 0,
+            "point": {
+              "x": 361.5,
+              "y": 300.625
+            },
+            "role": "AXTextField",
+            "sameOwnedBrowser": true,
+            "status": 0
+          },
+          "content": {
+            "available": true,
+            "height": 665,
+            "width": 1200,
+            "x": 216,
+            "y": 139
+          },
+          "mappedRect": {
+            "available": true,
+            "height": 21.5,
+            "width": 147,
+            "x": 288,
+            "y": 289.875
+          },
+          "source": "live-fixture-DOM-read-not-proof",
+          "valid": true
+        }
+      },
+      {
+        "sameOwnedBrowser": true,
+        "expectedURLHits": 1,
+        "priceField": [
+          {
+            "bounds": {
+              "available": true,
+              "height": 22,
+              "width": 147,
+              "x": 288,
+              "y": 290
+            },
+            "centerHit": {
+              "bounds": {
+                "available": true,
+                "height": 22,
+                "width": 147,
+                "x": 288,
+                "y": 290
+              },
+              "bundleId": "com.google.Chrome",
+              "hitAvailable": true,
+              "hitPid": 89204,
+              "pidStatus": 0,
+              "point": {
+                "x": 361.5,
+                "y": 301
+              },
+              "role": "AXTextField",
+              "sameOwnedBrowser": true,
+              "status": 0
+            },
+            "pid": 89204,
+            "pidStatus": 0,
+            "priceLabelMatches": true,
+            "role": "AXTextField",
+            "sameOwnedBrowser": true
+          }
+        ],
+        "productionMapping": {
+          "centerHit": {
+            "bounds": {
+              "available": true,
+              "height": 22,
+              "width": 147,
+              "x": 288,
+              "y": 290
+            },
+            "bundleId": "com.google.Chrome",
+            "hitAvailable": true,
+            "hitPid": 89204,
+            "pidStatus": 0,
+            "point": {
+              "x": 361.5,
+              "y": 300.625
+            },
+            "role": "AXTextField",
+            "sameOwnedBrowser": true,
+            "status": 0
+          },
+          "content": {
+            "available": true,
+            "height": 665,
+            "width": 1200,
+            "x": 216,
+            "y": 139
+          },
+          "mappedRect": {
+            "available": true,
+            "height": 21.5,
+            "width": 147,
+            "x": 288,
+            "y": 289.875
+          },
+          "source": "live-fixture-DOM-read-not-proof",
+          "valid": true
+        }
+      },
+      {
+        "sameOwnedBrowser": true,
+        "expectedURLHits": 1,
+        "priceField": [
+          {
+            "bounds": {
+              "available": true,
+              "height": 22,
+              "width": 147,
+              "x": 288,
+              "y": 290
+            },
+            "centerHit": {
+              "bounds": {
+                "available": true,
+                "height": 22,
+                "width": 147,
+                "x": 288,
+                "y": 290
+              },
+              "bundleId": "com.google.Chrome",
+              "hitAvailable": true,
+              "hitPid": 89204,
+              "pidStatus": 0,
+              "point": {
+                "x": 361.5,
+                "y": 301
+              },
+              "role": "AXTextField",
+              "sameOwnedBrowser": true,
+              "status": 0
+            },
+            "pid": 89204,
+            "pidStatus": 0,
+            "priceLabelMatches": true,
+            "role": "AXTextField",
+            "sameOwnedBrowser": true
+          }
+        ],
+        "productionMapping": {
+          "centerHit": {
+            "bounds": {
+              "available": true,
+              "height": 22,
+              "width": 147,
+              "x": 288,
+              "y": 290
+            },
+            "bundleId": "com.google.Chrome",
+            "hitAvailable": true,
+            "hitPid": 89204,
+            "pidStatus": 0,
+            "point": {
+              "x": 361.5,
+              "y": 300.625
+            },
+            "role": "AXTextField",
+            "sameOwnedBrowser": true,
+            "status": 0
+          },
+          "content": {
+            "available": true,
+            "height": 665,
+            "width": 1200,
+            "x": 216,
+            "y": 139
+          },
+          "mappedRect": {
+            "available": true,
+            "height": 21.5,
+            "width": 147,
+            "x": 288,
+            "y": 289.875
+          },
+          "source": "live-fixture-DOM-read-not-proof",
+          "valid": true
+        }
+      },
+      {
+        "sameOwnedBrowser": true,
+        "expectedURLHits": 1,
+        "priceField": [
+          {
+            "bounds": {
+              "available": true,
+              "height": 22,
+              "width": 147,
+              "x": 288,
+              "y": 290
+            },
+            "centerHit": {
+              "bounds": {
+                "available": true,
+                "height": 22,
+                "width": 147,
+                "x": 288,
+                "y": 290
+              },
+              "bundleId": "com.google.Chrome",
+              "hitAvailable": true,
+              "hitPid": 89204,
+              "pidStatus": 0,
+              "point": {
+                "x": 361.5,
+                "y": 301
+              },
+              "role": "AXTextField",
+              "sameOwnedBrowser": true,
+              "status": 0
+            },
+            "pid": 89204,
+            "pidStatus": 0,
+            "priceLabelMatches": true,
+            "role": "AXTextField",
+            "sameOwnedBrowser": true
+          }
+        ],
+        "productionMapping": {
+          "centerHit": {
+            "bounds": {
+              "available": true,
+              "height": 22,
+              "width": 147,
+              "x": 288,
+              "y": 290
+            },
+            "bundleId": "com.google.Chrome",
+            "hitAvailable": true,
+            "hitPid": 89204,
+            "pidStatus": 0,
+            "point": {
+              "x": 361.5,
+              "y": 300.625
+            },
+            "role": "AXTextField",
+            "sameOwnedBrowser": true,
+            "status": 0
+          },
+          "content": {
+            "available": true,
+            "height": 665,
+            "width": 1200,
+            "x": 216,
+            "y": 139
+          },
+          "mappedRect": {
+            "available": true,
+            "height": 21.5,
+            "width": 147,
+            "x": 288,
+            "y": 289.875
+          },
+          "source": "live-fixture-DOM-read-not-proof",
+          "valid": true
+        }
+      }
+    ],
+    "comparison": "DOM rect 72,150.875,147,21.5 and viewport 1200x665 DPR2 scale1 exactly match prior nMQGux real SW proof. Current system-wide AX hit matches browser PID; this alone does not establish the cause of the prior other-application refusal."
+  },
+  "afterSleepPreventionRemoval": {
+    "scope": "Actual isolated extension/NativeMessaging/host/helper chain using active authorization; no IOPM sleep-prevention assertion. Partial posted input and complete workflow acceptance are recorded separately. Raw failures are retained; input-source metadata does not exempt preemption.",
+    "attempts": [
+      {
+        "artifactId": "WaCyxv",
+        "rawReportSha256": "9e6470fef748e70b13a53efa1fef4160b0f06f5de61c4ffcf6f945247669df36",
+        "outcome": "failed-or-blocked",
+        "assertions": [
+          {
+            "name": "actual permissions and bound idle have no active input lease",
+            "status": "passed",
+            "evidence": {
+              "kind": "input-result",
+              "actionId": "ff94f488-4cdd-41b9-9623-41b4f536ee80",
+              "activity": {
+                "active": false,
+                "expired": false,
+                "lease": {}
+              },
+              "inputPreemption": {},
+              "ok": true,
+              "permissions": {
+                "accessibility": true,
+                "displayAvailable": true,
+                "frontmostChrome": true,
+                "inputMonitorActive": true,
+                "inputMonitoring": true,
+                "locked": false,
+                "screenRecording": false
+              }
+            }
+          }
+        ],
+        "failure": "input-stopped-or-user-preempted",
+        "fixtureAtFailure": {
+          "price": "100120",
+          "events": [
+            {
+              "type": "click",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840170234
+            },
+            {
+              "type": "input",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840170298
+            }
+          ],
+          "at": 1794840171826
+        },
+        "cleanup": {
+          "observedFixedHelperPids": [90981],
+          "processes": [
+            {
+              "pid": 90981,
+              "alive": false
+            }
+          ]
+        },
+        "selectedNativeResults": [
+          {
+            "receivedAt": 1794840170167,
+            "kind": "input-result",
+            "actionId": "0b17471f-3d83-4836-bea0-f9ee3fa7ba87",
+            "active": true,
+            "ok": true,
+            "posted": null,
+            "error": "",
+            "reason": null,
+            "inputPreemption": null
+          },
+          {
+            "receivedAt": 1794840170236,
+            "kind": "input-result",
+            "actionId": "1c44f9c0-c82f-4bd2-b1c2-2b2125c78c57",
+            "active": null,
+            "ok": true,
+            "posted": true,
+            "error": null,
+            "reason": null,
+            "inputPreemption": null
+          },
+          {
+            "receivedAt": 1794840171778,
+            "kind": "host-status",
+            "actionId": null,
+            "active": null,
+            "ok": null,
+            "posted": null,
+            "error": null,
+            "reason": "input-stopped-or-user-preempted",
+            "inputPreemption": {
+              "authorizationEpoch": 1,
+              "callbackTimestampNs": "212327386845166",
+              "coordinateSource": "CGEventGetLocation-global-display-coordinates",
+              "deltaSource": "kCGMouseEventDeltaX/Y-since-prior-mouse-movement",
+              "diagnosticSchema": 2,
+              "eventTimestampNs": "212327376106208",
+              "eventType": 5,
+              "grantPointer": {
+                "x": 509.48046875,
+                "y": 139.17578125
+              },
+              "grantPointerAvailable": true,
+              "grantTimestampNs": "212325788532833",
+              "helperPid": 90981,
+              "mouse": {
+                "deltaX": -145,
+                "deltaY": 163,
+                "location": {
+                  "x": 364.4921875,
+                  "y": 302.00390625
+                },
+                "locationAvailable": true
+              },
+              "ownsInput": true,
+              "recordScope": "first-preemption-in-helper-process",
+              "sourcePid": 0,
+              "sourceStateID": 1,
+              "tapDisabled": false,
+              "userData": 0
+            }
+          },
+          {
+            "receivedAt": 1794840171797,
+            "kind": "input-result",
+            "actionId": "872cc14a-9679-4d88-872f-c74212d9b58e",
+            "active": null,
+            "ok": true,
+            "posted": null,
+            "error": null,
+            "reason": null,
+            "inputPreemption": {
+              "authorizationEpoch": 1,
+              "callbackTimestampNs": "212327386845166",
+              "coordinateSource": "CGEventGetLocation-global-display-coordinates",
+              "deltaSource": "kCGMouseEventDeltaX/Y-since-prior-mouse-movement",
+              "diagnosticSchema": 2,
+              "eventTimestampNs": "212327376106208",
+              "eventType": 5,
+              "grantPointer": {
+                "x": 509.48046875,
+                "y": 139.17578125
+              },
+              "grantPointerAvailable": true,
+              "grantTimestampNs": "212325788532833",
+              "helperPid": 90981,
+              "mouse": {
+                "deltaX": -145,
+                "deltaY": 163,
+                "location": {
+                  "x": 364.4921875,
+                  "y": 302.00390625
+                },
+                "locationAvailable": true
+              },
+              "ownsInput": true,
+              "recordScope": "first-preemption-in-helper-process",
+              "sourcePid": 0,
+              "sourceStateID": 1,
+              "tapDisabled": false,
+              "userData": 0
+            }
+          }
+        ]
+      },
+      {
+        "artifactId": "HdM03o",
+        "rawReportSha256": "bcf1f81405d150db1371d3d890e1a11e98fc6dade3946ff4332d8e7e99a97c79",
+        "outcome": "failed-or-blocked",
+        "assertions": [
+          {
+            "name": "actual permissions and bound idle have no active input lease",
+            "status": "passed",
+            "evidence": {
+              "kind": "input-result",
+              "actionId": "e94c1e41-1b31-4da1-8d6f-567799fc461b",
+              "activity": {
+                "active": false,
+                "expired": false,
+                "lease": {}
+              },
+              "inputPreemption": {},
+              "ok": true,
+              "permissions": {
+                "accessibility": true,
+                "displayAvailable": true,
+                "frontmostChrome": true,
+                "inputMonitorActive": true,
+                "inputMonitoring": true,
+                "locked": false,
+                "screenRecording": false
+              }
+            }
+          }
+        ],
+        "failure": "input-stopped-or-user-preempted",
+        "fixtureAtFailure": {
+          "price": "100120",
+          "events": [
+            {
+              "type": "focus",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507039,
+              "eventTimeStamp": 657.4000000059605,
+              "phase": "capture",
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 0,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "click",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507040,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "selectionchange",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507045,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keydown",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507098,
+              "eventTimeStamp": 663,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keydown",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794840507098,
+              "at": 1794840507098,
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keyup",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507124,
+              "eventTimeStamp": 663.0999999940395,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keyup",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794840507124,
+              "at": 1794840507124,
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keydown",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507124,
+              "eventTimeStamp": 663.5,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 229,
+              "metaKey": false,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "beforeinput",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507125,
+              "eventTimeStamp": 743.7000000178814,
+              "phase": "capture",
+              "inputType": "insertText",
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "input",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507126,
+              "value": "100120",
+              "selectionStart": 6,
+              "selectionEnd": 6,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keyup",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507126,
+              "eventTimeStamp": 663.5999999940395,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": false,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100120",
+              "selectionStart": 6,
+              "selectionEnd": 6,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keydown",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794840507124,
+              "at": 1794840507127,
+              "code": "KeyA",
+              "keyCode": 229,
+              "metaKey": false,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100120",
+              "selectionStart": 6,
+              "selectionEnd": 6,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "selectionchange",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507127,
+              "value": "100120",
+              "selectionStart": 6,
+              "selectionEnd": 6,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keyup",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794840507126,
+              "at": 1794840507127,
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": false,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100120",
+              "selectionStart": 6,
+              "selectionEnd": 6,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "select",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507171,
+              "eventTimeStamp": 789.5999999940395,
+              "phase": "capture",
+              "value": "100120",
+              "selectionStart": 0,
+              "selectionEnd": 6,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "selectionchange",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507171,
+              "value": "100120",
+              "selectionStart": 0,
+              "selectionEnd": 6,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keydown",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794840507298,
+              "eventTimeStamp": 913.3000000119209,
+              "phase": "capture",
+              "code": "MetaLeft",
+              "keyCode": 91,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100120",
+              "selectionStart": 0,
+              "selectionEnd": 6,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keydown",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794840507298,
+              "at": 1794840507298,
+              "code": "MetaLeft",
+              "keyCode": 91,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100120",
+              "selectionStart": 0,
+              "selectionEnd": 6,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            }
+          ],
+          "at": 1794840507401
+        },
+        "cleanup": {
+          "observedFixedHelperPids": [91897],
+          "processes": [
+            {
+              "pid": 91897,
+              "alive": false
+            }
+          ]
+        },
+        "selectedNativeResults": [
+          {
+            "receivedAt": 1794840506973,
+            "kind": "input-result",
+            "actionId": "e697f7e4-a022-4233-9a60-a45c2c381679",
+            "active": true,
+            "ok": true,
+            "posted": null,
+            "error": "",
+            "reason": null,
+            "inputPreemption": null
+          },
+          {
+            "receivedAt": 1794840507045,
+            "kind": "input-result",
+            "actionId": "f3cee657-8f82-4f83-87da-1bc861e6fcd9",
+            "active": null,
+            "ok": true,
+            "posted": true,
+            "error": null,
+            "reason": null,
+            "inputPreemption": null
+          },
+          {
+            "receivedAt": 1794840507394,
+            "kind": "host-status",
+            "actionId": null,
+            "active": null,
+            "ok": null,
+            "posted": null,
+            "error": null,
+            "reason": "input-stopped-or-user-preempted",
+            "inputPreemption": {
+              "authorizationEpoch": 1,
+              "callbackTimestampNs": "212662979859041",
+              "coordinateSource": "CGEventGetLocation-global-display-coordinates",
+              "deltaSource": "kCGMouseEventDeltaX/Y-since-prior-mouse-movement",
+              "diagnosticSchema": 2,
+              "eventTimestampNs": "212662979540458",
+              "eventType": 5,
+              "grantPointer": {
+                "x": 766.8203125,
+                "y": 687.0859375
+              },
+              "grantPointerAvailable": true,
+              "grantTimestampNs": "212662597236458",
+              "helperPid": 91897,
+              "mouse": {
+                "deltaX": -405,
+                "deltaY": -386,
+                "location": {
+                  "x": 361.265625,
+                  "y": 300.16015625
+                },
+                "locationAvailable": true
+              },
+              "ownsInput": true,
+              "recordScope": "first-preemption-in-helper-process",
+              "sourcePid": 0,
+              "sourceStateID": 1,
+              "tapDisabled": false,
+              "userData": 0
+            }
+          },
+          {
+            "receivedAt": 1794840507410,
+            "kind": "input-result",
+            "actionId": "470cdc03-ce9d-4257-957b-80c4e405186e",
+            "active": null,
+            "ok": true,
+            "posted": null,
+            "error": null,
+            "reason": null,
+            "inputPreemption": {
+              "authorizationEpoch": 1,
+              "callbackTimestampNs": "212662979859041",
+              "coordinateSource": "CGEventGetLocation-global-display-coordinates",
+              "deltaSource": "kCGMouseEventDeltaX/Y-since-prior-mouse-movement",
+              "diagnosticSchema": 2,
+              "eventTimestampNs": "212662979540458",
+              "eventType": 5,
+              "grantPointer": {
+                "x": 766.8203125,
+                "y": 687.0859375
+              },
+              "grantPointerAvailable": true,
+              "grantTimestampNs": "212662597236458",
+              "helperPid": 91897,
+              "mouse": {
+                "deltaX": -405,
+                "deltaY": -386,
+                "location": {
+                  "x": 361.265625,
+                  "y": 300.16015625
+                },
+                "locationAvailable": true
+              },
+              "ownsInput": true,
+              "recordScope": "first-preemption-in-helper-process",
+              "sourcePid": 0,
+              "sourceStateID": 1,
+              "tapDisabled": false,
+              "userData": 0
+            }
+          }
+        ]
+      },
+      {
+        "artifactId": "PXlg9j",
+        "rawReportSha256": "8b8693ba7324a2c51d9a287ca5f367b74bdd3661a96c0b6f9be08295c69fb9e9",
+        "outcome": "failed-or-blocked",
+        "assertions": [
+          {
+            "name": "actual permissions and bound idle have no active input lease",
+            "status": "passed",
+            "evidence": {
+              "kind": "input-result",
+              "actionId": "bb732637-c745-4d93-98a2-48596e0a9c2c",
+              "activity": {
+                "active": false,
+                "expired": false,
+                "lease": {}
+              },
+              "inputPreemption": {},
+              "ok": true,
+              "permissions": {
+                "accessibility": true,
+                "displayAvailable": true,
+                "frontmostChrome": true,
+                "inputMonitorActive": true,
+                "inputMonitoring": true,
+                "locked": false,
+                "screenRecording": false
+              }
+            }
+          }
+        ],
+        "failure": "input-stopped-or-user-preempted",
+        "fixtureAtFailure": {
+          "price": "100",
+          "events": [
+            {
+              "type": "focus",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841127269,
+              "eventTimeStamp": 955.8999999761581,
+              "phase": "capture",
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 0,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "click",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841127270,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "selectionchange",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841127274,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keydown",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841127329,
+              "eventTimeStamp": 987.5,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keydown",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794841127329,
+              "at": 1794841127330,
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keyup",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841127330,
+              "eventTimeStamp": 987.5999999940395,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keyup",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794841127330,
+              "at": 1794841127331,
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "select",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841127354,
+              "eventTimeStamp": 1040.699999988079,
+              "phase": "capture",
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "selectionchange",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841127354,
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keydown",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841127370,
+              "eventTimeStamp": 1049.2999999821186,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 49,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keydown",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794841127370,
+              "at": 1794841127373,
+              "code": "KeyA",
+              "keyCode": 49,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keyup",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841127381,
+              "eventTimeStamp": 1049.3999999761581,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keyup",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794841127381,
+              "at": 1794841127381,
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            }
+          ],
+          "at": 1794841129444
+        },
+        "cleanup": {
+          "observedFixedHelperPids": [93620],
+          "processes": [
+            {
+              "pid": 93620,
+              "alive": false
+            }
+          ]
+        },
+        "selectedNativeResults": [
+          {
+            "receivedAt": 1794841127200,
+            "kind": "input-result",
+            "actionId": "9d83e3b4-39c1-4de9-9a41-4d7edb365916",
+            "active": true,
+            "ok": true,
+            "posted": null,
+            "error": "",
+            "reason": null,
+            "inputPreemption": null
+          },
+          {
+            "receivedAt": 1794841127363,
+            "kind": "input-result",
+            "actionId": "a380dc03-9b68-4893-97a1-82c69115d9c1",
+            "active": null,
+            "ok": true,
+            "posted": true,
+            "error": null,
+            "reason": null,
+            "inputPreemption": null
+          },
+          {
+            "receivedAt": 1794841129436,
+            "kind": "host-status",
+            "actionId": null,
+            "active": null,
+            "ok": null,
+            "posted": null,
+            "error": null,
+            "reason": "input-stopped-or-user-preempted",
+            "inputPreemption": {
+              "authorizationEpoch": 1,
+              "callbackTimestampNs": "213285019930208",
+              "coordinateSource": "CGEventGetLocation-global-display-coordinates",
+              "deltaSource": "kCGMouseEventDeltaX/Y-since-prior-mouse-movement",
+              "diagnosticSchema": 2,
+              "eventTimestampNs": "213284998216333",
+              "eventType": 5,
+              "grantPointer": {
+                "x": 256.3203125,
+                "y": 273.76171875
+              },
+              "grantPointerAvailable": true,
+              "grantTimestampNs": "213282812111708",
+              "helperPid": 93620,
+              "mouse": {
+                "deltaX": 104,
+                "deltaY": 26,
+                "location": {
+                  "x": 362.1875,
+                  "y": 300.625
+                },
+                "locationAvailable": true
+              },
+              "ownsInput": true,
+              "recordScope": "first-preemption-in-helper-process",
+              "sourcePid": 0,
+              "sourceStateID": 1,
+              "tapDisabled": false,
+              "userData": 0
+            }
+          }
+        ]
+      },
+      {
+        "artifactId": "7Ft8AB",
+        "rawReportSha256": "062b1843ca35356464833b75f24fc91020ce48c1440300db450e470edf79d890",
+        "outcome": "failed-or-blocked",
+        "assertions": [
+          {
+            "name": "actual permissions and bound idle have no active input lease",
+            "status": "passed",
+            "evidence": {
+              "kind": "input-result",
+              "actionId": "72cbba7f-6f87-428b-83c9-70b01e3ed537",
+              "activity": {
+                "active": false,
+                "expired": false,
+                "lease": {}
+              },
+              "inputPreemption": {},
+              "ok": true,
+              "permissions": {
+                "accessibility": true,
+                "displayAvailable": true,
+                "frontmostChrome": true,
+                "inputMonitorActive": true,
+                "inputMonitoring": true,
+                "locked": false,
+                "screenRecording": false
+              }
+            }
+          }
+        ],
+        "failure": "input-stopped-or-user-preempted",
+        "fixtureAtFailure": {
+          "price": "120",
+          "events": [
+            {
+              "type": "focus",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767780,
+              "eventTimeStamp": 594.5999999940395,
+              "phase": "capture",
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 0,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "click",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767783,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "selectionchange",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767786,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keydown",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767861,
+              "eventTimeStamp": 642,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keydown",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794841767861,
+              "at": 1794841767861,
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keyup",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767862,
+              "eventTimeStamp": 642.1999999880791,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keyup",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794841767862,
+              "at": 1794841767862,
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": true,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "select",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767909,
+              "eventTimeStamp": 724.0999999940395,
+              "phase": "capture",
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "selectionchange",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767910,
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keydown",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767945,
+              "eventTimeStamp": 746.2999999821186,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 229,
+              "metaKey": false,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "beforeinput",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767945,
+              "eventTimeStamp": 760.1999999880791,
+              "phase": "capture",
+              "inputType": "insertText",
+              "isComposing": false,
+              "value": "100",
+              "selectionStart": 0,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "input",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767946,
+              "value": "120",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "keyup",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767947,
+              "eventTimeStamp": 746.5999999940395,
+              "phase": "capture",
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": false,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "120",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keydown",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794841767945,
+              "at": 1794841767980,
+              "code": "KeyA",
+              "keyCode": 229,
+              "metaKey": false,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "120",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "selectionchange",
+              "id": "price_min",
+              "trusted": true,
+              "at": 1794841767980,
+              "value": "120",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            },
+            {
+              "type": "after-keyup",
+              "id": "price_min",
+              "trusted": true,
+              "originalAt": 1794841767947,
+              "at": 1794841767980,
+              "code": "KeyA",
+              "keyCode": 65,
+              "metaKey": false,
+              "ctrlKey": false,
+              "altKey": false,
+              "shiftKey": false,
+              "repeat": false,
+              "isComposing": false,
+              "value": "120",
+              "selectionStart": 3,
+              "selectionEnd": 3,
+              "selectionDirection": "none",
+              "activeElementId": "price_min",
+              "documentFocused": true
+            }
+          ],
+          "at": 1794841770913
+        },
+        "cleanup": {
+          "observedFixedHelperPids": [95518],
+          "processes": [
+            {
+              "pid": 95518,
+              "alive": false
+            }
+          ]
+        },
+        "selectedNativeResults": [
+          {
+            "receivedAt": 1794841767724,
+            "kind": "input-result",
+            "actionId": "65fbb9a0-2380-43a7-8ca0-e4885dae59b2",
+            "active": true,
+            "ok": true,
+            "posted": null,
+            "error": "",
+            "reason": null,
+            "inputPreemption": null
+          },
+          {
+            "receivedAt": 1794841767933,
+            "kind": "input-result",
+            "actionId": "93cb689b-c034-48d7-839e-88599011e47e",
+            "active": null,
+            "ok": true,
+            "posted": true,
+            "error": null,
+            "reason": null,
+            "inputPreemption": null
+          },
+          {
+            "receivedAt": 1794841768055,
+            "kind": "input-result",
+            "actionId": "5c7c7bb5-80f8-457b-826a-ae13b5d7723a",
+            "active": true,
+            "ok": true,
+            "posted": null,
+            "error": "",
+            "reason": null,
+            "inputPreemption": null
+          },
+          {
+            "receivedAt": 1794841770726,
+            "kind": "input-result",
+            "actionId": "fa375b4d-f979-47aa-b480-b2094835b42c",
+            "active": true,
+            "ok": true,
+            "posted": null,
+            "error": "",
+            "reason": null,
+            "inputPreemption": null
+          },
+          {
+            "receivedAt": 1794841770899,
+            "kind": "host-status",
+            "actionId": null,
+            "active": null,
+            "ok": null,
+            "posted": null,
+            "error": null,
+            "reason": "input-stopped-or-user-preempted",
+            "inputPreemption": {
+              "authorizationEpoch": 1,
+              "callbackTimestampNs": "213926435174083",
+              "coordinateSource": "CGEventGetLocation-global-display-coordinates",
+              "deltaSource": "kCGMouseEventDeltaX/Y-since-prior-mouse-movement",
+              "diagnosticSchema": 2,
+              "eventTimestampNs": "213926434145291",
+              "eventType": 5,
+              "grantPointer": {
+                "x": 776.03125,
+                "y": 437.65234375
+              },
+              "grantPointerAvailable": true,
+              "grantTimestampNs": "213923340140916",
+              "helperPid": 95518,
+              "mouse": {
+                "deltaX": -415,
+                "deltaY": -135,
+                "location": {
+                  "x": 361.5,
+                  "y": 301.08203125
+                },
+                "locationAvailable": true
+              },
+              "ownsInput": true,
+              "recordScope": "first-preemption-in-helper-process",
+              "sourcePid": 0,
+              "sourceStateID": 1,
+              "tapDisabled": false,
+              "userData": 0
+            }
+          },
+          {
+            "receivedAt": 1794841770912,
+            "kind": "input-result",
+            "actionId": "a3190ad8-e99f-40c4-bf03-7a918edc12ee",
+            "active": null,
+            "ok": true,
+            "posted": null,
+            "error": null,
+            "reason": null,
+            "inputPreemption": {
+              "authorizationEpoch": 1,
+              "callbackTimestampNs": "213926435174083",
+              "coordinateSource": "CGEventGetLocation-global-display-coordinates",
+              "deltaSource": "kCGMouseEventDeltaX/Y-since-prior-mouse-movement",
+              "diagnosticSchema": 2,
+              "eventTimestampNs": "213926434145291",
+              "eventType": 5,
+              "grantPointer": {
+                "x": 776.03125,
+                "y": 437.65234375
+              },
+              "grantPointerAvailable": true,
+              "grantTimestampNs": "213923340140916",
+              "helperPid": 95518,
+              "mouse": {
+                "deltaX": -415,
+                "deltaY": -135,
+                "location": {
+                  "x": 361.5,
+                  "y": 301.08203125
+                },
+                "locationAvailable": true
+              },
+              "ownsInput": true,
+              "recordScope": "first-preemption-in-helper-process",
+              "sourcePid": 0,
+              "sourceStateID": 1,
+              "tapDisabled": false,
+              "userData": 0
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "acceptedFieldReplacement": {
+    "artifactId": "7Ft8AB",
+    "actionId": "93cb689b-c034-48d7-839e-88599011e47e",
+    "target": {
+      "kind": "query-field",
+      "field": "price_min",
+      "value": "120"
+    },
+    "before": "100",
+    "after": "120",
+    "sameActionEvidence": {
+      "realSWProof": true,
+      "helperOk": true,
+      "helperPosted": true,
+      "trustedBeforeInputSelection": [0, 3],
+      "unicodeModifiers": {
+        "metaKey": false,
+        "ctrlKey": false,
+        "altKey": false,
+        "shiftKey": false
+      },
+      "governorPermit": "completed",
+      "bridgeCommand": "completed",
+      "snapshotRevision": "7eb22d5d-655b-4178-ae07-41b384ddb06f:1:5",
+      "observedAt": "2026-11-16T15:09:28.048Z"
+    },
+    "nextQueryPermit": "cancelled",
+    "fullScenarioOutcome": "failed-or-blocked",
+    "stopReason": "input-stopped-or-user-preempted",
+    "fixedHelperPid": 95518,
+    "helperExited": true,
+    "queryArgsPriceAfterReplacement": "100",
+    "querySubmitted": false,
+    "unknownActionsAtStop": 0,
+    "note": "Only the form value changed; QueryArgs remains the last submitted value. A real renewal ACK was observed, but no complete page-query wait was accepted."
+  },
+  "faultScenarios": [
+    {
+      "artifactId": "oMeK6u",
+      "scenario": "disconnect",
+      "outcome": "passed-real-input-disconnect-only",
+      "rawReportSha256": "c2fdf0f4aad6aa5df8b29d3246aee520a4bd2483ac24677dcec77ea746f34bd1",
+      "actionId": "3c979118-c84f-4ed6-8c80-b8b192ba3f77",
+      "input": {
+        "before": "100",
+        "after": "120",
+        "actualMatchingSWProof": true,
+        "helperOkPosted": true,
+        "bridgeState": "completed",
+        "permitState": "completed"
+      },
+      "activeBeforeFault": {
+        "active": true,
+        "expired": false,
+        "lease": {
+          "activityId": "245e7a0d-3c35-4d48-9efd-2767611cc078",
+          "authorizationEpoch": 1,
+          "browserSessionEpoch": "e1f8963c-e61a-41cf-a487-447df295ecfc",
+          "expiresAt": 1794842338198,
+          "hostGeneration": 1,
+          "hostInstanceEpoch": "6d0c7a26-1c41-4cce-911e-3299cbb583a3",
+          "progressActionId": "3c979118-c84f-4ed6-8c80-b8b192ba3f77",
+          "progressExpiresAt": 1794842503198,
+          "progressSequence": 1,
+          "stopEpoch": 0
+        }
+      },
+      "originalHostPid": 98627,
+      "originalHelperPids": [98628],
+      "afterFault": {
+        "workflowRejected": {
+          "rejected": true,
+          "message": "宿主连接中断，输入结果须人工核验"
+        },
+        "runtime": {
+          "adapter": "extension-native",
+          "listening": true,
+          "connected": false,
+          "stopped": true,
+          "idle": false,
+          "pageId": "bf5e9a75-8842-445e-bfd6-1d5233771a36",
+          "reason": "宿主连接中断，输入结果须人工核验",
+          "unknownActions": 0
+        },
+        "governorState": "needs_action",
+        "stopEpoch": 1
+      },
+      "oldScopeAttempt": {
+        "rejected": true,
+        "message": "原生宿主未连接"
+      },
+      "reconnected": null,
+      "cleanup": {
+        "observedFixedHelperPids": [98628],
+        "processes": [
+          {
+            "pid": 98628,
+            "alive": false
+          }
+        ]
+      },
+      "notProven": [
+        "manual recovery and a newly authorized business workflow",
+        "full basic query wait/completion/cancellation",
+        "lease expiry",
+        "physical multi-monitor and user-deferred lock screen"
+      ]
+    },
+    {
+      "artifactId": "pOTZmb",
+      "scenario": "restart",
+      "outcome": "passed-real-input-restart-only",
+      "rawReportSha256": "13bae25e95d323e4c44b1260ef514b30c9db04b2fcfd794fbfd262a2ace53266",
+      "actionId": "fd71ea40-668a-4e2b-9a16-13c4b43cdbc4",
+      "input": {
+        "before": "100",
+        "after": "120",
+        "actualMatchingSWProof": true,
+        "helperOkPosted": true,
+        "bridgeState": "completed",
+        "permitState": "completed"
+      },
+      "activeBeforeFault": {
+        "active": true,
+        "expired": false,
+        "lease": {
+          "activityId": "7eb273c5-829e-4716-b076-1aded14f9cca",
+          "authorizationEpoch": 1,
+          "browserSessionEpoch": "fa7d9ba7-720b-498a-a1a4-7010d444fd6a",
+          "expiresAt": 1794842380612,
+          "hostGeneration": 1,
+          "hostInstanceEpoch": "1786ddb8-7a7b-48d3-8ca6-c3496810a069",
+          "progressActionId": "fd71ea40-668a-4e2b-9a16-13c4b43cdbc4",
+          "progressExpiresAt": 1794842545612,
+          "progressSequence": 1,
+          "stopEpoch": 0
+        }
+      },
+      "originalHostPid": 98689,
+      "originalHelperPids": [98690],
+      "afterFault": {
+        "workflowRejected": {
+          "rejected": true,
+          "message": "宿主连接中断，输入结果须人工核验"
+        },
+        "runtime": {
+          "adapter": "extension-native",
+          "listening": true,
+          "connected": false,
+          "stopped": true,
+          "idle": false,
+          "pageId": "ccac44ca-a2ed-474e-84cd-22a18b1031bd",
+          "reason": "宿主连接中断，输入结果须人工核验",
+          "unknownActions": 0
+        },
+        "governorState": "needs_action",
+        "stopEpoch": 1
+      },
+      "oldScopeAttempt": {
+        "rejected": true,
+        "message": "原生活动授权已失效"
+      },
+      "reconnected": {
+        "hostPid": 98696,
+        "helperPids": [98697],
+        "runtimeStopped": true,
+        "activity": {
+          "active": false,
+          "expired": false,
+          "lease": {}
+        }
+      },
+      "cleanup": {
+        "observedFixedHelperPids": [98690, 98697],
+        "processes": [
+          {
+            "pid": 98690,
+            "alive": false
+          },
+          {
+            "pid": 98697,
+            "alive": false
+          }
+        ]
+      },
+      "notProven": [
+        "manual recovery and a newly authorized business workflow",
+        "full basic query wait/completion/cancellation",
+        "lease expiry",
+        "physical multi-monitor and user-deferred lock screen"
+      ]
+    }
+  ],
+  "userReportsNoInputDuringFinalBasic": true,
+  "mouseSourceControls": {
+    "scope": "Two independent 12-second controls with identical AX revalidation/event construction; only actual post differs. No production runtime, activity, proof or business-input acceptance.",
+    "runs": [
+      {
+        "artifactId": "a8PxTN",
+        "mode": "observe",
+        "rawReportSha256": "a8d3006735e6468db9039428dfa0968d594660a6d0e0b076688e7c6559dae94c",
+        "hashes": {
+          "source": "c0381a4a934823857ac3be7582f814bcd91e900ead77fd57939cdd5fd1534f1f",
+          "binary": "16e6bb7e02263fd32a9c898dc6bd3bc7b2c5bbc116389d6bd51b62213d6c905c",
+          "productionSnapshot": "9f32949c0e4fe994d118be9fe92d1d829608c915519c57975226bb3f6c4c8d7a"
+        },
+        "controlCompleted": true,
+        "sourceAttributionProven": false,
+        "outcome": "completed-no-post-control-observation",
+        "observation": {
+          "armStarted": true,
+          "armTimestampNs": "215898293884041",
+          "conservativeStopLatch": false,
+          "constructedEvent": {
+            "eventTimestampNs": "0",
+            "location": {
+              "x": 361.5,
+              "y": 301
+            },
+            "sourcePid": 4327,
+            "sourceStateID": 0,
+            "userData": 1128417104
+          },
+          "constructionTimestampNs": "215900316709958",
+          "ignoredBeforeArm": 0,
+          "interrupted": false,
+          "mode": "observe",
+          "noBusinessInputOrClick": true,
+          "observationElapsedMs": 12002.197625041008,
+          "observationEndTimestampNs": "215910296099666",
+          "ownedBrowserPid": 4310,
+          "pointerAtArm": {
+            "x": 22.671875,
+            "y": 758.51171875
+          },
+          "postCount": 0,
+          "postEligibleAtControlStep": true,
+          "probeTag": 1128417104,
+          "productionGuardModified": false,
+          "productionRuntimeStarted": false,
+          "productionTag": 1128417089,
+          "recordCount": 0,
+          "records": [],
+          "recordsDropped": 0,
+          "revalidationTimestampNs": "215900300336833",
+          "sameTargetAtControlStep": true,
+          "scope": "independent-source-diagnostic-not-native-authorization-or-human-proof",
+          "sourceArgument": "NULL",
+          "targetPoint": {
+            "x": 361.5,
+            "y": 301
+          }
+        }
+      },
+      {
+        "artifactId": "931687",
+        "mode": "move-once",
+        "rawReportSha256": "511aae1815dc6b414df5119960ea30ed3d4e1b2c76b704f717129c80e892ed44",
+        "hashes": {
+          "source": "c0381a4a934823857ac3be7582f814bcd91e900ead77fd57939cdd5fd1534f1f",
+          "binary": "16e6bb7e02263fd32a9c898dc6bd3bc7b2c5bbc116389d6bd51b62213d6c905c",
+          "productionSnapshot": "9f32949c0e4fe994d118be9fe92d1d829608c915519c57975226bb3f6c4c8d7a"
+        },
+        "controlCompleted": true,
+        "sourceAttributionProven": false,
+        "outcome": "completed-single-post-control-observation",
+        "observation": {
+          "armStarted": true,
+          "armTimestampNs": "215978669036458",
+          "conservativeStopLatch": true,
+          "constructedEvent": {
+            "eventTimestampNs": "0",
+            "location": {
+              "x": 361.5,
+              "y": 301
+            },
+            "sourcePid": 4801,
+            "sourceStateID": 0,
+            "userData": 1128417104
+          },
+          "constructionTimestampNs": "215980724252666",
+          "ignoredBeforeArm": 0,
+          "interrupted": false,
+          "mode": "move-once",
+          "noBusinessInputOrClick": true,
+          "observationElapsedMs": 12002.641250014305,
+          "observationEndTimestampNs": "215990671701541",
+          "ownedBrowserPid": 4785,
+          "pointerAtArm": {
+            "x": 25.2421875,
+            "y": 752.27734375
+          },
+          "postCount": 1,
+          "postEligibleAtControlStep": true,
+          "postTimestampNs": "215980725282166",
+          "probeTag": 1128417104,
+          "productionGuardModified": false,
+          "productionRuntimeStarted": false,
+          "productionTag": 1128417089,
+          "recordCount": 1,
+          "records": [
+            {
+              "afterPostAttempt": true,
+              "armedAtCallback": true,
+              "callbackTimestampNs": "215980771859041",
+              "deltaX": 0,
+              "deltaY": 0,
+              "eventTimestampNs": "215980770121958",
+              "flags": 536870912,
+              "index": 0,
+              "location": {
+                "x": 361.5,
+                "y": 301
+              },
+              "locationAvailable": true,
+              "matchesKnownProbeTag": true,
+              "sourcePid": 4801,
+              "sourceStateID": 0,
+              "type": 5,
+              "userData": 1128417104
+            }
+          ],
+          "recordsDropped": 0,
+          "revalidationTimestampNs": "215980680769375",
+          "sameTargetAtControlStep": true,
+          "scope": "independent-source-diagnostic-not-native-authorization-or-human-proof",
+          "sourceArgument": "NULL",
+          "targetPoint": {
+            "x": 361.5,
+            "y": 301
+          }
+        }
+      }
+    ],
+    "conclusion": "No extra unmarked event appeared in either control. A single default-source mouse move did not reproduce the 7Ft8AB full-workflow interruption; its source remains unconfirmed."
+  },
+  "latestBasicLifecycle": {
+    "artifactId": "ofKH5m",
+    "outcome": "passed-real-input-wait-completion-cancellation-only",
+    "rawReportSha256": "2d6f4ac1d56d7365dd681897223a41bdd96c67f8e9af1e239564e9bda7a5213b",
+    "scope": "Production 9f helper and final e407 Runtime. Explicit identical read-only AX preflight before the activity. Isolated fixture; not official-site collection or a default cold-start proof.",
+    "runtimeSha256": "e407714d4b21ded72ea1d4d54df3d1c96d5f0c3dc6a07eb9fe7ee5db90e97066",
+    "helperSourceSha256": "9f32949c0e4fe994d118be9fe92d1d829608c915519c57975226bb3f6c4c8d7a",
+    "actions": [
+      {
+        "name": "field-120",
+        "actionId": "ec0d91d6-f9eb-47f5-b805-8d470e119735",
+        "target": {
+          "kind": "query-field",
+          "field": "price_min",
+          "value": "120"
+        },
+        "proof": {
+          "actionId": "ec0d91d6-f9eb-47f5-b805-8d470e119735",
+          "pageId": "4930e8f3-f6c0-4fd4-891c-982a970249c8",
+          "pageGeneration": 1,
+          "targetVersion": "4:",
+          "sampledAt": 1794879764818,
+          "rect": {
+            "x": 72,
+            "y": 150.875,
+            "width": 147,
+            "height": 21.5
+          },
+          "viewport": {
+            "width": 1200,
+            "height": 665,
+            "dpr": 2,
+            "scrollX": 0,
+            "scrollY": 0,
+            "scale": 1
+          },
+          "semantic": {
+            "kind": "query-field",
+            "field": "price_min",
+            "value": "120"
+          },
+          "hit": true,
+          "url": "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&real_os_fixture=1",
+          "title": "真实原生输入隔离模拟页",
+          "control": {
+            "id": "price_min",
+            "tagName": "INPUT",
+            "type": "text",
+            "label": "最低价格",
+            "className": "",
+            "value": "100"
+          },
+          "ownedChildTab": false
+        },
+        "helperResult": {
+          "kind": "input-result",
+          "actionId": "ec0d91d6-f9eb-47f5-b805-8d470e119735",
+          "ok": true,
+          "posted": true,
+          "scrollFromY": 0,
+          "state": "input_posted_result_unconfirmed"
+        },
+        "bridgeState": "completed",
+        "permitState": "completed",
+        "commandResult": {
+          "revision": "4930e8f3-f6c0-4fd4-891c-982a970249c8:1:5",
+          "pageId": "4930e8f3-f6c0-4fd4-891c-982a970249c8"
+        }
+      },
+      {
+        "name": "search",
+        "actionId": "8e18ded7-2089-4a13-bafd-60166c55f478",
+        "target": {
+          "kind": "query"
+        },
+        "proof": {
+          "actionId": "8e18ded7-2089-4a13-bafd-60166c55f478",
+          "pageId": "4930e8f3-f6c0-4fd4-891c-982a970249c8",
+          "pageGeneration": 1,
+          "targetVersion": "5:搜索",
+          "sampledAt": 1794879769831,
+          "rect": {
+            "x": 219,
+            "y": 148.875,
+            "width": 42.6640625,
+            "height": 24.5
+          },
+          "viewport": {
+            "width": 1200,
+            "height": 665,
+            "dpr": 2,
+            "scrollX": 0,
+            "scrollY": 0,
+            "scale": 1
+          },
+          "semantic": {
+            "kind": "query"
+          },
+          "hit": true,
+          "url": "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&real_os_fixture=1",
+          "title": "真实原生输入隔离模拟页",
+          "control": {
+            "id": "btn_search",
+            "tagName": "BUTTON",
+            "type": "submit",
+            "label": "搜索",
+            "className": "",
+            "value": ""
+          },
+          "ownedChildTab": false
+        },
+        "helperResult": {
+          "kind": "input-result",
+          "actionId": "8e18ded7-2089-4a13-bafd-60166c55f478",
+          "ok": true,
+          "posted": true,
+          "scrollFromY": 0,
+          "state": "input_posted_result_unconfirmed"
+        },
+        "bridgeState": "completed",
+        "permitState": "completed",
+        "commandResult": {
+          "revision": "4930e8f3-f6c0-4fd4-891c-982a970249c8:1:8",
+          "pageId": "4930e8f3-f6c0-4fd4-891c-982a970249c8"
+        }
+      },
+      {
+        "name": "field-140",
+        "actionId": "cc8b733f-4a80-43a8-bca7-02756337d041",
+        "target": {
+          "kind": "query-field",
+          "field": "price_min",
+          "value": "140"
+        },
+        "proof": {
+          "actionId": "cc8b733f-4a80-43a8-bca7-02756337d041",
+          "pageId": "4930e8f3-f6c0-4fd4-891c-982a970249c8",
+          "pageGeneration": 1,
+          "targetVersion": "8:",
+          "sampledAt": 1794879774829,
+          "rect": {
+            "x": 72,
+            "y": 150.875,
+            "width": 147,
+            "height": 21.5
+          },
+          "viewport": {
+            "width": 1200,
+            "height": 665,
+            "dpr": 2,
+            "scrollX": 0,
+            "scrollY": 0,
+            "scale": 1
+          },
+          "semantic": {
+            "kind": "query-field",
+            "field": "price_min",
+            "value": "140"
+          },
+          "hit": true,
+          "url": "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&real_os_fixture=1",
+          "title": "真实原生输入隔离模拟页",
+          "control": {
+            "id": "price_min",
+            "tagName": "INPUT",
+            "type": "text",
+            "label": "最低价格",
+            "className": "",
+            "value": "120"
+          },
+          "ownedChildTab": false
+        },
+        "helperResult": {
+          "kind": "input-result",
+          "actionId": "cc8b733f-4a80-43a8-bca7-02756337d041",
+          "ok": true,
+          "posted": true,
+          "scrollFromY": 0,
+          "state": "input_posted_result_unconfirmed"
+        },
+        "bridgeState": "completed",
+        "permitState": "completed",
+        "commandResult": {
+          "revision": "4930e8f3-f6c0-4fd4-891c-982a970249c8:1:9",
+          "pageId": "4930e8f3-f6c0-4fd4-891c-982a970249c8"
+        }
+      }
+    ],
+    "assertions": [
+      {
+        "name": "actual permissions and bound idle have no active input lease",
+        "status": "passed",
+        "evidence": {
+          "kind": "input-result",
+          "actionId": "186ad4df-ebde-461c-9d69-a1f2411f197f",
+          "activity": {
+            "active": false,
+            "expired": false,
+            "lease": {}
+          },
+          "inputPreemption": {},
+          "ok": true,
+          "permissions": {
+            "accessibility": true,
+            "displayAvailable": true,
+            "frontmostChrome": true,
+            "inputMonitorActive": true,
+            "inputMonitoring": true,
+            "locked": false,
+            "screenRecording": false
+          }
+        }
+      },
+      {
+        "name": "explicit start signal releases an idle, genuinely focused and authorized fixture",
+        "status": "passed",
+        "evidence": {
+          "signalPath": "/private/tmp/cbg-installed-ofKH5m/start-native.signal",
+          "waitingAt": 1794879658944,
+          "idleStatus": {
+            "kind": "input-result",
+            "actionId": "186ad4df-ebde-461c-9d69-a1f2411f197f",
+            "activity": {
+              "active": false,
+              "expired": false,
+              "lease": {}
+            },
+            "inputPreemption": {},
+            "ok": true,
+            "permissions": {
+              "accessibility": true,
+              "displayAvailable": true,
+              "frontmostChrome": true,
+              "inputMonitorActive": true,
+              "inputMonitoring": true,
+              "locked": false,
+              "screenRecording": false
+            }
+          },
+          "bootstrapActivation": {
+            "tabId": 1976151997,
+            "windowId": 1976151995,
+            "requestedAt": 1794879763060,
+            "returnedAt": 1794879763064,
+            "returnedFocused": true
+          },
+          "lastIdleStatus": {
+            "kind": "input-result",
+            "actionId": "2e5ca3fc-c860-4962-b5e6-13365d230c98",
+            "activity": {
+              "active": false,
+              "expired": false,
+              "lease": {}
+            },
+            "inputPreemption": {},
+            "ok": true,
+            "permissions": {
+              "accessibility": true,
+              "displayAvailable": true,
+              "frontmostChrome": true,
+              "inputMonitorActive": true,
+              "inputMonitoring": true,
+              "locked": false,
+              "screenRecording": false
+            }
+          },
+          "releasedAt": 1794879763109,
+          "foreground": {
+            "tabId": 1976151997,
+            "windowId": 1976151995,
+            "focused": true
+          },
+          "idleStatusAtRelease": {
+            "kind": "input-result",
+            "actionId": "2e5ca3fc-c860-4962-b5e6-13365d230c98",
+            "activity": {
+              "active": false,
+              "expired": false,
+              "lease": {}
+            },
+            "inputPreemption": {},
+            "ok": true,
+            "permissions": {
+              "accessibility": true,
+              "displayAvailable": true,
+              "frontmostChrome": true,
+              "inputMonitorActive": true,
+              "inputMonitoring": true,
+              "locked": false,
+              "screenRecording": false
+            }
+          }
+        }
+      },
+      {
+        "name": "real OS input and page wait retain the authorized activity lease",
+        "status": "passed",
+        "evidence": {
+          "during": {
+            "kind": "input-result",
+            "actionId": "be40bec0-86bc-4aa9-99f7-4990a65ff43f",
+            "activity": {
+              "active": true,
+              "expired": false,
+              "lease": {
+                "activityId": "994b0902-c148-4a1a-9f11-6fd4d3cff371",
+                "authorizationEpoch": 1,
+                "browserSessionEpoch": "ccd207be-1a76-4c38-a7b8-86ace95bfaea",
+                "expiresAt": 1794879782804,
+                "hostGeneration": 1,
+                "hostInstanceEpoch": "de39029f-7a13-41d2-93dc-a2ed20e70c7f",
+                "progressActionId": "ec0d91d6-f9eb-47f5-b805-8d470e119735",
+                "progressExpiresAt": 1794879945235,
+                "progressSequence": 1,
+                "stopEpoch": 0
+              }
+            },
+            "inputPreemption": {},
+            "ok": true,
+            "permissions": {
+              "accessibility": true,
+              "displayAvailable": true,
+              "frontmostChrome": true,
+              "inputMonitorActive": true,
+              "inputMonitoring": true,
+              "locked": false,
+              "screenRecording": false
+            }
+          },
+          "pids": [17255]
+        }
+      },
+      {
+        "name": "actual heartbeat renews the same activity lease while the page is still waiting",
+        "status": "passed",
+        "evidence": {
+          "renewed": {
+            "kind": "input-result",
+            "actionId": "1e70a470-8da9-4dce-bbcd-2bf79793de44",
+            "activity": {
+              "active": true,
+              "expired": false,
+              "lease": {
+                "activityId": "994b0902-c148-4a1a-9f11-6fd4d3cff371",
+                "authorizationEpoch": 1,
+                "browserSessionEpoch": "ccd207be-1a76-4c38-a7b8-86ace95bfaea",
+                "expiresAt": 1794879785804,
+                "hostGeneration": 1,
+                "hostInstanceEpoch": "de39029f-7a13-41d2-93dc-a2ed20e70c7f",
+                "progressActionId": "ec0d91d6-f9eb-47f5-b805-8d470e119735",
+                "progressExpiresAt": 1794879945235,
+                "progressSequence": 1,
+                "stopEpoch": 0
+              }
+            },
+            "inputPreemption": {},
+            "ok": true,
+            "permissions": {
+              "accessibility": true,
+              "displayAvailable": true,
+              "frontmostChrome": true,
+              "inputMonitorActive": true,
+              "inputMonitoring": true,
+              "locked": false,
+              "screenRecording": false
+            }
+          },
+          "renewal": {
+            "direction": "runtime-to-host",
+            "receivedAt": 1794879770807,
+            "message": {
+              "kind": "activity",
+              "command": "renew",
+              "actionId": "204091ec-b3f2-4b89-ab5e-b97b1fc7b102",
+              "activity": {
+                "activityId": "994b0902-c148-4a1a-9f11-6fd4d3cff371",
+                "authorizationEpoch": 1,
+                "stopEpoch": 0,
+                "browserSessionEpoch": "ccd207be-1a76-4c38-a7b8-86ace95bfaea",
+                "expiresAt": 1794879785804,
+                "progressExpiresAt": 1794879945235,
+                "progressSequence": 1,
+                "progressActionId": "ec0d91d6-f9eb-47f5-b805-8d470e119735"
+              }
+            }
+          },
+          "renewalAck": {
+            "direction": "host-to-runtime",
+            "receivedAt": 1794879770808,
+            "message": {
+              "kind": "input-result",
+              "actionId": "204091ec-b3f2-4b89-ab5e-b97b1fc7b102",
+              "active": true,
+              "activityId": "994b0902-c148-4a1a-9f11-6fd4d3cff371",
+              "error": "",
+              "ok": true
+            }
+          }
+        }
+      },
+      {
+        "name": "workflow completion ends the authorized activity lease",
+        "status": "passed",
+        "evidence": {
+          "kind": "input-result",
+          "actionId": "c18b0c94-cd96-4373-922e-5f0c7203ee75",
+          "activity": {
+            "active": false,
+            "expired": false,
+            "lease": {}
+          },
+          "inputPreemption": {},
+          "ok": true,
+          "permissions": {
+            "accessibility": true,
+            "displayAvailable": true,
+            "frontmostChrome": true,
+            "inputMonitorActive": true,
+            "inputMonitoring": true,
+            "locked": false,
+            "screenRecording": false
+          }
+        }
+      },
+      {
+        "name": "real cancellation revokes and ends the activity lease",
+        "status": "passed",
+        "evidence": {
+          "beforeCancel": {
+            "kind": "input-result",
+            "actionId": "5739c36c-1672-45b4-adba-a2c79d8ee1da",
+            "activity": {
+              "active": true,
+              "expired": false,
+              "lease": {
+                "activityId": "00a76d7a-cb88-43fc-8cfa-13e667a87f6b",
+                "authorizationEpoch": 2,
+                "browserSessionEpoch": "ccd207be-1a76-4c38-a7b8-86ace95bfaea",
+                "expiresAt": 1794879790068,
+                "hostGeneration": 1,
+                "hostInstanceEpoch": "de39029f-7a13-41d2-93dc-a2ed20e70c7f",
+                "progressActionId": "cc8b733f-4a80-43a8-bca7-02756337d041",
+                "progressExpiresAt": 1794879955068,
+                "progressSequence": 1,
+                "stopEpoch": 0
+              }
+            },
+            "inputPreemption": {},
+            "ok": true,
+            "permissions": {
+              "accessibility": true,
+              "displayAvailable": true,
+              "frontmostChrome": true,
+              "inputMonitorActive": true,
+              "inputMonitoring": true,
+              "locked": false,
+              "screenRecording": false
+            }
+          },
+          "afterCancel": {
+            "kind": "input-result",
+            "actionId": "3a57d0d6-2b5d-4dc8-8b5e-e158e04415ba",
+            "activity": {
+              "active": false,
+              "expired": false,
+              "lease": {}
+            },
+            "inputPreemption": {},
+            "ok": true,
+            "permissions": {
+              "accessibility": true,
+              "displayAvailable": true,
+              "frontmostChrome": true,
+              "inputMonitorActive": true,
+              "inputMonitoring": true,
+              "locked": false,
+              "screenRecording": false
+            }
+          },
+          "stopped": true
+        }
+      }
+    ],
+    "submittedQueryArgs": {
+      "server_type": "1,2,3",
+      "page": 1,
+      "order_by": "selling_time DESC",
+      "price_min": "120"
+    },
+    "submittedControls": {
+      "price_min": {
+        "value": "120",
+        "min": "",
+        "max": "",
+        "step": "any"
+      }
+    },
+    "cancelledControls": {
+      "price_min": {
+        "value": "140",
+        "min": "",
+        "max": "",
+        "step": "any"
+      }
+    },
+    "axPreflight": {
+      "binarySha256": "4b51fae69516a0dfe4a907f56b99d4a6f64dddd4de95f57d957e52460de4add3",
+      "sourceSha256": "c19f8e6af882487e5bfc66f57351ee4c10edec393e2be4da0952413af4b39176",
+      "sampleCount": 8,
+      "lastSample": {
+        "accessibility": true,
+        "actualOffsetMs": 808.1607083082199,
+        "expectedBrowserPid": 17236,
+        "expectedURLHits": 1,
+        "focusedWindowAvailable": true,
+        "frontmostChrome": true,
+        "frontmostPid": 17236,
+        "nodeCount": 60,
+        "phase": "after-read-application-role",
+        "priceFields": [
+          {
+            "bounds": {
+              "available": true,
+              "height": 22,
+              "width": 147,
+              "x": 288,
+              "y": 290
+            },
+            "centerHit": {
+              "bounds": {
+                "available": true,
+                "height": 22,
+                "width": 147,
+                "x": 288,
+                "y": 290
+              },
+              "bundleId": "com.google.Chrome",
+              "hitAvailable": true,
+              "hitPid": 17236,
+              "pidStatus": 0,
+              "point": {
+                "x": 361.5,
+                "y": 301
+              },
+              "role": "AXTextField",
+              "sameOwnedBrowser": true,
+              "status": 0
+            },
+            "pid": 17236,
+            "pidStatus": 0,
+            "priceLabelMatches": true,
+            "role": "AXTextField",
+            "sameOwnedBrowser": true
+          }
+        ],
+        "productionMapping": {
+          "centerHit": {
+            "bounds": {
+              "available": true,
+              "height": 22,
+              "width": 147,
+              "x": 288,
+              "y": 290
+            },
+            "bundleId": "com.google.Chrome",
+            "hitAvailable": true,
+            "hitPid": 17236,
+            "pidStatus": 0,
+            "point": {
+              "x": 361.5,
+              "y": 300.625
+            },
+            "role": "AXTextField",
+            "sameOwnedBrowser": true,
+            "status": 0
+          },
+          "content": {
+            "available": true,
+            "height": 665,
+            "width": 1200,
+            "x": 216,
+            "y": 139
+          },
+          "mappedRect": {
+            "available": true,
+            "height": 21.5,
+            "width": 147,
+            "x": 288,
+            "y": 289.875
+          },
+          "source": "live-fixture-DOM-read-not-proof",
+          "valid": true
+        },
+        "requestedOffsetMs": 800,
+        "roles": {
+          "AXButton": 12,
+          "AXGroup": 27,
+          "AXHeading": 1,
+          "AXLink": 1,
+          "AXPopUpButton": 5,
+          "AXRadioButton": 2,
+          "AXScrollArea": 1,
+          "AXStaticText": 6,
+          "AXTabGroup": 1,
+          "AXTextField": 2,
+          "AXToolbar": 1,
+          "AXWebArea": 1
+        },
+        "sameOwnedBrowser": true,
+        "uniquePriceField": true,
+        "webAreas": [
+          {
+            "bounds": {
+              "height": 665,
+              "width": 1200,
+              "x": 216,
+              "y": 139
+            },
+            "expectedURLMatch": true,
+            "hasBounds": true,
+            "role": "AXWebArea",
+            "urlType": "NSURL"
+          }
+        ]
+      }
+    },
+    "cleanup": {
+      "observedFixedHelperPids": [17255],
+      "processes": [
+        {
+          "pid": 17255,
+          "alive": false
+        }
+      ]
+    },
+    "notRun": [
+      "lock screen (explicitly deferred this round)",
+      "second display",
+      "user takeover",
+      "disconnect",
+      "lease expiry",
+      "host restart during active input"
+    ]
+  },
+  "latestExpiryAttempt": {
+    "artifactId": "RV6KYg",
+    "outcome": "failed-or-blocked",
+    "rawReportSha256": "f283b3a20907289b277a179f6f92f1bc295c390424f0cbc3765e89eeceb2f2f1",
+    "scope": "Explicit project --ax-preflight setup; real field input then host SIGSTOP. Process liveness is observed while host is paused; independent helper expiry is NOT proven.",
+    "failure": "Timed out waiting for actual native evidence",
+    "helperPids": [21578],
+    "acceptedLease": {
+      "active": true,
+      "expired": false,
+      "lease": {
+        "activityId": "b533896d-09be-498f-a549-9fd4a3e7816b",
+        "authorizationEpoch": 1,
+        "browserSessionEpoch": "3f1128f9-71e7-43b1-9d1b-595c404a4db4",
+        "expiresAt": 1794881467721,
+        "hostGeneration": 1,
+        "hostInstanceEpoch": "cf85136c-4242-456a-9b19-355cb96c7230",
+        "progressActionId": "84f10d6f-3c43-480b-aadd-37251bf4f908",
+        "progressExpiresAt": 1794881632721,
+        "progressSequence": 1,
+        "stopEpoch": 0
+      }
+    },
+    "lastAcceptedGrant": {
+      "direction": "runtime-to-host",
+      "receivedAt": 1794881452722,
+      "message": {
+        "kind": "activity",
+        "command": "renew",
+        "actionId": "f6356a95-07f2-4156-ba1a-79448a06fa34",
+        "activity": {
+          "activityId": "b533896d-09be-498f-a549-9fd4a3e7816b",
+          "authorizationEpoch": 1,
+          "stopEpoch": 0,
+          "browserSessionEpoch": "3f1128f9-71e7-43b1-9d1b-595c404a4db4",
+          "expiresAt": 1794881467721,
+          "progressExpiresAt": 1794881632721,
+          "progressSequence": 1,
+          "progressActionId": "84f10d6f-3c43-480b-aadd-37251bf4f908"
+        }
+      }
+    },
+    "livenessSamples": 85,
+    "allSamplesHelperAlive": true,
+    "expiredWhileHostPaused": {
+      "at": 1794881469893,
+      "fixedHelperPidsAlive": [true],
+      "observationScope": "Process liveness only; helper activity status is checked after the host resumes."
+    },
+    "statusCollectedAfterFailure": {
+      "kind": "input-result",
+      "actionId": "48d927e0-d2ef-4556-a82a-2056dcef77e1",
+      "activity": {
+        "active": false,
+        "expired": false,
+        "lease": {}
+      },
+      "inputPreemption": {},
+      "ok": true,
+      "permissions": {
+        "accessibility": true,
+        "displayAvailable": true,
+        "frontmostChrome": true,
+        "inputMonitorActive": true,
+        "inputMonitoring": true,
+        "locked": false,
+        "screenRecording": false
+      }
+    },
+    "observedHostStatusReasons": ["server-stop", "server-stop"],
+    "cleanup": {
+      "observedFixedHelperPids": [21578],
+      "processes": [
+        {
+          "pid": 21578,
+          "alive": false
+        }
+      ]
+    },
+    "notProven": "The expected expired reason was not observed: runtime renewal timeout caused a server-stop. Do not classify this scenario as passed or independent helper-deadline proof."
+  },
+  "tapInventoryObservation": {
+    "rawReportSha256": "8ad6377e5d15de4633025938ad82bbe3e6a9a151dee233ef127a3595babb0a25",
+    "observedAt": "2026-11-17T08:04:09+08:00",
+    "tapCount": 8,
+    "activeHidOrSessionMouseType5FiltersObserved": 0,
+    "scope": "Metadata-only inventory after earlier attempts; production helper was absent, order is unspecified, and no source attribution or historical absence is proven. Latency-statistic reset is the documented diagnostic side effect; enabled/options/event stream unchanged."
+  }
+}

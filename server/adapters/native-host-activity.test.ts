@@ -105,7 +105,7 @@ function fixture() {
       actionId: command.actionId,
       activityId: activity.activityId,
       ok: true,
-      awake: command.command !== "activity-end",
+      active: command.command !== "activity-end",
     });
   };
   return {
@@ -148,7 +148,7 @@ it("host observe is a validated read-only route while stopped; a forged observat
   expect(f.serverWrites.at(-1).error).toBe("invalid-observation-request");
   expect(f.helperWrites).toHaveLength(writes);
 });
-it("host waits for a successful helper assertion before forwarding any native input", () => {
+it("host waits for a successful helper activity grant before forwarding any native input", () => {
   const f = fixture(),
     lease = f.lease();
   f.control("begin", lease);
@@ -175,7 +175,7 @@ it("host waits for a successful helper assertion before forwarding any native in
   });
   expect(f.helperWrites.at(-1)).toMatchObject({ command: "execute", plan: { activity: lease } });
 });
-it("a helper assertion failure stops the host without dispatching input", () => {
+it("a helper activity grant failure stops the host without dispatching input", () => {
   const f = fixture(),
     lease = f.lease();
   f.control("begin", lease);
@@ -183,15 +183,32 @@ it("a helper assertion failure stops the host without dispatching input", () => 
     actionId: f.helperWrites.at(-1).actionId,
     activityId: lease.activityId,
     ok: false,
-    awake: false,
-    error: "IOPM-failed",
+    active: false,
+    error: "activity-grant-failed",
   });
   expect(f.host.activities.current).toBeNull();
   expect(f.host.authority.stopped).toBe(true);
   expect(f.helperWrites.some((command) => command.command === "execute")).toBe(false);
-  expect(f.serverWrites.some((message) => message.error === "IOPM-failed")).toBe(true);
+  expect(f.serverWrites.some((message) => message.error === "activity-grant-failed")).toBe(true);
 });
-it("wait renewal keeps the lease live, and normal end releases the helper assertion", () => {
+it("a legacy awake-only helper ACK cannot authorize input", () => {
+  const f = fixture(),
+    lease = f.lease();
+  f.control("begin", lease);
+  f.result({
+    actionId: f.helperWrites.at(-1).actionId,
+    activityId: lease.activityId,
+    ok: true,
+    awake: true,
+  });
+  expect(f.host.activities.current).toBeNull();
+  expect(f.host.authority.stopped).toBe(true);
+  expect(f.serverWrites.some((message) => message.error === "native-activity-grant-failed")).toBe(
+    true,
+  );
+  expect(f.helperWrites.some((message) => message.command === "execute")).toBe(false);
+});
+it("wait renewal keeps the lease live, and normal end revokes helper input authorization", () => {
   const f = fixture(),
     lease = f.lease();
   f.control("begin", lease);

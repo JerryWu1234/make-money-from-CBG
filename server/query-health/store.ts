@@ -232,7 +232,7 @@ export class QueryHealthStore {
         candidate.schemaVersion !== identity.schemaVersion ||
         candidate.category !== identity.category ||
         candidate.server !== identity.server ||
-        candidate.serverAge !== identity.serverAge ||
+        normalizeValue(candidate.serverAge) !== normalizeValue(identity.serverAge) ||
         candidate.browserSessionEpoch !== identity.browserSessionEpoch ||
         candidate.page !== 1 ||
         candidate.sort !== identity.sort
@@ -242,7 +242,10 @@ export class QueryHealthStore {
       const target = Object.entries(identity.conditions).filter(([, v]) => String(v) !== "");
       if (
         filters.length < target.length &&
-        filters.every(([key, value]) => String(identity.conditions[key] ?? "") === String(value))
+        filters.every(
+          ([key, value]) =>
+            normalizeValue(identity.conditions[key] ?? "") === normalizeValue(value),
+        )
       )
         return candidate;
     }

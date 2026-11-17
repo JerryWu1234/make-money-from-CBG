@@ -21,7 +21,10 @@ const socket = net.connect(config.socketPath);
 const authority = new CommandAuthority(randomUUID());
 const activities = new ActivityAuthority();
 let lastCompletedActionId = null;
-let helperReady = false;
+let helperReady = false,
+  exiting = false;
+const helperQueue = [],
+  helperStartupExpiresAt = Date.now() + 6000;
 let nativeBuffer = Buffer.alloc(0),
   serverBuffer = "",
   stopped = false,
@@ -36,14 +39,27 @@ const native = (value) => {
 };
 const server = (value) => socket.write(`${JSON.stringify(value)}\n`);
 const helper = spawn(path.join(directory, "cbg-input"), [], { stdio: ["pipe", "pipe", "pipe"] });
+const writeHelper = (message) => {
+  if (exiting) return;
+  if (!helperReady) {
+    if (helperQueue.length >= 128) throw new Error("native-helper-startup-buffer-full");
+    helperQueue.push(message);
+    return;
+  }
+  helper.stdin.write(`${JSON.stringify(message)}\n`);
+};
 helper.stderr.on("data", (data) => process.stderr.write(data));
 helper.on("error", () => {
+  if (exiting) return;
   stopped = true;
   server({ kind: "host-status", stopped: true, reason: "native-helper-unavailable" });
+  exit();
 });
 helper.on("exit", () => {
+  if (exiting) return;
   stopped = true;
   server({ kind: "host-status", stopped: true, reason: "native-helper-exited" });
+  exit();
 });
 const resumeAck = (actionId, record, source, result) => {
   const merged = record.barrier.accept(source, result, authority.generation);
@@ -53,6 +69,7 @@ const resumeAck = (actionId, record, source, result) => {
   if (!merged.ok) stop("native-resume-denied");
 };
 helper.stdout.on("data", (data) => {
+  if (exiting) return;
   helperBuffer += data;
   let at;
   while ((at = helperBuffer.indexOf("\n")) >= 0) {
@@ -61,7 +78,18 @@ helper.stdout.on("data", (data) => {
     try {
       const result = JSON.parse(line);
       if (result.kind === "input-ready") {
+        if (helperReady) continue;
         helperReady = true;
+        for (const message of helperQueue.splice(0)) writeHelper(message);
+        continue;
+      }
+      if (result.kind === "input-unavailable") {
+        server({
+          kind: "host-status",
+          stopped: true,
+          reason: result.error || "native-helper-unavailable",
+        });
+        exit();
         continue;
       }
       if (result.kind === "activity-invalidated") {
@@ -70,7 +98,7 @@ helper.stdout.on("data", (data) => {
           result.hostGeneration === authority.generation &&
           activities.same(result, authority)
         )
-          stop(result.reason || "native-activity-invalidated");
+          stop(result.reason || "native-activity-invalidated", result.inputPreemption);
         continue;
       }
       const command = pending.get(result.actionId);
@@ -84,14 +112,14 @@ helper.stdout.on("data", (data) => {
           if (
             !result.ok ||
             result.activityId !== command.activity.activityId ||
-            (!ending && result.awake !== true)
+            result.active !== !ending
           ) {
             server({
               kind: "input-result",
               actionId: result.actionId,
               ok: false,
               posted: false,
-              error: result.error || "native-awake-assertion-failed",
+              error: result.error || "native-activity-grant-failed",
             });
             stop("native-activity-denied");
           } else {
@@ -130,20 +158,30 @@ const invalidatePending = (reason) => {
     });
   pending.clear();
 };
-const stop = (reason) => {
+const stop = (reason, inputPreemption) => {
+  if (exiting) return;
   stopped = true;
   activities.stop();
   authority.stop();
+  helperQueue.length = 0;
   invalidatePending("host-stop-invalidated");
   if (helperReady) helper.kill("SIGUSR1");
-  helper.stdin.write(
-    `${JSON.stringify({ command: "stop", hostGeneration: authority.generation, hostInstanceEpoch: authority.instanceEpoch })}\n`,
-  );
+  writeHelper({
+    command: "stop",
+    hostGeneration: authority.generation,
+    hostInstanceEpoch: authority.instanceEpoch,
+  });
   native({ kind: "command", command: "stop", actionId: "local-stop" });
-  server({ kind: "host-status", stopped: true, reason });
+  server({
+    kind: "host-status",
+    stopped: true,
+    reason,
+    ...(inputPreemption ? { inputPreemption } : {}),
+  });
 };
 socket.on("connect", () => server({ kind: "host-hello", version: 1 }));
 socket.on("data", (data) => {
+  if (exiting) return;
   serverBuffer += data;
   if (serverBuffer.length > 1024 * 1024) return stop("server-size");
   let at;
@@ -165,9 +203,13 @@ socket.on("data", (data) => {
           else if (message.command === "end") activities.end(message.activity, authority);
           else throw new Error("unsupported-activity-command");
           pending.set(message.actionId, { ...message, generation: authority.generation });
-          helper.stdin.write(
-            `${JSON.stringify({ command: `activity-${message.command}`, actionId: message.actionId, activity: message.activity, hostGeneration: authority.generation, hostInstanceEpoch: authority.instanceEpoch })}\n`,
-          );
+          writeHelper({
+            command: `activity-${message.command}`,
+            actionId: message.actionId,
+            activity: message.activity,
+            hostGeneration: authority.generation,
+            hostInstanceEpoch: authority.instanceEpoch,
+          });
         } catch (error) {
           server({
             kind: "input-result",
@@ -183,10 +225,8 @@ socket.on("data", (data) => {
           continue;
         }
         if (message.command === "status") {
-          helper.stdin.write(
-            `${JSON.stringify({ command: "status", actionId: message.actionId })}\n`,
-          );
           pending.set(message.actionId, message);
+          writeHelper({ command: "status", actionId: message.actionId });
           continue;
         }
         if (message.command === "observe") {
@@ -246,6 +286,7 @@ socket.on("data", (data) => {
       } else if (message.kind === "resume") {
         if (!message.context) continue;
         invalidatePending("host-resume-invalidated");
+        helperQueue.length = 0;
         activities.stop();
         authority.resume(message.context);
         stopped = false;
@@ -255,9 +296,7 @@ socket.on("data", (data) => {
             generation: authority.generation,
             barrier: new ResumeAcknowledgement(authority.generation),
           });
-          helper.stdin.write(
-            `${JSON.stringify(authority.helperResume(message.context, message.actionId))}\n`,
-          );
+          writeHelper(authority.helperResume(message.context, message.actionId));
           native({
             kind: "command",
             command: "resume",
@@ -272,6 +311,7 @@ socket.on("data", (data) => {
   }
 });
 process.stdin.on("data", (data) => {
+  if (exiting) return;
   nativeBuffer = Buffer.concat([nativeBuffer, data]);
   while (nativeBuffer.length >= 4) {
     const length = nativeBuffer.readUInt32LE(0);
@@ -305,7 +345,7 @@ process.stdin.on("data", (data) => {
         }
         const dispatched = authority.dispatch(message.actionId, message.proof);
         if (!dispatched) continue;
-        helper.stdin.write(`${JSON.stringify(dispatched)}\n`);
+        writeHelper(dispatched);
       }
     } catch {
       stop("invalid-native-message");
@@ -313,14 +353,27 @@ process.stdin.on("data", (data) => {
   }
 });
 const exit = () => {
+  if (exiting) return;
+  exiting = true;
   stopped = true;
+  helperReady = false;
+  helperQueue.length = 0;
+  pending.clear();
   activities.stop();
+  authority.stop();
   clearInterval(activityWatchdog);
+  process.stdin.pause?.();
+  process.stdin.destroy?.();
   helper.kill("SIGTERM");
   socket.destroy();
 };
 const activityWatchdog = setInterval(() => {
   try {
+    if (!helperReady && Date.now() >= helperStartupExpiresAt) {
+      stop("native-helper-startup-timeout");
+      exit();
+      return;
+    }
     if (activities.current && activities.expired()) stop("native-workflow-activity-expired");
   } catch {
     stop("native-activity-clock-anomaly");

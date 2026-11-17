@@ -1,5 +1,5 @@
 import { expect, it } from "vite-plus/test";
-import { valuationRecord } from "../../tests/fixtures/analysis";
+import { fixtureFieldEvidence, valuationRecord } from "../../tests/fixtures/analysis";
 import { capturedAssetCounts, capturedAssetSummary } from "./asset-counts";
 import { CrawlStore } from "../crawler/store";
 import { AnalysisStore } from "./store";
@@ -13,7 +13,7 @@ function recordWithAssets() {
     version: 1,
     fields: [],
     issues: [],
-    source: { serverId: "367", eid: "item-a" },
+    source: { ...record.detail!.valuation!.source },
   };
   const helmet = {
     index: 0,
@@ -75,6 +75,7 @@ function recordWithAssets() {
       },
     ],
   });
+  record.detail!.sourceEvidence = fixtureFieldEvidence(record.detail!, record.listing);
   return record;
 }
 

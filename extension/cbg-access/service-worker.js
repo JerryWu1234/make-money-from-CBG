@@ -36,35 +36,36 @@ const bindingIdentity = (bound) =>
     windowId: bound.windowId,
     bindingEpoch: bound.bindingEpoch,
   };
+async function stopTransport(value, reason) {
+  const bound = value.bound && { ...value.bound },
+    revision = (value.controlRevision || 0) + 1,
+    failedPort = port;
+  value.stopped = true;
+  value.observing = false;
+  value.controlRevision = revision;
+  delete value.navigation;
+  // The bounded outbox cannot carry another stop. Close this Native connection
+  // before storage or a hung content script can delay revoking the input helper.
+  if (port === failedPort) port = null;
+  flushing = false;
+  clearTimeout(ackTimer);
+  try {
+    failedPort?.disconnect();
+  } catch {
+    // An already-closed connection has already revoked its host/helper.
+  }
+  await save(value);
+  if (bound && value.controlRevision === revision)
+    await chrome.tabs
+      .sendMessage(bound.tabId, { kind: "stop", observerToken: bound.observerToken })
+      .catch(() => {});
+  throw new Error(reason);
+}
 async function enqueue(kind, payload) {
   await serial(async () => {
     const value = await state();
-    if (value.outbox.length >= 128) {
-      const bound = value.bound && { ...value.bound },
-        revision = (value.controlRevision || 0) + 1;
-      value.stopped = true;
-      value.observing = false;
-      value.controlRevision = revision;
-      await save(value);
-      if (bound && value.controlRevision === revision)
-        await chrome.tabs
-          .sendMessage(bound.tabId, { kind: "stop", observerToken: bound.observerToken })
-          .catch(() => {});
-      throw new Error("bridge-buffer-full");
-    }
-    if (JSON.stringify(payload).length > 450000) {
-      const bound = value.bound && { ...value.bound },
-        revision = (value.controlRevision || 0) + 1;
-      value.stopped = true;
-      value.observing = false;
-      value.controlRevision = revision;
-      await save(value);
-      if (bound && value.controlRevision === revision)
-        await chrome.tabs
-          .sendMessage(bound.tabId, { kind: "stop", observerToken: bound.observerToken })
-          .catch(() => {});
-      throw new Error("bridge-message-size");
-    }
+    if (value.outbox.length >= 128) return stopTransport(value, "bridge-buffer-full");
+    if (JSON.stringify(payload).length > 450000) return stopTransport(value, "bridge-message-size");
     value.outbox.push({
       version: 1,
       connectionEpoch: value.connectionEpoch,
@@ -79,13 +80,16 @@ async function enqueue(kind, payload) {
 }
 async function connect() {
   if (port) return;
-  port = chrome.runtime.connectNative(HOST);
-  port.onDisconnect.addListener(() => {
+  const connectedPort = (port = chrome.runtime.connectNative(HOST));
+  connectedPort.onDisconnect.addListener(() => {
+    if (port !== connectedPort) return;
     port = null;
     flushing = false;
     clearTimeout(ackTimer);
     void serial(async () => {
+      if (port && port !== connectedPort) return;
       const value = await state();
+      if (port && port !== connectedPort) return;
       const bound = value.bound && { ...value.bound },
         revision = (value.controlRevision || 0) + 1;
       value.stopped = true;
@@ -98,10 +102,13 @@ async function connect() {
           .catch(() => {});
     });
   });
-  port.onMessage.addListener((message) => {
+  connectedPort.onMessage.addListener((message) => {
+    if (port !== connectedPort) return;
     if (message.kind === "ack")
       void serial(async () => {
+        if (port !== connectedPort) return;
         const value = await state();
+        if (port !== connectedPort) return;
         if (
           message.connectionEpoch !== value.connectionEpoch ||
           value.outbox[0]?.messageId !== message.messageId
@@ -109,6 +116,7 @@ async function connect() {
           return;
         value.outbox.shift();
         await save(value);
+        if (port !== connectedPort) return;
         flushing = false;
         clearTimeout(ackTimer);
         void flush();
@@ -134,6 +142,9 @@ async function command(message) {
   const value = await state(),
     plan = message.plan;
   const commandPort = port;
+  const reply = (result) => {
+    if (port === commandPort) commandPort?.postMessage(result);
+  };
   if (message.command === "stop") {
     const bound = value.bound && { ...value.bound },
       revision = (value.controlRevision = (value.controlRevision || 0) + 1);
@@ -145,7 +156,8 @@ async function command(message) {
       await chrome.tabs
         .sendMessage(bound.tabId, { kind: "stop", observerToken: bound.observerToken })
         .catch(() => {});
-    port?.postMessage({ kind: "command-result", actionId: message.actionId, ok: true });
+    if (value.controlRevision === revision && value.stopped)
+      reply({ kind: "command-result", actionId: message.actionId, ok: true });
     return;
   }
   try {
@@ -178,7 +190,7 @@ async function command(message) {
         observerToken: observed?.observerToken,
       });
       if (!stillCurrent()) throw new Error("observation-generation-changed");
-      port?.postMessage({
+      reply({
         kind: "command-result",
         actionId: message.actionId,
         ok: true,
@@ -226,7 +238,7 @@ async function command(message) {
       value.stopped = false;
       await save(value);
       if (!stillCurrent() || value.stopped) throw new Error("recovery-generation-changed");
-      port?.postMessage({
+      reply({
         kind: "command-result",
         actionId: message.actionId,
         ok: true,
@@ -313,7 +325,7 @@ async function command(message) {
     if (message.command === "locate") {
       const location = await chrome.tabs.sendMessage(tab.id, { kind: "locate", plan });
       assertCurrent();
-      port?.postMessage({
+      reply({
         kind: "command-result",
         actionId: plan.actionId,
         ok: location?.ok === true,
@@ -359,9 +371,9 @@ async function command(message) {
     assertCurrent();
     verified.proof.ownedChildTab =
       plan.target.kind === "return-to-list" && value.parent?.childTabId === tab.id;
-    port?.postMessage({ kind: "command-proof", actionId: plan.actionId, proof: verified.proof });
+    reply({ kind: "command-proof", actionId: plan.actionId, proof: verified.proof });
   } catch (error) {
-    port?.postMessage({
+    reply({
       kind: "command-result",
       actionId: plan?.actionId || message.actionId,
       ok: false,

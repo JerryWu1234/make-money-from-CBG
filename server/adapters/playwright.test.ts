@@ -2,7 +2,11 @@ import { expect, it, vi } from "vite-plus/test";
 import type { Page } from "playwright-core";
 import type { AccessContext } from "../access";
 import type { CrawlSource } from "../crawler/types";
-import { analysisRecord, valuationRecord } from "../../tests/fixtures/analysis";
+import {
+  analysisRecord,
+  fixtureFieldEvidence,
+  valuationRecord,
+} from "../../tests/fixtures/analysis";
 import { createPlaywrightCrawlAdapter } from "./playwright";
 import { validateObservedCapture } from "./contracts";
 const context: AccessContext = {
@@ -27,12 +31,13 @@ function fixture() {
       version: 1 as const,
       fields: [],
       issues: [],
-      source: { serverId: record.listing.serverId, eid: record.listing.eid },
+      source: { ...record.detail!.valuation!.source },
     },
     tabs: record.detail!.tabs.map((tab) =>
       tab.name === "技能" ? valuationRecord("skills").detail!.tabs[1] : tab,
     ),
   };
+  detail.sourceEvidence = fixtureFieldEvidence(detail, record.listing);
   const listing = { page: 1, totalPages: 1, order: "selling_time DESC", items: [record.listing] };
   const source: CrawlSource = {
     prepare: async () => listing,

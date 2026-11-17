@@ -542,6 +542,13 @@ async function inspectPets(
     (pet) => inspectItems(page, pet, signal, report, readIssues),
     () => settled(page, signal),
     report,
+    (progress) => {
+      // Keep already-read pets if a later pet changes while being inspected.
+      // The expected total remains, so a partial list cannot become complete.
+      snapshot.pets = progress.pets;
+      if (progress.count !== null) snapshot.petCount = progress.count;
+      snapshot.itemsCollectedAt = collectedAt;
+    },
   );
   snapshot.pets = result.pets;
   if (result.count !== null) snapshot.petCount = result.count;

@@ -5,12 +5,29 @@ import { MAIN_TABS } from "./detail-tabs";
 import { equipmentCaptureSummary } from "./equipment-capture";
 import { fieldEvidence } from "./field-evidence";
 import { petCaptureSummary } from "./pet-capture-summary";
-import { normalizeValuationSource } from "./valuation-source";
-import type { RoleDetail, TabSnapshot } from "./types";
+import { normalizeValuationSource, ROLE_NUMERIC_FIELDS } from "./valuation-source";
+import { CrawlStore } from "./store";
+import type { Listing, RoleDetail, TabSnapshot } from "./types";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const listing = { serverId: "367", eid: "independent-field-evidence" };
 const collectedAt = "2026-11-15T14:00:00.000Z";
 const revision = "a".repeat(64);
+const itemFor = (detail: RoleDetail): Listing => ({
+  ...listing,
+  key: `${listing.serverId}:${listing.eid}`,
+  url: detail.url,
+  ordersn: "field-contract-fixture",
+  sellingTime: null,
+  createdTime: null,
+  orderTime: null,
+  name: "独立字段样本",
+  price: "100",
+  attrs: {},
+  summary: null,
+});
 
 function tab(name: string, contentText: string): TabSnapshot {
   return {
@@ -179,6 +196,302 @@ it("accepts the independent complete baseline through actual readiness checks", 
   expect(captureIssues(detail, true, true, listing)).toEqual([]);
   for (const name of ["坐骑", "锦衣/外观", "玩家之家"])
     expect(contentEvidence(detail, name)).toMatchObject({ state: "observed" });
+});
+
+const invalidRoleNumbers: unknown[] = [undefined, null, "0", true, -1, NaN, Infinity];
+it.each(ROLE_NUMERIC_FIELDS.flatMap((field) => invalidRoleNumbers.map((raw) => ({ field, raw }))))(
+  "marks missing/invalid $field.path=$raw unknown and prevents a complete save",
+  ({ field, raw }) => {
+    const detail = complete();
+    const input = structuredClone(detail.valuation!.source);
+    const parent = field.key === "holyLevel" ? input : (input.assets as Record<string, unknown>);
+    if (raw === undefined) delete parent[field.key];
+    else parent[field.key] = raw;
+    detail.valuation = normalizeValuationSource(input);
+    refreshEvidence(detail);
+    expect(detail.valuation.fields.some((entry) => entry.name === field.name)).toBe(false);
+    expect(detail.valuation.issues).toContain(
+      `${field.name}（${field.path}）${raw === undefined ? "缺失" : "无效"}，需补采`,
+    );
+    expect(detail.sourceEvidence!.fields).toContainEqual({
+      path: `valuation.source.${field.path}`,
+      source: "official-role-parser",
+      state: "unknown",
+    });
+    expect(
+      captureIssues(detail, true, true, listing).some((issue) => issue.includes(field.path)),
+    ).toBe(true);
+    const stored: Listing = {
+      ...listing,
+      key: `${listing.serverId}:${listing.eid}`,
+      url: detail.url,
+      ordersn: "numeric-field-fixture",
+      sellingTime: null,
+      createdTime: null,
+      orderTime: null,
+      name: "独立字段样本",
+      price: "100",
+      attrs: {},
+      summary: null,
+    };
+    const store = new CrawlStore(":memory:");
+    try {
+      store.observe(stored);
+      expect(store.save(stored, detail)).toBe(false);
+      expect(store.count()).toBe(0);
+    } finally {
+      store.close();
+    }
+  },
+);
+it.each([0.5, 10])(
+  "rejects an out-of-contract holy level %s without inventing unascended zero",
+  (holyLevel) => {
+    const detail = complete();
+    detail.valuation = normalizeValuationSource({ ...detail.valuation!.source, holyLevel });
+    refreshEvidence(detail);
+    expect(detail.valuation.fields.some((field) => field.name === "化圣层数")).toBe(false);
+    expect(detail.sourceEvidence!.fields).toContainEqual({
+      path: "valuation.source.holyLevel",
+      source: "official-role-parser",
+      state: "unknown",
+    });
+    expect(captureIssues(detail, true, true, listing)).toContain(
+      "化圣层数（holyLevel）无效，需补采",
+    );
+  },
+);
+it.each([undefined, null, [], false, "0"])(
+  "records every currency as unknown when its container is unreadable: %j",
+  (assets) => {
+    const detail = complete();
+    detail.valuation = normalizeValuationSource({ ...detail.valuation!.source, assets });
+    refreshEvidence(detail);
+    for (const field of ROLE_NUMERIC_FIELDS.slice(1)) {
+      expect(detail.sourceEvidence!.fields).toContainEqual({
+        path: `valuation.source.${field.path}`,
+        source: "official-role-parser",
+        state: "unknown",
+      });
+      expect(
+        captureIssues(detail, true, true, listing).some((issue) => issue.includes(field.path)),
+      ).toBe(true);
+    }
+  },
+);
+it("preserves explicitly unascended and zero balances as observed values with separate field origins", () => {
+  const detail = complete();
+  for (const field of ROLE_NUMERIC_FIELDS) {
+    expect(detail.valuation!.fields).toContainEqual({
+      name: field.name,
+      value: "0",
+      tab: field.tab,
+    });
+    expect(detail.sourceEvidence!.fields).toContainEqual({
+      path: `valuation.source.${field.path}`,
+      source: "official-role-parser",
+      state: "observed",
+    });
+  }
+  expect(
+    detail.sourceEvidence!.fields.some((field) => field.path === "valuation.source.assets"),
+  ).toBe(false);
+  expect(captureIssues(detail, true, true, listing)).toEqual([]);
+});
+it("does not infer required role cash/holy fields from an equipment-market identity and price", () => {
+  const product = {
+    serverId: "367",
+    eid: "market-equip",
+    category: "equip",
+    price: 123,
+    level: 100,
+  };
+  const valuation = normalizeValuationSource(product);
+  for (const field of ROLE_NUMERIC_FIELDS) {
+    expect(valuation.issues.some((issue) => issue.includes(`（${field.path}）`))).toBe(false);
+    expect(
+      fieldEvidence([], valuation).some((entry) => entry.path === `valuation.source.${field.path}`),
+    ).toBe(false);
+  }
+});
+
+it.each(["unknown", "old-summary"])(
+  "revalidates archived numeric source instead of trusting cleared issues or %s receipts",
+  (ledger) => {
+    const detail = complete();
+    const input = structuredClone(detail.valuation!.source);
+    delete input.holyLevel;
+    delete (input.assets as Record<string, unknown>).iCash;
+    detail.valuation = normalizeValuationSource(input);
+    detail.valuation.issues = []; // An older v10 archive never recorded these missing fields.
+    refreshEvidence(detail);
+    if (ledger === "old-summary")
+      detail.sourceEvidence!.fields = detail
+        .sourceEvidence!.fields.filter(
+          (field) =>
+            !ROLE_NUMERIC_FIELDS.some(
+              (required) => field.path === `valuation.source.${required.path}`,
+            ),
+        )
+        .concat({
+          path: "valuation.source.assets",
+          source: "official-role-parser",
+          state: "observed",
+        });
+    const issues = captureIssues(detail, true, true, listing);
+    expect(issues).toContain("化圣层数（holyLevel）缺失，需补采");
+    expect(issues).toContain("现金（assets.iCash）缺失，需补采");
+    const item: Listing = {
+      ...listing,
+      key: `${listing.serverId}:${listing.eid}`,
+      url: detail.url,
+      ordersn: "archived-field-fixture",
+      sellingTime: null,
+      createdTime: null,
+      orderTime: null,
+      name: "独立字段样本",
+      price: "100",
+      attrs: {},
+      summary: null,
+    };
+    const store = new CrawlStore(":memory:");
+    try {
+      store.observe(item);
+      expect(store.save(item, detail)).toBe(false);
+      expect(store.count()).toBe(0);
+    } finally {
+      store.close();
+    }
+  },
+);
+
+it.each(ROLE_NUMERIC_FIELDS)(
+  "requires a unique individual $path receipt even when archived values and issues are valid",
+  (field) => {
+    for (const kind of ["missing", "summary", "unknown", "wrong-source", "duplicate"] as const) {
+      const detail = complete();
+      const path = `valuation.source.${field.path}`;
+      detail.sourceEvidence!.fields = detail.sourceEvidence!.fields.filter(
+        (entry) => entry.path !== path,
+      );
+      if (kind === "summary")
+        detail.sourceEvidence!.fields.push({
+          path: "valuation.source.assets",
+          source: "official-role-parser",
+          state: "observed",
+        });
+      if (kind === "unknown")
+        detail.sourceEvidence!.fields.push({
+          path,
+          source: "official-role-parser",
+          state: "unknown",
+        });
+      if (kind === "wrong-source")
+        detail.sourceEvidence!.fields.push({ path, source: "visible-text", state: "observed" });
+      if (kind === "duplicate")
+        detail.sourceEvidence!.fields.push(
+          ...Array.from({ length: 2 }, () => ({
+            path,
+            source: "official-role-parser" as const,
+            state: "observed" as const,
+          })),
+        );
+      expect(captureIssues(detail, true, true, listing)).toContain(
+        `${field.name}（${field.path}）逐字段来源未核验，需补采`,
+      );
+    }
+  },
+);
+
+it("requires numeric fields for an explicit role capture even after all source groups have disappeared", () => {
+  const detail = complete();
+  detail.valuation = { version: 1, fields: [], issues: [], source: { ...listing } };
+  refreshEvidence(detail);
+  for (const field of ROLE_NUMERIC_FIELDS) {
+    expect(detail.sourceEvidence!.fields).toContainEqual({
+      path: `valuation.source.${field.path}`,
+      source: "official-role-parser",
+      state: "unknown",
+    });
+    expect(captureIssues(detail, true, true, listing)).toContain(
+      `${field.name}（${field.path}）缺失，需补采`,
+    );
+  }
+});
+
+it.each([
+  "wrong-eid",
+  "wrong-server",
+  "different-hash",
+  "empty-hash",
+  "non-hash",
+  "null-hash",
+  "numeric-stable",
+  "false-stable",
+  "wrong-version",
+  "missing-fields",
+])("rejects archived source evidence %s rather than trusting its stable claim", (kind) => {
+  const detail = complete();
+  const evidence = detail.sourceEvidence!;
+  if (kind === "wrong-eid") evidence.eid = "another-role";
+  if (kind === "wrong-server") evidence.serverId = "999";
+  if (kind === "different-hash") evidence.finalRevision = "b".repeat(64);
+  if (kind === "empty-hash") evidence.initialRevision = evidence.finalRevision = "";
+  if (kind === "non-hash") evidence.initialRevision = evidence.finalRevision = "synthetic-revision";
+  if (kind === "null-hash") evidence.initialRevision = evidence.finalRevision = null;
+  if (kind === "numeric-stable") Reflect.set(evidence, "stable", 1);
+  if (kind === "false-stable") evidence.stable = false;
+  if (kind === "wrong-version") Reflect.set(evidence, "version", 2);
+  if (kind === "missing-fields") Reflect.deleteProperty(evidence, "fields");
+  const issues = captureIssues(detail, true, true, listing);
+  expect(issues.some((issue) => issue.includes("详情") && issue.includes("来源"))).toBe(true);
+  const store = new CrawlStore(":memory:");
+  try {
+    const item = itemFor(detail);
+    store.observe(item);
+    expect(store.save(item, detail)).toBe(false);
+    expect(store.count()).toBe(0);
+  } finally {
+    store.close();
+  }
+});
+it("uses independent detail URL/valuation identity without a listing and refuses a conflict or ledger-only identity", () => {
+  const detail = complete();
+  expect(captureIssues(detail, true)).toEqual([]);
+  detail.url = "not-a-product-url";
+  expect(captureIssues(detail, true)).toEqual([]); // Observed valuation identity remains independent of the ledger.
+  detail.url = "https://xyq.cbg.163.com/equip?s=367&eid=another-role";
+  expect(captureIssues(detail, true)).toContain("详情URL与角色来源商品身份冲突，需补采");
+  detail.url = "not-a-product-url";
+  detail.valuation!.source = {};
+  expect(captureIssues(detail, true)).toContain("详情字段来源商品身份无法独立核验，需补采");
+});
+it("revalidates a stored v10 archive before it can be reused as complete", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "cbg-field-contract-"));
+  const file = path.join(directory, "archive.sqlite");
+  const valid = complete(),
+    item = itemFor(valid);
+  let store = new CrawlStore(file);
+  try {
+    store.observe(item);
+    expect(store.save(item, valid)).toBe(true);
+    const archive = complete();
+    delete archive.valuation!.source.holyLevel;
+    delete (archive.valuation!.source.assets as Record<string, unknown>).iCash;
+    archive.valuation!.issues = [];
+    archive.sourceEvidence!.eid = "another-role";
+    archive.sourceEvidence!.finalRevision = null;
+    store.db
+      .prepare("UPDATE listings SET detail_json=?,status='complete',error=NULL WHERE key=?")
+      .run(JSON.stringify(archive), item.key);
+    store.close();
+    store = new CrawlStore(file);
+    expect((store.detail(item.key) as { status: string } | undefined)?.status).toBe("failed");
+    expect(store.observe(item)).toBe(false);
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 for (const name of ["坐骑", "锦衣/外观", "玩家之家"]) {

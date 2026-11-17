@@ -6,6 +6,8 @@ const empty = () => ({
   advancedMount: { isJinJie: 0 },
   hasArtifact: false,
   goldIdFlag: false,
+  holyLevel: 0,
+  assets: { iCash: 0, iSaving: 0, iLearnCash: 0, xianyu: 0 },
 });
 const value = (source: Record<string, unknown>, name: string) =>
   normalizeValuationSource(source).fields.find((field) => field.name === name)?.value;

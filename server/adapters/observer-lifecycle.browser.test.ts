@@ -91,6 +91,48 @@ const counts = (page: Page) =>
       observers: g.__observers.size,
     };
   });
+it("publishes an explicit unready transition until this bind receives MAIN, and does not hide a real invalid age", async () => {
+  const page = await fixture();
+  try {
+    await command(page, "bind");
+    const first = await page.evaluate(
+      () => (window as unknown as Record<string, any>).__snapshots[0].payload,
+    );
+    expect(first).toMatchObject({ access: "unknown", loading: true });
+    expect(first.listing).toBeUndefined();
+    expect(first.authenticated).toBeUndefined();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as Record<string, any>).__snapshots.at(-1).payload.listing
+              ?.serverType,
+        ),
+      )
+      .toBe("1,2,3");
+    await page.evaluate(
+      () => ((window as unknown as Record<string, any>).QueryArgs.server_type = ""),
+    );
+    await command(page, "capture");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as Record<string, any>).__snapshots.at(-1).payload.listing
+              ?.serverType,
+        ),
+      )
+      .toBe("");
+    // The actual render is observable; the runtime's unchanged strict decoder must reject it.
+    expect(
+      await page.evaluate(
+        () => (window as unknown as Record<string, any>).__snapshots.at(-1).payload.loading,
+      ),
+    ).toBe(false);
+  } finally {
+    await page.close();
+  }
+});
 it("starts dormant, coalesces mutation bursts and cancels delayed capture and hooks on stop/rebind/pagehide", async () => {
   const page = await fixture();
   try {

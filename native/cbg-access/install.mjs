@@ -44,8 +44,6 @@ const compiled = spawnSync(
     "Cocoa",
     "-framework",
     "ApplicationServices",
-    "-framework",
-    "IOKit",
   ],
   { stdio: "inherit" },
 );

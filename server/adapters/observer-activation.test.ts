@@ -101,7 +101,7 @@ function boundRuntime() {
             kind: "input-result",
             actionId: message.actionId,
             ok: true,
-            awake: message.kind === "activity" && message.command !== "end",
+            active: message.kind === "activity" && message.command !== "end",
             activityId: message.activity?.activityId,
           }),
         );

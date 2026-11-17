@@ -109,7 +109,7 @@ export function createRoleListDiagnostic(
       identity.category !== "role" ||
       identity.schemaVersion !== saved.schemaVersion ||
       identity.server !== saved.server ||
-      identity.serverAge !== saved.serverAge ||
+      valueFor("server_type", identity.serverAge) !== valueFor("server_type", saved.serverAge) ||
       identity.browserSessionEpoch !== saved.browserSessionEpoch ||
       !Number.isSafeInteger(identity.page) ||
       identity.page < 1 ||

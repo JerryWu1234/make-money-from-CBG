@@ -23,7 +23,7 @@
 | BRG-02 / T15 | sender/origin/frame/tab/window/协议/限额核验；有限语义计划；ISOLATED 独立解析目标，宿主和 AX 再核验，不接收网页任意系统命令或最终坐标。                                                                             |
 | BRG-03 / T16 | `adapters/bridge-store.ts` 的持久数据去重/有界缓冲/ACK 重试；连接代次隔离；动作未知不重放。stop/resume 后旧 proof 同时受 SW revision、宿主 generation 和输入进程 epoch 拒绝。                                       |
 | DAT-01 / T17 | 新旧通路共用 7 类标签、装备/仓库/宝宝完整性和身份门槛；partial/history 与当前 complete 分开；版本和进度同事务提交。                                                                                                 |
-| NAT-01 / T18 | `native/cbg-access/Input.m` 的授权、前台、绑定 Chrome 窗口、锁屏、输入监控与用户抢占检查；有限输入、立即停止、防休眠释放。禁用 event tap 时保持停止。                                                               |
+| NAT-01 / T18 | `native/cbg-access/Input.m` 的授权、前台、绑定 Chrome 窗口、锁屏、输入监控与用户抢占检查；有限输入、立即停止、撤销活动授权（2026-11-16按用户要求移除自动防休眠）。禁用 event tap 时保持停止。                       |
 | NAT-02 / T19 | 可见语义节点、矩形时效、视口/DPR/屏幕坐标、遮挡/命中和 AX 角色/名称/范围复核；执行后等待业务证据；部分输入或未知结果停止且不重放。                                                                                  |
 | NAT-03 / T20 | 原生列表 query/refresh/next/jump、详情开关/标签、市场表单/查询/分页/详情；跨文档用本地 completed receipt + governor completed permit 验收；owned child 返回 parent 后再刷新。没有可核验 UI 入口时明确 unsupported。 |
 | MOD-01 / T21 | `browser-settings.ts`、`session.ts`、API 与浏览器设置 UI：通路互斥；切换不清保护状态；原生读/等/取证/输入无 CDP 依赖；未知已保存通路拒绝隐式回退。                                                                  |

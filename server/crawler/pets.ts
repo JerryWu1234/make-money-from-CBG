@@ -3,7 +3,135 @@ import type { Page } from "playwright-core";
 import type { PetSnapshot, TabSnapshot } from "./types";
 import { clickForInspection, hoverForInspection } from "../viewport";
 import { captureBrowserStep } from "../browser-evidence";
-import { evaluateDetailRoot, retainDetailLeaves, setDetailPetItems } from "./detail-root";
+import { retainDetailLeaves, setDetailPetItems } from "./detail-root";
+
+type PetReadProgress = { count: number | null; pets: PetSnapshot[]; issues: string[] };
+
+function discoverPetDetail(root: HTMLElement) {
+  const visible = (el: Element) =>
+    el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+    !el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]');
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes: Text[] = [];
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    if (node.parentElement && visible(node.parentElement)) nodes.push(node);
+  }
+  let markerIndex = -1;
+  nodes.forEach((node, index) => {
+    if (/详细信息/.test(node.textContent || "")) markerIndex = index;
+  });
+  if (markerIndex < 0) return { value: { paths: [], proof: null }, elements: [] as Element[] };
+  const marker = nodes[markerIndex];
+  const range = document.createRange();
+  range.setStart(marker, (marker.textContent || "").lastIndexOf("详细信息") + 4);
+  const end = nodes
+    .slice(markerIndex + 1)
+    .find((node) =>
+      /^(?:孩子|特殊宠物|召唤兽心得技能)(?:\s*[（(][^）)]*[）)])?\s*$/.test(
+        node.textContent?.trim() || "",
+      ),
+    );
+  if (end) range.setEndBefore(end);
+  else range.setEnd(root, root.childNodes.length);
+  const selected = nodes.slice(markerIndex + 1).filter((node) => range.intersectsNode(node));
+  const text = selected
+    .map((node) => node.textContent?.trim() || "")
+    .filter(Boolean)
+    .join("\n");
+  const counts = { skills: 0, equipment: 0, innerSkills: 0 };
+  const icons: Record<keyof typeof counts, { name: string; modelId: string; src: string }[]> = {
+    skills: [],
+    equipment: [],
+    innerSkills: [],
+  };
+  const items: { path: string; section: string }[] = [];
+  const elements: Element[] = [];
+  const path = (element: Element) => {
+    const parts: string[] = [];
+    for (let node: Element | null = element; node && node !== root; node = node.parentElement)
+      parts.unshift(
+        `${node.tagName.toLowerCase()}:nth-child(${[...node.parentElement!.children].indexOf(node) + 1})`,
+      );
+    return ":scope > " + parts.join(" > ");
+  };
+  for (const icon of root.querySelectorAll("img")) {
+    if (
+      !visible(icon) ||
+      !range.intersectsNode(icon) ||
+      /\/pets\/(?:big|small)\//.test(icon.getAttribute("src") || "") ||
+      /\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#]|$)/.test(
+        icon.getAttribute("src") || "",
+      )
+    )
+      continue;
+    const section = selected
+      .filter(
+        (node) => (node.compareDocumentPosition(icon) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+      )
+      .map((node) => node.textContent?.trim() || "")
+      .filter((text) => /^(?:赐福技能|(?:召唤兽)?技能|内丹)(?:\s*[（(]\d+[）)])?$/.test(text))
+      .at(-1)
+      ?.replace(/\s*[（(]\d+[）)]$/, "");
+    elements.push(icon);
+    items.push({ path: path(icon), section: section || "" });
+    const attrs: Record<string, string> = {};
+    let current: Element | null = icon;
+    for (
+      let depth = 0;
+      depth < 3 && current && current !== root;
+      depth++, current = current.parentElement
+    )
+      for (const attr of current.attributes)
+        if (attr.name.startsWith("data"))
+          attrs[attr.name.replace(/^data-/, "data_")] ||= attr.value;
+    const skill = attrs.data_skill_type;
+    let kind: keyof typeof counts | undefined;
+    if (skill === "neidan") kind = "innerSkills";
+    else if (skill) kind = "skills";
+    else if (attrs.data_equip_name || attrs.data_tip_box || attrs.data_equip_desc)
+      kind = "equipment";
+    if (kind) {
+      counts[kind]++;
+      icons[kind].push({
+        name: attrs.data_equip_name || "",
+        modelId: attrs.data_equip_type || "",
+        src: icon.getAttribute("src") || "",
+      });
+    }
+  }
+  const declared = (label: string) => {
+    const match = text.match(new RegExp(`(?:^|\\n)\\s*${label}\\s*[（(]\\s*(\\d+)\\s*[）)]`));
+    return match ? Number(match[1]) : null;
+  };
+  const proof = {
+    text,
+    items,
+    counts,
+    icons,
+    sections: {
+      skills:
+        counts.skills > 0 ||
+        /(?:^|\n)\s*(?:召唤兽)?技能(?:\s*[（(:：]|\s*$)/m.test(text) ||
+        /(?:无|没有|暂无)技能/.test(text),
+      equipment:
+        counts.equipment > 0 ||
+        /(?:^|\n)\s*(?:召唤兽|宝宝)?装备(?:\s*[（(:：]|\s*$)/m.test(text) ||
+        /(?:无|没有|暂无)(?:宝宝)?装备/.test(text),
+      innerSkills:
+        counts.innerSkills > 0 ||
+        /(?:^|\n)\s*(?:召唤兽)?内丹(?:\s*[（(:：]|\s*$)/m.test(text) ||
+        /(?:无|没有|暂无)内丹/.test(text),
+    },
+    declared: {
+      skills: declared("技能"),
+      equipment: declared("装备"),
+      innerSkills: declared("内丹"),
+    },
+    loading: /正在(?:加载|读取)|加载中|展开全部(?:技能|装备|内丹)/.test(text),
+  };
+  return { value: { paths: items.map((item) => item.path), proof }, elements };
+}
 
 export async function collectPets(
   page: Page,
@@ -12,7 +140,8 @@ export async function collectPets(
   inspect: (snapshot: TabSnapshot) => Promise<void>,
   settled: () => Promise<void>,
   report: (message: string) => void,
-): Promise<{ count: number | null; pets: PetSnapshot[]; issues: string[] }> {
+  onProgress?: (value: PetReadProgress) => void,
+): Promise<PetReadProgress> {
   const leaves = await retainDetailLeaves(
     page,
     (root) => {
@@ -126,6 +255,7 @@ export async function collectPets(
       );
     const pets: PetSnapshot[] = [];
     const issues: string[] = [];
+    onProgress?.({ count: discovered.expected, pets: [], issues: [] });
     for (let index = 0; index < discovered.count; index++) {
       signal.throwIfAborted();
       report(`正在读取第 ${index + 1}/${discovered.count} 只召唤兽的资质、技能及装备…`);
@@ -137,211 +267,92 @@ export async function collectPets(
       await leaves.assert();
       await settled();
       await leaves.assert();
-      const proof = await evaluateDetailRoot(
-        page,
-        (root) => {
-          const visible = (el: Element) =>
-            el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
-            !el.closest('[data-cbg-hover-tip], [id$="TipsBox"], [role="tooltip"]');
-          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-          const nodes: Text[] = [];
-          while (walker.nextNode()) {
-            const node = walker.currentNode as Text;
-            if (node.parentElement && visible(node.parentElement)) nodes.push(node);
-          }
-          let markerIndex = -1;
-          nodes.forEach((node, index) => {
-            if (/详细信息/.test(node.textContent || "")) markerIndex = index;
-          });
-          if (markerIndex < 0) return null;
-          const marker = nodes[markerIndex];
-          const range = document.createRange();
-          range.setStart(marker, (marker.textContent || "").lastIndexOf("详细信息") + 4);
-          const end = nodes
-            .slice(markerIndex + 1)
-            .find((node) =>
-              /^(?:孩子|特殊宠物|召唤兽心得技能)(?:\s*[（(][^）)]*[）)])?\s*$/.test(
-                node.textContent?.trim() || "",
-              ),
-            );
-          if (end) range.setEndBefore(end);
-          else range.setEnd(root, root.childNodes.length);
-          const selected = nodes
-            .slice(markerIndex + 1)
-            .filter((node) => range.intersectsNode(node));
-          const text = selected
-            .map((node) => node.textContent?.trim() || "")
-            .filter(Boolean)
-            .join("\n");
-          const counts = { skills: 0, equipment: 0, innerSkills: 0 };
-          const icons: Record<
-            keyof typeof counts,
-            { name: string; modelId: string; src: string }[]
-          > = {
-            skills: [],
-            equipment: [],
-            innerSkills: [],
-          };
-          const items: { path: string; section: string }[] = [];
-          const path = (element: Element) => {
-            const parts: string[] = [];
-            for (
-              let node: Element | null = element;
-              node && node !== root;
-              node = node.parentElement
-            )
-              parts.unshift(
-                `${node.tagName.toLowerCase()}:nth-child(${[...node.parentElement!.children].indexOf(node) + 1})`,
-              );
-            return ":scope > " + parts.join(" > ");
-          };
-          for (const icon of root.querySelectorAll("img")) {
-            if (
-              !visible(icon) ||
-              !range.intersectsNode(icon) ||
-              /\/pets\/(?:big|small)\//.test(icon.getAttribute("src") || "") ||
-              /\/images\/time_lock_(?:\d+|protect|huoyue)\.png(?:[?#]|$)/.test(
-                icon.getAttribute("src") || "",
-              )
-            )
-              continue;
-            const section = selected
-              .filter(
-                (node) =>
-                  (node.compareDocumentPosition(icon) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
-              )
-              .map((node) => node.textContent?.trim() || "")
-              .filter((text) =>
-                /^(?:赐福技能|(?:召唤兽)?技能|内丹)(?:\s*[（(]\d+[）)])?$/.test(text),
-              )
-              .at(-1)
-              ?.replace(/\s*[（(]\d+[）)]$/, "");
-            items.push({ path: path(icon), section: section || "" });
-            const attrs: Record<string, string> = {};
-            let current: Element | null = icon;
-            for (
-              let depth = 0;
-              depth < 3 && current && current !== root;
-              depth++, current = current.parentElement
-            )
-              for (const attr of current.attributes)
-                if (attr.name.startsWith("data"))
-                  attrs[attr.name.replace(/^data-/, "data_")] ||= attr.value;
-            const skill = attrs.data_skill_type;
-            let kind: keyof typeof counts | undefined;
-            if (skill === "neidan") kind = "innerSkills";
-            else if (skill) kind = "skills";
-            else if (attrs.data_equip_name || attrs.data_tip_box || attrs.data_equip_desc)
-              kind = "equipment";
-            if (kind) {
-              counts[kind]++;
-              icons[kind].push({
-                name: attrs.data_equip_name || "",
-                modelId: attrs.data_equip_type || "",
-                src: icon.getAttribute("src") || "",
-              });
-            }
-          }
-          const declared = (label: string) => {
-            const match = text.match(
-              new RegExp(`(?:^|\\n)\\s*${label}\\s*[（(]\\s*(\\d+)\\s*[）)]`),
-            );
-            return match ? Number(match[1]) : null;
-          };
-          return {
-            text,
-            items,
-            counts,
-            icons,
-            sections: {
-              skills:
-                counts.skills > 0 ||
-                /(?:^|\n)\s*(?:召唤兽)?技能(?:\s*[（(:：]|\s*$)/m.test(text) ||
-                /(?:无|没有|暂无)技能/.test(text),
-              equipment:
-                counts.equipment > 0 ||
-                /(?:^|\n)\s*(?:召唤兽|宝宝)?装备(?:\s*[（(:：]|\s*$)/m.test(text) ||
-                /(?:无|没有|暂无)(?:宝宝)?装备/.test(text),
-              innerSkills:
-                counts.innerSkills > 0 ||
-                /(?:^|\n)\s*(?:召唤兽)?内丹(?:\s*[（(:：]|\s*$)/m.test(text) ||
-                /(?:无|没有|暂无)内丹/.test(text),
-            },
-            declared: {
-              skills: declared("技能"),
-              equipment: declared("装备"),
-              innerSkills: declared("内丹"),
-            },
-            loading: /正在(?:加载|读取)|加载中|展开全部(?:技能|装备|内丹)/.test(text),
-          };
-        },
+      const details = await retainDetailLeaves<
         undefined,
-      );
-      await setDetailPetItems(page, proof?.items || []);
-      const snapshot = await capture(`召唤兽 ${index + 1}`);
-      await inspect(snapshot);
-      await leaves.assert();
-      if (!proof) issues.push(`第 ${index + 1} 只召唤兽详细信息区域未确认`);
-      const start = snapshot.text.lastIndexOf("详细信息");
-      const body = proof?.text ?? (start >= 0 ? snapshot.text.slice(start + 4) : snapshot.text);
-      const stats = body
-        .split(/(?:^|\n)技能(?:\s*[（(]\s*\d+\s*[）)])?(?:\n|$)/)[0]
-        .replace(/[ \t]+(?=[^\s：:]{1,20}[：:])/g, "\n");
-      const fields = [
-        ...stats.matchAll(/(?:^|[\n\t；])([^：:\n\t；]{1,30})[：:]\s*([^\n\t；]+)/g),
-      ].map((match) => ({ name: match[1].trim(), value: match[2].trim() }));
-      if (!fields.some((field) => /类型|名称|宝宝/.test(field.name)))
-        throw Object.assign(new Error(`第 ${index + 1} 只召唤兽没有可识别的属性，未标记采集成功`), {
-          name: "IncompleteDetailError",
-        });
-      const items = snapshot.items || [];
-      const pet: PetSnapshot = {
-        index: index + 1,
-        name:
-          fields.find((field) => /^(名称|名字|宝宝)$/.test(field.name))?.value ||
-          fields.find((field) => field.name === "类型")?.value ||
-          `召唤兽 ${index + 1}`,
-        fields,
-        skills: items.filter((item) => item.kind === "skill"),
-        equipment: items.filter((item) => item.kind === "equipment"),
-        innerSkills: items.filter((item) => item.kind === "innerSkill"),
-      };
-      if (proof) {
-        if (proof.loading) issues.push(`第 ${index + 1} 只召唤兽详情仍在加载或未展开`);
-        for (const [key, label] of [
-          ["skills", "技能"],
-          ["equipment", "装备"],
-          ["innerSkills", "内丹"],
-        ] as const) {
-          if (!proof.sections[key])
-            issues.push(`第 ${index + 1} 只召唤兽${label}区域未确认，不能按空列表处理`);
-          if (pet[key].length !== proof.counts[key]) {
-            issues.push(`第 ${index + 1} 只召唤兽${label}图标未完整读取`);
-            report(
-              "召唤兽图标核对异常：" +
-                JSON.stringify({
-                  pet: index + 1,
-                  section: key,
-                  expected: proof.counts[key],
-                  captured: pet[key].length,
-                  icons: proof.icons[key],
-                  capturedItems: pet[key].map((item) => ({
-                    name: item.name,
-                    modelId: item.modelId,
-                  })),
-                }),
-            );
+        ReturnType<typeof discoverPetDetail>["value"]
+      >(page, discoverPetDetail, undefined);
+      try {
+        const proof = details.value.proof;
+        await details.assert();
+        await setDetailPetItems(page, proof?.items || []);
+        const snapshot = await capture(`召唤兽 ${index + 1}`);
+        await details.assert();
+        await inspect(snapshot);
+        await details.assert();
+        await leaves.assert();
+        if (!proof) issues.push(`第 ${index + 1} 只召唤兽详细信息区域未确认`);
+        const start = snapshot.text.lastIndexOf("详细信息");
+        const body = proof?.text ?? (start >= 0 ? snapshot.text.slice(start + 4) : snapshot.text);
+        const stats = body
+          .split(/(?:^|\n)技能(?:\s*[（(]\s*\d+\s*[）)])?(?:\n|$)/)[0]
+          .replace(/[ \t]+(?=[^\s：:]{1,20}[：:])/g, "\n");
+        const fields = [
+          ...stats.matchAll(/(?:^|[\n\t；])([^：:\n\t；]{1,30})[：:]\s*([^\n\t；]+)/g),
+        ].map((match) => ({ name: match[1].trim(), value: match[2].trim() }));
+        if (!fields.some((field) => /类型|名称|宝宝/.test(field.name)))
+          throw Object.assign(
+            new Error(`第 ${index + 1} 只召唤兽没有可识别的属性，未标记采集成功`),
+            {
+              name: "IncompleteDetailError",
+            },
+          );
+        const items = snapshot.items || [];
+        const pet: PetSnapshot = {
+          index: index + 1,
+          name:
+            fields.find((field) => /^(名称|名字|宝宝)$/.test(field.name))?.value ||
+            fields.find((field) => field.name === "类型")?.value ||
+            `召唤兽 ${index + 1}`,
+          fields,
+          skills: items.filter((item) => item.kind === "skill"),
+          equipment: items.filter((item) => item.kind === "equipment"),
+          innerSkills: items.filter((item) => item.kind === "innerSkill"),
+        };
+        if (proof) {
+          if (proof.loading) issues.push(`第 ${index + 1} 只召唤兽详情仍在加载或未展开`);
+          for (const [key, label] of [
+            ["skills", "技能"],
+            ["equipment", "装备"],
+            ["innerSkills", "内丹"],
+          ] as const) {
+            if (!proof.sections[key])
+              issues.push(`第 ${index + 1} 只召唤兽${label}区域未确认，不能按空列表处理`);
+            if (pet[key].length !== proof.counts[key]) {
+              issues.push(`第 ${index + 1} 只召唤兽${label}图标未完整读取`);
+              report(
+                "召唤兽图标核对异常：" +
+                  JSON.stringify({
+                    pet: index + 1,
+                    section: key,
+                    expected: proof.counts[key],
+                    captured: pet[key].length,
+                    icons: proof.icons[key],
+                    capturedItems: pet[key].map((item) => ({
+                      name: item.name,
+                      modelId: item.modelId,
+                    })),
+                  }),
+              );
+            }
+            if (proof.declared[key] !== null && pet[key].length !== proof.declared[key])
+              issues.push(`第 ${index + 1} 只召唤兽${label}数量与页面不一致`);
           }
-          if (proof.declared[key] !== null && pet[key].length !== proof.declared[key])
-            issues.push(`第 ${index + 1} 只召唤兽${label}数量与页面不一致`);
         }
+        await captureBrowserStep(
+          page,
+          { flow: "collection", stage: `宝宝读取完成-${index + 1}` },
+          signal,
+        );
+        await details.assert();
+        pets.push(pet);
+        onProgress?.({
+          count: discovered.expected,
+          pets: structuredClone(pets),
+          issues: [...issues],
+        });
+      } finally {
+        await details.dispose();
       }
-      pets.push(pet);
-      await captureBrowserStep(
-        page,
-        { flow: "collection", stage: `宝宝读取完成-${index + 1}` },
-        signal,
-      );
     }
     await leaves.assert();
     return { count: discovered.expected, pets, issues };
