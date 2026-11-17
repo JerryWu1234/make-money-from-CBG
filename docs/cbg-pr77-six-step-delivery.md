@@ -1,5 +1,7 @@
 # PR #77 六项改进交付记录
 
+> **当前补充：** MAIN回调观察端异常隔离已修复（`14aec82`），新全量204文件、3683项通过。[回调复核](./reviews/cbg-observer-callback-isolation-2026-11-17.md)与[物理接管准备](./evidence/cbg-physical-takeover-preparation-2026-11-17.json)给出本轮范围；63项纯判据/prepare不能替代真实用户操作。下方原生四轮与旧计数均保留其记录版本，不重新标为新MAIN实机通过。
+
 > **2026-11-17 当前状态：** 新 Input `224348ba` / helper `ece793eb` 的默认 AX basic、独立 helper expiry、断连及宿主重启已取得隔离实机证据；全量 204 文件、3675/3675 通过，检查 0 错误、29 条原有 warning，构建通过。详见[当前补充交付](./native-followup-acceptance-2026-11-17.md)及[当前实机证据](./evidence/cbg-native-followup-live-2026-11-17.json)。来源未解事件、物理接管、缺硬件多屏及延期锁屏仍未闭合。以下保留截至 `28baf1a` 的历史记录；其中“当前/最终/仍未通过”指该历史版本，不覆盖本补充。
 
 基线：`cae224916d5f7d2e4114f078d20ed1477744ecd6`。本轮按六个可独立评审的提交交付，继续更新现有 PR #77，不合并、不强推，不改动真实采集数据库或持久 Chrome 配置。

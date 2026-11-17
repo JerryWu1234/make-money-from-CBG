@@ -12,6 +12,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 import { chromium } from "playwright-core";
 import { assertHelperExpiryInput, helperMessages } from "./native-helper-stdio-evidence.mjs";
+import {
+  assessPhysicalTakeover,
+  validPhysicalIntent,
+} from "./native-physical-takeover-evidence.mjs";
 
 // Load the actual application modules. The hook only resolves/transpiles TypeScript;
 // it does not replace runtime, governor, authority, observer or input implementations.
@@ -48,6 +52,7 @@ const scenarios = [
   "restart",
   "ax-readonly",
   "preemption-diagnostic",
+  "physical-takeover",
 ];
 assert(
   options.every(
@@ -61,7 +66,7 @@ assert(
       ].includes(value) ||
       (value.startsWith("--scenario=") && scenarios.includes(value.slice(11))),
   ),
-  "Use --prepare-only or --run, optionally --await-start, --ax-preflight, --observe-helper-stdio and --scenario=basic|expiry|disconnect|restart|ax-readonly|preemption-diagnostic",
+  "Use --prepare-only or --run, optionally --await-start, --ax-preflight, --observe-helper-stdio and --scenario=basic|expiry|disconnect|restart|ax-readonly|preemption-diagnostic|physical-takeover",
 );
 assert(options.filter((value) => value.startsWith("--scenario=")).length <= 1);
 const scenario = options.find((value) => value.startsWith("--scenario="))?.slice(11) || "basic";
@@ -69,6 +74,11 @@ const run = options.includes("--run");
 const awaitStart = options.includes("--await-start");
 const axPreflight = options.includes("--ax-preflight");
 const observeHelperStdio = options.includes("--observe-helper-stdio");
+if (scenario === "physical-takeover")
+  assert(
+    awaitStart && observeHelperStdio,
+    "Physical takeover requires explicit --await-start intent and --observe-helper-stdio evidence",
+  );
 assert(!(run && options.includes("--prepare-only")), "Choose one mode");
 const prepared = spawnSync(
   process.execPath,
@@ -112,6 +122,26 @@ const result = {
     "The mock search proves a local role-list DOM commit, not an authenticated official-site fresh request/callback result.",
   ],
 };
+if (scenario === "physical-takeover") {
+  result.physicalTakeoverPlan = {
+    intentPath: path.join(artifact, "start-native.signal"),
+    intentFields: [
+      "statement",
+      "receivedAt",
+      "inputKind=keyboard-escape|trackpad-move",
+      "inputDevice=built-in-keyboard|built-in-trackpad",
+      "oneActionOnly=true",
+    ],
+    attestationPath: path.join(artifact, "physical-takeover-attestation.json"),
+    actionWindowMs: 20000,
+    postReplyWindowMs: 60000,
+    actualUserReplyRequired: true,
+    fileSignalsArePhysicalInputProof: false,
+  };
+  result.differences.push(
+    "Physical-takeover mode adds only a non-interactive fixture notice after the actual field action, and reads the existing fixture keydown log for first trusted Escape/code/keyCode27 alignment. It generates no test key/mouse event. Human statements are operator-recorded evidence separate from helper and DOM records; visible-notice timing cannot prove low-level producer identity or strict causation.",
+  );
+}
 const save = () =>
   writeFile(path.join(artifact, "os-result.json"), JSON.stringify(result, null, 2));
 const record = (name, evidence) => {
@@ -468,7 +498,218 @@ const nativeProcessIdentity = async (hostPid) => {
     helpers,
   };
 };
+async function physicalTakeover({ page, during, identity, lease, timingStart }) {
+  const evidence = result.physicalTakeover;
+  assert(validPhysicalIntent(evidence?.intent, Date.now()));
+  assert.deepEqual(during.inputPreemption, {}, "A pre-window event cannot count as user takeover");
+  const actionId = result.actions[0].actionId;
+  const stdio = await stdioRecords();
+  const proof = stdio.find(
+    (row) =>
+      row.direction === "chrome-to-host" &&
+      row.message?.kind === "command-proof" &&
+      row.message.actionId === actionId,
+  );
+  const posted = wire.find(
+    (row) =>
+      row.direction === "host-to-runtime" &&
+      row.message.kind === "input-result" &&
+      row.message.actionId === actionId &&
+      row.message.ok === true &&
+      row.message.posted === true,
+  );
+  const permit = db
+    .prepare(
+      "SELECT status,context_json FROM access_permits WHERE json_extract(context_json,'$.actionId')=?",
+    )
+    .get(actionId);
+  const command = db
+    .prepare("SELECT state,plan FROM access_bridge_commands WHERE action_id=?")
+    .get(actionId);
+  const dom = await page.evaluate(() => ({
+    price: document.querySelector("#price_min").value,
+    events: window.__osEvents,
+  }));
+  assert(proof && posted && permit?.status === "completed" && command?.state === "completed");
+  assert.equal(dom.price, "120");
+  assert(
+    dom.events.some(
+      (event) =>
+        event.type === "input" &&
+        event.id === "price_min" &&
+        event.trusted === true &&
+        event.value === "120",
+    ),
+  );
+  evidence.field120BeforePrompt = { actionId, proof, posted, permit, command, dom };
+  evidence.authorityCountsBeforeWindow = {
+    permits: db.prepare("SELECT count(*) n FROM access_permits").get().n,
+    commands: db.prepare("SELECT count(*) n FROM access_bridge_commands").get().n,
+  };
+  const history = helperMessages(helperObservation());
+  const request = history.find(
+    (row) =>
+      row.observerPid === identity.proxy.pid &&
+      row.hostPid === identity.host.pid &&
+      row.helperPid === identity.helpers[0].pid &&
+      row.direction === "host-to-helper" &&
+      row.message.command === "activity-begin" &&
+      row.message.activity?.activityId === lease.activityId,
+  );
+  const ack =
+    request &&
+    history.find(
+      (row) =>
+        row.observerPid === request.observerPid &&
+        row.hostPid === request.hostPid &&
+        row.helperPid === request.helperPid &&
+        row.direction === "helper-to-host" &&
+        row.message.actionId === request.message.actionId &&
+        row.message.ok === true &&
+        row.message.active === true &&
+        row.message.activityId === lease.activityId,
+    );
+  assert(request && ack, "No real original helper begin/ACK bracket");
+  evidence.grant = { request, ack };
+  const openedAt = Date.now();
+  evidence.window = {
+    id: randomUUID(),
+    inputKind: evidence.intent.inputKind,
+    openedAt,
+    closesAt: openedAt + 20000,
+  };
+  const actionLabel =
+    evidence.intent.inputKind === "keyboard-escape"
+      ? "仅用内建键盘按一次 Escape（Esc）键，不移动触控板、不点击、不按其他键"
+      : "仅用内建触控板明显移动一次，不点击、不按键";
+  const setNotice = (text) =>
+    page.evaluate((text) => {
+      let notice = document.getElementById("physical-takeover-notice");
+      if (!notice) {
+        notice = document.createElement("div");
+        notice.id = "physical-takeover-notice";
+        notice.style.cssText =
+          "position:fixed;right:12px;bottom:12px;max-width:560px;padding:16px;background:#fff4c2;color:#111;border:2px solid #8a6900;z-index:99999;pointer-events:none;font-size:20px";
+        document.body.append(notice);
+      }
+      notice.textContent = text;
+      return Date.now();
+    }, text);
+  evidence.window.noticeShownAt = await setNotice(
+    `等待真实接管：现在请${actionLabel}。20秒窗口；看到已停止后不再进行测试动作。`,
+  );
+  evidence.setup =
+    "Non-interactive fixture notice only; no business control changes, focus changes or generated events. noticeShownAt is a DOM text-set timestamp, not proof the user saw it; seeing the prompt is confirmed only by the separate actual user reply.";
+  await save();
+  console.log(
+    `AWAIT_PHYSICAL_TAKEOVER: ${JSON.stringify({ artifact, ...evidence.window, instructions: actionLabel })}`,
+  );
+  let invalidation;
+  while (Date.now() <= evidence.window.closesAt + 2000) {
+    const messages = helperMessages(helperObservation());
+    invalidation = messages.find(
+      (row) =>
+        row.observerPid === request.observerPid &&
+        row.helperPid === request.helperPid &&
+        row.direction === "helper-to-host" &&
+        row.message.kind === "activity-invalidated" &&
+        row.message.activityId === lease.activityId,
+    );
+    if (invalidation) break;
+    if (Date.now() > evidence.window.closesAt && !evidence.window.closedNoticeAt)
+      evidence.window.closedNoticeAt = await setNotice(
+        "接管窗口已结束：请勿继续操作。本轮没有可确认的真实接管事件，不能计通过。",
+      );
+    await wait(100);
+  }
+  evidence.invalidation = invalidation;
+  evidence.timing = {
+    elapsedWallMs: Date.now() - timingStart.wall,
+    elapsedMonotonicMs: Number(process.hrtime.bigint() - timingStart.monotonicNs) / 1e6,
+  };
+  if (!invalidation) {
+    evidence.assessment = {
+      status: "inconclusive",
+      reason: "no-real-helper-preemption-within-action-window",
+      producerIdentityProven: false,
+    };
+    await save();
+    throw new Error(
+      "Physical takeover inconclusive: no real event; no automatic input was generated",
+    );
+  }
+  await until(() => runtime.status().stopped, 5000);
+  evidence.inactive = await runtime.nativeStatus();
+  evidence.window.stoppedNoticeAt = await setNotice(
+    `原生输入已停止，测试动作已结束，可回聊天确认：是否确实在等待提示后亲自${evidence.intent.inputKind === "keyboard-escape" ? "按了一次Esc" : "移动触控板一次"}，随后才看到本停止提示。没赶上或不确定请如实说明。`,
+  );
+  const domDeadline = Date.now() + 1000;
+  do {
+    evidence.domEvents = await page.evaluate(() => window.__osEvents);
+    if (
+      evidence.intent.inputKind !== "keyboard-escape" ||
+      evidence.domEvents.some(
+        (event) =>
+          event.type === "keydown" &&
+          event.id === "price_min" &&
+          event.trusted === true &&
+          event.at >= evidence.window.openedAt &&
+          event.at <= evidence.window.closesAt,
+      )
+    )
+      break;
+    await wait(25);
+  } while (Date.now() < domDeadline);
+  evidence.timing = {
+    elapsedWallMs: Date.now() - timingStart.wall,
+    elapsedMonotonicMs: Number(process.hrtime.bigint() - timingStart.monotonicNs) / 1e6,
+  };
+  evidence.runtimeStopped = runtime.status();
+  const snapshot = () => ({
+    intent: evidence.intent,
+    window: evidence.window,
+    grant: evidence.grant,
+    invalidation,
+    lease,
+    helperPid: identity.helpers[0].pid,
+    inactive: evidence.inactive,
+    attestation: evidence.attestation,
+    timing: evidence.timing,
+    transportRows: helperObservation(),
+    messages: helperMessages(helperObservation()),
+    domEvents: evidence.domEvents,
+  });
+  evidence.assessment = assessPhysicalTakeover(snapshot());
+  await save();
+  assert.equal(
+    evidence.assessment.reason,
+    "missing-or-uncertain-post-action-user-attestation",
+    `Physical takeover inconclusive: ${evidence.assessment.reason}`,
+  );
+  const attestationPath = path.join(artifact, "physical-takeover-attestation.json");
+  evidence.attestationPath = attestationPath;
+  evidence.attestationSource = "operator-recorded-real-user-post-action-reply-not-OS-input-proof";
+  await save();
+  console.log(
+    `AWAIT_PHYSICAL_ATTESTATION: ${JSON.stringify({ path: attestationPath, windowId: evidence.window.id, inputKind: evidence.intent.inputKind, stoppedNoticeAt: evidence.window.stoppedNoticeAt, timeoutMs: 60000 })}`,
+  );
+  try {
+    await until(() => existsSync(attestationPath), 60000);
+    evidence.attestation = JSON.parse(await readFile(attestationPath, "utf8"));
+  } catch (error) {
+    evidence.attestationError = error.message;
+  }
+  evidence.assessment = assessPhysicalTakeover(snapshot());
+  await save();
+  assert.equal(
+    evidence.assessment.status,
+    "verified",
+    `Physical takeover inconclusive: ${evidence.assessment.reason}`,
+  );
+}
+
 async function faultScenario({ page, protocol, tab, scope, governor }) {
+  const timingStart = { wall: Date.now(), monotonicNs: process.hrtime.bigint() };
   const control = new AbortController();
   let entered, continueOldWork, finishLate, cleanupError;
   const active = new Promise((resolve) => (entered = resolve));
@@ -546,7 +787,9 @@ async function faultScenario({ page, protocol, tab, scope, governor }) {
       governorBefore: governor.read(),
     };
     record("fault begins inside an actual input-owning workflow", result.fault);
-    if (scenario === "expiry") {
+    if (scenario === "physical-takeover") {
+      await physicalTakeover({ page, during, identity, lease: originalLease, timingStart });
+    } else if (scenario === "expiry") {
       const grant = wire
         .filter(
           (entry) =>
@@ -721,7 +964,7 @@ async function faultScenario({ page, protocol, tab, scope, governor }) {
       process.kill(hostPid, "SIGKILL");
     }
     await until(() => runtime.status().stopped, 20000);
-    if (scenario !== "expiry")
+    if (["disconnect", "restart"].includes(scenario))
       await until(() => originalHelperPids.every((pid) => !pidAlive(pid)), 10000);
     if (scenario === "expiry") {
       const expiredStatus = await runtime.nativeStatus();
@@ -783,6 +1026,47 @@ async function faultScenario({ page, protocol, tab, scope, governor }) {
       proofBefore,
     );
     assert.equal(await page.locator("#price_min").inputValue(), "120");
+    if (scenario === "physical-takeover") {
+      const permits = db.prepare("SELECT context_json FROM access_permits").all();
+      const commands = db.prepare("SELECT plan FROM access_bridge_commands").all();
+      const is140 = (value) =>
+        value?.target?.kind === "query-field" &&
+        value.target.field === "price_min" &&
+        value.target.value === "140";
+      assert(
+        !permits.some((row) => is140(JSON.parse(row.context_json))),
+        "Original scope must create no 140 permit",
+      );
+      assert(
+        !commands.some((row) => is140(JSON.parse(row.plan))),
+        "Original scope must create no 140 command",
+      );
+      assert.equal(
+        permits.length,
+        result.physicalTakeover.authorityCountsBeforeWindow.permits,
+        "The old scope must create no new permit of any kind",
+      );
+      assert.equal(
+        commands.length,
+        result.physicalTakeover.authorityCountsBeforeWindow.commands,
+        "The old scope must create no new Bridge command",
+      );
+      assert(
+        !wire.slice(faultWireIndex).some((entry) => entry.message.command === "execute"),
+        "The waiting/old scope must send no further execute",
+      );
+      assert(
+        !wire.some((entry) => entry.message.command === "execute" && is140(entry.message.plan)),
+      );
+      assert(
+        !stdio.some(
+          (entry) =>
+            entry.message?.kind === "command-proof" &&
+            entry.message.proof?.semantic?.value === "140",
+        ),
+      );
+      result.physicalTakeover.oldScopeNo140InputOrPermit = true;
+    }
     result.fault.statusReasons = wire
       .slice(faultWireIndex)
       .filter((entry) => ["host-status", "activity-invalidated"].includes(entry.message.kind));
@@ -824,6 +1108,7 @@ async function faultScenario({ page, protocol, tab, scope, governor }) {
           expiry: "lease expiry",
           disconnect: "disconnect",
           restart: "host restart during active input",
+          "physical-takeover": "user takeover",
         }[scenario],
     );
     result.notRun.push(
@@ -834,11 +1119,20 @@ async function faultScenario({ page, protocol, tab, scope, governor }) {
       result.notRun.push(
         "Runtime stop specifically caused by delivery of helper expired reason (host pause can filter the now-old scope)",
       );
+    if (scenario === "physical-takeover")
+      result.notRun.push(
+        "strict physical causation, low-level producer identity and historical unexplained unmarked mouse source",
+      );
     record(
       "fault revokes the activity and rejects the original scope without another proof or posted input",
       result.fault,
     );
-    result.outcome = `passed-real-input-${scenario}-only`;
+    result.outcome =
+      scenario === "physical-takeover"
+        ? result.physicalTakeover.intent.inputKind === "keyboard-escape"
+          ? "passed-human-confirmed-Escape-with-native-keydown-stop-alignment-only"
+          : "passed-human-confirmed-movement-with-real-stop-alignment-only"
+        : `passed-real-input-${scenario}-only`;
   } finally {
     if (pausedHostPid !== undefined) {
       try {
@@ -1054,6 +1348,18 @@ searchForm.onsubmit=e=>{e.preventDefault();LoadingCover.style.display='block';se
     await save();
     console.log(`AWAIT_NATIVE_START: ${signalPath}`);
     await until(() => existsSync(signalPath), 180000);
+    if (scenario === "physical-takeover") {
+      const intent = JSON.parse(await readFile(signalPath, "utf8"));
+      result.physicalTakeover = {
+        intent,
+        intentSource: "operator-recorded-real-user-reply-not-OS-input-proof",
+      };
+      await save();
+      assert(
+        validPhysicalIntent(intent, Date.now()),
+        "A current actual user intent statement is required before starting",
+      );
+    }
     result.startGate.bootstrapActivation = await worker.evaluate(
       async ({ tabId, windowId, fixtureUrl }) => {
         const current = await chrome.tabs.get(tabId);

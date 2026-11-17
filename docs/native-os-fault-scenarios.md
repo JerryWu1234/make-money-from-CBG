@@ -24,7 +24,53 @@ vp exec node scripts/native-os-integration.mjs --run --scenario=restart
 
 成功的实际输入必须按同一 actionId 对齐 SW command-proof、helper 成功 posted 回执、Governor completed permit 和 Bridge completed 命令。宿主在停止时保守返回的 `posted:true, ok:false` 是未知结果，不能计作实际输入成功。脚本还核对价格保持 120、故障后没有新增 proof 或 posted 回执。
 
-每个目录的 `os-result.json` 保留原始 wire、stdio、permit、command、失败 DOM 状态、固定 PID 与清理信息；`notRun` 仅在对应场景实际通过后移除该项。物理用户抢占尚未加入本脚本，需要用户实际移动协作，不能用 CGEvent/CDP 冒充。本轮不锁屏；第二屏缺硬件；恢复新业务授权和官网新请求/成功回调均不由这些离线故障场景证明。
+每个目录的 `os-result.json` 保留原始 wire、stdio、permit、command、失败 DOM 状态、固定 PID 与清理信息；`notRun` 仅在对应场景实际通过后移除该项。受控物理动作模式见下文，必须有用户实际操作协作，不能用 CGEvent/CDP 或文件信号冒充。本轮不锁屏；第二屏缺硬件；恢复新业务授权和官网新请求/成功回调均不由这些离线故障场景证明。
+
+## 受控物理动作与真实停止对齐（准备阶段，尚未实机通过）
+
+```sh
+vp exec node scripts/native-os-integration.mjs --prepare-only --scenario=physical-takeover --await-start --observe-helper-stdio --ax-preflight
+vp exec node scripts/native-os-integration.mjs --run --scenario=physical-takeover --await-start --observe-helper-stdio --ax-preflight
+vp exec node --test scripts/native-physical-takeover-regression.mjs
+```
+
+此模式先等待 `AWAIT_NATIVE_START`。操作者只在收到本次用户明确意图后，将**实际回复原话及接收时间**写入输出所示 `start-native.signal`，例如以下结构；占位值和 `null` 不会通过，脚本不会替用户填写真值：
+
+```json
+{
+  "statement": "<实际用户回复原话>",
+  "receivedAt": "<实际接收时间 ISO>",
+  "inputKind": "keyboard-escape",
+  "inputDevice": "built-in-keyboard",
+  "oneActionOnly": null
+}
+```
+
+推荐 `inputKind=keyboard-escape`、`inputDevice=built-in-keyboard`：用户在提示后仅按一次Escape，不移动触控板、不点击、不按其他键。Esc不会填写价格或提交模拟表单。它要求首个真实 unmarked 诊断为 type10 keydown，已知 type5 mouse 即使随后用户按Esc也只能 inconclusive，不能伪算为键盘接管。helper没有采集keycode；脚本复用模拟字段已有 `__osEvents`，要求窗口内首条 `price_min` 可信keydown的 `code=Escape`、`keyCode=27`，时间落在helper保守事件区间前不超过2ms、后不超过1000ms。缺DOM证据、首条是其他键或时间不相关均inconclusive；不新增事件监听或自动输入。Esc由现有DOM记录与用户明确回执补强，不能据此认证底层producer。
+
+可选 `inputKind=trackpad-move`、`inputDevice=built-in-trackpad`，要求只明显移动一次触控板，不点击、不按键。意图须在10分钟内且明确同意对应单次动作。文件只承载意图和启动时序，不能证明发生物理输入；缺少本次意图、设备不符或意图不确定均停止，不申请该场景活动。
+
+脚本实际执行隔离表单100→120，先逐项核对同 actionId 的真实 proof、helper `ok/posted`、completed permit/Bridge 及 trusted DOM input。确认活动仍有效且没有抢占记录后，才添加非交互提示栏并打印 `AWAIT_PHYSICAL_TAKEOVER`、唯一 windowId、inputKind和20秒窗口。提示栏不改变业务控件、不聚焦、不生成任何鼠标/键盘事件。用户只在看见等待提示后执行预先声明的单次动作。`noticeShownAt` 只是设置DOM文本的时刻，不是用户已看见提示的证据。
+
+候选必须来自独立 observer 记录的真实生产 helper：原 activity/授权 epoch/host instance/generation 全部一致，实际 active 期间的首个 unmarked 事件、非disabled，并实际撤权/租约清空。键盘模式必须type10；触控板模式必须type5且非零位移。事件时刻只用 helper 内同钟的 event−grant 纳秒差，再与实际 begin request/ACK 的接收时间形成保守事件区间；整个区间必须在可见提示设置后的20秒窗口内。窗前事件即使报告迟到也不计；时钟不确定、模式不符、零位移mouse、超时、其他停止原因或无法核对身份均为 inconclusive/失败。Node与CG单调时钟不直接相减。
+
+记录真实停止后，脚本显示中性的“已停止”提示，并打印 `AWAIT_PHYSICAL_ATTESTATION`。操作者须在60秒内取得用户本次**实际事后回复**，把原话和真实接收时间写到该输出的 `physical-takeover-attestation.json`；不得以计划、文件已出现、无人回复或推断代替：
+
+```json
+{
+  "windowId": "<本轮输出的 windowId>",
+  "inputKind": "keyboard-escape",
+  "statement": "<实际用户事后回复原话>",
+  "receivedAt": "<实际接收时间 ISO>",
+  "actionOnceAfterPrompt": null,
+  "stopObservedAfterAction": null,
+  "noOtherInput": null
+}
+```
+
+只有实际用户明确确认“看见等待提示后亲自按了一次Esc（或预先声明的触控板动作），随后看到停止，且测试动作期间无其他操作”，才可据实把对应布尔设为 `true`。停止后可回聊天提供实际回复。回执inputKind必须与本轮意图一致。没有操作、没赶上、先看见停止才动或不确定先后，均不得设真；缺回复或超时也不能通过。原 ALS scope 随后再尝试140必须被拒，且不能新增任何 execute/proof/post、permit 或 Bridge 命令，价格仍120。
+
+键盘正向标签为 `passed-human-confirmed-Escape-with-native-keydown-stop-alignment-only`：用户确认一次Esc、模拟字段首条trusted Escape DOM记录与真实unmarked keydown停止有界对齐，type5不能通过。触控板标签仍仅为 `passed-human-confirmed-movement-with-real-stop-alignment-only`，不能据此关闭严格物理因果或历史unknown mouse来源。可见停止提示有轮询、status读取和DOM更新延迟，不能排除同种类未知事件先停止helper、用户在提示显示前才操作；因此不证明严格因果、helper未采集的keycode、底层producer身份或历史无操作mouse来源。结果始终保留 `producerIdentityProven=false`、`strictCausationProven=false`。纯回归只验证这些判据与边界，不计为实机物理验收；实际结果须另行记录。
 
 ## 当前已执行范围
 

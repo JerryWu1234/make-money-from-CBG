@@ -1,5 +1,7 @@
 # 真实 OS 输入最小复现
 
+> 新受控物理模式的操作与证据边界见[故障场景](./native-os-fault-scenarios.md#受控物理动作与真实停止对齐准备阶段尚未实机通过)。63项纯判据及prepare已通过，未产生物理通过结论；当前MAIN回调故障隔离由[新回归](./evidence/cbg-observer-contract-regression-2026-11-17.json)验证，旧原生四轮仍对应其记录版本。
+
 > **2026-11-17 更新：** 当前 `224348ba` helper 已在无 AX 预检的新 profile 下通过 basic；独立 helper expiry 与本版断连/重启 fault-only 也通过。实际范围和新入口见[当前验收](./native-followup-acceptance-2026-11-17.md)。下文旧版本执行记录及其“尚未通过”按原时点保留；`RV6KYg` 本身仍失败，未改写为通过。物理、官网及鼠标来源边界仍保留。
 
 入口为 [`scripts/native-os-integration.mjs`](../scripts/native-os-integration.mjs)。已执行真实安装、只读诊断、带显式只读AX setup的离线basic输入/等待/结束/取消，以及断连和重启各自fault-only验收。默认冷启动和其余物理范围未据此通过。早期四轮与后续收证分开记录，运行结果以实际 `os-result.json` 为准。

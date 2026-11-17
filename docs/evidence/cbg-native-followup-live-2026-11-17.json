@@ -478,7 +478,15 @@
         "documentFocused": true
       }
     ],
-    "scope": "One fresh-profile first basic workflow through default production AX path with already-granted TCC and explicit foreground start gate. No AX preflight, no observer. Not proof of actual zero-to-one retry occurrence, immediate unattended launch, official-site query, or long-term cross-environment stability."
+    "scope": "One fresh-profile first basic workflow through default production AX path with already-granted TCC and explicit foreground start gate. No AX preflight, no observer. Not proof of actual zero-to-one retry occurrence, immediate unattended launch, official-site query, or long-term cross-environment stability.",
+    "installedExtensionScriptSha256": {
+      "main.js": "e4f5de510da9caed23918b3cfcb7f416a1e6a1ccc2bd94cf505215811ee21d9c",
+      "isolated.js": "d46286d86390c2186a18f700b3e5617ed1ca951182b30c65212c5f9926697117",
+      "service-worker.js": "84866e2798b3df30caf80fcada3a1ad3f60a91af462da7b4983daca7f6651119",
+      "market-config.js": "a2c11c2bee12fdc7957cdd91f5bfab42dd1be11b10a09093f80734e559a0dedf",
+      "market-rules.js": "c22b78f92e96cbb8ab3a792a39798229a7a600bfb60b039f0474ea7e2309b03e",
+      "pet-product-observation.js": "ef3ad8d17c06ca14dbda510e6a3c2fe24197f48c80c4aa1d77928838658691cc"
+    }
   },
   "independentHelperExpiry": {
     "artifactId": "cbg-installed-9mAQdg",
@@ -691,7 +699,15 @@
       "rejected": true,
       "message": "原生输入回执未知，禁止自动重放"
     },
-    "scope": "Expiry after field120 completed while the workflow retained its active waiting lease. Actual production helper revoked independently with host paused; transparent test-only stdio proxy captured the original message. Not a fault during keystroke delivery or a manual recovery/new authorization acceptance."
+    "scope": "Expiry after field120 completed while the workflow retained its active waiting lease. Actual production helper revoked independently with host paused; transparent test-only stdio proxy captured the original message. Not a fault during keystroke delivery or a manual recovery/new authorization acceptance.",
+    "installedExtensionScriptSha256": {
+      "main.js": "e4f5de510da9caed23918b3cfcb7f416a1e6a1ccc2bd94cf505215811ee21d9c",
+      "isolated.js": "d46286d86390c2186a18f700b3e5617ed1ca951182b30c65212c5f9926697117",
+      "service-worker.js": "84866e2798b3df30caf80fcada3a1ad3f60a91af462da7b4983daca7f6651119",
+      "market-config.js": "a2c11c2bee12fdc7957cdd91f5bfab42dd1be11b10a09093f80734e559a0dedf",
+      "market-rules.js": "c22b78f92e96cbb8ab3a792a39798229a7a600bfb60b039f0474ea7e2309b03e",
+      "pet-product-observation.js": "ef3ad8d17c06ca14dbda510e6a3c2fe24197f48c80c4aa1d77928838658691cc"
+    }
   },
   "faultScenarios": [
     {
@@ -830,7 +846,15 @@
         "state": "needs_action",
         "stopEpoch": 1
       },
-      "scope": "Fault after the completed field120 input, during active workflow waiting. Old scope rejected without another proof/post; reconnect alone is not new business authorization. Does not establish failure handling during key delivery."
+      "scope": "Fault after the completed field120 input, during active workflow waiting. Old scope rejected without another proof/post; reconnect alone is not new business authorization. Does not establish failure handling during key delivery.",
+      "installedExtensionScriptSha256": {
+        "main.js": "e4f5de510da9caed23918b3cfcb7f416a1e6a1ccc2bd94cf505215811ee21d9c",
+        "isolated.js": "d46286d86390c2186a18f700b3e5617ed1ca951182b30c65212c5f9926697117",
+        "service-worker.js": "84866e2798b3df30caf80fcada3a1ad3f60a91af462da7b4983daca7f6651119",
+        "market-config.js": "a2c11c2bee12fdc7957cdd91f5bfab42dd1be11b10a09093f80734e559a0dedf",
+        "market-rules.js": "c22b78f92e96cbb8ab3a792a39798229a7a600bfb60b039f0474ea7e2309b03e",
+        "pet-product-observation.js": "ef3ad8d17c06ca14dbda510e6a3c2fe24197f48c80c4aa1d77928838658691cc"
+      }
     },
     {
       "artifactId": "cbg-installed-6Xqp2D",
@@ -1016,6 +1040,14 @@
           "posted": false
         },
         "scope": "One read-only locate occurred after reconnection. The old ALS activity was then rejected before execute, proof, posted input or a second permit; this is not new business authorization."
+      },
+      "installedExtensionScriptSha256": {
+        "main.js": "e4f5de510da9caed23918b3cfcb7f416a1e6a1ccc2bd94cf505215811ee21d9c",
+        "isolated.js": "d46286d86390c2186a18f700b3e5617ed1ca951182b30c65212c5f9926697117",
+        "service-worker.js": "84866e2798b3df30caf80fcada3a1ad3f60a91af462da7b4983daca7f6651119",
+        "market-config.js": "a2c11c2bee12fdc7957cdd91f5bfab42dd1be11b10a09093f80734e559a0dedf",
+        "market-rules.js": "c22b78f92e96cbb8ab3a792a39798229a7a600bfb60b039f0474ea7e2309b03e",
+        "pet-product-observation.js": "ef3ad8d17c06ca14dbda510e6a3c2fe24197f48c80c4aa1d77928838658691cc"
       }
     }
   ],
@@ -1031,5 +1063,7 @@
     "Lock-screen acceptance deferred explicitly by the user.",
     "Authenticated official-site first query remains manual and was not performed."
   ],
-  "goalStatus": "active; physical and unexplained-input scope remains incomplete"
+  "goalStatus": "active; physical and unexplained-input scope remains incomplete",
+  "recordedAtCommit": "98318d66f7f457f4b30bf79ab1718f1427aa22d8",
+  "sourceVersionScope": "Recorded before MAIN callback-finally isolation and physical-mode preparation. Captured source hashes stay unchanged; native Input/host/Runtime bytes remain current. New MAIN contract coverage is separate, and physical-mode preparation is not physical acceptance."
 }

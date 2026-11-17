@@ -1081,5 +1081,7 @@
       "upFlags": 0
     },
     "notProven": "Compile and no-input self-checks do not establish AX readiness, real input, or lifecycle behavior; see separate current real-device evidence."
-  }
+  },
+  "historical": true,
+  "supersededByCurrentSummary": "cbg-observer-contract-regression-2026-11-17.json"
 }

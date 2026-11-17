@@ -1070,5 +1070,13 @@
       "status": "passed",
       "tests": 2
     }
-  ]
+  ],
+  "deliveryCheck": {
+    "command": "vp check",
+    "exitCode": 0,
+    "errors": 0,
+    "warnings": 29,
+    "warningScope": "Existing install-regression warnings; no added suppression.",
+    "rawLogSha256": "050b88e5c801b9e45df2cb0bc46b9a202904527e8675c4e9398b39e75e0475a9"
+  }
 }
