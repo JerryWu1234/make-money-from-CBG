@@ -1,5 +1,5 @@
 {
-  "description": "Selected actual fresh-isolation evidence; no business OS input completion has passed; conservative posted true/ok false is unknown, not helper success.",
+  "description": "Selected actual fresh-isolation evidence, including historical failures and the latest ofKH5m input/wait/completion/cancellation pass with explicit read-only AX preflight setup. This does not establish default cold-start or official-site success. Conservative posted true/ok false remains unknown, not helper success.",
   "attempts": [
     {
       "artifact": "cbg-installed-CxThOa",
@@ -1154,7 +1154,7 @@
       "not a completed business input or full manual takeover acceptance"
     ]
   },
-  "pointerSchema2Observation": "Implemented and pure-tested after this run; not executed on hardware in this evidence bundle.",
+  "pointerSchema2Observation": "Schema 2 was implemented and pure-tested after the earlier YYxCQe run. Later installed hardware attempts in this bundle include diagnosticSchema2 observations, including 7Ft8AB; the unexplained unmarked-input source remains unresolved.",
   "currentNotVerified": [
     "lease expiry under stopped host",
     "controlled physical user takeover",
