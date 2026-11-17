@@ -269,5 +269,14 @@
       "rawLogSha256": "333199d92018660f118e94cbb323aeaea5394e29d90b261006676d76a88db521"
     },
     "fullRegression": "Previously recorded 204 files / 3683 passed remains pinned to its original capture. This follow-up changes only the idle test gate and evidence/docs; no production source or acceptance predicate changed, so the full suite and build were not repeated."
+  },
+  "humanIntentProvenance": {
+    "actualCurrentUserReply": "已看到，准备开始",
+    "context": "The user confirmed seeing the idle preparation page and being ready, in the ongoing explicitly authorized single-Escape test. The operator then announced that input was starting and instructed one Escape only after the yellow notice.",
+    "recordedStatementOperatorNormalized": true,
+    "recordedStatementIsVerbatimUserQuote": false,
+    "scope": "The raw intent.statement combines the current reply with the previously authorized test instruction. It is operator-recorded intent context, not an additional verbatim user utterance or OS input proof. The separate post-action user reply is preserved verbatim.",
+    "recordingDeviation": "The start-file statement was normalized instead of copied verbatim as required by the recording instructions. The current reply and prior authorized context are separated here; no raw capture, action authorization or physical conclusion was changed.",
+    "futureRecording": "Record the current user reply verbatim and store earlier authorized context in a separate field."
   }
 }

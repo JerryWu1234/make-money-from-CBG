@@ -26,7 +26,9 @@ vp exec node scripts/native-os-integration.mjs --run --scenario=restart
 
 每个目录的 `os-result.json` 保留原始 wire、stdio、permit、command、失败 DOM 状态、固定 PID 与清理信息；`notRun` 仅在对应场景实际通过后移除该项。受控物理动作模式见下文，必须有用户实际操作协作，不能用 CGEvent/CDP 或文件信号冒充。本轮不锁屏；第二屏缺硬件；恢复新业务授权和官网新请求/成功回调均不由这些离线故障场景证明。
 
-## 受控物理动作与真实停止对齐（准备阶段，尚未实机通过）
+## 受控物理动作与真实停止对齐
+
+`bs9yzU` 已完成一次用户确认的 Esc 与真实 keydown 撤权对齐，终端0，见[实机摘要](./evidence/cbg-physical-takeover-live-2026-11-17.json)和[两位独立复核](./reviews/cbg-physical-takeover-review-2026-11-17.md)。前置空闲 gate 为15分钟，期间无活动租约；用户确认看到页面后才释放，20秒动作窗口、60秒回执及TTL不变。启动statement为操作者结合当前回复及既有约定的整理，不是逐字引语；事后实际回复独立保留。结论仍仅对齐，不证明helper键码、生产者、严格因果、历史mouse来源或完整实机验收。下方操作步骤与历史失败保持各自范围。
 
 ```sh
 vp exec node scripts/native-os-integration.mjs --prepare-only --scenario=physical-takeover --await-start --observe-helper-stdio --ax-preflight

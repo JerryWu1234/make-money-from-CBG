@@ -40,7 +40,7 @@ watchdog 已判定租约过期时先按原 lease 身份撤权，不再先查询�
 
 ## 受控 Esc 实机重试
 
-`bs9yzU` 在新的临时 profile 中运行真实扩展、Native Messaging、host、正常 helper 和 AX 读取。用户先确认看到了最低价格 100 的准备页，才释放空闲 gate；空闲期间 `active=false/lease={}`。为等待人工确认，只有输入授权之前的 gate 从 3 分钟延长到 15 分钟；活动有效期、20秒操作窗口和60秒事后回执限时均未变。实际临时入口与本次交付 runner 字节一致。
+`bs9yzU` 在新的临时 profile 中运行真实扩展、Native Messaging、host、正常 helper 和 AX 读取。用户先确认看到了最低价格 100 的准备页，才释放空闲 gate；空闲期间 `active=false/lease={}`。为等待人工确认，只有输入授权之前的 gate 从 3 分钟延长到 15 分钟；活动有效期、20秒操作窗口和60秒事后回执限时均未变。实际临时入口与本次交付 runner 字节一致。 启动文件中的 statement 由操作者将本次「已看到，准备开始」与既有单次 Esc 约定整理合并，属于意图记录而非逐字用户引语；独立事后回执保留实际用户原话。
 
 真实输入先把价格改为120，保留 proof、成功 posted、可信 DOM 与 completed permit/Bridge。黄色提示后，用户确认只按一次 Esc 且没有其他操作。helper 首次未标记抢占为 type10，保守事件区间完整落在提示窗口内；操作窗口内该字段首个可信 keydown 为 `Escape/27`。随后 helper inactive、lease清空，Runtime stopped、governor needs_action。原 ALS scope 的后续140尝试被缺失/过期观察拦截，没有新 proof、execute、输入或 permit；该次不能单独证明后续授权守卫的拒绝原因。runner 终端0，五个实际进程全部退出。
 
