@@ -1,0 +1,1074 @@
+{
+  "schemaVersion": 1,
+  "scope": "Full regression after OBS-02 callback-finally failure isolation. Real MAIN script VM fault cases verify website return/error identity, receiver/arguments, one invocation and descriptor restoration when observer scheduling or metadata creation fails. Temporary isolated browser fixtures; no physical takeover or authenticated official-site acceptance.",
+  "startedAtUtc": "2026-11-17T04:18:14.132000+00:00",
+  "command": "vp test --maxWorkers=1 --hookTimeout=30000 --reporter=default --reporter=json --outputFile.json=/private/tmp/cbg-pr77-observer-final.json",
+  "sandbox": "require_escalated",
+  "launcherNode": "25.8.2",
+  "vpManagedNode": "26.13.1",
+  "files": 204,
+  "tests": 3683,
+  "passed": 3683,
+  "failed": 0,
+  "pending": 0,
+  "success": true,
+  "durationSeconds": 627.47,
+  "rawReportSha256": "432761afa1b7ac6708c7a691972565176ab4b5fc7c45251e578f710a521d8dd5",
+  "sourceSha256": {
+    "extension/cbg-access/main.js": "361a6b35a91d968ad281b1a1b64252edcb2d62bf8d119da6bf0aee818a4f3f9b",
+    "server/adapters/passive-observer.test.ts": "d7692b6085314863995428b1b176496901677d979cbf1bc5365b532dc188037e",
+    "native/cbg-access/Input.m": "224348ba03a4c93bdc37e23a654a9243d2b64ff1839455d7950fb7d998469e15",
+    "native/cbg-access/host.mjs": "d8fc9471f4b7e11dc367e9ffa26200ecb2ea2b2ef16534e3a8a171bc779a0507",
+    "server/adapters/extension-native.ts": "e407714d4b21ded72ea1d4d54df3d1c96d5f0c3dc6a07eb9fe7ee5db90e97066",
+    "extension/cbg-access/service-worker.js": "84866e2798b3df30caf80fcada3a1ad3f60a91af462da7b4983daca7f6651119",
+    "server/crawler/detail.ts": "e0833e760a20180662cb9cd11336f1cd51fb2c069b736171040cb954f7ccbe14",
+    "server/crawler/capture-readiness.ts": "81fa63e9c17f5cbe0ca621489baca545ea95dbc7c40b06d8e2164bf9d6533e09"
+  },
+  "beforeFix": {
+    "productionSourceCommit": "98318d6",
+    "mainSourceSha256": "e4f5de510da9caed23918b3cfcb7f416a1e6a1ccc2bd94cf505215811ee21d9c",
+    "faultCasesFailed": 8,
+    "existingCasesPassed": 16,
+    "exitCode": 1,
+    "rawLogSha256": "73a9e6f96f1c6a0457f691af390c4580023e47bfce14bbdac830e9ee7738e1e2"
+  },
+  "targetedAfterFix": {
+    "files": 3,
+    "passed": 38,
+    "failed": 0,
+    "exitCode": 0,
+    "rawLogSha256": "4786bae23ef2e8e356f49c27c06a2754ba50ce60f0164999683508bdf0997739"
+  },
+  "build": {
+    "command": "vp run build",
+    "exitCode": 0,
+    "rawLogSha256": "e460e498964f40c09143a46e3b7ec5b906726dde2a003544febaa20bc61ab4f9"
+  },
+  "notProven": [
+    "Physical takeover remains unexecuted; standalone synthetic acceptance tests are separate.",
+    "The native four-run bundle was recorded at 98318d6 before this MAIN-only fix; Input/host/Runtime bytes remain unchanged.",
+    "Historical unexplained mouse-source attribution, second physical monitor, deferred lock screen and authenticated official first query."
+  ],
+  "suiteResults": [
+    {
+      "file": "server/ai-api.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/ai-connection-pool.test.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "server/ai-connection.test.ts",
+      "status": "passed",
+      "tests": 34
+    },
+    {
+      "file": "server/analysis-api.test.ts",
+      "status": "passed",
+      "tests": 10
+    },
+    {
+      "file": "server/api-browser-settings.test.ts",
+      "status": "passed",
+      "tests": 45
+    },
+    {
+      "file": "server/api-head-refresh.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/api-runtime.test.ts",
+      "status": "passed",
+      "tests": 18
+    },
+    {
+      "file": "server/api.test.ts",
+      "status": "passed",
+      "tests": 61
+    },
+    {
+      "file": "server/browser-connection.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/browser-evidence.browser.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/browser-evidence.test.ts",
+      "status": "passed",
+      "tests": 11
+    },
+    {
+      "file": "server/browser-settings.test.ts",
+      "status": "passed",
+      "tests": 26
+    },
+    {
+      "file": "server/cbg.test.ts",
+      "status": "passed",
+      "tests": 11
+    },
+    {
+      "file": "server/chrome.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/dedicated-browser.browser.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "server/dedicated-browser.test.ts",
+      "status": "passed",
+      "tests": 7
+    },
+    {
+      "file": "server/diagnostics.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/inspection-click.browser.test.ts",
+      "status": "passed",
+      "tests": 11
+    },
+    {
+      "file": "server/inspection-compatibility.browser.test.ts",
+      "status": "passed",
+      "tests": 13
+    },
+    {
+      "file": "server/list-query-diagnostics.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "server/log-storage.test.ts",
+      "status": "passed",
+      "tests": 12
+    },
+    {
+      "file": "server/native-access.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/official-access.browser.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/official-access.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/page-state.test.ts",
+      "status": "passed",
+      "tests": 17
+    },
+    {
+      "file": "server/record-versions.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/runtime-settings.test.ts",
+      "status": "passed",
+      "tests": 15
+    },
+    {
+      "file": "server/session.browser.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/session.test.ts",
+      "status": "passed",
+      "tests": 35
+    },
+    {
+      "file": "server/shutdown.test.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "server/viewport.test.ts",
+      "status": "passed",
+      "tests": 21
+    },
+    {
+      "file": "server/vite-codex-guard.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/work-transport.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/workflow-server-age.browser.test.ts",
+      "status": "passed",
+      "tests": 13
+    },
+    {
+      "file": "server/workflow.test.ts",
+      "status": "passed",
+      "tests": 8
+    },
+    {
+      "file": "src/AccessSettings.test.tsx",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "src/AnalysisConditions.test.tsx",
+      "status": "passed",
+      "tests": 7
+    },
+    {
+      "file": "src/detail-view.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "src/pricing-display.test.tsx",
+      "status": "passed",
+      "tests": 27
+    },
+    {
+      "file": "src/request-error.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "src/saved-view-state.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "server/access/governor.test.ts",
+      "status": "passed",
+      "tests": 23
+    },
+    {
+      "file": "server/access/response-classifier.test.ts",
+      "status": "passed",
+      "tests": 7
+    },
+    {
+      "file": "server/adapters/bridge-store.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "server/adapters/extension-native.browser.test.ts",
+      "status": "passed",
+      "tests": 27
+    },
+    {
+      "file": "server/adapters/extension-native.test.ts",
+      "status": "passed",
+      "tests": 26
+    },
+    {
+      "file": "server/adapters/native-activity.test.ts",
+      "status": "passed",
+      "tests": 9
+    },
+    {
+      "file": "server/adapters/native-authority.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/adapters/native-capture.test.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "server/adapters/native-diagnostic-authority.test.ts",
+      "status": "passed",
+      "tests": 7
+    },
+    {
+      "file": "server/adapters/native-fresh-review-user-stop.test.ts",
+      "status": "passed",
+      "tests": 8
+    },
+    {
+      "file": "server/adapters/native-host-activity.test.ts",
+      "status": "passed",
+      "tests": 10
+    },
+    {
+      "file": "server/adapters/native-install.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/adapters/native-market-controls.browser.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/adapters/native-market-controls.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/adapters/native-market-source.test.ts",
+      "status": "passed",
+      "tests": 7
+    },
+    {
+      "file": "server/adapters/native-navigation-health.test.ts",
+      "status": "passed",
+      "tests": 26
+    },
+    {
+      "file": "server/adapters/native-observation-readiness.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/adapters/native-page-readiness.test.ts",
+      "status": "passed",
+      "tests": 34
+    },
+    {
+      "file": "server/adapters/native-query-correlation.test.ts",
+      "status": "passed",
+      "tests": 11
+    },
+    {
+      "file": "server/adapters/native-query-health.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/adapters/native-role-query-commit.browser.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/adapters/native-role-query-commit.test.ts",
+      "status": "passed",
+      "tests": 36
+    },
+    {
+      "file": "server/adapters/native-startup-lifecycle.test.ts",
+      "status": "passed",
+      "tests": 11
+    },
+    {
+      "file": "server/adapters/native-status-stop-race.test.ts",
+      "status": "passed",
+      "tests": 14
+    },
+    {
+      "file": "server/adapters/native-workflow.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/adapters/observer-activation.test.ts",
+      "status": "passed",
+      "tests": 7
+    },
+    {
+      "file": "server/adapters/observer-lifecycle.browser.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/adapters/passive-observer.test.ts",
+      "status": "passed",
+      "tests": 24
+    },
+    {
+      "file": "server/adapters/playwright.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/adapters/service-worker.test.ts",
+      "status": "passed",
+      "tests": 19
+    },
+    {
+      "file": "server/ai/codex-home.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/ai/codex-lifecycle.test.ts",
+      "status": "passed",
+      "tests": 11
+    },
+    {
+      "file": "server/ai/codex-pool.test.ts",
+      "status": "passed",
+      "tests": 27
+    },
+    {
+      "file": "server/ai/codex.test.ts",
+      "status": "passed",
+      "tests": 37
+    },
+    {
+      "file": "server/ai/deepseek.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/ai/request-error.test.ts",
+      "status": "passed",
+      "tests": 13
+    },
+    {
+      "file": "server/query-health/callback-observer.browser.test.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "server/query-health/callback-observer.test.ts",
+      "status": "passed",
+      "tests": 19
+    },
+    {
+      "file": "server/query-health/native-fresh-query-baseline.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/query-health/progress-fence.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/query-health/role-list-diagnostics.test.ts",
+      "status": "passed",
+      "tests": 19
+    },
+    {
+      "file": "server/query-health/role-query-identity.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/query-health/runtime.test.ts",
+      "status": "passed",
+      "tests": 16
+    },
+    {
+      "file": "server/query-health/store.test.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "server/analysis/analysis-checkpoint.test.ts",
+      "status": "passed",
+      "tests": 16
+    },
+    {
+      "file": "server/analysis/asset-counts.test.ts",
+      "status": "passed",
+      "tests": 9
+    },
+    {
+      "file": "server/analysis/bare-role-prompt.test.ts",
+      "status": "passed",
+      "tests": 7
+    },
+    {
+      "file": "server/analysis/browser-equipment-source.test.ts",
+      "status": "passed",
+      "tests": 121
+    },
+    {
+      "file": "server/analysis/browser-pet-gear-source.test.ts",
+      "status": "passed",
+      "tests": 11
+    },
+    {
+      "file": "server/analysis/browser-pet-source.test.ts",
+      "status": "passed",
+      "tests": 111
+    },
+    {
+      "file": "server/analysis/condition-compilation-api.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "server/analysis/condition-compiler.test.ts",
+      "status": "passed",
+      "tests": 26
+    },
+    {
+      "file": "server/analysis/condition-rule-runtime.test.ts",
+      "status": "passed",
+      "tests": 31
+    },
+    {
+      "file": "server/analysis/condition-rules-store.test.ts",
+      "status": "passed",
+      "tests": 9
+    },
+    {
+      "file": "server/analysis/condition-source-inventory.test.ts",
+      "status": "passed",
+      "tests": 7
+    },
+    {
+      "file": "server/analysis/conditions.test.ts",
+      "status": "passed",
+      "tests": 57
+    },
+    {
+      "file": "server/analysis/contract.test.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "server/analysis/controller.test.ts",
+      "status": "passed",
+      "tests": 23
+    },
+    {
+      "file": "server/analysis/direct-condition-review.test.ts",
+      "status": "passed",
+      "tests": 66
+    },
+    {
+      "file": "server/analysis/equip-attributes.test.ts",
+      "status": "passed",
+      "tests": 42
+    },
+    {
+      "file": "server/analysis/equipment-baseline-flow.test.ts",
+      "status": "passed",
+      "tests": 8
+    },
+    {
+      "file": "server/analysis/equipment-baseline.test.ts",
+      "status": "passed",
+      "tests": 55
+    },
+    {
+      "file": "server/analysis/equipment-category-evidence.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "server/analysis/equipment-check.test.ts",
+      "status": "passed",
+      "tests": 30
+    },
+    {
+      "file": "server/analysis/equipment-exclusion.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/analysis/equipment-failure-budget.test.ts",
+      "status": "passed",
+      "tests": 18
+    },
+    {
+      "file": "server/analysis/equipment-initial-search.test.ts",
+      "status": "passed",
+      "tests": 37
+    },
+    {
+      "file": "server/analysis/equipment-match.test.ts",
+      "status": "passed",
+      "tests": 90
+    },
+    {
+      "file": "server/analysis/equipment-pricing.test.ts",
+      "status": "passed",
+      "tests": 183
+    },
+    {
+      "file": "server/analysis/equipment-search-evidence.test.ts",
+      "status": "passed",
+      "tests": 12
+    },
+    {
+      "file": "server/analysis/equipment-toggle.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/analysis/equipment-upper-bound.test.ts",
+      "status": "passed",
+      "tests": 10
+    },
+    {
+      "file": "server/analysis/historical-ranking.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/analysis/initial-defense.test.ts",
+      "status": "passed",
+      "tests": 14
+    },
+    {
+      "file": "server/analysis/jade-query.test.ts",
+      "status": "passed",
+      "tests": 10
+    },
+    {
+      "file": "server/analysis/market-detail.test.ts",
+      "status": "passed",
+      "tests": 17
+    },
+    {
+      "file": "server/analysis/market-fallback.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/analysis/market-scope.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/analysis/market-travel.test.ts",
+      "status": "passed",
+      "tests": 9
+    },
+    {
+      "file": "server/analysis/market.test.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "server/analysis/overview-payload.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "server/analysis/overview-scheduling.test.ts",
+      "status": "passed",
+      "tests": 10
+    },
+    {
+      "file": "server/analysis/overview-worker.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/analysis/pet-check.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/analysis/pet-gear-check.test.ts",
+      "status": "passed",
+      "tests": 7
+    },
+    {
+      "file": "server/analysis/pet-gear-inventory.test.ts",
+      "status": "passed",
+      "tests": 28
+    },
+    {
+      "file": "server/analysis/pet-gear-search.test.ts",
+      "status": "passed",
+      "tests": 17
+    },
+    {
+      "file": "server/analysis/pet-pricing.test.ts",
+      "status": "passed",
+      "tests": 75
+    },
+    {
+      "file": "server/analysis/pricing-estimate.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/analysis/pricing-integrity.test.ts",
+      "status": "passed",
+      "tests": 21
+    },
+    {
+      "file": "server/analysis/pricing-progress.test.ts",
+      "status": "passed",
+      "tests": 9
+    },
+    {
+      "file": "server/analysis/product-document.test.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "server/analysis/publication.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/analysis/rate-limit.test.ts",
+      "status": "passed",
+      "tests": 9
+    },
+    {
+      "file": "server/analysis/recommendation.test.ts",
+      "status": "passed",
+      "tests": 12
+    },
+    {
+      "file": "server/analysis/runner-concurrency.test.ts",
+      "status": "passed",
+      "tests": 13
+    },
+    {
+      "file": "server/analysis/runner-lanes.test.ts",
+      "status": "passed",
+      "tests": 10
+    },
+    {
+      "file": "server/analysis/runner-pet-gear.test.ts",
+      "status": "passed",
+      "tests": 25
+    },
+    {
+      "file": "server/analysis/runner-pricing-continuation.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/analysis/runner-pricing-isolation.test.ts",
+      "status": "passed",
+      "tests": 18
+    },
+    {
+      "file": "server/analysis/runner-rate-limit.test.ts",
+      "status": "passed",
+      "tests": 8
+    },
+    {
+      "file": "server/analysis/runner-sessions.test.ts",
+      "status": "passed",
+      "tests": 11
+    },
+    {
+      "file": "server/analysis/runner-streaming.test.ts",
+      "status": "passed",
+      "tests": 17
+    },
+    {
+      "file": "server/analysis/runner.test.ts",
+      "status": "passed",
+      "tests": 50
+    },
+    {
+      "file": "server/analysis/school-confirmation.test.ts",
+      "status": "passed",
+      "tests": 45
+    },
+    {
+      "file": "server/analysis/source-matches.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/analysis/special-asset-match.test.ts",
+      "status": "passed",
+      "tests": 11
+    },
+    {
+      "file": "server/analysis/valuation-range.test.ts",
+      "status": "passed",
+      "tests": 46
+    },
+    {
+      "file": "server/analysis/valuation.test.ts",
+      "status": "passed",
+      "tests": 27
+    },
+    {
+      "file": "server/crawler/access-guard.browser.test.ts",
+      "status": "passed",
+      "tests": 8
+    },
+    {
+      "file": "server/crawler/access-guard.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "server/crawler/access-guard.unit.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/crawler/access-navigation.browser.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/crawler/access-navigation.test.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "server/crawler/business-lease.test.ts",
+      "status": "passed",
+      "tests": 7
+    },
+    {
+      "file": "server/crawler/capture-failure.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/crawler/capture-readiness.test.ts",
+      "status": "passed",
+      "tests": 52
+    },
+    {
+      "file": "server/crawler/clear-data.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/crawler/compact.test.ts",
+      "status": "passed",
+      "tests": 73
+    },
+    {
+      "file": "server/crawler/controller-hmr-store.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/crawler/controller.test.ts",
+      "status": "passed",
+      "tests": 20
+    },
+    {
+      "file": "server/crawler/crawler.test.ts",
+      "status": "passed",
+      "tests": 84
+    },
+    {
+      "file": "server/crawler/detail-field-coverage.browser.test.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "server/crawler/detail-leaf.browser.test.ts",
+      "status": "passed",
+      "tests": 20
+    },
+    {
+      "file": "server/crawler/detail-open-queue.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "server/crawler/detail-revision.browser.test.ts",
+      "status": "passed",
+      "tests": 12
+    },
+    {
+      "file": "server/crawler/detail-root.browser.test.ts",
+      "status": "passed",
+      "tests": 20
+    },
+    {
+      "file": "server/crawler/detail.test.ts",
+      "status": "passed",
+      "tests": 148
+    },
+    {
+      "file": "server/crawler/failure-budget.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/crawler/field-evidence-review.test.ts",
+      "status": "passed",
+      "tests": 86
+    },
+    {
+      "file": "server/crawler/head-refresh.test.ts",
+      "status": "passed",
+      "tests": 25
+    },
+    {
+      "file": "server/crawler/item-read-policy.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/crawler/lanes-store.test.ts",
+      "status": "passed",
+      "tests": 4
+    },
+    {
+      "file": "server/crawler/list-evaluate-timeout.browser.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/crawler/list-hover-handle-timeout.browser.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/crawler/listing-age-window.test.ts",
+      "status": "passed",
+      "tests": 13
+    },
+    {
+      "file": "server/crawler/login-dialog.browser.test.ts",
+      "status": "passed",
+      "tests": 19
+    },
+    {
+      "file": "server/crawler/native-lifecycle.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/crawler/non-role-materials.test.ts",
+      "status": "passed",
+      "tests": 12
+    },
+    {
+      "file": "server/crawler/official-model.test.ts",
+      "status": "passed",
+      "tests": 18
+    },
+    {
+      "file": "server/crawler/page-navigation.browser.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "server/crawler/page-refresh.browser.test.ts",
+      "status": "passed",
+      "tests": 12
+    },
+    {
+      "file": "server/crawler/page-reviews-store.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "server/crawler/pause-partial.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/crawler/pets.test.ts",
+      "status": "passed",
+      "tests": 8
+    },
+    {
+      "file": "server/crawler/queue-dispatch.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/crawler/retry-priority.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "server/crawler/retry-store.test.ts",
+      "status": "passed",
+      "tests": 12
+    },
+    {
+      "file": "server/crawler/role-canary.browser.test.ts",
+      "status": "passed",
+      "tests": 1
+    },
+    {
+      "file": "server/crawler/role-diagnostic-controls.browser.test.ts",
+      "status": "passed",
+      "tests": 6
+    },
+    {
+      "file": "server/crawler/role-identity.test.ts",
+      "status": "passed",
+      "tests": 16
+    },
+    {
+      "file": "server/crawler/schedule.test.ts",
+      "status": "passed",
+      "tests": 40
+    },
+    {
+      "file": "server/crawler/school-skills.test.ts",
+      "status": "passed",
+      "tests": 16
+    },
+    {
+      "file": "server/crawler/source.test.ts",
+      "status": "passed",
+      "tests": 36
+    },
+    {
+      "file": "server/crawler/sparse-school-skills.test.ts",
+      "status": "passed",
+      "tests": 51
+    },
+    {
+      "file": "server/crawler/valuation-capture.test.ts",
+      "status": "passed",
+      "tests": 16
+    },
+    {
+      "file": "server/crawler/valuation-identity.browser.test.ts",
+      "status": "passed",
+      "tests": 15
+    },
+    {
+      "file": "server/crawler/watch-source.test.ts",
+      "status": "passed",
+      "tests": 2
+    },
+    {
+      "file": "server/crawler/watch.test.ts",
+      "status": "passed",
+      "tests": 74
+    },
+    {
+      "file": "server/crawler/worn-equipment.test.ts",
+      "status": "passed",
+      "tests": 142
+    },
+    {
+      "file": "tests/live/streaming-options.test.ts",
+      "status": "passed",
+      "tests": 3
+    },
+    {
+      "file": "tests/live/synchronous-work-evidence.test.ts",
+      "status": "passed",
+      "tests": 5
+    },
+    {
+      "file": "tests/live/work-page-evidence.test.ts",
+      "status": "passed",
+      "tests": 2
+    }
+  ]
+}

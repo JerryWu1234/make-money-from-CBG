@@ -226,6 +226,65 @@ describe("MAIN passive observer", () => {
       }),
     ).toThrow(error);
   });
+  for (const name of ["onSuccess", "onFailure"] as const)
+    for (const fault of ["scheduler", "metadata"] as const)
+      it.each([false, true])(
+        `preserves ${name} completion and cleanup when ${fault} fails (callback throws: %s)`,
+        (throws) => {
+          const f = fixture(),
+            receiver = {},
+            response = { status: 0, msg: [] },
+            returned = {},
+            websiteError = new Error("original website callback failure"),
+            observerError = new Error("observer failure");
+          let calls = 0,
+            pending: Record<string, any> | undefined;
+          f.window.ajax_with_recommend = (options: Record<string, any>) => {
+            pending = options;
+            return "website request";
+          };
+          const callback = function (this: unknown, ...args: unknown[]) {
+            calls++;
+            expect(this).toBe(receiver);
+            expect(args).toEqual([response, 3]);
+            if (throws) throw websiteError;
+            return returned;
+          };
+          const options = { data: { act: "overall_search_equip", page: 1 }, [name]: callback };
+          const descriptor = Object.getOwnPropertyDescriptor(options, name);
+          f.install();
+          f.flush();
+          expect((f.window.ajax_with_recommend as (options: unknown) => unknown)(options)).toBe(
+            "website request",
+          );
+          expect(pending).toBe(options);
+          const wrapped = pending![name];
+          expect(wrapped).not.toBe(callback);
+          if (fault === "scheduler")
+            f.scope.setTimeout = () => {
+              throw observerError;
+            };
+          else
+            Object.defineProperty(f.scope, "Date", {
+              value: class extends Date {
+                override toISOString(): string {
+                  throw observerError;
+                }
+              },
+            });
+          if (throws) {
+            let caught: unknown;
+            try {
+              wrapped.call(receiver, response, 3);
+            } catch (error) {
+              caught = error;
+            }
+            expect(caught).toBe(websiteError);
+          } else expect(wrapped.call(receiver, response, 3)).toBe(returned);
+          expect(calls).toBe(1);
+          expect(Object.getOwnPropertyDescriptor(options, name)).toEqual(descriptor);
+        },
+      );
   it("pairs the start and callback of each request using immutable public conditions", () => {
     const f = fixture();
     let pending: { onSuccess: (value: unknown) => unknown } | undefined;

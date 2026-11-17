@@ -392,23 +392,25 @@
                   completed = true;
                   return result;
                 } finally {
-                  if (live(epoch) && !record.abandoned && !record.completed) {
-                    record.completed = true;
-                    emit(
-                      {
-                        kind: "jsonp",
-                        endpoint: "/cgi-bin/recommend.py",
-                        phase: "response",
-                        ...request,
-                        status: 200,
-                        observedAt: new Date().toISOString(),
-                        ...evidence,
-                        success: completed && evidence.success,
-                      },
-                      epoch,
-                    );
-                    scheduleRead();
-                  }
+                  safe(() => {
+                    if (live(epoch) && !record.abandoned && !record.completed) {
+                      record.completed = true;
+                      emit(
+                        {
+                          kind: "jsonp",
+                          endpoint: "/cgi-bin/recommend.py",
+                          phase: "response",
+                          ...request,
+                          status: 200,
+                          observedAt: new Date().toISOString(),
+                          ...evidence,
+                          success: completed && evidence.success,
+                        },
+                        epoch,
+                      );
+                      scheduleRead();
+                    }
+                  });
                   safe(record.restore);
                 }
               };
