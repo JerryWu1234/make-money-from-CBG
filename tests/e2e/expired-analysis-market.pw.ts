@@ -84,8 +84,13 @@ test("过期行情显示重新分析入口，点击建立新批次而非恢复�
         case "/api/analysis/resume":
           resumes++;
           return route.fulfill({ status: 400, json: { error: "不能恢复过期批次" } });
-        default:
+        default: {
+          if (url.pathname === "/api/crawl/role-training-filter") {
+            await route.fulfill({ json: { minTotal: null } });
+            return;
+          }
           throw new Error("未模拟接口：" + url.pathname);
+        }
       }
       return route.fulfill({ json: body });
     }

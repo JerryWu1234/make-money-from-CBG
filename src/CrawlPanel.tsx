@@ -306,7 +306,8 @@ export function CrawlPanel({
             )}
             <p>
               第 {status.page} / {status.totalPages} 页 · 本轮保存 {status.saved} · 跳过{" "}
-              {status.skipped} · 本轮待重试 {status.failed || 0} · 库内完整商品 {status.totalSaved}
+              {status.skipped} · 四修不足跳过 {status.filteredTraining ?? 0} · 本轮待重试{" "}
+              {status.failed || 0} · 库内完整商品 {status.totalSaved}
             </p>
             {status.phase === "retrying" && !!status.retryTotal && (
               <p>

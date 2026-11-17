@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   enqueue: vi.fn(),
   getBrowser: vi.fn(),
   headRefresh: vi.fn(),
+  roleTraining: vi.fn(),
   watchLogin: vi.fn(),
   disposeLogin: vi.fn(),
   listPage: { close: vi.fn() },
@@ -36,6 +37,7 @@ vi.mock("./store", () => ({
 }));
 vi.mock("./runner", () => ({ crawl: mocks.crawl, validateCrawlOptions: vi.fn() }));
 vi.mock("./head-refresh-settings", () => ({ headRefreshSettings: mocks.headRefresh }));
+vi.mock("./role-training-settings", () => ({ roleTrainingSettings: mocks.roleTraining }));
 vi.mock("../cbg", () => ({ checkCbgStatus: mocks.current }));
 vi.mock("../session", () => ({
   getCbgPage: () => mocks.listPage,
@@ -62,6 +64,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.acquire.mockReturnValue(true);
   mocks.headRefresh.mockReturnValue({ intervalSeconds: 600, random: true, listingAgeMinutes: 3 });
+  mocks.roleTraining.mockReturnValue({ minTotal: null });
   mocks.current.mockResolvedValue({ isLoggedIn: true, running: false, workflowStep: "completed" });
   mocks.getBrowser.mockResolvedValue({ isConnected: () => true });
   mocks.watchLogin.mockResolvedValue(mocks.disposeLogin);
@@ -77,6 +80,29 @@ it.each(["manual", "scheduled"] as const)("%s 启动将已保存的刷新配置�
   expect(mocks.crawl.mock.calls[0][4]).toMatchObject({
     headRefresh: { intervalSeconds: 600, random: true, listingAgeMinutes: 3 },
   });
+});
+
+it("四修阈值在启动前冻结，下一轮读取新设置，显式null不被默认覆盖", async () => {
+  mocks.roleTraining.mockReturnValue({ minTotal: 80 });
+  mocks.current.mockImplementation(async () => {
+    mocks.roleTraining.mockReturnValue({ minTotal: 90 });
+    return { isLoggedIn: true, running: false, workflowStep: "completed" };
+  });
+  mocks.crawl.mockResolvedValue(undefined);
+  const controller = await import("./controller");
+  initial = controller;
+  const first = await controller.startCrawl();
+  await first.activity!.completion;
+  const second = await controller.startCrawl();
+  await second.activity!.completion;
+  const explicit = await controller.startCrawl("manual", undefined, { minRoleTrainingTotal: null });
+  await explicit.activity!.completion;
+  expect(mocks.crawl.mock.calls.map((call) => call[4].minRoleTrainingTotal)).toEqual([
+    80,
+    90,
+    null,
+  ]);
+  expect(mocks.roleTraining).toHaveBeenCalledTimes(2);
 });
 
 it("重新开始使用当前分钟范围，不沿用上一轮的计划或实际刷新时间", async () => {

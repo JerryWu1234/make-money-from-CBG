@@ -21,6 +21,7 @@ import { assertServiceOpen } from "../service-lifecycle";
 import { showBrowserWorkPages } from "../config";
 import { BrowserConnectionError, browserConnectionFailure } from "../browser-connection";
 import { headRefreshSettings } from "./head-refresh-settings";
+import { roleTrainingSettings } from "./role-training-settings";
 import { watchCrawlAccess } from "./access-guard";
 import { createCaptureFailureBudget, CrawlFailureLimitError } from "./failure-budget";
 
@@ -150,6 +151,10 @@ export async function startCrawl(
     throw new Error("官网访问已暂停，请处理登录、验证或冷却原因，并在访问状态中人工继续");
   options = {
     ...options,
+    minRoleTrainingTotal:
+      options.minRoleTrainingTotal === undefined
+        ? roleTrainingSettings().minTotal
+        : options.minRoleTrainingTotal,
     headRefresh: options.headRefresh ?? headRefreshSettings(),
     newTaskQuota: options.newTaskQuota ?? access.policy.newTaskQuota,
   };
@@ -197,6 +202,8 @@ export async function startCrawl(
     ...cache.status,
     running: true,
     concurrency,
+    minRoleTrainingTotal: options.minRoleTrainingTotal ?? null,
+    filteredTraining: 0,
     includeAssets: true,
     phase: "locating",
     message: "正在创建隐藏详情页并读取断点…",
@@ -445,6 +452,8 @@ async function startNativeCrawl(
     running: true,
     phase: "collecting",
     concurrency: 1,
+    minRoleTrainingTotal: options.minRoleTrainingTotal ?? null,
+    filteredTraining: 0,
     error: undefined,
     message: "正在通过扩展读取与 macOS 输入采集",
     saved: 0,

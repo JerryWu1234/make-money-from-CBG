@@ -207,6 +207,82 @@ export async function readListings(page: Page): Promise<ListingPage> {
     const anchors = Array.from(
       document.querySelectorAll<HTMLAnchorElement>("#soldList a.soldImg[href]"),
     );
+    const trainingAttrs = (anchor: HTMLAnchorElement): Record<string, string> => {
+      const row = anchor.closest("tr"),
+        table = row?.closest("table");
+      if (!row || !table) return {};
+      // A row shared by multiple product links cannot prove whose values these are.
+      const products = [...row.querySelectorAll("a.soldImg[href]")].filter(
+        (node) => node.closest("tr") === row && node.closest("table") === table,
+      );
+      if (products.length !== 1 || products[0] !== anchor) return {};
+      const fields = ["攻修", "防修", "法修", "抗法"],
+        rows = [...table.rows].filter((node) => node.closest("table") === table),
+        target = rows.indexOf(row),
+        label = (cell: HTMLTableCellElement) => cell.innerText.replace(/\s/g, ""),
+        customHeaders = new Set<Element>(
+          rows.filter(
+            (node) =>
+              !node.querySelector("a.soldImg[href]") &&
+              fields.every((field) => [...node.cells].some((cell) => label(cell) === field)),
+          ),
+        ),
+        isHeader = (cell: HTMLTableCellElement) =>
+          cell.tagName === "TH" ||
+          cell.parentElement?.id === "order_menu" ||
+          (!!cell.parentElement && customHeaders.has(cell.parentElement));
+      let header = -1;
+      for (let index = 0; index < target; index++)
+        if (
+          !rows[index].querySelector("a.soldImg[href]") &&
+          [...rows[index].cells].some((cell) => isHeader(cell) && fields.includes(label(cell)))
+        )
+          header = index;
+      if (header < 0 || target < 0 || target > 2000) return {};
+      const grid: HTMLTableCellElement[][] = [];
+      for (let index = 0; index <= target; index++) {
+        const columns = (grid[index] ??= []);
+        let column = 0;
+        for (const cell of rows[index].cells) {
+          while (columns[column]) column++;
+          const width = cell.colSpan,
+            height = cell.rowSpan || rows.length - index;
+          if (column + width > 256) return {};
+          for (let y = index; y <= Math.min(target, index + height - 1); y++) {
+            const slots = (grid[y] ??= []);
+            for (let x = column; x < column + width; x++) {
+              if (slots[x]) return {};
+              slots[x] = cell;
+            }
+          }
+          column += width;
+        }
+      }
+      if (
+        grid[header].length !== grid[target].length ||
+        Array.from(grid[header]).some((cell) => !cell) ||
+        Array.from(grid[target]).some((cell) => !cell)
+      )
+        return {};
+      const result: Record<string, string> = {};
+      for (const field of fields) {
+        const headers = [...new Set(grid[header])].filter(
+          (cell) => isHeader(cell) && label(cell) === field,
+        );
+        if (headers.length !== 1 || headers[0].colSpan !== 1) continue;
+        const cell = grid[target][grid[header].indexOf(headers[0])];
+        // A rowspan from another product is not this product's evidence.
+        if (
+          cell?.parentElement !== row ||
+          cell.colSpan !== 1 ||
+          cell.querySelector("table, a.soldImg[href]")
+        )
+          continue;
+        const value = cell.innerText.trim();
+        if (value) result[field] = value;
+      }
+      return result;
+    };
     const items = anchors.map((a, index) => {
       const attrs: Record<string, string> = {};
       for (const el of [a, a.querySelector("img")])
@@ -218,6 +294,7 @@ export async function readListings(page: Page): Promise<ListingPage> {
               attr.name === "mouse_over_begin"
             )
               attrs[attr.name.replaceAll("data-", "data_")] = attr.value;
+      Object.assign(attrs, trainingAttrs(a));
       const raw =
         globals.QueryResult?.find((item) => String(item.game_ordersn) === attrs.data_ordersn) ||
         globals.QueryResult?.[index] ||

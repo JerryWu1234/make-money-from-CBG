@@ -253,8 +253,13 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
               : detail;
             break;
           }
-          default:
+          default: {
+            if (url.pathname === "/api/crawl/role-training-filter") {
+              await route.fulfill({ json: { minTotal: null } });
+              return;
+            }
             throw new Error("未模拟估值接口：" + url.pathname);
+          }
         }
         return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
       }

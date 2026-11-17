@@ -14,6 +14,7 @@ import { AssetCounts, EquipmentSummary } from "./AssetCounts";
 import { AnalysisResultDrawer } from "./AnalysisResultDrawer";
 import { AnalysisSettings, type AnalysisSettingsDraft } from "./AnalysisSettings";
 import { SqliteDataCleanup } from "./SqliteDataCleanup";
+import { RoleTrainingFilter } from "./RoleTrainingFilter";
 import {
   valuationDecisionLabel,
   valuationMoney,
@@ -1137,6 +1138,7 @@ export function AnalysisPreview() {
             )}
           </section>
           <aside className="analysis-aside">
+            <RoleTrainingFilter />
             <section className="analysis-plan-card">
               <h2>当前分析队列</h2>
               <p>

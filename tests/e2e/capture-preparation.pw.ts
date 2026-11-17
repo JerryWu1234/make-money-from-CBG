@@ -23,6 +23,8 @@ test("分析只等待已完成资料，开始和暂停均不启动或暂停采�
       const url = new URL(route.request().url());
       if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== "http://cbg-capture.test") return route.abort();
+      if (url.pathname === "/api/crawl/role-training-filter")
+        return route.fulfill({ json: { minTotal: null } });
       if (url.pathname === "/api/runtime/settings")
         return route.fulfill({ json: { saveScreenshots: false } });
       if (url.pathname === "/api/browser/settings")

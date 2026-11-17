@@ -188,7 +188,13 @@ test("推荐榜历史等价条件→查看不隐藏→确认隐藏→全部商�
           body = store.markRecommendationViewed(route.request().postDataJSON().key);
         else if (url.pathname === "/api/analysis/detail")
           body = store.detail(url.searchParams.get("taskId")!);
-        else throw new Error("未模拟接口：" + url.pathname);
+        else {
+          if (url.pathname === "/api/crawl/role-training-filter") {
+            await route.fulfill({ json: { minTotal: null } });
+            return;
+          }
+          throw new Error("未模拟接口：" + url.pathname);
+        }
         return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
       }
       const filename = path.join(

@@ -25,7 +25,11 @@ import {
 } from "./head-refresh";
 import { browserConnectionFailure } from "../browser-connection";
 import { pageSignature, readPageReview, refreshRepeatedPage } from "./repeated-pages";
+import { roleTrainingDecision } from "./role-training-filter";
+import { validateRoleTrainingMinimum } from "./role-training-settings";
+import { diagnostics } from "../diagnostics";
 export interface CrawlOptions {
+  minRoleTrainingTotal?: number | null;
   concurrency?: number;
   watch?: boolean;
   headIntervalMs?: number;
@@ -36,6 +40,9 @@ export interface CrawlOptions {
   newTaskQuota?: number;
 }
 export function validateCrawlOptions(options: CrawlOptions) {
+  if (options.minRoleTrainingTotal !== undefined)
+    if (validateRoleTrainingMinimum(options.minRoleTrainingTotal) !== options.minRoleTrainingTotal)
+      throw new Error("四修总和下限必须为 null 或非负安全整数");
   if (
     options.newTaskQuota !== undefined &&
     (!Number.isSafeInteger(options.newTaskQuota) ||
@@ -101,8 +108,12 @@ export async function crawl(
   signal.throwIfAborted();
   validateCrawlOptions(options);
   const concurrency = options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
-  publish({ concurrency });
+  const minRoleTrainingTotal = options.minRoleTrainingTotal ?? null;
+  options = { ...options, minRoleTrainingTotal };
+  const filteredTrainingVersions = new Set<string>();
+  publish({ concurrency, minRoleTrainingTotal, filteredTraining: 0 });
   let saved = 0,
+    filteredTraining = 0,
     skipped = 0,
     failed = 0;
   const minutes =
@@ -139,6 +150,12 @@ export async function crawl(
     // 已保存的补采优先于列表发现，不分新老占满整个池，清完后才开启新号发现。
     await captureConcurrently(retries, concurrency, signal, async (item, index) => {
       const lane = store.captureLane(item.key);
+      if (minRoleTrainingTotal !== null)
+        diagnostics.record("crawl.training_filter", {
+          key: item.key,
+          minTotal: minRoleTrainingTotal,
+          ...roleTrainingDecision(item.attrs, minRoleTrainingTotal, false),
+        });
       signal.throwIfAborted();
       retryQueued[lane]--;
       if (options.watch && !isRecentListing(item.sellingTime, minutes)) {
@@ -272,6 +289,7 @@ export async function crawl(
       skipped,
       failed,
       failedItems: retries.filter((item) => retryFailed.has(item.key)),
+      filteredTraining,
     };
     try {
       return await watchCrawl(source, store, signal, publish, options, undefined, seed);
@@ -372,6 +390,27 @@ export async function crawl(
         publish({
           itemIndex,
           detailProgress: "该商品本轮补采未完成，保留待重试",
+        });
+        continue;
+      }
+      const training = roleTrainingDecision(listed.attrs, minRoleTrainingTotal);
+      if (minRoleTrainingTotal !== null)
+        diagnostics.record("crawl.training_filter", {
+          key: listed.key,
+          minTotal: minRoleTrainingTotal,
+          ...training,
+        });
+      if (training.skip) {
+        handled.add(listed.key);
+        const version = JSON.stringify([listed.key, listed.sellingTime]);
+        if (!filteredTrainingVersions.has(version)) {
+          filteredTrainingVersions.add(version);
+          filteredTraining++;
+        }
+        publish({
+          filteredTraining,
+          itemIndex,
+          detailProgress: `四修总和 ${training.total} 低于下限 ${minRoleTrainingTotal}，本轮跳过`,
         });
         continue;
       }
@@ -490,6 +529,7 @@ export async function crawl(
     saved,
     skipped,
     failed,
+    filteredTraining,
     totalSaved: store.count(),
   });
 }

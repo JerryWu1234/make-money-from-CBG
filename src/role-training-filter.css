@@ -1,0 +1,24 @@
+.role-training-filter form,
+.role-training-filter label {
+  display: grid;
+  gap: 8px;
+}
+
+.role-training-filter input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--text-primary);
+}
+
+.role-training-filter p:last-child {
+  margin-bottom: 0;
+}
+
+.role-training-filter .error-message {
+  color: var(--error-text, #b42318);
+}

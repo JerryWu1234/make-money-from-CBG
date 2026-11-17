@@ -21,6 +21,7 @@ const getRoutes = new Set([
   "/api/browser/settings",
   "/api/crawl/status",
   "/api/crawl/settings",
+  "/api/crawl/role-training-filter",
   "/api/crawl/head-refresh",
   "/api/crawl/detail",
   "/api/crawl/records",
@@ -46,6 +47,7 @@ const postRoutes = new Set([
   "/api/browser/settings/save",
   "/api/crawl/start",
   "/api/crawl/settings/save",
+  "/api/crawl/role-training-filter/save",
   "/api/crawl/head-refresh/save",
   "/api/crawl/backfill",
   "/api/crawl/stop",
@@ -282,6 +284,23 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
           busy: busy() || session.browserSessionSettings().busy,
         }),
       );
+      return;
+    }
+    if (
+      pathname === "/api/crawl/role-training-filter" ||
+      pathname === "/api/crawl/role-training-filter/save"
+    ) {
+      const settings = await import("./crawler/role-training-settings");
+      try {
+        const result = pathname.endsWith("/save")
+          ? settings.saveRoleTrainingSettings((body as Record<string, unknown>).minTotal)
+          : settings.roleTrainingSettings();
+        res.end(JSON.stringify(result));
+      } catch (error) {
+        if (!(error instanceof settings.RoleTrainingSettingsError)) throw error;
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: error.message }));
+      }
       return;
     }
     if (pathname === "/api/runtime/settings" || pathname === "/api/runtime/settings/save") {

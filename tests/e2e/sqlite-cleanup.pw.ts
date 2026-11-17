@@ -245,8 +245,13 @@ async function fixture(page: Page, testInfo: TestInfo) {
         case "/api/analysis/detail":
           body = analysis.detail(url.searchParams.get("taskId")!);
           break;
-        default:
+        default: {
+          if (url.pathname === "/api/crawl/role-training-filter") {
+            await route.fulfill({ json: { minTotal: null } });
+            return;
+          }
           throw new Error("未模拟接口：" + url.pathname);
+        }
       }
       return route.fulfill({ json: body });
     }

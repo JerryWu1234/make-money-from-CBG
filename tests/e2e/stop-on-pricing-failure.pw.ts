@@ -141,8 +141,13 @@ test("并发1时查价失败立即停队，刷新后显式重试，按顺序完�
             case "/api/analysis/detail":
               body = store.detail(url.searchParams.get("taskId")!, profile);
               break;
-            default:
+            default: {
+              if (url.pathname === "/api/crawl/role-training-filter") {
+                await route.fulfill({ json: { minTotal: null } });
+                return;
+              }
               throw new Error("未模拟接口：" + url.pathname);
+            }
           }
           return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
         } catch (error) {

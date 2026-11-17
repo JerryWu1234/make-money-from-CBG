@@ -97,8 +97,13 @@ test("分析记录第二页→调用记录→当前采集资料→三种关闭�
           body = crawl.detail(key);
           break;
         }
-        default:
+        default: {
+          if (url.pathname === "/api/crawl/role-training-filter") {
+            await route.fulfill({ json: { minTotal: null } });
+            return;
+          }
           throw new Error("未模拟接口：" + url.pathname);
+        }
       }
       return route.fulfill({ json: body });
     }

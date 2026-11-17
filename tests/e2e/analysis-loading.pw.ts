@@ -105,8 +105,13 @@ test("浅色工作台按页签加载、合并搜索请求并保留分页和完�
         }
         case "/api/analysis/detail":
           return route.fulfill({ json: store.detail(url.searchParams.get("taskId")!) });
-        default:
+        default: {
+          if (url.pathname === "/api/crawl/role-training-filter") {
+            await route.fulfill({ json: { minTotal: null } });
+            return;
+          }
           throw new Error(`未模拟接口：${url.pathname}`);
+        }
       }
     }
     const filename = path.join(

@@ -140,8 +140,13 @@ test("真实分析页面与队列：首次连接、暂停继续、刷新、原�
               body: detail.inputText,
             });
           }
-          default:
+          default: {
+            if (url.pathname === "/api/crawl/role-training-filter") {
+              await route.fulfill({ json: { minTotal: null } });
+              return;
+            }
             throw new Error(`未模拟接口：${url.pathname}`);
+          }
         }
         return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
       }
@@ -443,8 +448,13 @@ for (const savedVersion of [undefined, CALCULATION_VERSION, "price-comparison-v9
               await runner.resume(input.runId, true);
               body = store.run(input.runId);
               break;
-            default:
+            default: {
+              if (url.pathname === "/api/crawl/role-training-filter") {
+                await route.fulfill({ json: { minTotal: null } });
+                return;
+              }
               throw new Error(`未模拟接口：${url.pathname}`);
+            }
           }
           return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
         }
@@ -584,8 +594,13 @@ test("空库先启动等待：首个角色采齐自动分析，刷新保留等�
           case "/api/analysis/resume":
             body = store.run(await runner.resume(input.runId));
             break;
-          default:
+          default: {
+            if (url.pathname === "/api/crawl/role-training-filter") {
+              await route.fulfill({ json: { minTotal: null } });
+              return;
+            }
             throw new Error(`未模拟接口：${url.pathname}`);
+          }
         }
         return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
       }

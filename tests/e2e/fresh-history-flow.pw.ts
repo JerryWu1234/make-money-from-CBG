@@ -342,8 +342,13 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
           await analysisRunner!.resume(input.runId, false, input.concurrency);
           body = analysisStore!.run(batch);
           break;
-        default:
+        default: {
+          if (url.pathname === "/api/crawl/role-training-filter") {
+            await route.fulfill({ json: { minTotal: null } });
+            return;
+          }
           throw new Error("未模拟接口：" + url.pathname);
+        }
       }
       return route.fulfill({ json: body });
     }

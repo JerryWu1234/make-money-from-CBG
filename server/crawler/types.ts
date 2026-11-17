@@ -240,6 +240,8 @@ export interface PageReview {
   detectedAt: string;
 }
 export interface CrawlStatus {
+  minRoleTrainingTotal?: number | null;
+  filteredTraining?: number;
   headRefresh?: import("./head-refresh").HeadRefreshSettings;
   headRefreshDelayMs?: number;
   concurrency?: number;

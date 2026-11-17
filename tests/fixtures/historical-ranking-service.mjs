@@ -35,6 +35,8 @@ const server = createServer(async (request, response) => {
   };
   try {
     switch (url.pathname) {
+      case "/api/crawl/role-training-filter":
+        return json({ minTotal: null });
       case "/api/runtime/settings":
         return json({ saveScreenshots: false });
       case "/api/browser/settings":
