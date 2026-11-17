@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { copyFile, readFile, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import net from "node:net";
 import path from "node:path";
@@ -11,6 +11,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import ts from "typescript";
 import { chromium } from "playwright-core";
+import { assertHelperExpiryInput, helperMessages } from "./native-helper-stdio-evidence.mjs";
 
 // Load the actual application modules. The hook only resolves/transpiles TypeScript;
 // it does not replace runtime, governor, authority, observer or input implementations.
@@ -51,16 +52,23 @@ const scenarios = [
 assert(
   options.every(
     (value) =>
-      ["--run", "--prepare-only", "--await-start", "--ax-preflight"].includes(value) ||
+      [
+        "--run",
+        "--prepare-only",
+        "--await-start",
+        "--ax-preflight",
+        "--observe-helper-stdio",
+      ].includes(value) ||
       (value.startsWith("--scenario=") && scenarios.includes(value.slice(11))),
   ),
-  "Use --prepare-only or --run, optionally --await-start, --ax-preflight and --scenario=basic|expiry|disconnect|restart|ax-readonly|preemption-diagnostic",
+  "Use --prepare-only or --run, optionally --await-start, --ax-preflight, --observe-helper-stdio and --scenario=basic|expiry|disconnect|restart|ax-readonly|preemption-diagnostic",
 );
 assert(options.filter((value) => value.startsWith("--scenario=")).length <= 1);
 const scenario = options.find((value) => value.startsWith("--scenario="))?.slice(11) || "basic";
 const run = options.includes("--run");
 const awaitStart = options.includes("--await-start");
 const axPreflight = options.includes("--ax-preflight");
+const observeHelperStdio = options.includes("--observe-helper-stdio");
 assert(!(run && options.includes("--prepare-only")), "Choose one mode");
 const prepared = spawnSync(
   process.execPath,
@@ -75,10 +83,12 @@ const native = path.join(artifact, "native"),
   backend = path.join(artifact, "runtime.sock");
 const configPath = path.join(native, "host.json");
 const config = JSON.parse(await readFile(configPath, "utf8"));
+const helperObserverLog = path.join(artifact, "helper-stdio.jsonl");
 const result = {
   artifact,
   scenario,
   axPreflightRequested: axPreflight,
+  observeHelperStdioRequested: observeHelperStdio,
   mode: run
     ? scenario === "ax-readonly"
       ? "read-only-ax-diagnostic"
@@ -123,6 +133,16 @@ const command = (file, args) => {
   assert.equal(value.status, 0, value.stderr);
   return value.stdout;
 };
+function helperObservation() {
+  if (!existsSync(helperObserverLog)) return [];
+  // A live append may leave its final row incomplete; retain all complete raw rows.
+  const text = readFileSync(helperObserverLog, "utf8");
+  return text
+    .slice(0, text.lastIndexOf("\n") + 1)
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
 const pidAlive = (pid) => {
   try {
     process.kill(pid, 0);
@@ -133,12 +153,54 @@ const pidAlive = (pid) => {
   }
 };
 function helperPids() {
+  if (observeHelperStdio)
+    return helperObservation()
+      .filter((row) => row.event === "observer-start")
+      .map((row) => row.helperPid)
+      .filter(pidAlive);
   return command("/bin/ps", ["-axo", "pid=,ppid=,command="])
     .split("\n")
     .filter((line) => line.includes(path.join(native, "cbg-input")))
     .map((line) => Number(line.trim().split(/\s+/)[0]));
 }
 const quote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
+if (observeHelperStdio) {
+  const realBinary = path.join(native, "cbg-input");
+  await copyFile(
+    "scripts/native-helper-stdio-observer.mjs",
+    path.join(native, "helper-stdio-observer.mjs"),
+  );
+  const hostPath = path.join(native, "host.mjs"),
+    hostSource = await readFile(hostPath, "utf8");
+  const from =
+    'const helper = spawn(path.join(directory, "cbg-input"), [], { stdio: ["pipe", "pipe", "pipe"] });';
+  const to = `const helper = spawn(process.execPath, [path.join(directory, "helper-stdio-observer.mjs"), "--binary", path.join(directory, "cbg-input"), "--log", ${JSON.stringify(helperObserverLog)}], { stdio: ["pipe", "pipe", "pipe"] });`;
+  const hash = (text) => createHash("sha256").update(text).digest("hex");
+  assert.equal(hash(hostSource), plan.hostCopy.temporarySha256);
+  assert.equal(
+    hostSource.split(from).length,
+    2,
+    "Inspect changed helper launch before adding a test transport",
+  );
+  await writeFile(hostPath, hostSource.replace(from, to));
+  result.helperStdioObservation = {
+    scope: "test-only-passive-byte-transport-observer",
+    logPath: helperObserverLog,
+    realBinary,
+    temporaryHostLaunchReplacement: { from, to },
+    temporaryHostBeforeSha256: hash(hostSource),
+    temporaryHostAfterSha256: hash(await readFile(hostPath)),
+    binarySha256: createHash("sha256")
+      .update(await readFile(realBinary))
+      .digest("hex"),
+    observerSha256: createHash("sha256")
+      .update(await readFile(path.join(native, "helper-stdio-observer.mjs")))
+      .digest("hex"),
+  };
+  result.differences.push(
+    "--observe-helper-stdio inserts an independent passive stdio proxy before the byte-identical production helper. Signals and EOF are forwarded; only raw received bytes and process metadata are recorded, never fabricated protocol replies.",
+  );
+}
 // Transparent actual stdio recording: the checked-in host remains the endpoint.
 await writeFile(
   path.join(native, "wire-recorder.mjs"),
@@ -336,6 +398,7 @@ let context, relay, runtime, db, heartbeat, worker, fixturePage;
 const connections = new Set(),
   wire = [];
 let activeHelperPids = [];
+const activeObserverPids = [];
 let pausedHostPid, releaseFaultWork;
 const stdioRecords = async () =>
   (await readFile(path.join(artifact, "native-wire.jsonl"), "utf8"))
@@ -368,12 +431,42 @@ const nativeProcessIdentity = async (hostPid) => {
     (row) => Number(row[1]) === hostPid && row[3].includes(path.join(native, "host.mjs")),
   );
   assert(host, "Recorded real host PID is not this installation's running host");
+  let parentPid = hostPid,
+    proxy,
+    expectedHelperPid;
+  if (observeHelperStdio) {
+    const started = helperObservation()
+      .filter((row) => row.event === "observer-start" && row.hostPid === hostPid)
+      .at(-1);
+    assert(started, "No independent observer for this exact host");
+    const row = rows.find(
+      (row) =>
+        Number(row[1]) === started.observerPid &&
+        Number(row[2]) === hostPid &&
+        row[3].includes(path.join(native, "helper-stdio-observer.mjs")),
+    );
+    assert(row, "Observer is not the real host child");
+    assert.equal(started.binarySha256, result.helperStdioObservation.binarySha256);
+    parentPid = started.observerPid;
+    expectedHelperPid = started.helperPid;
+    proxy = { pid: parentPid, parentPid: hostPid, command: row[3] };
+    activeObserverPids.push(parentPid);
+  }
   const helpers = rows
-    .filter((row) => Number(row[2]) === hostPid && row[3].includes(path.join(native, "cbg-input")))
+    .filter(
+      (row) =>
+        Number(row[2]) === parentPid &&
+        row[3].startsWith(path.join(native, "cbg-input")) &&
+        (!observeHelperStdio || Number(row[1]) === expectedHelperPid),
+    )
     .map((row) => ({ pid: Number(row[1]), parentPid: Number(row[2]), command: row[3] }));
   assert(helpers.length > 0, "No actual helper child of the recorded host");
   activeHelperPids = [...new Set([...activeHelperPids, ...helpers.map((entry) => entry.pid)])];
-  return { host: { pid: hostPid, parentPid: Number(host[2]), command: host[3] }, helpers };
+  return {
+    host: { pid: hostPid, parentPid: Number(host[2]), command: host[3] },
+    ...(proxy ? { proxy } : {}),
+    helpers,
+  };
 };
 async function faultScenario({ page, protocol, tab, scope, governor }) {
   const control = new AbortController();
@@ -478,6 +571,49 @@ async function faultScenario({ page, protocol, tab, scope, governor }) {
       );
       process.kill(hostPid, "SIGSTOP");
       pausedHostPid = hostPid;
+      const pausedAt = Date.now();
+      if (observeHelperStdio) {
+        const state = command("/bin/ps", ["-o", "stat=", "-p", String(hostPid)]).trim();
+        assert(state.includes("T"), "The actual host was not observed stopped");
+        result.fault.hostPause = { hostPid, pausedAt, state, stateSampledAt: Date.now() };
+        const pauseRows = helperObservation(),
+          history = helperMessages(pauseRows);
+        const pairs = history
+          .filter(
+            (row) =>
+              row.hostPid === hostPid &&
+              row.observerPid === identity.proxy.pid &&
+              originalHelperPids.includes(row.helperPid) &&
+              row.direction === "host-to-helper" &&
+              ["activity-begin", "activity-renew"].includes(row.message.command),
+          )
+          .map((request) => ({
+            request,
+            ack: history.find(
+              (ack) =>
+                ack.observerPid === request.observerPid &&
+                ack.hostPid === request.hostPid &&
+                ack.helperPid === request.helperPid &&
+                ack.direction === "helper-to-host" &&
+                ack.rowIndex > request.rowIndex &&
+                ack.message.actionId === request.message.actionId &&
+                ack.message.ok === true &&
+                ack.message.active === true &&
+                ack.message.activityId === request.message.activity.activityId,
+            ),
+          }))
+          .filter((pair) => pair.ack)
+          .sort((a, b) => a.ack.rowIndex - b.ack.rowIndex);
+        const accepted = pairs.at(-1);
+        assert(accepted, "No independently recorded real helper grant ACK");
+        assert(
+          accepted.ack.receivedAt <= pausedAt,
+          "The accepted helper grant was not observed before pausing",
+        );
+        assert.deepEqual(accepted.request.message.activity, grant.message.activity);
+        result.fault.lastObservedHelperGrant = accepted;
+        result.fault.hostPause.rawRowsAtPause = pauseRows.length;
+      }
       result.fault.lastAcceptedGrant = grant;
       continueOldWork(); // A normal old-scope query now queues naturally behind the stopped host.
       const samples = (result.fault.expiryProcessSamples = []);
@@ -499,16 +635,85 @@ async function faultScenario({ page, protocol, tab, scope, governor }) {
         observationScope:
           "Process liveness only; helper activity status is checked after the host resumes.",
       };
+      if (observeHelperStdio) {
+        const raw = helperObservation();
+        const messages = helperMessages(raw);
+        const fromHelper = messages.filter(
+          (row) => row.direction === "helper-to-host" && originalHelperPids.includes(row.helperPid),
+        );
+        const expired = fromHelper.find(
+          (row) =>
+            row.receivedAt >= pausedAt &&
+            row.message.kind === "activity-invalidated" &&
+            row.message.activityId === originalLease.activityId,
+        );
+        result.fault.helperExpiryObservation = {
+          rawLogPath: helperObserverLog,
+          expired,
+          observedAt: Date.now(),
+          raw,
+          runtimeStateWhileHostPaused: runtime.status(),
+          causalScope:
+            "Independent helper revocation only. Runtime may stop earlier on its unchanged request timeout; this does not prove helper-reason delivery to Runtime.",
+        };
+        await save();
+        assert(expired, "No actual helper invalidation was received before resuming the host");
+        assert.equal(expired.message.reason, "native-workflow-activity-expired");
+        assert.deepEqual(
+          expired.message.inputPreemption,
+          {},
+          "A prior input preemption makes expiry attribution inconclusive",
+        );
+        for (const key of [
+          "activityId",
+          "authorizationEpoch",
+          "stopEpoch",
+          "browserSessionEpoch",
+          "hostGeneration",
+          "hostInstanceEpoch",
+        ])
+          assert.equal(expired.message[key], originalLease[key], `Wrong expiry ${key}`);
+        assert(
+          expired.receivedAt >= originalLease.expiresAt &&
+            expired.receivedAt <= originalLease.expiresAt + 2000,
+          "The independent observer did not receive expiry inside the real lease deadline window",
+        );
+        assert.equal(expired.hostStateStatus, 0);
+        assert(
+          expired.hostState.includes("T"),
+          "The host was not paused when the observer read expiry",
+        );
+        assert(command("/bin/ps", ["-o", "stat=", "-p", String(hostPid)]).includes("T"));
+        assert(
+          originalHelperPids.every(pidAlive),
+          "A live original helper must expire independently",
+        );
+        const accepted = result.fault.lastObservedHelperGrant;
+        const allowedStatus = assertHelperExpiryInput(raw, {
+          ...accepted,
+          expired,
+          pausedAt,
+          pauseRowCount: result.fault.hostPause.rawRowsAtPause,
+          statusActionId: during.actionId,
+        });
+        result.fault.helperExpiryObservation.allowedReadOnlyStatusBetweenGrantAndPause =
+          allowedStatus;
+        result.fault.helperExpiryObservation.independentExpiryProven = true;
+        result.fault.helperExpiryObservation.verifiedBeforeHostResumeAt = Date.now();
+        await save();
+      }
       process.kill(hostPid, "SIGCONT");
       pausedHostPid = undefined;
-      await until(
-        () =>
-          wire.some(
-            (entry) =>
-              entry.message.kind === "host-status" && /expired/.test(entry.message.reason || ""),
-          ),
-        10000,
-      );
+      if (observeHelperStdio) result.fault.hostPause.continuedAt = Date.now();
+      else
+        await until(
+          () =>
+            wire.some(
+              (entry) =>
+                entry.message.kind === "host-status" && /expired/.test(entry.message.reason || ""),
+            ),
+          10000,
+        );
     } else if (scenario === "disconnect") {
       assert(connections.size >= 2, "No actual relay socket pair to disconnect");
       for (const socket of connections) socket.destroy();
@@ -625,6 +830,10 @@ async function faultScenario({ page, protocol, tab, scope, governor }) {
       "basic search wait/completion/cancellation (separate scenario)",
       "new business authorization or manual recovery after the fault",
     );
+    if (observeHelperStdio && scenario === "expiry")
+      result.notRun.push(
+        "Runtime stop specifically caused by delivery of helper expired reason (host pause can filter the now-old scope)",
+      );
     record(
       "fault revokes the activity and rejects the original scope without another proof or posted input",
       result.fault,
@@ -1274,6 +1483,44 @@ searchForm.onsubmit=e=>{e.preventDefault();LoadingCover.style.display='block';se
   }
   releaseFaultWork?.();
   clearInterval(heartbeat);
+  if (observeHelperStdio) {
+    try {
+      // Discover even when bind/permissions fail before nativeProcessIdentity runs.
+      const starts = helperObservation().filter((row) => row.event === "observer-start");
+      const ownRows = command("/bin/ps", ["-axo", "pid=,ppid=,command="])
+        .split("\n")
+        .map((line) => /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line))
+        .filter(Boolean)
+        .filter(
+          (row) =>
+            row[3].includes(path.join(native, "helper-stdio-observer.mjs")) ||
+            row[3].startsWith(path.join(native, "cbg-input")),
+        );
+      for (const row of starts) {
+        assert.equal(row.binarySha256, result.helperStdioObservation.binarySha256);
+        activeObserverPids.push(row.observerPid);
+        if (Number.isSafeInteger(row.helperPid)) activeHelperPids.push(row.helperPid);
+      }
+      for (const row of ownRows) {
+        if (row[3].startsWith(path.join(native, "cbg-input")))
+          activeHelperPids.push(Number(row[1]));
+        else activeObserverPids.push(Number(row[1]));
+      }
+      activeHelperPids = [...new Set(activeHelperPids)];
+      result.helperStdioObservation.cleanupDiscovery = {
+        observerStarts: starts.length,
+        actualProcesses: ownRows.map((row) => ({
+          pid: Number(row[1]),
+          parentPid: Number(row[2]),
+          command: row[3],
+        })),
+      };
+    } catch (error) {
+      result.helperStdioObservation.cleanupDiscoveryError = error.message;
+      result.outcome = "failed-or-blocked";
+      process.exitCode = 1;
+    }
+  }
   if (runtime) await runtime.stop("real OS acceptance finished").catch(() => {});
   if (context) await context.close().catch(() => {});
   for (const socket of connections) socket.destroy();
@@ -1286,6 +1533,13 @@ searchForm.onsubmit=e=>{e.preventDefault();LoadingCover.style.display='block';se
       observedFixedHelperPids: activeHelperPids,
       processes: activeHelperPids.map((pid) => ({ pid, alive: pidAlive(pid) })),
     };
+    if (observeHelperStdio) {
+      await until(() => activeObserverPids.every((pid) => !pidAlive(pid)), 5000);
+      result.cleanup.observers = [...new Set(activeObserverPids)].map((pid) => ({
+        pid,
+        alive: pidAlive(pid),
+      }));
+    }
   } catch (error) {
     result.cleanup = { observedFixedHelperPids: activeHelperPids, error: error.message };
     result.outcome = "failed-or-blocked";
@@ -1311,6 +1565,24 @@ searchForm.onsubmit=e=>{e.preventDefault();LoadingCover.style.display='block';se
     result.stdioEvidenceError = error.message;
   }
   result.runtimeWire = wire;
+  if (observeHelperStdio) {
+    result.helperStdioRecords = helperObservation();
+    try {
+      result.helperMessages = helperMessages(result.helperStdioRecords);
+    } catch (error) {
+      result.helperStdioObservation.decodeError = error.message;
+      result.outcome = "failed-or-blocked";
+      process.exitCode = 1;
+    }
+    const fatal = result.helperStdioRecords.filter((row) =>
+      ["output-buffer-overflow", "helper-spawn-error"].includes(row.event),
+    );
+    if (fatal.length) {
+      result.helperStdioObservation.fatalEvents = fatal;
+      result.outcome = "failed-or-blocked";
+      process.exitCode = 1;
+    }
+  }
   await save();
   console.log(`OS evidence: ${artifact}/os-result.json`);
 }

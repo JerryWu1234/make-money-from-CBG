@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "scope": "Full regression after user-requested removal of automatic sleep prevention and all confirmed code-review fixes. Temporary isolated fixtures; no authenticated official-site collection or physical multi-monitor/lock-screen acceptance.",
+  "scope": "Historical full regression for the 9f helper after removal of automatic sleep prevention and review fixes known at that time. Preserve the original counts, source hashes and raw report digest; later 224348ba changes have separate current evidence.",
   "startedAtUtc": "2026-11-17T01:58:02.676000+00:00",
   "command": "vp test --maxWorkers=1 --hookTimeout=30000 --reporter=default --reporter=json --outputFile.json=/private/tmp/cbg-six-release-complete-final.json",
   "sandbox": "require_escalated",
@@ -1037,5 +1037,7 @@
       "status": "passed",
       "tests": 27
     }
-  ]
+  ],
+  "historical": true,
+  "supersededByCurrentSummary": "cbg-native-followup-regression-2026-11-17.json"
 }

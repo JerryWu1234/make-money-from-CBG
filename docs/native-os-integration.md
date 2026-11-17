@@ -1,5 +1,7 @@
 # 真实 OS 输入最小复现
 
+> **2026-11-17 更新：** 当前 `224348ba` helper 已在无 AX 预检的新 profile 下通过 basic；独立 helper expiry 与本版断连/重启 fault-only 也通过。实际范围和新入口见[当前验收](./native-followup-acceptance-2026-11-17.md)。下文旧版本执行记录及其“尚未通过”按原时点保留；`RV6KYg` 本身仍失败，未改写为通过。物理、官网及鼠标来源边界仍保留。
+
 入口为 [`scripts/native-os-integration.mjs`](../scripts/native-os-integration.mjs)。已执行真实安装、只读诊断、带显式只读AX setup的离线basic输入/等待/结束/取消，以及断连和重启各自fault-only验收。默认冷启动和其余物理范围未据此通过。早期四轮与后续收证分开记录，运行结果以实际 `os-result.json` 为准。
 
 在仓库根目录使用支持 `node:sqlite` 和 `node:module.registerHooks` 的 Node 环境。下面沿用本机 Node25 启动 PATH；`vp exec` 可采用其 managed Node 运行时，不修改全局环境。

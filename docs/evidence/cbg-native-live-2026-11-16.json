@@ -1,5 +1,5 @@
 {
-  "description": "Selected actual fresh-isolation evidence, including historical failures and the latest ofKH5m input/wait/completion/cancellation pass with explicit read-only AX preflight setup. This does not establish default cold-start or official-site success. Conservative posted true/ok false remains unknown, not helper success.",
+  "description": "Historical selected 9f-helper evidence, including failures and the ofKH5m pass with explicit read-only AX setup. Current new-helper outcomes are recorded separately; this bundle keeps its original raw results and causal limits.",
   "attempts": [
     {
       "artifact": "cbg-installed-CxThOa",
@@ -4001,5 +4001,7 @@
     "tapCount": 8,
     "activeHidOrSessionMouseType5FiltersObserved": 0,
     "scope": "Metadata-only inventory after earlier attempts; production helper was absent, order is unspecified, and no source attribution or historical absence is proven. Latency-statistic reset is the documented diagnostic side effect; enabled/options/event stream unchanged."
-  }
+  },
+  "supersededCurrentSummary": "cbg-native-followup-live-2026-11-17.json",
+  "currentStatusFieldScope": "currentNotVerified and other current/frozen wording below refer to this historical 9f bundle, not the later 224348ba helper acceptance."
 }

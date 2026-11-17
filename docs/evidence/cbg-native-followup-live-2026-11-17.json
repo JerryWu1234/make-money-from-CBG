@@ -1,0 +1,1035 @@
+{
+  "schemaVersion": 1,
+  "scope": "Current new-helper isolated native evidence, superseding only the current-status summaries of the historical 9f bundle. No authenticated official-site interaction or physical lock/multimonitor/takeover acceptance.",
+  "sourceSha256": {
+    "native/cbg-access/Input.m": "224348ba03a4c93bdc37e23a654a9243d2b64ff1839455d7950fb7d998469e15",
+    "native/cbg-access/host.mjs": "d8fc9471f4b7e11dc367e9ffa26200ecb2ea2b2ef16534e3a8a171bc779a0507",
+    "server/adapters/extension-native.ts": "e407714d4b21ded72ea1d4d54df3d1c96d5f0c3dc6a07eb9fe7ee5db90e97066",
+    "scripts/native-os-integration.mjs": "5ccbd73f178bf3f63c6312fabc0073d091fe0824e8c1a3677925190ff393b243",
+    "scripts/native-helper-stdio-observer.mjs": "7a5cda9a205c6b1ce1234c21e17894170bf03c3a1d1ce0f8705aa082b9533235",
+    "scripts/native-helper-stdio-evidence.mjs": "f8b62fd6a8ad6eddfce0e528720ef16acc6b04a0cd1557e56fab456278184862",
+    "scripts/native-helper-stdio-observer-regression.mjs": "2bb79a11cbbfdbdecf3aff6b2941f82a4a0cc847c13c5f41a36369a7f0c9279a"
+  },
+  "helperBinarySha256": "ece793eb4b1eb3c8da58b5e50dbb39574ebd3d0d975b60ee86954b40e5942223",
+  "normalHostUnchanged": true,
+  "automaticSleepPrevention": "Removed at user request; no sleep assertion requirement. Active means valid input authorization.",
+  "regressionEvidence": "cbg-native-followup-regression-2026-11-17.json",
+  "observerRegression": {
+    "command": "node --test scripts/native-helper-stdio-observer-regression.mjs",
+    "node": "26.13.1",
+    "tests": 15,
+    "passed": 15,
+    "failed": 0,
+    "rawLogSha256": "4e865de2cffce7f776797d61de98571e6e831a99d86c4a1f5a15f0e18e7e08f1",
+    "scope": "Pure byte-stream, chunking, signal, EOF, overflow/fatal and cleanup fixtures; no Chrome, production native input or real TTL evidence."
+  },
+  "defaultColdBasic": {
+    "artifactId": "cbg-installed-ALYpDS",
+    "rawReportSha256": "a1d1cc94a4eda171908633b63bdffb5ec7245658ae237d8c64b2dffc90e746cc",
+    "nativeStdioSha256": "9bac7a050a6cae8f28ed12a88b17fb5728e240e30162e478e3487cfb62022e08",
+    "outcome": "passed-real-input-wait-completion-cancellation-only",
+    "axPreflightRequested": false,
+    "observeHelperStdioRequested": false,
+    "helperBinarySha256": "ece793eb4b1eb3c8da58b5e50dbb39574ebd3d0d975b60ee86954b40e5942223",
+    "identity": {
+      "host": {
+        "pid": 34925,
+        "parentPid": 34924
+      },
+      "helpers": [
+        {
+          "pid": 34926,
+          "parentPid": 34925
+        }
+      ]
+    },
+    "permissions": {
+      "accessibility": true,
+      "displayAvailable": true,
+      "frontmostChrome": true,
+      "inputMonitorActive": true,
+      "inputMonitoring": true,
+      "locked": false,
+      "screenRecording": false
+    },
+    "startGateScope": "Explicit start signal after genuine foreground, permission and idle checks. No external AX diagnostic.",
+    "actions": [
+      {
+        "name": "field-120",
+        "actionId": "d1b24e21-219b-4e53-b34a-47157f2b3cb6",
+        "proof": {
+          "actionId": "d1b24e21-219b-4e53-b34a-47157f2b3cb6",
+          "pageId": "5d736f66-a232-4981-8ffd-33cfaa2e9855",
+          "pageGeneration": 1,
+          "targetVersion": "4:",
+          "sampledAt": 1794886496904,
+          "rect": {
+            "x": 72,
+            "y": 150.875,
+            "width": 147,
+            "height": 21.5
+          },
+          "viewport": {
+            "width": 1200,
+            "height": 665,
+            "dpr": 2,
+            "scrollX": 0,
+            "scrollY": 0,
+            "scale": 1
+          },
+          "semantic": {
+            "kind": "query-field",
+            "field": "price_min",
+            "value": "120"
+          },
+          "hit": true,
+          "url": "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&real_os_fixture=1"
+        },
+        "actualHelperReply": {
+          "kind": "input-result",
+          "actionId": "d1b24e21-219b-4e53-b34a-47157f2b3cb6",
+          "ok": true,
+          "posted": true,
+          "scrollFromY": 0,
+          "state": "input_posted_result_unconfirmed"
+        },
+        "permitStates": ["completed"],
+        "bridgeStates": ["completed"]
+      },
+      {
+        "name": "search",
+        "actionId": "5e63aba7-88bb-406a-85c2-16cb7508a358",
+        "proof": {
+          "actionId": "5e63aba7-88bb-406a-85c2-16cb7508a358",
+          "pageId": "5d736f66-a232-4981-8ffd-33cfaa2e9855",
+          "pageGeneration": 1,
+          "targetVersion": "5:搜索",
+          "sampledAt": 1794886501908,
+          "rect": {
+            "x": 219,
+            "y": 148.875,
+            "width": 42.6640625,
+            "height": 24.5
+          },
+          "viewport": {
+            "width": 1200,
+            "height": 665,
+            "dpr": 2,
+            "scrollX": 0,
+            "scrollY": 0,
+            "scale": 1
+          },
+          "semantic": {
+            "kind": "query"
+          },
+          "hit": true,
+          "url": "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&real_os_fixture=1"
+        },
+        "actualHelperReply": {
+          "kind": "input-result",
+          "actionId": "5e63aba7-88bb-406a-85c2-16cb7508a358",
+          "ok": true,
+          "posted": true,
+          "scrollFromY": 0,
+          "state": "input_posted_result_unconfirmed"
+        },
+        "permitStates": ["completed"],
+        "bridgeStates": ["completed"]
+      },
+      {
+        "name": "field-140",
+        "actionId": "b849b226-288e-4fef-a194-b66342e1ef57",
+        "proof": {
+          "actionId": "b849b226-288e-4fef-a194-b66342e1ef57",
+          "pageId": "5d736f66-a232-4981-8ffd-33cfaa2e9855",
+          "pageGeneration": 1,
+          "targetVersion": "8:",
+          "sampledAt": 1794886506917,
+          "rect": {
+            "x": 72,
+            "y": 150.875,
+            "width": 147,
+            "height": 21.5
+          },
+          "viewport": {
+            "width": 1200,
+            "height": 665,
+            "dpr": 2,
+            "scrollX": 0,
+            "scrollY": 0,
+            "scale": 1
+          },
+          "semantic": {
+            "kind": "query-field",
+            "field": "price_min",
+            "value": "140"
+          },
+          "hit": true,
+          "url": "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&real_os_fixture=1"
+        },
+        "actualHelperReply": {
+          "kind": "input-result",
+          "actionId": "b849b226-288e-4fef-a194-b66342e1ef57",
+          "ok": true,
+          "posted": true,
+          "scrollFromY": 0,
+          "state": "input_posted_result_unconfirmed"
+        },
+        "permitStates": ["completed"],
+        "bridgeStates": ["completed"]
+      }
+    ],
+    "assertions": [
+      {
+        "name": "actual permissions and bound idle have no active input lease",
+        "status": "passed"
+      },
+      {
+        "name": "explicit start signal releases an idle, genuinely focused and authorized fixture",
+        "status": "passed"
+      },
+      {
+        "name": "real OS input and page wait retain the authorized activity lease",
+        "status": "passed"
+      },
+      {
+        "name": "actual heartbeat renews the same activity lease while the page is still waiting",
+        "status": "passed"
+      },
+      {
+        "name": "workflow completion ends the authorized activity lease",
+        "status": "passed"
+      },
+      {
+        "name": "real cancellation revokes and ends the activity lease",
+        "status": "passed"
+      }
+    ],
+    "cleanup": {
+      "observedFixedHelperPids": [34926],
+      "processes": [
+        {
+          "pid": 34926,
+          "alive": false
+        }
+      ]
+    },
+    "lifecycleEvidence": {
+      "real OS input and page wait retain the authorized activity lease": {
+        "during": {
+          "kind": "input-result",
+          "actionId": "18037a59-35d8-426a-b7fd-3f65a2a86367",
+          "activity": {
+            "active": true,
+            "expired": false,
+            "lease": {
+              "activityId": "4914b837-c10a-4a3f-88a6-e000db84fd0d",
+              "authorizationEpoch": 1,
+              "browserSessionEpoch": "2abe8242-dc32-4225-b697-17f59ebd578a",
+              "expiresAt": 1794886514898,
+              "hostGeneration": 1,
+              "hostInstanceEpoch": "a1d3ceaa-13e1-4a0b-a325-3d9390e6a37e",
+              "progressActionId": "d1b24e21-219b-4e53-b34a-47157f2b3cb6",
+              "progressExpiresAt": 1794886677386,
+              "progressSequence": 1,
+              "stopEpoch": 0
+            }
+          },
+          "inputPreemption": {},
+          "ok": true,
+          "permissions": {
+            "accessibility": true,
+            "displayAvailable": true,
+            "frontmostChrome": true,
+            "inputMonitorActive": true,
+            "inputMonitoring": true,
+            "locked": false,
+            "screenRecording": false
+          }
+        },
+        "pids": [34926]
+      },
+      "actual heartbeat renews the same activity lease while the page is still waiting": {
+        "renewed": {
+          "kind": "input-result",
+          "actionId": "67300eda-b320-4bf1-a4a5-82bc3202cd36",
+          "activity": {
+            "active": true,
+            "expired": false,
+            "lease": {
+              "activityId": "4914b837-c10a-4a3f-88a6-e000db84fd0d",
+              "authorizationEpoch": 1,
+              "browserSessionEpoch": "2abe8242-dc32-4225-b697-17f59ebd578a",
+              "expiresAt": 1794886517899,
+              "hostGeneration": 1,
+              "hostInstanceEpoch": "a1d3ceaa-13e1-4a0b-a325-3d9390e6a37e",
+              "progressActionId": "d1b24e21-219b-4e53-b34a-47157f2b3cb6",
+              "progressExpiresAt": 1794886677386,
+              "progressSequence": 1,
+              "stopEpoch": 0
+            }
+          },
+          "inputPreemption": {},
+          "ok": true,
+          "permissions": {
+            "accessibility": true,
+            "displayAvailable": true,
+            "frontmostChrome": true,
+            "inputMonitorActive": true,
+            "inputMonitoring": true,
+            "locked": false,
+            "screenRecording": false
+          }
+        },
+        "renewal": {
+          "direction": "runtime-to-host",
+          "receivedAt": 1794886502903,
+          "message": {
+            "kind": "activity",
+            "command": "renew",
+            "actionId": "29546ee7-34b0-44cc-a720-81305f660a0d",
+            "activity": {
+              "activityId": "4914b837-c10a-4a3f-88a6-e000db84fd0d",
+              "authorizationEpoch": 1,
+              "stopEpoch": 0,
+              "browserSessionEpoch": "2abe8242-dc32-4225-b697-17f59ebd578a",
+              "expiresAt": 1794886517899,
+              "progressExpiresAt": 1794886677386,
+              "progressSequence": 1,
+              "progressActionId": "d1b24e21-219b-4e53-b34a-47157f2b3cb6"
+            }
+          }
+        },
+        "renewalAck": {
+          "direction": "host-to-runtime",
+          "receivedAt": 1794886502904,
+          "message": {
+            "kind": "input-result",
+            "actionId": "29546ee7-34b0-44cc-a720-81305f660a0d",
+            "active": true,
+            "activityId": "4914b837-c10a-4a3f-88a6-e000db84fd0d",
+            "error": "",
+            "ok": true
+          }
+        }
+      },
+      "workflow completion ends the authorized activity lease": {
+        "kind": "input-result",
+        "actionId": "4ee1ab79-ae69-405e-8e45-d8ae6d8f6f10",
+        "activity": {
+          "active": false,
+          "expired": false,
+          "lease": {}
+        },
+        "inputPreemption": {},
+        "ok": true,
+        "permissions": {
+          "accessibility": true,
+          "displayAvailable": true,
+          "frontmostChrome": true,
+          "inputMonitorActive": true,
+          "inputMonitoring": true,
+          "locked": false,
+          "screenRecording": false
+        }
+      },
+      "real cancellation revokes and ends the activity lease": {
+        "beforeCancel": {
+          "kind": "input-result",
+          "actionId": "eb7f8d63-1d86-4d05-9b98-4238f2d9a718",
+          "activity": {
+            "active": true,
+            "expired": false,
+            "lease": {
+              "activityId": "4caf50f8-0630-4f3d-9254-3e440478e2cc",
+              "authorizationEpoch": 2,
+              "browserSessionEpoch": "2abe8242-dc32-4225-b697-17f59ebd578a",
+              "expiresAt": 1794886522231,
+              "hostGeneration": 1,
+              "hostInstanceEpoch": "a1d3ceaa-13e1-4a0b-a325-3d9390e6a37e",
+              "progressActionId": "b849b226-288e-4fef-a194-b66342e1ef57",
+              "progressExpiresAt": 1794886687231,
+              "progressSequence": 1,
+              "stopEpoch": 0
+            }
+          },
+          "inputPreemption": {},
+          "ok": true,
+          "permissions": {
+            "accessibility": true,
+            "displayAvailable": true,
+            "frontmostChrome": true,
+            "inputMonitorActive": true,
+            "inputMonitoring": true,
+            "locked": false,
+            "screenRecording": false
+          }
+        },
+        "afterCancel": {
+          "kind": "input-result",
+          "actionId": "fc36caf5-54e5-47b7-a4f2-60b81a8119c8",
+          "activity": {
+            "active": false,
+            "expired": false,
+            "lease": {}
+          },
+          "inputPreemption": {},
+          "ok": true,
+          "permissions": {
+            "accessibility": true,
+            "displayAvailable": true,
+            "frontmostChrome": true,
+            "inputMonitorActive": true,
+            "inputMonitoring": true,
+            "locked": false,
+            "screenRecording": false
+          }
+        },
+        "stopped": true
+      }
+    },
+    "submittedSnapshot": {
+      "revision": "5d736f66-a232-4981-8ffd-33cfaa2e9855:1:8",
+      "queryArgs": {
+        "server_type": "1,2,3",
+        "page": 1,
+        "order_by": "selling_time DESC",
+        "price_min": "120"
+      },
+      "roleQueryControls": {
+        "price_min": {
+          "value": "120",
+          "min": "",
+          "max": "",
+          "step": "any"
+        }
+      },
+      "listingCommit": {
+        "actionId": "5e63aba7-88bb-406a-85c2-16cb7508a358",
+        "sequence": 1
+      },
+      "loading": false
+    },
+    "trustedDomEvents": [
+      {
+        "type": "click",
+        "id": "price_min",
+        "trusted": true,
+        "at": 1794886497059,
+        "value": "100",
+        "selectionStart": 3,
+        "selectionEnd": 3,
+        "selectionDirection": "none",
+        "activeElementId": "price_min",
+        "documentFocused": true
+      },
+      {
+        "type": "input",
+        "id": "price_min",
+        "trusted": true,
+        "at": 1794886497278,
+        "value": "120",
+        "selectionStart": 3,
+        "selectionEnd": 3,
+        "selectionDirection": "none",
+        "activeElementId": "price_min",
+        "documentFocused": true
+      },
+      {
+        "type": "change",
+        "id": "price_min",
+        "trusted": true,
+        "at": 1794886502039,
+        "value": "120",
+        "selectionStart": 3,
+        "selectionEnd": 3,
+        "selectionDirection": "none",
+        "activeElementId": "",
+        "documentFocused": true
+      },
+      {
+        "type": "click",
+        "id": "btn_search",
+        "trusted": true,
+        "at": 1794886502039
+      },
+      {
+        "type": "click",
+        "id": "price_min",
+        "trusted": true,
+        "at": 1794886507056,
+        "value": "120",
+        "selectionStart": 3,
+        "selectionEnd": 3,
+        "selectionDirection": "none",
+        "activeElementId": "price_min",
+        "documentFocused": true
+      },
+      {
+        "type": "input",
+        "id": "price_min",
+        "trusted": true,
+        "at": 1794886507122,
+        "value": "140",
+        "selectionStart": 3,
+        "selectionEnd": 3,
+        "selectionDirection": "none",
+        "activeElementId": "price_min",
+        "documentFocused": true
+      }
+    ],
+    "scope": "One fresh-profile first basic workflow through default production AX path with already-granted TCC and explicit foreground start gate. No AX preflight, no observer. Not proof of actual zero-to-one retry occurrence, immediate unattended launch, official-site query, or long-term cross-environment stability."
+  },
+  "independentHelperExpiry": {
+    "artifactId": "cbg-installed-9mAQdg",
+    "rawReportSha256": "ad8eae0e7b0a62cb4156e9ce1ff0eb30ea37bb05760f875e9fab72a4e0de9b27",
+    "nativeStdioSha256": "976e075df34d78f419bd4b9dabfe4d515a78ed07985e422ed40c83f9242f0bd3",
+    "outcome": "passed-real-input-expiry-only",
+    "axPreflightRequested": false,
+    "observeHelperStdioRequested": true,
+    "helperBinarySha256": "ece793eb4b1eb3c8da58b5e50dbb39574ebd3d0d975b60ee86954b40e5942223",
+    "identity": {
+      "host": {
+        "pid": 35759,
+        "parentPid": 35758
+      },
+      "proxy": {
+        "pid": 35760,
+        "parentPid": 35759
+      },
+      "helpers": [
+        {
+          "pid": 35761,
+          "parentPid": 35760
+        }
+      ]
+    },
+    "permissions": {
+      "accessibility": true,
+      "displayAvailable": true,
+      "frontmostChrome": true,
+      "inputMonitorActive": true,
+      "inputMonitoring": true,
+      "locked": false,
+      "screenRecording": false
+    },
+    "startGateScope": "Explicit start signal after genuine foreground, permission and idle checks. No external AX diagnostic.",
+    "actions": [
+      {
+        "name": "field-120",
+        "actionId": "1c5b24d1-3ebd-4175-8e11-19f9d44dd8c9",
+        "proof": {
+          "actionId": "1c5b24d1-3ebd-4175-8e11-19f9d44dd8c9",
+          "pageId": "74ac4ea2-d1f4-413d-8c4c-e0a5cc966042",
+          "pageGeneration": 1,
+          "targetVersion": "4:",
+          "sampledAt": 1794886631418,
+          "rect": {
+            "x": 72,
+            "y": 150.875,
+            "width": 147,
+            "height": 21.5
+          },
+          "viewport": {
+            "width": 1200,
+            "height": 665,
+            "dpr": 2,
+            "scrollX": 0,
+            "scrollY": 0,
+            "scale": 1
+          },
+          "semantic": {
+            "kind": "query-field",
+            "field": "price_min",
+            "value": "120"
+          },
+          "hit": true,
+          "url": "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&real_os_fixture=1"
+        },
+        "actualHelperReply": {
+          "kind": "input-result",
+          "actionId": "1c5b24d1-3ebd-4175-8e11-19f9d44dd8c9",
+          "ok": true,
+          "posted": true,
+          "scrollFromY": 0,
+          "state": "input_posted_result_unconfirmed"
+        },
+        "permitStates": ["completed"],
+        "bridgeStates": ["completed"]
+      }
+    ],
+    "assertions": [
+      {
+        "name": "actual permissions and bound idle have no active input lease",
+        "status": "passed"
+      },
+      {
+        "name": "explicit start signal releases an idle, genuinely focused and authorized fixture",
+        "status": "passed"
+      },
+      {
+        "name": "fault begins inside an actual input-owning workflow",
+        "status": "passed"
+      },
+      {
+        "name": "fault revokes the activity and rejects the original scope without another proof or posted input",
+        "status": "passed"
+      }
+    ],
+    "cleanup": {
+      "observedFixedHelperPids": [35761],
+      "processes": [
+        {
+          "pid": 35761,
+          "alive": false
+        }
+      ],
+      "observers": [
+        {
+          "pid": 35760,
+          "alive": false
+        }
+      ]
+    },
+    "independentExpiry": {
+      "helperRawLogSha256": "1cee5b15c7d768dcc07588e75f1cf089fa4f04656e2348a6cb45bc1c340d8aae",
+      "rawRows": 27,
+      "rawStreams": {
+        "host-to-helper": {
+          "bytes": 2955,
+          "sha256": "61685aaea46cab1a808bd8fd8dc60077d23777f344f0df90a8e216c525c4795e"
+        },
+        "helper-to-host": {
+          "bytes": 2491,
+          "sha256": "cfd0a8a5594eeb600db110b630a83a735f782af69b327c2c5df90caa0ef681a8"
+        }
+      },
+      "hostPause": {
+        "hostPid": 35759,
+        "pausedAt": 1794886631803,
+        "state": "T",
+        "stateSampledAt": 1794886631806,
+        "rawRowsAtPause": 16,
+        "continuedAt": 1794886648936
+      },
+      "lastAcceptedRequest": {
+        "command": "activity-renew",
+        "actionId": "ac05dcab-f552-424a-b874-7e62a86518d5",
+        "activity": {
+          "activityId": "b2b6c84e-99f7-45c3-9433-1fccf954db75",
+          "authorizationEpoch": 1,
+          "stopEpoch": 0,
+          "browserSessionEpoch": "a08c8649-d861-4817-9612-0867e56e7880",
+          "expiresAt": 1794886646749,
+          "progressExpiresAt": 1794886811749,
+          "progressSequence": 1,
+          "progressActionId": "1c5b24d1-3ebd-4175-8e11-19f9d44dd8c9"
+        },
+        "hostGeneration": 1,
+        "hostInstanceEpoch": "e0f673e9-69b1-4620-aef6-f22c5d9e882c"
+      },
+      "lastAcceptedActualHelperAck": {
+        "actionId": "ac05dcab-f552-424a-b874-7e62a86518d5",
+        "active": true,
+        "activityId": "b2b6c84e-99f7-45c3-9433-1fccf954db75",
+        "error": "",
+        "ok": true
+      },
+      "actualHelperInvalidation": {
+        "activityId": "b2b6c84e-99f7-45c3-9433-1fccf954db75",
+        "authorizationEpoch": 1,
+        "browserSessionEpoch": "a08c8649-d861-4817-9612-0867e56e7880",
+        "hostGeneration": 1,
+        "hostInstanceEpoch": "e0f673e9-69b1-4620-aef6-f22c5d9e882c",
+        "inputPreemption": {},
+        "kind": "activity-invalidated",
+        "reason": "native-workflow-activity-expired",
+        "stopEpoch": 0
+      },
+      "receivedAt": 1794886646800,
+      "hostStateAtReceipt": "T",
+      "deadline": 1794886646749,
+      "receivedAfterDeadlineMs": 51,
+      "verifiedBeforeHostResumeAt": 1794886648934,
+      "liveHelperSampleCount": 85,
+      "allSamplesAlive": true,
+      "allowedReadOnlyStatusBetweenGrantAndPause": [
+        {
+          "command": "status",
+          "actionId": "adecb789-2f2c-4f92-95cc-b26dc00fc0b7"
+        }
+      ],
+      "excludedBeforeExpiry": [
+        "late lease renewal, begin/end or resume",
+        "input execute or stop command",
+        "signal, EOF, transport error or partial input",
+        "any helper inbound bytes after host pause"
+      ],
+      "inputPreemption": {},
+      "independentExpiryProven": true
+    },
+    "runtimeCause": {
+      "firstRuntimeStopSentAt": 1794886644418,
+      "stateWhileHostPaused": {
+        "adapter": "extension-native",
+        "listening": true,
+        "connected": true,
+        "stopped": true,
+        "idle": false,
+        "pageId": "74ac4ea2-d1f4-413d-8c4c-e0a5cc966042",
+        "reason": "原生输入回执未知，禁止自动重放",
+        "unknownActions": 0
+      },
+      "scope": "Runtime stopped earlier on its unchanged request timeout; this run does not prove helper-expired notification caused Runtime to stop. Host-resume wire still reports server-stop."
+    },
+    "statusAfterHostResumed": {
+      "active": false,
+      "expired": false,
+      "lease": {}
+    },
+    "oldScopeAttempt": {
+      "rejected": true,
+      "message": "原生输入回执未知，禁止自动重放"
+    },
+    "scope": "Expiry after field120 completed while the workflow retained its active waiting lease. Actual production helper revoked independently with host paused; transparent test-only stdio proxy captured the original message. Not a fault during keystroke delivery or a manual recovery/new authorization acceptance."
+  },
+  "faultScenarios": [
+    {
+      "artifactId": "cbg-installed-kvMysh",
+      "rawReportSha256": "f3a6a295839980a5bb2cd67d5189a65bb300a3db4a264f312cc0f5ffccdda589",
+      "nativeStdioSha256": "376b43ef0a502f89162353f18fda67d5740dd7b2683a93fbabe26bdf39012192",
+      "outcome": "passed-real-input-disconnect-only",
+      "axPreflightRequested": false,
+      "observeHelperStdioRequested": false,
+      "helperBinarySha256": "ece793eb4b1eb3c8da58b5e50dbb39574ebd3d0d975b60ee86954b40e5942223",
+      "identity": {
+        "host": {
+          "pid": 36440,
+          "parentPid": 36439
+        },
+        "helpers": [
+          {
+            "pid": 36442,
+            "parentPid": 36440
+          }
+        ]
+      },
+      "permissions": {
+        "accessibility": true,
+        "displayAvailable": true,
+        "frontmostChrome": true,
+        "inputMonitorActive": true,
+        "inputMonitoring": true,
+        "locked": false,
+        "screenRecording": false
+      },
+      "startGateScope": "Explicit start signal after genuine foreground, permission and idle checks. No external AX diagnostic.",
+      "actions": [
+        {
+          "name": "field-120",
+          "actionId": "5f9b661c-7386-44e8-8263-01e0e6d178bf",
+          "proof": {
+            "actionId": "5f9b661c-7386-44e8-8263-01e0e6d178bf",
+            "pageId": "50d99873-7520-452d-bde2-b804751ab258",
+            "pageGeneration": 1,
+            "targetVersion": "4:",
+            "sampledAt": 1794887026616,
+            "rect": {
+              "x": 72,
+              "y": 150.875,
+              "width": 147,
+              "height": 21.5
+            },
+            "viewport": {
+              "width": 1200,
+              "height": 665,
+              "dpr": 2,
+              "scrollX": 0,
+              "scrollY": 0,
+              "scale": 1
+            },
+            "semantic": {
+              "kind": "query-field",
+              "field": "price_min",
+              "value": "120"
+            },
+            "hit": true,
+            "url": "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&real_os_fixture=1"
+          },
+          "actualHelperReply": {
+            "kind": "input-result",
+            "actionId": "5f9b661c-7386-44e8-8263-01e0e6d178bf",
+            "ok": true,
+            "posted": true,
+            "scrollFromY": 0,
+            "state": "input_posted_result_unconfirmed"
+          },
+          "permitStates": ["completed"],
+          "bridgeStates": ["completed"]
+        }
+      ],
+      "assertions": [
+        {
+          "name": "actual permissions and bound idle have no active input lease",
+          "status": "passed"
+        },
+        {
+          "name": "explicit start signal releases an idle, genuinely focused and authorized fixture",
+          "status": "passed"
+        },
+        {
+          "name": "fault begins inside an actual input-owning workflow",
+          "status": "passed"
+        },
+        {
+          "name": "fault revokes the activity and rejects the original scope without another proof or posted input",
+          "status": "passed"
+        }
+      ],
+      "cleanup": {
+        "observedFixedHelperPids": [36442],
+        "processes": [
+          {
+            "pid": 36442,
+            "alive": false
+          }
+        ]
+      },
+      "scenario": "disconnect",
+      "activeBeforeFault": {
+        "active": true,
+        "expired": false,
+        "lease": {
+          "activityId": "acc5d0e5-ab12-4139-91ed-772ee9badc3c",
+          "authorizationEpoch": 1,
+          "browserSessionEpoch": "bf0d4b89-2a8b-4260-998b-08fefd28ae95",
+          "expiresAt": 1794887042030,
+          "hostGeneration": 1,
+          "hostInstanceEpoch": "2e63938b-e9ae-4f74-b238-d6f02503d85b",
+          "progressActionId": "5f9b661c-7386-44e8-8263-01e0e6d178bf",
+          "progressExpiresAt": 1794887207030,
+          "progressSequence": 1,
+          "stopEpoch": 0
+        }
+      },
+      "oldScopeAttempt": {
+        "rejected": true,
+        "message": "原生宿主未连接"
+      },
+      "stoppedAfterFault": {
+        "adapter": "extension-native",
+        "listening": true,
+        "connected": false,
+        "stopped": true,
+        "idle": false,
+        "pageId": "50d99873-7520-452d-bde2-b804751ab258",
+        "reason": "宿主连接中断，输入结果须人工核验",
+        "unknownActions": 0
+      },
+      "governorAfterFault": {
+        "state": "needs_action",
+        "stopEpoch": 1
+      },
+      "scope": "Fault after the completed field120 input, during active workflow waiting. Old scope rejected without another proof/post; reconnect alone is not new business authorization. Does not establish failure handling during key delivery."
+    },
+    {
+      "artifactId": "cbg-installed-6Xqp2D",
+      "rawReportSha256": "3df771926827e459fba2c1fcf0c607e55569360b75a38b12e3fe0ef9d4bf6ee0",
+      "nativeStdioSha256": "c6797f7dc3a1cf4fa76b70609d82b21bedad36f03e68c25edfcab92fc5d7bcf8",
+      "outcome": "passed-real-input-restart-only",
+      "axPreflightRequested": false,
+      "observeHelperStdioRequested": false,
+      "helperBinarySha256": "ece793eb4b1eb3c8da58b5e50dbb39574ebd3d0d975b60ee86954b40e5942223",
+      "identity": {
+        "host": {
+          "pid": 36920,
+          "parentPid": 36919
+        },
+        "helpers": [
+          {
+            "pid": 36921,
+            "parentPid": 36920
+          }
+        ]
+      },
+      "permissions": {
+        "accessibility": true,
+        "displayAvailable": true,
+        "frontmostChrome": true,
+        "inputMonitorActive": true,
+        "inputMonitoring": true,
+        "locked": false,
+        "screenRecording": false
+      },
+      "startGateScope": "Explicit start signal after genuine foreground, permission and idle checks. No external AX diagnostic.",
+      "actions": [
+        {
+          "name": "field-120",
+          "actionId": "f40375b5-4ddc-4c06-ac8a-80deb6baaef0",
+          "proof": {
+            "actionId": "f40375b5-4ddc-4c06-ac8a-80deb6baaef0",
+            "pageId": "a8efc2c0-2598-40fb-99c4-1b0ac53b60df",
+            "pageGeneration": 1,
+            "targetVersion": "4:",
+            "sampledAt": 1794887086919,
+            "rect": {
+              "x": 72,
+              "y": 150.875,
+              "width": 147,
+              "height": 21.5
+            },
+            "viewport": {
+              "width": 1200,
+              "height": 665,
+              "dpr": 2,
+              "scrollX": 0,
+              "scrollY": 0,
+              "scale": 1
+            },
+            "semantic": {
+              "kind": "query-field",
+              "field": "price_min",
+              "value": "120"
+            },
+            "hit": true,
+            "url": "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&real_os_fixture=1"
+          },
+          "actualHelperReply": {
+            "kind": "input-result",
+            "actionId": "f40375b5-4ddc-4c06-ac8a-80deb6baaef0",
+            "ok": true,
+            "posted": true,
+            "scrollFromY": 0,
+            "state": "input_posted_result_unconfirmed"
+          },
+          "permitStates": ["completed"],
+          "bridgeStates": ["completed"]
+        }
+      ],
+      "assertions": [
+        {
+          "name": "actual permissions and bound idle have no active input lease",
+          "status": "passed"
+        },
+        {
+          "name": "explicit start signal releases an idle, genuinely focused and authorized fixture",
+          "status": "passed"
+        },
+        {
+          "name": "fault begins inside an actual input-owning workflow",
+          "status": "passed"
+        },
+        {
+          "name": "fault revokes the activity and rejects the original scope without another proof or posted input",
+          "status": "passed"
+        }
+      ],
+      "cleanup": {
+        "observedFixedHelperPids": [36921, 36941],
+        "processes": [
+          {
+            "pid": 36921,
+            "alive": false
+          },
+          {
+            "pid": 36941,
+            "alive": false
+          }
+        ]
+      },
+      "scenario": "restart",
+      "activeBeforeFault": {
+        "active": true,
+        "expired": false,
+        "lease": {
+          "activityId": "b2c4eb87-89f6-4cd9-b4b1-815801190f25",
+          "authorizationEpoch": 1,
+          "browserSessionEpoch": "69ec35cd-2c91-4437-b172-1d48d46fab33",
+          "expiresAt": 1794887102298,
+          "hostGeneration": 1,
+          "hostInstanceEpoch": "cba9016c-88d0-4376-bc88-3f7a8b607b6b",
+          "progressActionId": "f40375b5-4ddc-4c06-ac8a-80deb6baaef0",
+          "progressExpiresAt": 1794887267298,
+          "progressSequence": 1,
+          "stopEpoch": 0
+        }
+      },
+      "oldScopeAttempt": {
+        "rejected": true,
+        "message": "原生活动授权已失效"
+      },
+      "stoppedAfterFault": {
+        "adapter": "extension-native",
+        "listening": true,
+        "connected": false,
+        "stopped": true,
+        "idle": false,
+        "pageId": "a8efc2c0-2598-40fb-99c4-1b0ac53b60df",
+        "reason": "宿主连接中断，输入结果须人工核验",
+        "unknownActions": 0
+      },
+      "governorAfterFault": {
+        "state": "needs_action",
+        "stopEpoch": 1
+      },
+      "reconnected": {
+        "identity": {
+          "host": {
+            "pid": 36940,
+            "parentPid": 36939
+          },
+          "helpers": [
+            {
+              "pid": 36941,
+              "parentPid": 36940
+            }
+          ]
+        },
+        "runtime": {
+          "adapter": "extension-native",
+          "listening": true,
+          "connected": true,
+          "stopped": true,
+          "idle": false,
+          "pageId": "a8efc2c0-2598-40fb-99c4-1b0ac53b60df",
+          "reason": "正在绑定扩展与宿主授权代次",
+          "unknownActions": 0
+        },
+        "nativeActivity": {
+          "active": false,
+          "expired": false,
+          "lease": {}
+        }
+      },
+      "scope": "Fault after the completed field120 input, during active workflow waiting. Old scope rejected without another proof/post; reconnect alone is not new business authorization. Does not establish failure handling during key delivery.",
+      "oldScopeReadOnlyLocate": {
+        "actionId": "6bd6437a-6556-4b3e-939c-74e634fe4dd5",
+        "target": {
+          "kind": "query-field",
+          "field": "price_min",
+          "value": "140"
+        },
+        "sentAt": 1794887087617,
+        "replyAt": 1794887087619,
+        "actualReply": {
+          "ok": true,
+          "posted": false
+        },
+        "scope": "One read-only locate occurred after reconnection. The old ALS activity was then rejected before execute, proof, posted input or a second permit; this is not new business authorization."
+      }
+    }
+  ],
+  "historicalExpiry": {
+    "artifactId": "cbg-installed-RV6KYg",
+    "outcome": "failed-or-blocked",
+    "independentExpiry": "NOT PROVEN in that historical attempt; preserve its raw failure and do not relabel it passed."
+  },
+  "remaining": [
+    "Historical unmarked mouse event source during confirmed no-user-operation runs remains unexplained; no PID/coordinate/timing exemption was added.",
+    "Controlled physical user takeover has not been observed.",
+    "Physical second monitor, negative coordinates and cross-screen scaling require unavailable hardware.",
+    "Lock-screen acceptance deferred explicitly by the user.",
+    "Authenticated official-site first query remains manual and was not performed."
+  ],
+  "goalStatus": "active; physical and unexplained-input scope remains incomplete"
+}
