@@ -82,6 +82,14 @@ export async function withOfficialAction<T>(
       binding.dispatchContext = actionContext;
       try {
         return await dispatching.run(page, execute);
+      } catch (error) {
+        // Persist the original failure before runAction revokes the page signal.
+        try {
+          diagnostics.record("access.action_failed", { ...actionContext, action, error });
+        } catch {
+          // A diagnostic failure must not replace the original action failure.
+        }
+        throw error;
       } finally {
         binding.dispatchContext = undefined;
       }

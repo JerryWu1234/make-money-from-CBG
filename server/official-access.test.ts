@@ -1,18 +1,24 @@
 import { watchCrawlAccess } from "./crawler/access-guard";
 import { beginPageQuery } from "./query-health/runtime";
 import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import type { Page, Request } from "playwright-core";
+import { DiagnosticLog, diagnostics } from "./diagnostics";
 import {
   bindOfficialPage,
   officialGovernor,
   officialPageContext,
+  officialPageSignal,
   onOfficialFirstDispatch,
   withOfficialAction,
 } from "./official-access";
 vi.mock("./crawler/access-guard", () => ({ watchCrawlAccess: vi.fn(async () => async () => {}) }));
 const databases: DatabaseSync[] = [],
-  pages: { close(): Promise<void> }[] = [];
+  pages: { close(): Promise<void> }[] = [],
+  directories: string[] = [];
 function page(context = {}) {
   const listeners = new Map<string, ((...args: unknown[]) => void)[]>();
   const target = {
@@ -52,6 +58,8 @@ function setup() {
 afterEach(async () => {
   await Promise.all(pages.splice(0).map((page) => page.close()));
   databases.splice(0).forEach((db) => db.close());
+  vi.restoreAllMocks();
+  directories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true }));
   vi.useRealTimers();
 });
 it("两个自有页共享会话和许可账本，组合点击只计一次动作", async () => {
@@ -90,6 +98,105 @@ it("风险提交后旧页面不能派发，未知副作用不返还预算", asyn
   expect(gate.read().state).toBe("needs_action");
   await expect(target.goto()).rejects.toThrow();
   expect(db.prepare("SELECT status FROM access_permits").get()?.status).toBe("unknown");
+});
+it("动作原异常在unknown撤权前持久化，保留同一异常且后续动作仍暂停", async () => {
+  vi.useFakeTimers();
+  const { db, gate } = setup(),
+    target = page(),
+    originalGoto = target.goto;
+  await bindOfficialPage(target as unknown as Page, { runId: "hover-run", sourceKind: "workflow" });
+  const signal = officialPageSignal(target as unknown as Page)!;
+  const original = new Error(
+    "locator.hover: Timeout 5000ms exceeded\nCall log: node remains covered",
+  );
+  original.name = "TimeoutError";
+  const directory = mkdtempSync(path.join(os.tmpdir(), "cbg-official-action-log-"));
+  directories.push(directory);
+  const log = new DiagnosticLog(directory);
+  const atFailure: { error: unknown; aborted: boolean; state: string; permitStatus: unknown }[] =
+    [];
+  vi.spyOn(diagnostics, "record").mockImplementation((event, data) => {
+    if (event === "access.action_failed")
+      atFailure.push({
+        error: data?.error,
+        aborted: signal.aborted,
+        state: gate.read().state,
+        permitStatus: db.prepare("SELECT status FROM access_permits").get()?.status,
+      });
+    log.record(event, data);
+  });
+  await expect(
+    withOfficialAction(target as unknown as Page, "locator.hover", async () => {
+      throw original;
+    }),
+  ).rejects.toBe(original);
+  expect(atFailure).toEqual([
+    { error: original, aborted: false, state: "ready", permitStatus: "dispatch_authorized" },
+  ]);
+  expect(atFailure[0]?.error).toBe(original);
+  const permit = db.prepare("SELECT status,end_reason,context_json FROM access_permits").get()!;
+  const context = JSON.parse(String(permit.context_json));
+  const persisted = new DiagnosticLog(directory).export();
+  expect(persisted.writeError).toBeNull();
+  expect(persisted.incompleteLines).toBe(0);
+  expect(persisted.events).toMatchObject([
+    { event: "access.action_dispatch", data: { ...context, action: "locator.hover" } },
+    {
+      event: "access.action_failed",
+      data: {
+        ...context,
+        action: "locator.hover",
+        error: { name: "TimeoutError", message: original.message },
+      },
+    },
+  ]);
+  expect(permit).toMatchObject({ status: "unknown", end_reason: "dispatch_outcome_unknown" });
+  expect(gate.read()).toMatchObject({
+    state: "needs_action",
+    stopEpoch: 1,
+    reasons: [expect.objectContaining({ code: "unknown_inflight" })],
+  });
+  await expect(target.goto()).rejects.toThrow();
+  expect(originalGoto).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(200);
+  expect(signal.aborted).toBe(true);
+  expect(signal.reason).not.toBe(original);
+  await expect(target.goto()).rejects.toBe(signal.reason);
+  expect(originalGoto).not.toHaveBeenCalled();
+  expect(db.prepare("SELECT COUNT(*) AS n FROM access_permits").get()?.n).toBe(1);
+});
+it("诊断记录自身抛错仍原样抛出动作异常并保留unknown暂停", async () => {
+  vi.useFakeTimers();
+  const { db, gate } = setup(),
+    target = page();
+  await bindOfficialPage(target as unknown as Page, { runId: "hover-run", sourceKind: "workflow" });
+  const signal = officialPageSignal(target as unknown as Page)!;
+  const original = new Error("original hover failure"),
+    diagnosticFailure = new Error("diagnostic sink unavailable");
+  const recorded: unknown[] = [];
+  vi.spyOn(diagnostics, "record").mockImplementation((event, data) => {
+    if (event === "access.action_failed") {
+      recorded.push(data?.error);
+      throw diagnosticFailure;
+    }
+  });
+  await expect(
+    withOfficialAction(target as unknown as Page, "locator.hover", async () => {
+      throw original;
+    }),
+  ).rejects.toBe(original);
+  expect(recorded).toEqual([original]);
+  expect(recorded[0]).toBe(original);
+  expect(gate.read()).toMatchObject({ state: "needs_action", stopEpoch: 1 });
+  expect(db.prepare("SELECT status FROM access_permits").get()?.status).toBe("unknown");
+  await vi.advanceTimersByTimeAsync(200);
+  expect(signal.aborted).toBe(true);
+  const next = vi.fn(async () => {});
+  await expect(withOfficialAction(target as unknown as Page, "next-action", next)).rejects.toBe(
+    signal.reason,
+  );
+  expect(next).not.toHaveBeenCalled();
+  expect(db.prepare("SELECT COUNT(*) AS n FROM access_permits").get()?.n).toBe(1);
 });
 it("首次读取截止时间在许可实际派发时开始，重新绑定增加页面代次", async () => {
   const { gate } = setup(),
