@@ -75,6 +75,43 @@
     cache.set(name, { inputs, value, at: now });
     return value;
   };
+  // List consumers need row identity and listing timestamps, not detail descriptions.
+  // Preserve every supported row; an unsupported result is absent, never a partial/empty proof.
+  const listingRows = (value) =>
+    safe(() => {
+      if (!Array.isArray(value) || value.length > 1000) return undefined;
+      const result = [];
+      let size = 2;
+      for (let index = 0; index < value.length; index++) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        const row = descriptor && "value" in descriptor ? descriptor.value : undefined;
+        if (!row || typeof row !== "object" || Array.isArray(row)) return undefined;
+        const projected = {};
+        for (const name of [
+          "game_ordersn",
+          "eid",
+          "server_id",
+          "serverid",
+          "serverId",
+          "server_name",
+          "selling_time",
+          "create_time",
+          "expire_time",
+        ]) {
+          const field = Object.getOwnPropertyDescriptor(row, name);
+          if (!field || !("value" in field)) continue;
+          const item = field.value;
+          if (typeof item === "string") {
+            if (item.length > 100000) return undefined;
+            projected[name] = item;
+          } else if (typeof item === "number" && Number.isFinite(item)) projected[name] = item;
+        }
+        size += JSON.stringify(projected).length + 1;
+        if (size > 100000) return undefined;
+        result.push(projected);
+      }
+      return result;
+    });
   const render = (globals, epoch, sequence, force, url) => {
     if (!live(epoch) || sequence !== readSequence || url !== location.href) return;
     const snapshot = plain(globals),
@@ -543,7 +580,6 @@
       // Only product/query data. Never enumerate window, storage, cookies or login objects.
       for (const name of [
         "QueryArgs",
-        "QueryResult",
         "EquipInfo",
         "RoleInfo",
         "RoleData",
@@ -554,6 +590,8 @@
         const value = window[name];
         if (value && typeof value === "object") globals[name] = value;
       }
+      const resultRows = safe(() => listingRows(window.QueryResult));
+      if (resultRows !== undefined) globals.QueryResult = resultRows;
       if (typeof EquipInfo !== "undefined" && EquipInfo && typeof EquipInfo === "object")
         globals.EquipInfo = EquipInfo;
       if (typeof equip !== "undefined" && equip && typeof equip === "object")
