@@ -726,7 +726,11 @@ export class AccessGovernor {
     const purpose = context.purpose ?? "ordinary";
     if (purpose === "ordinary") {
       if (state.state !== "ready")
-        throw new AccessGateError("site_paused", "官网访问已暂停，需人工核验后继续", state);
+        throw new AccessGateError(
+          "site_paused",
+          "官网访问已暂停，请处理当前页面的登录或验证后重新尝试",
+          state,
+        );
     } else if (purpose === "diagnostic") {
       const plan = this.db
         .prepare("SELECT * FROM access_diagnostic_plans WHERE plan_id=?")
@@ -1015,6 +1019,118 @@ export class AccessGovernor {
         )
         .run(result.token, result.revision, result.stopEpoch, result.owner, result.fence);
       return result;
+    });
+  }
+  /** Explicit user intent may release soft stops; it never replays an unknown action. */
+  resumeForUser(expectedRevision: number, preparedStopEpoch?: number): AccessState {
+    return this.transaction((state, now) => {
+      if (
+        !Number.isSafeInteger(expectedRevision) ||
+        expectedRevision < 0 ||
+        state.revision !== expectedRevision
+      )
+        throw new AccessGateError("stale_revision", "访问状态已变化，请重新尝试", state);
+      if (preparedStopEpoch !== undefined && state.stopEpoch !== preparedStopEpoch)
+        throw new AccessGateError("stale_revision", "继续核验期间停止代次已变化", state);
+      if (preparedStopEpoch !== undefined) {
+        const preparation = this.db
+          .prepare("SELECT reason,evidence_json FROM access_evidence WHERE evidence_id=?")
+          .get(state.lastEvidenceId ?? "");
+        const isReadyPreparation =
+          preparation?.reason === "manual_stop" &&
+          JSON.parse(String(preparation.evidence_json)).source === "user_native_resume_preparation";
+        if (preparation?.reason !== "user_resume_preparing" && !isReadyPreparation)
+          throw new AccessGateError("stale_revision", "没有匹配的用户继续准备阶段", state);
+      }
+      if (
+        this.db
+          .prepare("SELECT 1 FROM access_permits WHERE status='dispatch_authorized' LIMIT 1")
+          .get()
+      )
+        throw new AccessGateError(
+          "inflight_action",
+          "仍有未结束的官网动作，请等待其停止后重试",
+          state,
+        );
+      if (state.state === "ready") return structuredClone(state);
+      const soft = new Set(["unknown_inflight", "manual_stop", "login"]);
+      if (
+        state.state === "cooldown" ||
+        state.retryNotBefore !== null ||
+        !state.reasons.length ||
+        state.reasons.some((reason) => !soft.has(reason.code))
+      )
+        throw new AccessGateError(
+          "user_recovery_required",
+          "官网仍有验证、访问限制或冷却，请处理当前官网页面后重新尝试",
+          state,
+        );
+      const evidenceId = this.riskEvidenceInside(now, {
+        reason: "user_resume",
+        evidence: { revision: state.revision, stopEpoch: state.stopEpoch, reasons: state.reasons },
+      });
+      this.db
+        .prepare(
+          "UPDATE access_permits SET status='cancelled',finished_at=?,end_reason='user_resume' WHERE status='reserved'",
+        )
+        .run(now);
+      state.state = "ready";
+      state.reasons = [];
+      state.retryNotBefore = null;
+      state.occurredAt = null;
+      delete state.queryDiagnostic;
+      state.revision++;
+      if (preparedStopEpoch === undefined) state.stopEpoch++;
+      state.lastEvidenceId = evidenceId;
+      state.updatedAt = now;
+      this.save(state);
+      return structuredClone(state);
+    });
+  }
+  /** Fence old scopes first, while the site remains paused for the real native handshake. */
+  prepareUserResume(expectedRevision: number): AccessState {
+    return this.transaction((state, now) => {
+      if (!Number.isSafeInteger(expectedRevision) || state.revision !== expectedRevision)
+        throw new AccessGateError("stale_revision", "访问状态已变化，请重新尝试", state);
+      if (
+        this.db
+          .prepare("SELECT 1 FROM access_permits WHERE status='dispatch_authorized' LIMIT 1")
+          .get()
+      )
+        throw new AccessGateError(
+          "inflight_action",
+          "仍有未结束的官网动作，请等待其停止后重试",
+          state,
+        );
+      if (state.state === "ready")
+        return structuredClone(
+          this.riskInside(state, now, {
+            reason: "manual_stop",
+            evidence: { source: "user_native_resume_preparation" },
+          }),
+        );
+      if (
+        state.state === "cooldown" ||
+        state.retryNotBefore !== null ||
+        !state.reasons.length ||
+        state.reasons.some(
+          (reason) => !["unknown_inflight", "manual_stop", "login"].includes(reason.code),
+        )
+      )
+        throw new AccessGateError(
+          "user_recovery_required",
+          "官网仍有验证、访问限制或冷却，请处理当前官网页面后重新尝试",
+          state,
+        );
+      state.lastEvidenceId = this.riskEvidenceInside(now, {
+        reason: "user_resume_preparing",
+        evidence: { revision: state.revision, stopEpoch: state.stopEpoch },
+      });
+      state.revision++;
+      state.stopEpoch++;
+      state.updatedAt = now;
+      this.save(state);
+      return structuredClone(state);
     });
   }
   finishRecovery(token: RecoveryToken, verifiedReasons: string[]): AccessState {

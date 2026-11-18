@@ -22,9 +22,11 @@ const mocks = vi.hoisted(() => ({
   crawlDatabase: vi.fn(),
   openOfficialRecovery: vi.fn(),
   recoverOfficialAccess: vi.fn(),
+  accessRead: vi.fn(),
+  resumeForUser: vi.fn(),
 }));
 vi.mock("./official-access", () => ({
-  officialGovernor: () => ({}),
+  officialGovernor: () => ({ read: mocks.accessRead, resumeForUser: mocks.resumeForUser }),
   openOfficialRecovery: mocks.openOfficialRecovery,
   recoverOfficialAccess: mocks.recoverOfficialAccess,
 }));
@@ -76,6 +78,7 @@ beforeEach(async () => {
   });
   mocks.isBrowserWorkflowRunning.mockReturnValue(false);
   mocks.isCrawling.mockReturnValue(false);
+  mocks.accessRead.mockReturnValue({ state: "ready", revision: 0 });
   mocks.isAnalyzing.mockReturnValue(false);
   mocks.getActiveBrowserMode.mockReturnValue("dedicated");
   mocks.changeBrowserMode.mockImplementation(

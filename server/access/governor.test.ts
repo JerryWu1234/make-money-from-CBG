@@ -71,6 +71,107 @@ function errorCode(fn: () => unknown, code: string) {
   expect(fn).toThrowError(expect.objectContaining({ code }));
 }
 
+it("显式用户继续仅清soft暂停，保留unknown账本/证据并用新epoch拒绝旧任务", () => {
+  const f = fixture(),
+    permit = authorize(f.gate, f.context);
+  f.gate.failUnknown(permit.permitId, f.context);
+  f.gate.reportRisk({ reason: "manual_stop" });
+  const paused = f.gate.reportRisk({ reason: "login" });
+  const evidence = f.db
+    .prepare("SELECT * FROM access_evidence ORDER BY recorded_at,evidence_id")
+    .all();
+  const ledger = f.db.prepare("SELECT * FROM access_permits").all();
+  const resumed = f.gate.resumeForUser(paused.revision);
+  expect(resumed).toMatchObject({
+    state: "ready",
+    reasons: [],
+    revision: paused.revision + 1,
+    stopEpoch: paused.stopEpoch + 1,
+  });
+  expect(f.db.prepare("SELECT * FROM access_permits").all()).toEqual(ledger);
+  for (const row of evidence)
+    expect(
+      f.db.prepare("SELECT * FROM access_evidence WHERE evidence_id=?").get(row.evidence_id),
+    ).toEqual(row);
+  expect(
+    f.db
+      .prepare("SELECT reason FROM access_evidence WHERE evidence_id=?")
+      .get(resumed.lastEvidenceId!),
+  ).toEqual({ reason: "user_resume" });
+  errorCode(() => f.gate.reserve(f.context), "stale_stop_epoch");
+  const fresh = { ...f.context, stopEpoch: resumed.stopEpoch, pageGeneration: 2 };
+  f.gate.registerPage(fresh);
+  expect(() => f.gate.reserve(fresh)).not.toThrow();
+  errorCode(() => f.gate.resumeForUser(paused.revision), "stale_revision");
+});
+it.each([
+  "verification",
+  "http_403",
+  "http_429",
+  "frequency",
+  "clock_anomaly",
+  "unexpected_reason",
+])("普通用户继续不能清除%s", (reason) => {
+  const f = fixture(),
+    state = f.gate.reportRisk({ reason });
+  errorCode(() => f.gate.resumeForUser(state.revision), "user_recovery_required");
+  expect(f.gate.read()).toMatchObject({
+    state: state.state,
+    revision: state.revision,
+    stopEpoch: state.stopEpoch,
+    reasons: state.reasons,
+  });
+});
+it("冷却期限过去也不会以soft入口自动清除", () => {
+  const f = fixture();
+  const state = f.gate.reportRisk({ reason: "login", state: "cooldown" });
+  f.advance(DEFAULT_ACCESS_POLICY.fallbackCooldownMs + 1);
+  errorCode(() => f.gate.resumeForUser(state.revision), "user_recovery_required");
+});
+it("新风险与双点击CAS竞争均不被旧继续请求抹掉", () => {
+  const f = fixture();
+  const first = f.gate.reportRisk({ reason: "login" });
+  const current = f.gate.reportRisk({ reason: "verification" });
+  errorCode(() => f.gate.resumeForUser(first.revision), "stale_revision");
+  expect(f.gate.read().revision).toBe(current.revision);
+});
+it("有真实授权在途时，即使仅soft原因也不继续", () => {
+  const f = fixture();
+  const permit = authorize(f.gate, f.context);
+  const state = f.gate.reportRisk({ reason: "manual_stop" });
+  errorCode(() => f.gate.resumeForUser(state.revision), "inflight_action");
+  expect(
+    f.db.prepare("SELECT status FROM access_permits WHERE permit_id=?").get(permit.permitId),
+  ).toEqual({ status: "dispatch_authorized" });
+});
+it("Native准备先推进epoch但仍暂停，finish CAS不再次改变已核票据epoch", () => {
+  const f = fixture(),
+    paused = f.gate.reportRisk({ reason: "login" });
+  errorCode(() => f.gate.resumeForUser(paused.revision, paused.stopEpoch), "stale_revision");
+  const prepared = f.gate.prepareUserResume(paused.revision);
+  expect(prepared).toMatchObject({
+    state: "needs_action",
+    stopEpoch: paused.stopEpoch + 1,
+    revision: paused.revision + 1,
+  });
+  errorCode(() => f.gate.reserve(f.context), "stale_stop_epoch");
+  const ready = f.gate.resumeForUser(prepared.revision, prepared.stopEpoch);
+  expect(ready).toMatchObject({
+    state: "ready",
+    stopEpoch: prepared.stopEpoch,
+    revision: prepared.revision + 1,
+  });
+});
+it("Native准备后新风险阻止finish，旧ready状态也能先fence再准备", () => {
+  const f = fixture(),
+    ready = f.gate.read(),
+    prepared = f.gate.prepareUserResume(ready.revision);
+  expect(prepared).toMatchObject({ state: "needs_action", stopEpoch: ready.stopEpoch + 1 });
+  f.gate.reportRisk({ reason: "verification" });
+  errorCode(() => f.gate.resumeForUser(prepared.revision, prepared.stopEpoch), "stale_revision");
+  expect(f.gate.read().state).toBe("needs_action");
+});
+
 it("moves only an unfinished query after its exact completed navigation permit", async () => {
   const f = fixture();
   f.gate.registerQuery(f.context, { accepted: false });

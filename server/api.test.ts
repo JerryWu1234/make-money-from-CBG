@@ -28,6 +28,12 @@ const mocks = vi.hoisted(() => ({
   savedRecords: vi.fn(),
   markRecommendationViewed: vi.fn(),
   aiProvider: vi.fn(),
+  crawlDatabase: vi.fn(),
+  accessRead: vi.fn(),
+  resumeForUser: vi.fn(),
+}));
+vi.mock("./official-access", () => ({
+  officialGovernor: () => ({ read: mocks.accessRead, resumeForUser: mocks.resumeForUser }),
 }));
 vi.mock("./crawler/controller", () => mocks);
 vi.mock("./crawler/schedule", () => mocks);
@@ -72,6 +78,7 @@ beforeEach(() => {
     return mocks;
   });
   mocks.isCrawling.mockReturnValue(false);
+  mocks.accessRead.mockReturnValue({ state: "ready", revision: 0 });
   mocks.isAnalyzing.mockReturnValue(false);
   mocks.aiProvider.mockReturnValue("codex");
   mocks.scanScheduleStatus.mockReturnValue({ mode: "disabled" });

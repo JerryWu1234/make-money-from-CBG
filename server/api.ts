@@ -7,6 +7,7 @@ import { validateSampleSelection } from "./analysis/sample-selection";
 import { analysisConcurrency } from "./analysis/types";
 import type { SavedListingScope } from "./crawler/types";
 import { HeadRefreshSettingsError } from "./crawler/head-refresh";
+import { AccessGateError } from "./access";
 import {
   browserControl,
   browserBusyError,
@@ -41,6 +42,7 @@ const getRoutes = new Set([
 const postRoutes = new Set([
   "/api/access/policy",
   "/api/access/recover",
+  "/api/access/resume",
   "/api/access/open",
   "/api/access/stop",
   "/api/browser/open",
@@ -85,6 +87,7 @@ const browserUseRoutes = new Set([
   ...controlRoutes,
   "/api/access/open",
   "/api/access/recover",
+  "/api/access/resume",
   "/api/analysis/equipment/check",
   "/api/analysis/pet/check",
   "/api/analysis/pet-gear/check",
@@ -109,6 +112,103 @@ async function verifyRequestBody(request: IncomingMessage, limit = 4096) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     throw new Error("请求格式错误");
   return parsed;
+}
+
+async function resumeAccessForUser(mode: "resume" | "open" | "capture", revision?: unknown) {
+  const crawler = await import("./crawler/controller");
+  const access = await import("./official-access");
+  const governor = access.officialGovernor(crawler.crawlDatabase());
+  const state = governor.read();
+  if (revision !== undefined && (!Number.isSafeInteger(revision) || Number(revision) < 0))
+    throw new AccessGateError("stale_revision", "访问状态版本无效，请重新尝试", state);
+  const { browserSettings } = await import("./browser-settings");
+  const nativeMode = browserSettings().accessAdapter === "extension-native";
+  const native = nativeMode ? await import("./native-access") : undefined;
+  const nativeStatus = native?.nativeAccessStatus();
+  const nativeNeedsResume =
+    nativeStatus?.connected && nativeStatus.pageId && nativeStatus.stopped && !nativeStatus.idle;
+  if (state.state === "ready" && mode !== "resume" && !nativeNeedsResume) return state;
+  const analysis = await import("./analysis/controller");
+  const browser = await import("./cbg");
+  if (
+    crawler.isCrawling() ||
+    analysis.isAnalyzing() ||
+    browser.isBrowserWorkflowRunning() ||
+    browserControl.pending > 1
+  )
+    throw new AccessGateError(
+      "inflight_action",
+      "仍有正在运行的任务，请先暂停或等待结束后重试",
+      state,
+    );
+  try {
+    if (nativeMode) {
+      const prepared = governor.prepareUserResume(
+        revision === undefined ? state.revision : Number(revision),
+      );
+      const adapter = await native!.nativeAccess();
+      let activated = false;
+      try {
+        const ticket = await adapter.prepareManualRecovery();
+        const result = governor.resumeForUser(prepared.revision, prepared.stopEpoch);
+        activated = true;
+        adapter.completeManualRecovery(ticket);
+        return result;
+      } catch (error) {
+        try {
+          if (activated)
+            governor.reportRisk({
+              reason: "native_recovery_activation_failed",
+              evidence: { message: error instanceof Error ? error.message : "activation_failed" },
+            });
+        } finally {
+          await adapter.abortManualRecovery("用户继续未完成，保持原生停止状态").catch(() => {});
+        }
+        throw error;
+      }
+    }
+    return governor.resumeForUser(revision === undefined ? state.revision : Number(revision));
+  } catch (error) {
+    if (
+      !(error instanceof AccessGateError) ||
+      error.code !== "user_recovery_required" ||
+      mode === "resume"
+    )
+      throw error;
+    const pageReasons = new Set([
+      "unknown_inflight",
+      "manual_stop",
+      "login",
+      "verification",
+      "http_403",
+      "http_429",
+      "frequency",
+      "busy",
+      ...(nativeMode ? ["native_recovery_activation_failed", "native-activity-stopped"] : []),
+    ]);
+    if (state.reasons.some((reason) => !pageReasons.has(reason.code)))
+      throw new AccessGateError(
+        "user_recovery_required",
+        `当前暂停原因不能仅凭登录页面解除：${state.reasons.map((reason) => reason.code).join("、")}`,
+        state,
+      );
+    if (
+      mode === "capture" ||
+      (nativeMode && state.reasons.some((reason) => reason.code === "native-activity-stopped"))
+    )
+      return access.recoverOfficialAccess(
+        state.revision,
+        state.reasons.map((reason) => reason.code),
+      );
+    await access.openOfficialRecovery(state.revision);
+    throw new AccessGateError(
+      "user_recovery_required",
+      nativeMode
+        ? "请在已绑定的官网页面完成登录或验证后重新尝试；原生输入仍保持停止"
+        : "已打开官网固定页面，请完成登录或验证后重新尝试；访问限制尚未解除",
+      governor.read(),
+    );
+  }
 }
 
 export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, next: () => void) {
@@ -213,6 +313,14 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
           Number(input.revision),
           input.acknowledgedReasons as string[],
         );
+      } else if (pathname === "/api/access/resume") {
+        if (!Number.isSafeInteger(input.revision) || Number(input.revision) < 0)
+          throw new AccessGateError(
+            "stale_revision",
+            "访问状态版本无效，请重新尝试",
+            governor.read(),
+          );
+        result = await resumeAccessForUser("resume", input.revision);
       } else if (pathname === "/api/access/stop") {
         result = governor.reportRisk({ reason: "manual_stop", state: "needs_action" });
       } else result = governor.read();
@@ -625,6 +733,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
                 keys[0] !== keys[0].trim())
             )
               throw new Error("刷新采集仅支持明确指定一个已保存商品");
+            if (!crawler.isCrawling()) await resumeAccessForUser("capture");
             const attempt = await crawler.startCrawl("manual", undefined, {
               backfillOnly: pathname === "/api/crawl/backfill",
               keys: keys as string[] | undefined,
@@ -678,6 +787,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
       res.end(JSON.stringify({ error: "请先暂停采集，再重新打开角色查询" }));
       return;
     }
+    if (pathname === "/api/browser/open") await resumeAccessForUser("open");
     const { browserSettings } = await import("./browser-settings");
     if (browserSettings().accessAdapter === "extension-native") {
       const { nativeBrowserState } = await import("./native-access");
@@ -692,14 +802,25 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
     diagnostics.record("api.error", { route: pathname, error });
     if (res.destroyed) return;
     res.statusCode =
-      error instanceof ScheduleConfigError
-        ? 400
-        : error instanceof Error && error.name === "SchoolFormulaConfirmationError"
+      error instanceof AccessGateError
+        ? 409
+        : error instanceof ScheduleConfigError
           ? 400
-          : error instanceof Error &&
-              ["LogStorageTokenError", "BrowserSessionBusyError"].includes(error.name)
-            ? 409
-            : 500;
-    res.end(JSON.stringify({ error: error instanceof Error ? error.message : "请求失败" }));
+          : error instanceof Error && error.name === "SchoolFormulaConfirmationError"
+            ? 400
+            : error instanceof Error &&
+                ["LogStorageTokenError", "BrowserSessionBusyError"].includes(error.name)
+              ? 409
+              : 500;
+    const retryNotBefore = error instanceof AccessGateError ? error.state?.retryNotBefore : null;
+    const remaining = retryNotBefore
+      ? Math.max(0, Math.ceil((retryNotBefore - Date.now()) / 1000))
+      : 0;
+    res.end(
+      JSON.stringify({
+        error: `${error instanceof Error ? error.message : "请求失败"}${remaining ? `（冷却剩余约 ${remaining} 秒）` : ""}`,
+        ...(error instanceof AccessGateError ? { code: error.code, access: error.state } : {}),
+      }),
+    );
   }
 }

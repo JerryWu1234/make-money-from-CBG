@@ -6,6 +6,7 @@ import type { OpenCbgResult } from "./types";
 import { diagnostics, watchWorkPage, workflowDiagnostic } from "./diagnostics";
 import type { BrowserMode } from "./browser-settings";
 import { assertServiceOpen } from "./service-lifecycle";
+import { AccessGateError } from "./access";
 
 type WorkflowCache = {
   state: OpenCbgResult;
@@ -71,7 +72,10 @@ function createWorkflow(mode: BrowserMode) {
     })()
       .catch((error: unknown) => {
         const detail = error instanceof Error ? error.message : "流程执行失败";
-        const code = `CBG_${(cache.state.workflowStep || "unknown").toUpperCase()}`;
+        const code =
+          error instanceof AccessGateError
+            ? error.code
+            : `CBG_${(cache.state.workflowStep || "unknown").toUpperCase()}`;
         diagnostics.record("workflow.error", { code, error, durationMs: Date.now() - started });
         const message = /Timeout/i.test(detail)
           ? "网站响应超时，请重试当前流程。"
