@@ -125,7 +125,7 @@ export function RoleTrainingFilter() {
   }
   return (
     <section
-      className="analysis-plan-card role-training-filter"
+      className="role-training-filter"
       aria-label="采集前置筛选"
       aria-busy={loading || saving}
     >
@@ -154,11 +154,7 @@ export function RoleTrainingFilter() {
             }}
           />
         </label>
-        <button
-          className="analysis-button analysis-button-outline"
-          type="submit"
-          disabled={loading || saving || !saved}
-        >
+        <button className="btn-secondary" type="submit" disabled={loading || saving || !saved}>
           {saving ? "正在保存…" : "保存前置筛选"}
         </button>
       </form>
@@ -190,11 +186,7 @@ export function RoleTrainingFilter() {
         </p>
       )}
       {!loading && !saved && (
-        <button
-          className="analysis-button analysis-button-outline"
-          type="button"
-          onClick={() => void load()}
-        >
+        <button className="btn-secondary" type="button" onClick={() => void load()}>
           重新读取筛选设置
         </button>
       )}

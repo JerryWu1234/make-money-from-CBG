@@ -1,6 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { accessState } from "../fixtures/access-state";
+import { browserStatus, crawlStatus } from "../fixtures/saved-role";
 
 type Settings = { minTotal: number | null };
 function deferred() {
@@ -64,6 +66,30 @@ async function mount(
     if (url.pathname.startsWith("/api/")) {
       if (route.request().method() !== "GET") state.otherMutations.push(url.pathname);
       const responses: Record<string, unknown> = {
+        "/api/access/status": accessState,
+        "/api/browser/status": browserStatus,
+        "/api/browser/settings": { mode: "dedicated", connected: true, busy: false },
+        "/api/runtime/settings": { saveScreenshots: false },
+        "/api/crawl/settings": { analyzeEquipment: false },
+        "/api/crawl/status": crawlStatus(true, true),
+        "/api/crawl/records": { page: 1, total: 0, totalPages: 1, items: [] },
+        "/api/crawl/head-refresh": {
+          intervalSeconds: 60,
+          random: false,
+          listingAgeMinutes: 10,
+        },
+        "/api/scan/status": {
+          config: {
+            scheduleType: "daily",
+            daily: { startTime: "09:00" },
+            days: [],
+            maxDurationMinutes: null,
+          },
+          mode: "disabled",
+          state: "disabled",
+          message: "未启用",
+          timezone: "Asia/Shanghai",
+        },
         "/api/analysis/progress": overview,
         "/api/analysis/status": overview,
         "/api/ai/status": { codex: { state: "unconfigured" }, deepseek: { state: "unconfigured" } },
@@ -74,7 +100,7 @@ async function mount(
     }
     const asset = path.join(
       "dist",
-      url.pathname === "/analysis-preview" ? "index.html" : url.pathname,
+      url.pathname === "/" || url.pathname === "/analysis-preview" ? "index.html" : url.pathname,
     );
     return route.fulfill({
       contentType: asset.endsWith(".js")
@@ -85,7 +111,7 @@ async function mount(
       body: await readFile(asset),
     });
   });
-  await page.goto("http://role-training-ui.test/analysis-preview");
+  await page.goto("http://role-training-ui.test");
   return state;
 }
 
@@ -122,9 +148,12 @@ test("四修40/0/空设置保存并重载恢复，不启动采集或修改分析
   await expect(panel).toContainText("上次确认的设置：不限");
   expect(state.writes).toEqual([{ minTotal: 40 }, { minTotal: 0 }, { minTotal: null }]);
   expect(state.otherMutations).toEqual([]);
+  await page.getByRole("link", { name: "商品分析", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "商品分析", exact: true })).toBeVisible();
+  await expect(panel).toHaveCount(0);
 });
 
-test("读取中及读取失败禁提交默认值，重试后恢复且分析页仍可使用", async ({ page }, info) => {
+test("读取中及读取失败禁提交默认值，重试后恢复且采集页仍可使用", async ({ page }, info) => {
   const gate = deferred();
   const state = await mount(page, info.outputPath("filter.json"), { minTotal: 88 }, gate.promise);
   const panel = page.getByRole("region", { name: "采集前置筛选" });
@@ -145,8 +174,8 @@ test("读取中及读取失败禁提交默认值，重试后恢复且分析页�
   await expect(panel.getByRole("alert")).toContainText("模拟读取筛选失败");
   await expect(input).toBeDisabled();
   await expect(save).toBeDisabled();
-  await expect(page.getByRole("heading", { name: "商品分析", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: /分析记录/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "详情采集与续采", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "列表首页刷新设置" })).toBeVisible();
   state.failRead = false;
   await panel.getByRole("button", { name: "重新读取筛选设置" }).click();
   await expect(input).toHaveValue("88");

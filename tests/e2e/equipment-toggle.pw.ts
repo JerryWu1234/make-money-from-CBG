@@ -10,6 +10,8 @@ test("首页装备总开关默认关闭、持久保存，保存失败不伪装�
   const writes: boolean[] = [];
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
     if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://cbg-ui.test") return route.abort();
     if (url.pathname === "/api/runtime/settings")

@@ -61,6 +61,8 @@ for (const cancel of [false, true]) {
             : { ...idle, running: true, workflowStep: "connecting", message: "正在恢复连接" };
     await context.route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/crawl/role-training-filter")
+        return route.fulfill({ json: { minTotal: null } });
       if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       // 只访问本地构建与固定模拟接口，不连接日常 Chrome 或真实官网。
       if (url.origin !== "http://resume-ui.test") return route.abort();

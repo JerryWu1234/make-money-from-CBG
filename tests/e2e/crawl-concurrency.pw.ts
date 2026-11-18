@@ -49,6 +49,8 @@ test("新号优先状态显示实际在途，10并发上限不会显示成已满
   };
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
     if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://capture-status.test") return route.abort();
     if (url.pathname.startsWith("/api/")) {
@@ -247,6 +249,8 @@ for (const concurrency of [2, 6, 10]) {
       };
     await context.route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/crawl/role-training-filter")
+        return route.fulfill({ json: { minTotal: null } });
       if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== origin) return route.abort();
       if (url.pathname === "/click-rpc") {
@@ -426,6 +430,8 @@ for (const persistent of [false, true]) {
     });
     await context.route("**/*", (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/crawl/role-training-filter")
+        return route.fulfill({ json: { minTotal: null } });
       if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== "https://xyq.cbg.163.com" || url.pathname !== "/equip")
         return route.abort();
@@ -570,6 +576,8 @@ test("配置并发抓取→暂停→改为2并发续采→翻页去重入库", a
   const listPage = await context.newPage();
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
     if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin === "https://xyq.cbg.163.com") {
       const body =

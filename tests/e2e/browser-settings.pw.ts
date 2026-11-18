@@ -66,6 +66,8 @@ async function mount(
   });
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
     if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     // Built assets and all API responses are fixtures; never reach 5173 or daily Chrome.
     if (url.origin !== "http://browser-settings.test") return route.abort();

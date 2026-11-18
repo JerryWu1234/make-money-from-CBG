@@ -47,6 +47,8 @@ test("定时计划选择、清空、删除时间并保存刷新", async ({ page,
   // This browser loads the real build, with local fixture APIs and no outside traffic.
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
     if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://cbg-ui.test") return route.abort();
     if (url.pathname.startsWith("/api/")) {

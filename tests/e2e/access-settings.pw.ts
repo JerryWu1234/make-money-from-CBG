@@ -13,6 +13,8 @@ test("暂停原因、人工继续与策略更新保留同一风险版本", async
   const requests: unknown[] = [];
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
     if (url.origin !== "http://access-ui.test") return route.abort();
     if (url.pathname === "/api/access/status") return route.fulfill({ json: gate.read() });
     if (url.pathname === "/api/access/recover") {

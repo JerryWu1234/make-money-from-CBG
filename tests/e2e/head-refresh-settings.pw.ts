@@ -19,6 +19,8 @@ async function mount(page: Page, file: string) {
   };
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
     if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     // 仅本地构建和临时配置文件；禁止请求真实官网或运行中的项目服务。
     if (url.origin !== "http://head-refresh-ui.test") return route.abort();

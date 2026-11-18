@@ -6,6 +6,7 @@ import { SavedRoleList, displayTime } from "./SavedRoleList";
 import { ScanSchedulePanel } from "./ScanSchedulePanel";
 import { RunRecordSettings } from "./RunRecordSettings";
 import { SqliteDataCleanup } from "./SqliteDataCleanup";
+import { RoleTrainingFilter } from "./RoleTrainingFilter";
 import { HeadRefreshSettings } from "./HeadRefreshSettings";
 import { DEFAULT_LISTING_AGE_MINUTES, describeHeadRefresh } from "../server/crawler/head-refresh";
 import { replaceSavedRecordKey, replaceSavedRecordsPage, savedRecordKey } from "./saved-view-state";
@@ -240,6 +241,7 @@ export function CrawlPanel({
           </div>
         </div>
         <HeadRefreshSettings />
+        <RoleTrainingFilter />
         {waitingForReady && (
           <p role="status" className="status-note">
             正在恢复 Chrome 连接和角色列表；如需授权或扫码，请按页面提示完成，之后自动继续采集。

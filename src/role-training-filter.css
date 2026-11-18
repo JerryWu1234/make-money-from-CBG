@@ -1,3 +1,11 @@
+.role-training-filter {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid var(--card-border, #d8e0eb);
+  border-radius: 8px;
+  background: var(--card-bg, #fff);
+}
+
 .role-training-filter form,
 .role-training-filter label {
   display: grid;
