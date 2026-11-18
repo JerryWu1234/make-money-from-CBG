@@ -5,7 +5,14 @@ import { withNativeWorkflow } from "./adapters/native-workflow";
 import { closeNativeAccess, nativeAccess } from "./native-access";
 import { officialGovernor } from "./official-access";
 
-const captured = vi.hoisted(() => ({ options: undefined as any }));
+const captured = vi.hoisted(() => ({
+  options: undefined as any,
+  status: { stopped: true, recoveringStopEpoch: undefined as number | undefined },
+  stop: vi.fn(async () => {
+    captured.status.stopped = true;
+    captured.status.recoveringStopEpoch = undefined;
+  }),
+}));
 vi.mock("./adapters/extension-native", () => ({
   ExtensionNativeRuntime: class {
     constructor(options: unknown) {
@@ -13,13 +20,58 @@ vi.mock("./adapters/extension-native", () => ({
     }
     start = async () => {};
     close = async () => {};
-    stop = async () => {};
+    stop = captured.stop;
+    status = () => captured.status;
   },
 }));
 const dbs: DatabaseSync[] = [];
 afterEach(async () => {
   await closeNativeAccess();
   for (const db of dbs.splice(0)) db.close();
+  vi.useRealTimers();
+  captured.stop.mockClear();
+  captured.status = { stopped: true, recoveringStopEpoch: undefined };
+});
+
+it("paused heartbeat preserves an already-stopped binding handshake, but still stops active input", async () => {
+  vi.useFakeTimers();
+  const db = new DatabaseSync(":memory:");
+  dbs.push(db);
+  await nativeAccess(db);
+  const gate = officialGovernor(db);
+  gate.reportRisk({ reason: "unknown_inflight" });
+
+  // Before its first snapshot, a newly connected extension must be able to
+  // deliver the bound status. Repeated stop commands invalidate that handshake.
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(captured.stop).not.toHaveBeenCalled();
+  expect(gate.read().state).toBe("needs_action");
+
+  captured.status.stopped = false;
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(captured.stop).toHaveBeenCalledExactlyOnceWith("官网访问状态已暂停");
+  await vi.advanceTimersByTimeAsync(3000);
+  expect(captured.stop).toHaveBeenCalledOnce();
+  expect(gate.read().state).toBe("needs_action");
+});
+
+it("paused heartbeat preserves the current recovery but cancels it once a new risk changes the epoch", async () => {
+  vi.useFakeTimers();
+  const db = new DatabaseSync(":memory:");
+  dbs.push(db);
+  await nativeAccess(db);
+  const gate = officialGovernor(db);
+  const paused = gate.reportRisk({ reason: "login" });
+  captured.status.recoveringStopEpoch = paused.stopEpoch;
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(captured.stop).not.toHaveBeenCalled();
+
+  gate.reportRisk({ reason: "manual_stop" });
+  await vi.advanceTimersByTimeAsync(1000);
+  expect(captured.stop).toHaveBeenCalledExactlyOnceWith("官网访问状态已暂停");
+  expect(captured.status.recoveringStopEpoch).toBeUndefined();
+  await vi.advanceTimersByTimeAsync(2000);
+  expect(captured.stop).toHaveBeenCalledOnce();
 });
 
 it("native final dispatch keeps a crawl fence across page changes and never lends it to a queued market workflow", async () => {

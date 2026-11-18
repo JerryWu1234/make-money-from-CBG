@@ -74,8 +74,15 @@ export async function nativeAccess(db?: DatabaseSync) {
         // The active workflow owns its diagnostic scope. A service heartbeat must
         // not replace that scope or read a resolver from an unrelated queued job.
         const state = governor.read();
-        const recovering = cache.adapter?.status().recoveringStopEpoch === state.stopEpoch;
-        if (["cooldown", "needs_action"].includes(state.state) && !recovering)
+        const status = cache.adapter?.status();
+        const recovering = status?.recoveringStopEpoch === state.stopEpoch;
+        // A stopped runtime already rejects input. Repeating stop here would
+        // invalidate the extension's read-only initial binding handshake.
+        if (
+          ["cooldown", "needs_action"].includes(state.state) &&
+          !recovering &&
+          (!status?.stopped || status.recoveringStopEpoch !== undefined)
+        )
           void cache.adapter?.stop("官网访问状态已暂停");
       } catch (error) {
         void cache.adapter?.stop(error instanceof Error ? error.message : "访问状态不可用");
