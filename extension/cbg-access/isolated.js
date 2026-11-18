@@ -552,12 +552,35 @@
         : "unknown";
     const associated = nodes.get(actionContext?.actionId),
       targetRect = associated?.node?.isConnected ? associated.node.getBoundingClientRect() : null;
-    const hasLogout = [...document.querySelectorAll('a[href*="act=logout"]')].some(
-      (node) => visible(node) && new URL(node.href).origin === location.origin,
-    );
+    const hasLogout = [...document.querySelectorAll("a[href]")].some((node) => {
+      if (!visible(node)) return false;
+      let destination = node.getAttribute("href")?.trim() || "";
+      if (/^javascript:/i.test(destination)) {
+        // Observe the site's literal logout(URL) control without executing its JavaScript.
+        const literal = /^\s*logout\(\s*(['"])(https:\/\/[^'"\\\s]+)\1\s*\)\s*;?\s*$/.exec(
+          destination.slice(11),
+        );
+        if (!literal) return false;
+        destination = literal[2];
+      }
+      try {
+        const url = new URL(destination, location.href);
+        return (
+          url.origin === "https://xyq.cbg.163.com" &&
+          !url.username &&
+          !url.password &&
+          ["/cgi-bin/logout.py", "/cgi-bin/login.py"].includes(url.pathname) &&
+          url.searchParams.getAll("act").length === 1 &&
+          url.searchParams.get("act") === "logout"
+        );
+      } catch {
+        return false;
+      }
+    });
     const hasLogin = [
       ...document.querySelectorAll('#loginContainer,#qrcode,input[type="password"]'),
     ].some(visible);
+    const logoutCandidates = [...document.querySelectorAll('a[href*="logout" i]')];
     const authenticated =
       globals.authState === false || hasLogin
         ? false
@@ -565,6 +588,15 @@
           ? true
           : undefined;
     const snapshot = {
+      observerVersion: "1.1.1",
+      authenticationEvidence: {
+        mainRender: hasMainRender,
+        serverAuth: globals.authState ?? null,
+        logoutControl: hasLogout,
+        loginSurface: hasLogin,
+        logoutCandidates: logoutCandidates.length,
+        visibleLogoutCandidates: logoutCandidates.filter(visible).length,
+      },
       pageId,
       pageGeneration: generation,
       observedAt: new Date().toISOString(),

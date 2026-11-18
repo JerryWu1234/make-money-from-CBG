@@ -2,12 +2,17 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import type { ActionPlan } from "./adapters/contracts";
 import { withNativeWorkflow } from "./adapters/native-workflow";
-import { closeNativeAccess, nativeAccess } from "./native-access";
+import { closeNativeAccess, nativeAccess, nativeBrowserState } from "./native-access";
 import { officialGovernor } from "./official-access";
 
 const captured = vi.hoisted(() => ({
   options: undefined as any,
-  status: { stopped: true, recoveringStopEpoch: undefined as number | undefined },
+  database: undefined as DatabaseSync | undefined,
+  start: vi.fn(async () => {}),
+  snapshot: vi.fn(async (): Promise<any> => {
+    throw new Error("not bound");
+  }),
+  status: { stopped: true, recoveringStopEpoch: undefined as number | undefined, connected: false },
   stop: vi.fn(async () => {
     captured.status.stopped = true;
     captured.status.recoveringStopEpoch = undefined;
@@ -18,10 +23,17 @@ vi.mock("./adapters/extension-native", () => ({
     constructor(options: unknown) {
       captured.options = options;
     }
-    start = async () => {};
+    start = captured.start;
+    snapshot = captured.snapshot;
     close = async () => {};
     stop = captured.stop;
     status = () => captured.status;
+  },
+}));
+vi.mock("./crawler/controller", () => ({
+  crawlDatabase: () => {
+    if (!captured.database) throw new Error("test database missing");
+    return captured.database;
   },
 }));
 const dbs: DatabaseSync[] = [];
@@ -30,7 +42,10 @@ afterEach(async () => {
   for (const db of dbs.splice(0)) db.close();
   vi.useRealTimers();
   captured.stop.mockClear();
-  captured.status = { stopped: true, recoveringStopEpoch: undefined };
+  captured.status = { stopped: true, recoveringStopEpoch: undefined, connected: false };
+  captured.database = undefined;
+  captured.start.mockClear();
+  captured.snapshot.mockReset().mockRejectedValue(new Error("not bound"));
 });
 
 it("paused heartbeat preserves an already-stopped binding handshake, but still stops active input", async () => {
@@ -124,4 +139,84 @@ it("native final dispatch keeps a crawl fence across page changes and never lend
     ),
   );
   expect(stored.crawlLease).toBeUndefined();
+});
+
+it("native status polling starts only the local listener without requiring a start or extension click", async () => {
+  const db = new DatabaseSync(":memory:");
+  dbs.push(db);
+  captured.database = db;
+  const result = await nativeBrowserState();
+  expect(captured.start).toHaveBeenCalledOnce();
+  expect(result).toMatchObject({ connected: false, running: false, isLoggedIn: false });
+  expect(result.message).toContain("自动连接");
+  expect(captured.stop).not.toHaveBeenCalled();
+  expect(db.prepare("SELECT count(*) AS count FROM access_permits").get()?.count).toBe(0);
+});
+it.each([true, false])(
+  "a valid observed role list (visible=%s) enables the ordinary collection entry while preserving a stopped access gate",
+  async (visible) => {
+    const db = new DatabaseSync(":memory:");
+    dbs.push(db);
+    await nativeAccess(db);
+    const gate = officialGovernor(db);
+    const paused = gate.reportRisk({ reason: "login" });
+    captured.status.connected = true;
+    captured.snapshot.mockResolvedValue({
+      listing: { items: [{}] },
+      visible,
+      authenticated: true,
+      access: "normal",
+      loading: false,
+      url: "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py",
+      title: "角色列表",
+    });
+    expect(await nativeBrowserState()).toMatchObject({
+      connected: true,
+      isLoggedIn: true,
+      workflowStep: "completed",
+      running: false,
+    });
+    expect(gate.read()).toMatchObject({
+      state: "needs_action",
+      revision: paused.revision,
+      stopEpoch: paused.stopEpoch,
+    });
+    expect(captured.stop).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT count(*) AS count FROM access_permits").get()?.count).toBe(0);
+  },
+);
+it("a connected search form is described as awaiting a website query, not as an install or raw server-stop error", async () => {
+  const db = new DatabaseSync(":memory:");
+  dbs.push(db);
+  await nativeAccess(db);
+  captured.status.connected = true;
+  captured.snapshot.mockResolvedValue({
+    authenticated: true,
+    access: "normal",
+    loading: false,
+    url: "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=show_search_role_form",
+  });
+  const result = await nativeBrowserState();
+  expect(result.isLoggedIn).toBe(false);
+  expect(result.message).toContain("请先在官网搜索角色");
+  expect(result.message).not.toContain("server-stop");
+});
+
+it("a disconnected native host cannot expose a cached role list as ready", async () => {
+  const db = new DatabaseSync(":memory:");
+  dbs.push(db);
+  await nativeAccess(db);
+  captured.snapshot.mockResolvedValue({
+    listing: { items: [{}] },
+    visible: true,
+    authenticated: true,
+    access: "normal",
+    loading: false,
+    url: "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py",
+  });
+  expect(await nativeBrowserState()).toMatchObject({
+    connected: false,
+    isLoggedIn: false,
+    workflowStep: "idle",
+  });
 });

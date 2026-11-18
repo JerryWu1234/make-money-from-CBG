@@ -229,7 +229,7 @@ socket.on("data", (data) => {
           writeHelper({ command: "status", actionId: message.actionId });
           continue;
         }
-        if (message.command === "observe") {
+        if (["observe", "focus"].includes(message.command)) {
           if (
             !/^[a-zA-Z0-9_-]{1,100}$/.test(message.actionId) ||
             pending.has(message.actionId) ||
@@ -329,7 +329,18 @@ process.stdin.on("data", (data) => {
       else if (message.kind === "command-result") {
         const record = pending.get(message.actionId);
         if (record?.kind === "resume") resumeAck(message.actionId, record, "extension", message);
-        else if (pending.delete(message.actionId)) server({ ...message, kind: "input-result" });
+        else if (pending.delete(message.actionId))
+          server(
+            record?.kind === "observe" && message.posted !== false
+              ? {
+                  kind: "input-result",
+                  actionId: message.actionId,
+                  ok: false,
+                  posted: false,
+                  error: "read-only-command-cannot-post",
+                }
+              : { ...message, kind: "input-result" },
+          );
       } else if (message.kind === "command-proof") {
         const command = pending.get(message.actionId);
         if (

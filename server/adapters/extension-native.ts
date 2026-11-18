@@ -187,6 +187,14 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     bindingEpoch: string;
     connectionEpoch: string;
   };
+  private userFocus?: {
+    id: string;
+    binding: NonNullable<ExtensionNativeRuntime["currentBinding"]>;
+    socket: Socket;
+    url: string;
+    verifiedAt: number;
+    controller: AbortController;
+  };
   private readonly pageContexts = new Map<
     string,
     {
@@ -222,6 +230,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     controller: AbortController;
     prepared: boolean;
     automatic: boolean;
+    focusId?: string;
   };
   private returnTarget?: {
     url: string;
@@ -679,6 +688,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
       return;
     }
     if (message.kind === "host-status") {
+      this.cancelUserFocus();
       const activity = this.detachActivity(String(message.reason));
       if (message.reason !== "server-stop") this.idle = false;
       this.stopped = true;
@@ -1105,6 +1115,85 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
   }
   async nativeStatus() {
     return this.request({ kind: "command", command: "status", actionId: randomUUID() });
+  }
+  /** Explicit user task preparation only. This does not grant input authority. */
+  async focusBoundPage(): Promise<{ id: string }> {
+    const binding = this.currentBinding;
+    const snapshot = binding && this.snapshots.get(binding.pageId);
+    const socket = this.socket;
+    if (!binding || !snapshot || !socket || socket.destroyed)
+      throw new Error("官网尚未自动绑定，无法切换到角色列表");
+    const focus = {
+      id: randomUUID(),
+      binding,
+      socket,
+      url: snapshot.url,
+      verifiedAt: 0,
+      controller: new AbortController(),
+    };
+    this.cancelUserFocus();
+    const epoch = this.options.stopEpoch();
+    this.userFocus = focus;
+    const assertCurrent = () => {
+      this.assertFocusedPage(focus, false);
+      if (this.options.stopEpoch() !== epoch) throw new Error("聚焦期间访问状态已变化");
+    };
+    try {
+      const result = await this.request({
+        kind: "command",
+        command: "focus",
+        actionId: randomUUID(),
+        context: { ...binding, url: snapshot.url },
+      });
+      assertCurrent();
+      if (!result.ok || result.posted !== false)
+        throw new Error(textValue(result.error, "无法切换到已绑定的官网页面"));
+      const startedAt = Date.now();
+      const observed = await this.request({
+        kind: "command",
+        command: "observe",
+        actionId: randomUUID(),
+      });
+      assertCurrent();
+      if (!observed.ok) throw new Error("无法读取聚焦后的官网页面");
+      await this.waitFor(
+        (value) =>
+          value.visible &&
+          !value.loading &&
+          value.access === "normal" &&
+          value.authenticated === true &&
+          value.context.pageGeneration === binding.pageGeneration &&
+          value.url === focus.url &&
+          Date.parse(value.context.observedAt) >= startedAt,
+        { pageId: binding.pageId, after: "", timeoutMs: 5000, signal: focus.controller.signal },
+      );
+      assertCurrent();
+      focus.verifiedAt = Date.now();
+      return { id: focus.id };
+    } catch (error) {
+      if (this.userFocus === focus) this.userFocus = undefined;
+      throw error;
+    }
+  }
+  private cancelUserFocus() {
+    if (this.userFocus && this.recovery?.focusId === this.userFocus.id)
+      this.recovery.controller.abort(new Error("官网聚焦已取消"));
+    this.userFocus?.controller.abort(new Error("官网聚焦已取消"));
+    this.userFocus = undefined;
+  }
+  assertFocusedPage(receipt: { id: string }, verified = true): void {
+    const focus = this.userFocus;
+    if (
+      !focus ||
+      focus.id !== receipt.id ||
+      focus.controller.signal.aborted ||
+      this.currentBinding !== focus.binding ||
+      this.socket !== focus.socket ||
+      focus.socket.destroyed ||
+      this.snapshots.get(focus.binding.pageId)?.url !== focus.url ||
+      (verified && (!focus.verifiedAt || Date.now() - focus.verifiedAt > 5000))
+    )
+      throw new Error("官网聚焦状态已失效，请重新开始当前任务");
   }
   async execute(plan: ActionPlan, signal?: AbortSignal): Promise<PageSnapshot> {
     const workflow = nativeWorkflowActivity();
@@ -1660,8 +1749,8 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     this.queryId = queryId;
     return { runId, queryId };
   }
-  async prepareManualRecovery(): Promise<NativeRecoveryTicket> {
-    return this.prepareActivation(false);
+  async prepareManualRecovery(focus?: { id: string }): Promise<NativeRecoveryTicket> {
+    return this.prepareActivation(false, focus);
   }
   private async activationSnapshot(): Promise<PageSnapshot> {
     const pageId = this.pageId || "",
@@ -1687,7 +1776,10 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     }
     return this.snapshot(pageId);
   }
-  private async prepareActivation(automatic: boolean): Promise<NativeRecoveryTicket> {
+  private async prepareActivation(
+    automatic: boolean,
+    focus?: { id: string },
+  ): Promise<NativeRecoveryTicket> {
     if (this.recovery) throw new Error("已有原生恢复核验正在进行");
     if (
       automatic &&
@@ -1695,7 +1787,9 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
         (this.options.accessReady && !this.options.accessReady()))
     )
       throw new Error("未知动作或访问暂停禁止自动启用原生输入");
+    if (focus) this.assertFocusedPage(focus);
     const snapshot = await this.activationSnapshot();
+    if (focus) this.assertFocusedPage(focus);
     if (
       snapshot.access !== "normal" ||
       snapshot.authenticated !== true ||
@@ -1715,7 +1809,13 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
       browserSessionEpoch: snapshot.context.browserSessionEpoch,
       verifiedAt: 0,
     };
-    const recovery = { ticket, controller: new AbortController(), prepared: false, automatic };
+    const recovery = {
+      ticket,
+      controller: new AbortController(),
+      prepared: false,
+      automatic,
+      focusId: focus?.id,
+    };
     this.recovery = recovery;
     this.stopped = true;
     this.reason = "正在核验原生恢复条件";
@@ -1733,6 +1833,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
       )
         throw new Error("原生权限、输入监控、前台或解锁条件未满足");
       recovery.controller.signal.throwIfAborted();
+      if (focus) this.assertFocusedPage(focus);
       context.stopEpoch = ticket.stopEpoch;
       context.boundAt = Date.now();
       context.requiredBindingEpoch = randomUUID();
@@ -1741,6 +1842,8 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
         actionId: randomUUID(),
         context: { ...context, pageId: ticket.pageId, recoveryEpoch: context.requiredBindingEpoch },
       });
+      recovery.controller.signal.throwIfAborted();
+      if (focus) this.assertFocusedPage(focus);
       if (!result.ok) throw new Error(textValue(result.error, "原生恢复握手失败"));
       const activity = await this.beginActivity(recovery.controller.signal, true);
       try {
@@ -1756,6 +1859,8 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
       } finally {
         await activity.close();
       }
+      recovery.controller.signal.throwIfAborted();
+      if (focus) this.assertFocusedPage(focus);
       if (this.options.stopEpoch() !== ticket.stopEpoch || this.recovery !== recovery)
         throw new Error("新的访问风险使本次原生恢复失效");
       ticket.verifiedAt = Date.now();
@@ -1772,6 +1877,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     if (
       !prepared ||
       !prepared.prepared ||
+      prepared.controller.signal.aborted ||
       prepared.ticket.ticketId !== ticket.ticketId ||
       prepared.ticket.stopEpoch !== ticket.stopEpoch ||
       prepared.ticket.pageId !== ticket.pageId ||
@@ -1844,6 +1950,7 @@ export class ExtensionNativeRuntime implements PageObserver, UiDriver {
     );
   }
   async stop(reason: string) {
+    this.cancelUserFocus();
     this.detachActivity(reason);
     this.idle = false;
     const recovery = this.recovery;

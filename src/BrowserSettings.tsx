@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export type BrowserMode = "dedicated" | "daily";
-type AccessAdapter = "playwright" | "extension-native";
+export type AccessAdapter = "playwright" | "extension-native";
 type Settings = {
   mode: BrowserMode;
   accessAdapter?: AccessAdapter;
@@ -45,11 +45,13 @@ export function BrowserSettings({
   active,
   onBusy,
   onMode,
+  onAdapter,
   onSaved,
 }: {
   active: boolean;
   onBusy: (busy: boolean) => void;
   onMode: (mode: BrowserMode) => void;
+  onAdapter?: (adapter: AccessAdapter) => void;
   onSaved: (mode: BrowserMode) => Promise<void>;
 }) {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -57,6 +59,7 @@ export function BrowserSettings({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const mode = useRef<BrowserMode | null>(null);
+  const adapter = useRef<AccessAdapter | null>(null);
   const visibility = useRef<boolean | null>(null);
   const pending = useRef(false);
   const generation = useRef(0);
@@ -75,11 +78,15 @@ export function BrowserSettings({
         if (id !== generation.current || signal?.aborted) return;
         const changed =
           mode.current !== null &&
-          (data.mode !== mode.current || data.showWorkPages !== visibility.current);
+          (data.mode !== mode.current ||
+            data.showWorkPages !== visibility.current ||
+            (data.accessAdapter ?? "playwright") !== adapter.current);
         mode.current = data.mode;
+        adapter.current = data.accessAdapter ?? "playwright";
         visibility.current = data.showWorkPages;
         setSettings(data);
         onMode(data.mode);
+        onAdapter?.(data.accessAdapter ?? "playwright");
         setError("");
         if (changed) await onSaved(data.mode);
       } catch (cause) {
@@ -92,7 +99,7 @@ export function BrowserSettings({
         }
       }
     },
-    [onBusy, onMode, onSaved],
+    [onBusy, onMode, onAdapter, onSaved],
   );
 
   useEffect(() => {
@@ -132,9 +139,11 @@ export function BrowserSettings({
       if (data.mode !== next || data.showWorkPages !== showWorkPages)
         throw new Error("浏览器设置未保存，请重试");
       mode.current = data.mode;
+      adapter.current = data.accessAdapter ?? "playwright";
       visibility.current = data.showWorkPages;
       setSettings(data);
       onMode(data.mode);
+      onAdapter?.(data.accessAdapter ?? "playwright");
       await onSaved(data.mode);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "浏览器运行方式保存失败，请重试");
@@ -150,8 +159,9 @@ export function BrowserSettings({
       <fieldset disabled={loading || saving || active || settings?.busy || settings === null}>
         <legend>浏览器运行方式</legend>
         <p className="status-note">
-          默认使用项目专用浏览器保存登录。重启服务复用本机登录，无需日常 Chrome
-          调试授权；登录过期仍需扫码。
+          {settings?.accessAdapter === "extension-native"
+            ? "扩展自动读取藏宝阁官网；在官网完成首次登录和角色搜索后，商品列表会自动连接，无需点击扩展。"
+            : "默认使用项目专用浏览器保存登录。重启服务复用本机登录，无需日常 Chrome 调试授权；登录过期仍需扫码。"}
         </p>
         <div className="browser-mode-options">
           <label>
@@ -171,37 +181,41 @@ export function BrowserSettings({
               <option value="extension-native">扩展读取与 macOS 输入</option>
             </select>
           </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={settings?.mode === "daily"}
-              onChange={(event) => void save(event.target.checked ? "daily" : "dedicated")}
-            />
-            <span>
-              <strong>使用日常 Chrome（CDP，需要授权）</strong>
-              <small>
-                仅勾选并点击开始查询后连接日常 Chrome。勾选不代表已获 Chrome
-                授权；新调试连接可能再次要求允许。
-              </small>
-            </span>
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              checked={settings?.showWorkPages ?? false}
-              onChange={(event) => {
-                if (settings) void save(settings.mode, event.target.checked);
-              }}
-            />
-            <span>
-              <strong>显示操作过程（实时预览）</strong>
-              <small>
-                开启后在 Chrome
-                窗口查看查询、采集和网页查价过程。选择会保存，修改后重新开始查询生效。
-                运行时请避免手动操作工作页。
-              </small>
-            </span>
-          </label>
+          {settings?.accessAdapter !== "extension-native" && (
+            <>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={settings?.mode === "daily"}
+                  onChange={(event) => void save(event.target.checked ? "daily" : "dedicated")}
+                />
+                <span>
+                  <strong>使用日常 Chrome（CDP，需要授权）</strong>
+                  <small>
+                    仅勾选并点击开始查询后连接日常 Chrome。勾选不代表已获 Chrome
+                    授权；新调试连接可能再次要求允许。
+                  </small>
+                </span>
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={settings?.showWorkPages ?? false}
+                  onChange={(event) => {
+                    if (settings) void save(settings.mode, event.target.checked);
+                  }}
+                />
+                <span>
+                  <strong>显示操作过程（实时预览）</strong>
+                  <small>
+                    开启后在 Chrome
+                    窗口查看查询、采集和网页查价过程。选择会保存，修改后重新开始查询生效。
+                    运行时请避免手动操作工作页。
+                  </small>
+                </span>
+              </label>
+            </>
+          )}
         </div>
       </fieldset>
       <p className="status-note" role="status">
@@ -211,7 +225,9 @@ export function BrowserSettings({
             ? "正在保存并更新浏览器状态…"
             : active || settings?.busy
               ? "查询、采集或分析正在运行，请先暂停任务再修改浏览器设置。"
-              : `${settings?.showWorkPages ? "已开启操作过程显示。" : "操作过程默认隐藏。"}切换后重新开始查询，已有浏览器登录资料会保留。`}
+              : settings?.accessAdapter === "extension-native"
+                ? "只连接 https://xyq.cbg.163.com/。采集任务由采集页控制；主动点击扩展可暂停读取，再点可继续。"
+                : `${settings?.showWorkPages ? "已开启操作过程显示。" : "操作过程默认隐藏。"}切换后重新开始查询，已有浏览器登录资料会保留。`}
       </p>
       {error && (
         <p className="error-message" role="alert">

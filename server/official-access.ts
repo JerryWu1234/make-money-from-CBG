@@ -384,7 +384,11 @@ export async function bindOfficialPage(
   );
 }
 
-export async function recoverOfficialAccess(revision: number, acknowledgedReasons: string[]) {
+export async function recoverOfficialAccess(
+  revision: number,
+  acknowledgedReasons: string[],
+  focusReceipt?: { id: string },
+) {
   const governor = officialGovernor();
   const state = governor.read();
   if (state.revision !== revision) throw new Error("访问状态已变化，请重新核对全部原因");
@@ -396,7 +400,7 @@ export async function recoverOfficialAccess(revision: number, acknowledgedReason
   if (browserSettings().accessAdapter === "extension-native") {
     const { nativeAccess } = await import("./native-access");
     const adapter = await nativeAccess();
-    const ticket = await adapter.prepareManualRecovery();
+    const ticket = await adapter.prepareManualRecovery(focusReceipt);
     try {
       const result = governor.finishRecovery(token, acknowledgedReasons);
       try {

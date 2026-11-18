@@ -22,6 +22,23 @@ const chromePath =
 const hostName = "com.cbg.access_bridge";
 const fixtureUrl =
   "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role&installed_fixture=1";
+const fixtureListings = Array.from({ length: 15 }, (_, index) => ({
+  game_ordersn: `fixture-order-${index}`,
+  eid: `fixture-eid-${index}`,
+  server_id: 1,
+  server_name: "隔离服",
+  selling_time: "2026-11-18 08:00:00",
+  create_time: "2026-11-18 07:00:00",
+  expire_time: "2026-11-25 08:00:00",
+  desc: "offline-description-".repeat(3000),
+}));
+assert(JSON.stringify(fixtureListings).length > 200000);
+const fixtureRows = fixtureListings
+  .map(
+    (row, index) =>
+      `<a class="soldImg" href="/equip?s=1&eid=${row.eid}" data_ordersn="${row.game_ordersn}" data_eid="${row.eid}" data_serverid="1" data_name="隔离角色${index + 1}" data_price="100" data_level="100">隔离角色${index + 1}</a>`,
+  )
+  .join("<br>");
 const arguments_ = process.argv.slice(2);
 if (
   arguments_.some((value) => !["--run", "--prepare-only", "--help"].includes(value)) ||
@@ -56,8 +73,8 @@ const result = {
   differences: [
     "Temporary manifest adds only the fixed public key; extension scripts are copied unchanged.",
     "Temporary host.mjs changes only configPath to the temporary mode-0600 host.json.",
-    "The local Unix-socket fixture records and ACKs envelopes, and sends status only. It never sends resume/activity/execute.",
-    "CDP installs the real extension and triggers its real toolbar action in this temporary profile. No chrome.runtime replacement or content-script injection is used.",
+    "The local Unix-socket fixture records and ACKs envelopes, and sends read-only status/focus only. It never sends resume/activity/execute.",
+    "CDP installs the real extension; the focused fixture page must bind automatically without any toolbar action in this temporary profile. No chrome.runtime replacement or content-script injection is used.",
   ],
   notRun: [
     "OS business input",
@@ -248,9 +265,9 @@ try {
         contentType: "text/html",
         body: `<!doctype html><meta charset="utf-8"><title>Installed extension isolation fixture</title>
 <h1>实装只读验收 · 隔离模拟页</h1><p>此页为本地固定数据；扩展与 Native Messaging 使用真实安装。没有发送原生业务输入。</p>
-<a href="/cgi-bin/login.py?act=logout">退出</a><form><input name="price_min" value="100"></form>
-<div id="query_result">没有符合条件<div id="soldList"></div><div id="pager_bar">第 1 页 共 1 页</div></div>
-<script>var IsLogin=1,LoginInfo={login:1},QueryArgs={server_type:'1,2,3',page:1,order_by:'selling_time DESC',price_min:'100'},QueryResult=[];
+<a href="javascript:logout('https://xyq.cbg.163.com/cgi-bin/logout.py?act=logout')">退出</a><form><input name="price_min" value="100"></form>
+<div id="query_result"><div id="soldList">${fixtureRows}</div><div id="pager_bar">第 1 页 共 1 页</div></div>
+<script>var IsLogin=1,LoginInfo={login:1},QueryArgs={server_type:'1,2,3',page:1,order_by:'selling_time DESC',price_min:'100'},QueryResult=${JSON.stringify(fixtureListings)};
 window.ajax_with_recommend=function(){return 'fixture-only'};window.__installedFixtureAjax=window.ajax_with_recommend;</script>`,
       });
     if (route.request().url().startsWith(`chrome-extension://${extensionId}/`))
@@ -310,19 +327,7 @@ window.ajax_with_recommend=function(){return 'fixture-only'};window.__installedF
     description:
       "Actual isolated fixture page rendered by Chrome; no permission or input success is depicted",
   });
-  // Extensions.triggerAction accepts a tab target, while Playwright page sessions expose page targets.
-  const { targetInfos } = await protocol.send("Target.getTargets", {
-    filter: [{ type: "tab", exclude: false }],
-  });
-  const tabTarget = targetInfos.find(
-    (target) => target.type === "tab" && target.url === fixtureUrl,
-  );
-  assert(tabTarget, "Chrome did not expose the fixture's tab target to Extensions.triggerAction");
-  result.actionTarget = { targetId: tabTarget.targetId, type: tabTarget.type, url: tabTarget.url };
-  await protocol.send("Extensions.triggerAction", {
-    id: extensionId,
-    targetId: tabTarget.targetId,
-  });
+  result.actionTarget = { mode: "automatic-no-toolbar-action", url: fixtureUrl };
   const observed = await until(async () => {
     const stored = await worker.evaluate(() => chrome.storage.local.get("bridge"));
     const socketSnapshot = result.messages.find(
@@ -337,9 +342,26 @@ window.ajax_with_recommend=function(){return 'fixture-only'};window.__installedF
       : pendingSnapshot
         ? { via: "real SW durable outbox", snapshot: pendingSnapshot.payload }
         : undefined;
-  }, 2500);
+  }, 10000);
+  if (observed) {
+    assert.equal(observed.snapshot.listing?.items?.length, fixtureListings.length);
+    for (const [index, item] of observed.snapshot.listing.items.entries()) {
+      assert.equal(item.raw.game_ordersn, fixtureListings[index].game_ordersn);
+      assert.equal(item.raw.eid, fixtureListings[index].eid);
+      assert.equal(item.raw.selling_time, fixtureListings[index].selling_time);
+      assert.equal(item.raw.create_time, fixtureListings[index].create_time);
+      assert.equal(item.raw.expire_time, fixtureListings[index].expire_time);
+      assert.equal(item.raw.desc, undefined);
+    }
+    result.largeListingProjection = {
+      sourceCharacters: JSON.stringify(fixtureListings).length,
+      expectedRows: fixtureListings.length,
+      observedRows: observed.snapshot.listing.items.length,
+      noToolbarAction: true,
+    };
+  }
   record(
-    "real toolbar action and observer snapshot",
+    "automatic domain binding and observer snapshot without toolbar action",
     observed ? "passed" : "blocked",
     observed ||
       "Real monitor denial disconnected the native port before a committed snapshot was retained; no synthetic runtime was substituted.",
@@ -400,6 +422,48 @@ window.ajax_with_recommend=function(){return 'fixture-only'};window.__installedF
       },
     );
   }
+  const bridgeForFocus = await worker.evaluate(
+    async () => (await chrome.storage.local.get("bridge")).bridge,
+  );
+  const focusTab = await worker.evaluate(
+    async () => (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0],
+  );
+  // No resume/activity/execute is sent. Focusing an existing binding must remain read-only.
+  const focusAction = "installed-readonly-focus";
+  const focusSocket = [...sockets].at(-1);
+  assert(focusSocket && bridgeForFocus.bound);
+  focusSocket.write(
+    JSON.stringify({
+      kind: "command",
+      command: "focus",
+      actionId: focusAction,
+      context: {
+        ...bridgeForFocus.bound,
+        connectionEpoch: bridgeForFocus.connectionEpoch,
+        url: focusTab.url.split("#")[0],
+      },
+    }) + "\n",
+  );
+  const focusedReply = await until(
+    async () =>
+      result.messages.find(
+        (entry) => entry.message?.kind === "input-result" && entry.message.actionId === focusAction,
+      ),
+    10000,
+  );
+  assert.equal(focusedReply?.message.ok, true, JSON.stringify(focusedReply));
+  assert.equal(focusedReply?.message.posted, false);
+  assert.equal(
+    result.messages.some(
+      (entry) => entry.message?.kind === "command-proof" && entry.message.actionId === focusAction,
+    ),
+    false,
+  );
+  record("explicit focus through real Native host remains read-only", "passed", {
+    ok: true,
+    posted: false,
+    noInputAuthority: true,
+  });
   const denied = result.messages.filter(
     (entry) =>
       entry.message?.kind === "host-status" &&
@@ -425,7 +489,7 @@ window.ajax_with_recommend=function(){return 'fixture-only'};window.__installedF
   record(
     "OS business input",
     "not-run",
-    "The socket fixture sent ACK/status only; no resume, activity lease, execute, permission spoof or TCC grant was issued.",
+    "The socket fixture sent ACK/status/focus only; no resume, activity lease, execute, permission spoof or TCC grant was issued.",
   );
   const installedPage = await context.newPage();
   await installedPage.goto(`chrome://extensions/?id=${extensionId}`);

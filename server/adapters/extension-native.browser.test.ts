@@ -304,6 +304,139 @@ describe("isolated extension observation and semantic targeting", () => {
       await page.close();
     }
   });
+  it.each([
+    {
+      name: "actual official javascript logout literal",
+      href: "javascript:logout('https://xyq.cbg.163.com/cgi-bin/logout.py?act=logout')",
+      auth: 1,
+      expected: true,
+    },
+    {
+      name: "foreign javascript destination",
+      href: "javascript:logout('https://example.com/cgi-bin/logout.py?act=logout')",
+      auth: 1,
+      expected: undefined,
+    },
+    {
+      name: "different function",
+      href: "javascript:open('https://xyq.cbg.163.com/cgi-bin/logout.py?act=logout')",
+      auth: 1,
+      expected: undefined,
+    },
+    {
+      name: "extra javascript statement",
+      href: "javascript:logout('https://xyq.cbg.163.com/cgi-bin/logout.py?act=logout');other()",
+      auth: 1,
+      expected: undefined,
+    },
+    {
+      name: "different official endpoint",
+      href: "javascript:logout('https://xyq.cbg.163.com/cgi-bin/order.py?act=logout')",
+      auth: 1,
+      expected: undefined,
+    },
+    {
+      name: "ambiguous action",
+      href: "javascript:logout('https://xyq.cbg.163.com/cgi-bin/logout.py?act=logout&act=login')",
+      auth: 1,
+      expected: undefined,
+    },
+    {
+      name: "visible password input overrides positive auth",
+      href: "javascript:logout('https://xyq.cbg.163.com/cgi-bin/logout.py?act=logout')",
+      auth: 1,
+      loginInput: true,
+      expected: false,
+    },
+    {
+      name: "negative MAIN auth overrides logout",
+      href: "javascript:logout('https://xyq.cbg.163.com/cgi-bin/logout.py?act=logout')",
+      auth: 0,
+      expected: false,
+    },
+    {
+      name: "missing MAIN auth stays unknown",
+      href: "javascript:logout('https://xyq.cbg.163.com/cgi-bin/logout.py?act=logout')",
+      expected: undefined,
+    },
+    {
+      name: "hidden official control is not evidence",
+      href: "javascript:logout('https://xyq.cbg.163.com/cgi-bin/logout.py?act=logout')",
+      auth: 1,
+      hidden: true,
+      expected: undefined,
+    },
+    {
+      name: "foreign direct destination",
+      href: "https://example.com/cgi-bin/login.py?act=logout",
+      auth: 1,
+      expected: undefined,
+    },
+    {
+      name: "direct action prefix is not logout",
+      href: "https://xyq.cbg.163.com/cgi-bin/login.py?act=logout_spoof",
+      auth: 1,
+      expected: undefined,
+    },
+  ])("auth only observes strict logout evidence: $name", async (test) => {
+    const page = await fixture('<a id="official-logout">退出</a>');
+    try {
+      await page.evaluate((test) => {
+        const g = window as unknown as Record<string, any>;
+        g.IsLogin = test.auth;
+        g.__logoutCalls = 0;
+        g.logout = () => {
+          g.__logoutCalls++;
+        };
+        const link = document.getElementById("official-logout")!;
+        link.setAttribute("href", test.href);
+        if (test.hidden) link.style.display = "none";
+        if (test.loginInput) {
+          const input = document.createElement("input");
+          input.type = "password";
+          document.body.append(input);
+        }
+      }, test);
+      await page.addScriptTag({ content: script("main.js") });
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => (window as unknown as Record<string, any>).__snapshots.at(-1)?.payload.loading,
+          ),
+        )
+        .toBe(false);
+      expect(
+        await page.evaluate(
+          () =>
+            (window as unknown as Record<string, any>).__snapshots.at(-1)?.payload.authenticated,
+        ),
+      ).toBe(test.expected);
+      const diagnostic = await page.evaluate(() => {
+        const snapshot = (window as unknown as Record<string, any>).__snapshots.at(-1)?.payload;
+        return {
+          observerVersion: snapshot.observerVersion,
+          evidence: snapshot.authenticationEvidence,
+        };
+      });
+      expect(diagnostic.observerVersion).toBe("1.1.1");
+      expect(diagnostic.evidence).toMatchObject({
+        mainRender: true,
+        serverAuth: test.auth === 1 ? true : test.auth === 0 ? false : null,
+        loginSurface: test.loginInput === true,
+        logoutCandidates: 1,
+        visibleLogoutCandidates: test.hidden ? 0 : 1,
+      });
+      if (test.name === "actual official javascript logout literal")
+        expect(diagnostic.evidence.logoutControl).toBe(true);
+      if (test.name === "foreign javascript destination")
+        expect(diagnostic.evidence.logoutControl).toBe(false);
+      expect(
+        await page.evaluate(() => (window as unknown as Record<string, any>).__logoutCalls),
+      ).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
   it.each([{}, { cross_buy_serverid: 33 }])(
     "reads and clears actual hidden cross-server fields independently of old submitted conditions %j",
     async (conditions) => {

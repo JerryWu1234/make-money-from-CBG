@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
   "name": "CBG 本地只读采集桥",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "minimum_chrome_version": "120",
   "permissions": ["nativeMessaging", "storage", "tabs", "alarms", "webRequest"],
   "host_permissions": ["https://xyq.cbg.163.com/*"],
   "background": { "service_worker": "service-worker.js", "type": "module" },
-  "action": { "default_title": "绑定当前藏宝阁标签页 / 停止输入" },
+  "action": { "default_title": "自动读取藏宝阁 / 点击暂停或继续" },
   "content_scripts": [
     {
       "matches": ["https://xyq.cbg.163.com/*"],

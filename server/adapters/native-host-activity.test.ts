@@ -7,6 +7,7 @@ import { expect, it } from "vite-plus/test";
 function fixture() {
   let now = 100000;
   const serverWrites: any[] = [],
+    nativeWrites: any[] = [],
     helperWrites: any[] = [],
     kills: string[] = [],
     timers: Array<() => void> = [];
@@ -43,7 +44,9 @@ function fixture() {
       argv: ["node", "host", `chrome-extension://${"a".repeat(32)}/`],
       getuid: () => 501,
       stdin,
-      stdout: { write: () => {} },
+      stdout: {
+        write: (frame: Buffer) => nativeWrites.push(JSON.parse(frame.subarray(4).toString("utf8"))),
+      },
       stderr: { write: () => {} },
       on: () => {},
       exit: () => {},
@@ -117,6 +120,7 @@ function fixture() {
     control,
     grant,
     helperWrites,
+    nativeWrites,
     serverWrites,
     kills,
     socket,
@@ -126,28 +130,66 @@ function fixture() {
     tick: () => timers.forEach((callback) => callback()),
   };
 }
-it("host observe is a validated read-only route while stopped; a forged observation proof never reaches the helper", () => {
-  const f = fixture();
-  f.send({ kind: "command", command: "stop", actionId: "stop" });
-  const writes = f.helperWrites.length,
-    generation = f.host.authority.generation;
-  f.send({ kind: "command", command: "observe", actionId: "observe" });
-  f.chrome({ kind: "command-proof", actionId: "observe", proof: { actionId: "observe" } });
-  expect(f.helperWrites).toHaveLength(writes);
-  expect(f.host.authority.stopped).toBe(true);
-  expect(f.host.authority.generation).toBe(generation);
-  expect(f.host.activities.current).toBeNull();
-  f.chrome({ kind: "command-result", actionId: "observe", ok: true, posted: false });
-  expect(f.serverWrites.at(-1)).toMatchObject({
-    kind: "input-result",
-    actionId: "observe",
-    ok: true,
-    posted: false,
-  });
-  f.send({ kind: "command", command: "observe", actionId: "bad action id" });
-  expect(f.serverWrites.at(-1).error).toBe("invalid-observation-request");
-  expect(f.helperWrites).toHaveLength(writes);
-});
+it.each(["observe", "focus"])(
+  "host %s is a validated read-only route while stopped; a forged proof never reaches the helper",
+  (command) => {
+    const f = fixture();
+    f.send({ kind: "command", command: "stop", actionId: "stop" });
+    const writes = f.helperWrites.length,
+      generation = f.host.authority.generation;
+    const context = {
+      pageId: "page",
+      pageGeneration: 1,
+      tabId: 1,
+      windowId: 2,
+      bindingEpoch: "binding",
+      connectionEpoch: "connection",
+      url: "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=role",
+    };
+    f.send({ kind: "command", command, actionId: command, context });
+    expect(f.nativeWrites.at(-1)).toEqual({ kind: "command", command, actionId: command, context });
+    f.chrome({ kind: "command-proof", actionId: command, proof: { actionId: command } });
+    expect(f.helperWrites).toHaveLength(writes);
+    expect(f.host.authority.stopped).toBe(true);
+    expect(f.host.authority.generation).toBe(generation);
+    expect(f.host.activities.current).toBeNull();
+    f.chrome({ kind: "command-result", actionId: command, ok: true, posted: false });
+    expect(f.serverWrites.at(-1)).toMatchObject({
+      kind: "input-result",
+      actionId: command,
+      ok: true,
+      posted: false,
+    });
+    f.send({ kind: "command", command, actionId: "bad action id" });
+    expect(f.serverWrites.at(-1).error).toBe("invalid-observation-request");
+    expect(f.helperWrites).toHaveLength(writes);
+  },
+);
+it.each([true, undefined])(
+  "focus result cannot claim input or omit its read-only receipt: posted=%s",
+  (posted) => {
+    const f = fixture(),
+      before = f.helperWrites.length,
+      generation = f.host.authority.generation;
+    f.send({ kind: "command", command: "focus", actionId: "focus" });
+    f.chrome({
+      kind: "command-result",
+      actionId: "focus",
+      ok: true,
+      ...(posted === undefined ? {} : { posted }),
+    });
+    expect(f.serverWrites.at(-1)).toMatchObject({
+      kind: "input-result",
+      actionId: "focus",
+      ok: false,
+      posted: false,
+      error: "read-only-command-cannot-post",
+    });
+    expect(f.helperWrites).toHaveLength(before);
+    expect(f.host.authority.generation).toBe(generation);
+    expect(f.host.activities.current).toBeNull();
+  },
+);
 it("host waits for a successful helper activity grant before forwarding any native input", () => {
   const f = fixture(),
     lease = f.lease();

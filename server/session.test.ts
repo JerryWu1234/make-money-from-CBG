@@ -4,6 +4,7 @@ import { parseDevToolsEndpoint } from "./chrome";
 import { browserControl, browserSettings, saveBrowserSettings } from "./browser-settings";
 import { openDedicatedBrowser } from "./dedicated-browser";
 import { captureBrowserStep } from "./browser-evidence";
+import { nativeAccessStatus } from "./native-access";
 
 const { connectOverCDP, readFile, openWorkTransport, verifyCdpEndpoint, transport } = vi.hoisted(
   () => ({
@@ -33,7 +34,10 @@ vi.mock("./chrome", async (importOriginal) => ({
 }));
 
 vi.mock("./official-access", () => ({ bindOfficialPage: vi.fn() }));
-vi.mock("./native-access", () => ({ closeNativeAccess: vi.fn(async () => {}) }));
+vi.mock("./native-access", () => ({
+  closeNativeAccess: vi.fn(async () => {}),
+  nativeAccessStatus: vi.fn(),
+}));
 
 beforeEach(() => {
   Reflect.deleteProperty(globalThis, Symbol.for("cbg.browser-session.v1"));
@@ -696,4 +700,25 @@ it("全部详情复用所选的专用浏览器，不自动连接日常 Chrome", 
   expect(connectOverCDP).not.toHaveBeenCalled();
   await session.shutdownBrowserSession();
   expect(context.close).toHaveBeenCalledOnce();
+});
+
+it("native browser settings report the actual native connection without connecting CDP", async () => {
+  vi.mocked(browserSettings).mockReturnValue({ mode: "daily", accessAdapter: "extension-native" });
+  vi.mocked(nativeAccessStatus).mockReturnValue({
+    adapter: "extension-native",
+    listening: true,
+    connected: true,
+    stopped: true,
+    idle: false,
+    pageId: "page",
+    reason: null,
+    unknownActions: 0,
+  });
+  const session = await import("./session");
+  expect(session.browserSessionSettings()).toMatchObject({
+    connected: true,
+    accessAdapter: "extension-native",
+    browsers: [{ connected: true, mode: "daily" }],
+  });
+  expect(connectOverCDP).not.toHaveBeenCalled();
 });

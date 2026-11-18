@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   recover: vi.fn(),
   disableScanSchedule: vi.fn(),
   adapter: "playwright" as "playwright" | "extension-native",
+  focusNative: vi.fn(),
+  assertFocus: vi.fn(),
   prepareNative: vi.fn(),
   completeNative: vi.fn(),
   abortNative: vi.fn(),
@@ -45,6 +47,8 @@ vi.mock("./native-access", () => ({
   nativeAccessStatus: mocks.nativeStatus,
   nativeBrowserState: mocks.nativeBrowserState,
   nativeAccess: async () => ({
+    focusBoundPage: mocks.focusNative,
+    assertFocusedPage: mocks.assertFocus,
     prepareManualRecovery: mocks.prepareNative,
     completeManualRecovery: mocks.completeNative,
     abortManualRecovery: mocks.abortNative,
@@ -56,12 +60,19 @@ beforeEach(async () => {
   db = new DatabaseSync(":memory:");
   mocks.gate = new AccessGovernor(db);
   mocks.adapter = "playwright";
-  mocks.nativeStatus.mockReturnValue(undefined);
+  mocks.nativeStatus.mockReturnValue({
+    connected: true,
+    pageId: "page",
+    stopped: true,
+    idle: false,
+  });
   mocks.nativeBrowserState.mockResolvedValue({
     running: false,
     workflowStep: "completed",
     isLoggedIn: true,
   });
+  mocks.focusNative.mockResolvedValue({ id: "focus" });
+  mocks.assertFocus.mockImplementation(() => {});
   mocks.abortNative.mockResolvedValue(undefined);
   mocks.prepareNative.mockImplementation(async () => ({ stopEpoch: mocks.gate!.read().stopEpoch }));
   mocks.completeNative.mockImplementation((ticket) => {
@@ -240,9 +251,79 @@ it("物理暂停仅Native普通重新尝试交已有恢复核验，不列soft清
   mocks.adapter = "extension-native";
   mocks.recover.mockResolvedValueOnce({ state: "ready" });
   expect((await call("/api/browser/open")).status).toBe(200);
-  expect(mocks.recover).toHaveBeenCalledWith(paused.revision, ["native-activity-stopped"]);
+  expect(mocks.recover).toHaveBeenCalledWith(paused.revision, ["native-activity-stopped"], {
+    id: "focus",
+  });
   expect(mocks.openRecovery).not.toHaveBeenCalled();
   expect(mocks.nativeBrowserState).toHaveBeenCalledWith(true);
   expect(mocks.prepareNative).not.toHaveBeenCalled(); // The soft-resume path did not accept this reason.
   expect(mocks.gate!.read()).toMatchObject({ state: "needs_action", revision: paused.revision }); // Recovery is mocked; the API never cleared the risk itself.
+});
+
+it("native startup waits for automatic binding without preparing a recovery or clearing a pause", async () => {
+  mocks.adapter = "extension-native";
+  mocks.nativeStatus.mockReturnValue(undefined);
+  const paused = mocks.gate!.reportRisk({ reason: "unknown_inflight" });
+  const result = await call("/api/browser/open");
+  expect(result.status).toBe(200);
+  expect(mocks.prepareNative).not.toHaveBeenCalled();
+  expect(mocks.gate!.read()).toMatchObject({
+    state: "needs_action",
+    revision: paused.revision,
+    stopEpoch: paused.stopEpoch,
+  });
+  expect(mocks.openCbg).not.toHaveBeenCalled();
+  const capture = await call("/api/crawl/start");
+  expect(capture.status).toBe(409);
+  expect(capture.body.code).toBe("native_binding_pending");
+  expect(mocks.startCrawl).not.toHaveBeenCalled();
+});
+
+it("Native GET只读，不聚焦或恢复；显式采集才聚焦原绑定", async () => {
+  mocks.adapter = "extension-native";
+  mocks.gate!.reportRisk({ reason: "login" });
+  await call("/api/browser/status", {}, "GET");
+  expect(mocks.focusNative).not.toHaveBeenCalled();
+  expect(mocks.prepareNative).not.toHaveBeenCalled();
+  expect((await call("/api/crawl/start")).status).toBe(200);
+  expect(mocks.focusNative).toHaveBeenCalledOnce();
+  expect(mocks.prepareNative).toHaveBeenCalledWith({ id: "focus" });
+  expect(mocks.startCrawl).toHaveBeenCalledOnce();
+});
+it("Native聚焦期间出现新暂停，旧点击不能恢复或启动", async () => {
+  mocks.adapter = "extension-native";
+  mocks.gate!.reportRisk({ reason: "login" });
+  mocks.focusNative.mockImplementationOnce(async () => {
+    mocks.gate!.reportRisk({ reason: "manual_stop" });
+    return { id: "focus" };
+  });
+  const result = await call("/api/crawl/start");
+  expect(result.status).toBe(409);
+  expect(result.body.code).toBe("stale_revision");
+  expect(mocks.prepareNative).not.toHaveBeenCalled();
+  expect(mocks.startCrawl).not.toHaveBeenCalled();
+});
+it("Native忙碌和旧revision均在聚焦前拒绝", async () => {
+  mocks.adapter = "extension-native";
+  const paused = mocks.gate!.reportRisk({ reason: "login" });
+  mocks.isAnalyzing.mockReturnValue(true);
+  expect((await call("/api/crawl/start")).status).toBe(409);
+  mocks.isAnalyzing.mockReturnValue(false);
+  expect((await call("/api/access/resume", { revision: paused.revision - 1 })).status).toBe(409);
+  expect(mocks.focusNative).not.toHaveBeenCalled();
+});
+it("Native ready入口仍聚焦，但不重复恢复或自动输入", async () => {
+  mocks.adapter = "extension-native";
+  mocks.nativeStatus.mockReturnValue({ connected: true, pageId: "page", stopped: false });
+  expect((await call("/api/crawl/start")).status).toBe(200);
+  expect(mocks.focusNative).toHaveBeenCalledOnce();
+  expect(mocks.prepareNative).not.toHaveBeenCalled();
+});
+
+it("Native硬暂停恢复也透传聚焦凭据，供恢复内部跨await核验", async () => {
+  mocks.adapter = "extension-native";
+  const state = mocks.gate!.reportRisk({ reason: "http_403" });
+  mocks.recover.mockResolvedValue(state);
+  await call("/api/crawl/start");
+  expect(mocks.recover).toHaveBeenCalledWith(state.revision, ["http_403"], { id: "focus" });
 });

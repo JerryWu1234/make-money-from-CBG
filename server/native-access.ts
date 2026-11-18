@@ -103,7 +103,9 @@ export async function closeNativeAccess() {
   cache.adapter = undefined;
 }
 export async function nativeBrowserState(start = false): Promise<OpenCbgResult> {
-  const adapter = start ? await nativeAccess() : cache.adapter;
+  // Selecting the native adapter and polling its status must be sufficient to
+  // open the local listener; it does not resume or dispatch an input workflow.
+  const adapter = start || !cache.adapter ? await nativeAccess() : cache.adapter;
   const status = adapter?.status();
   let snapshot;
   try {
@@ -112,11 +114,11 @@ export async function nativeBrowserState(start = false): Promise<OpenCbgResult> 
     /* Missing or stale observation is explicit. */
   }
   const ready =
+    status?.connected === true &&
     !!snapshot?.listing &&
     snapshot.access === "normal" &&
     snapshot.authenticated === true &&
-    !snapshot.loading &&
-    status?.stopped === false;
+    !snapshot.loading;
   return {
     connected: status?.connected === true,
     title: snapshot?.title ?? "扩展与 macOS 输入",
@@ -128,8 +130,17 @@ export async function nativeBrowserState(start = false): Promise<OpenCbgResult> 
     running: false,
     workflowStep: ready ? "completed" : "idle",
     message: ready
-      ? "扩展已绑定角色列表，可开始采集"
-      : (status?.reason ??
-        "请安装原生宿主，并在官网完成登录、查询角色后点击扩展绑定；读取与输入均不连接 CDP。"),
+      ? status?.stopped
+        ? "已自动识别角色列表，开始采集时将核验当前访问状态"
+        : "扩展已自动连接角色列表，可开始采集"
+      : snapshot?.access === "login"
+        ? "官网尚未登录，请在藏宝阁完成登录；角色列表将自动识别"
+        : snapshot?.loading
+          ? "扩展已连接，正在读取官网页面和角色列表…"
+          : snapshot && !snapshot.listing
+            ? "扩展已自动连接官网，请先在官网搜索角色；商品列表出现后将自动识别"
+            : status?.connected
+              ? "宿主已连接，正在等待官网页面自动绑定；请保持藏宝阁页面打开"
+              : "正在等待 CBG 扩展自动连接；请启用扩展并打开藏宝阁官网",
   };
 }

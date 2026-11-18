@@ -1,4 +1,4 @@
-import { closeNativeAccess } from "./native-access";
+import { closeNativeAccess, nativeAccessStatus } from "./native-access";
 import { bindOfficialPage } from "./official-access";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core";
 import { CONNECTION_HELP, resolveCdpEndpoint, verifyCdpEndpoint } from "./chrome";
@@ -386,7 +386,13 @@ export function createHiddenPage(browser: Browser): Promise<Page> {
 }
 export function browserSessionSettings() {
   const modes = [getActiveBrowserMode()];
-  const browsers = modes.map((mode) => ({ ...session(mode).browserSessionSettings(), mode }));
+  const browsers = modes.map((mode) => ({
+    ...session(mode).browserSessionSettings(),
+    ...(browserSettings().accessAdapter === "extension-native"
+      ? { connected: nativeAccessStatus()?.connected === true }
+      : {}),
+    mode,
+  }));
   return {
     mode: getActiveBrowserMode(),
     accessAdapter: browserSettings().accessAdapter ?? "playwright",

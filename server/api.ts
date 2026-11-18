@@ -121,13 +121,28 @@ async function resumeAccessForUser(mode: "resume" | "open" | "capture", revision
   const state = governor.read();
   if (revision !== undefined && (!Number.isSafeInteger(revision) || Number(revision) < 0))
     throw new AccessGateError("stale_revision", "访问状态版本无效，请重新尝试", state);
+  if (revision !== undefined && revision !== state.revision)
+    throw new AccessGateError("stale_revision", "访问状态已变化，请重新尝试", state);
   const { browserSettings } = await import("./browser-settings");
   const nativeMode = browserSettings().accessAdapter === "extension-native";
   const native = nativeMode ? await import("./native-access") : undefined;
   const nativeStatus = native?.nativeAccessStatus();
+  if (nativeMode && (!nativeStatus?.connected || !nativeStatus.pageId)) {
+    if (mode === "open") {
+      await native!.nativeAccess();
+      return governor.read();
+    }
+    if (mode === "capture")
+      throw new AccessGateError(
+        "native_binding_pending",
+        "正在等待官网角色列表自动连接，请在藏宝阁完成角色搜索后重试",
+        state,
+      );
+  }
   const nativeNeedsResume =
     nativeStatus?.connected && nativeStatus.pageId && nativeStatus.stopped && !nativeStatus.idle;
-  if (state.state === "ready" && mode !== "resume" && !nativeNeedsResume) return state;
+  if (!nativeMode && state.state === "ready" && mode !== "resume" && !nativeNeedsResume)
+    return state;
   const analysis = await import("./analysis/controller");
   const browser = await import("./cbg");
   if (
@@ -141,6 +156,16 @@ async function resumeAccessForUser(mode: "resume" | "open" | "capture", revision
       "仍有正在运行的任务，请先暂停或等待结束后重试",
       state,
     );
+  let focusReceipt: { id: string } | undefined;
+  if (nativeMode) {
+    const adapter = await native!.nativeAccess();
+    focusReceipt = await adapter.focusBoundPage();
+    const latest = governor.read();
+    adapter.assertFocusedPage(focusReceipt);
+    if (latest.revision !== state.revision || latest.stopEpoch !== state.stopEpoch)
+      throw new AccessGateError("stale_revision", "切回官网期间访问状态已变化，请重新尝试", latest);
+  }
+  if (state.state === "ready" && mode !== "resume" && !nativeNeedsResume) return state;
   try {
     if (nativeMode) {
       const prepared = governor.prepareUserResume(
@@ -149,7 +174,7 @@ async function resumeAccessForUser(mode: "resume" | "open" | "capture", revision
       const adapter = await native!.nativeAccess();
       let activated = false;
       try {
-        const ticket = await adapter.prepareManualRecovery();
+        const ticket = await adapter.prepareManualRecovery(focusReceipt);
         const result = governor.resumeForUser(prepared.revision, prepared.stopEpoch);
         activated = true;
         adapter.completeManualRecovery(ticket);
@@ -199,6 +224,7 @@ async function resumeAccessForUser(mode: "resume" | "open" | "capture", revision
       return access.recoverOfficialAccess(
         state.revision,
         state.reasons.map((reason) => reason.code),
+        ...(nativeMode ? [focusReceipt] : []),
       );
     await access.openOfficialRecovery(state.revision);
     throw new AccessGateError(
