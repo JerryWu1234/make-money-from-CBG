@@ -1,3 +1,4 @@
+import type { AccessContext } from "../access";
 import { createHash } from "node:crypto";
 import { comparePetGear } from "./pet-gear-match";
 import type { DetailItem, PetSnapshot, SavedRoleRecord } from "../crawler/types";
@@ -78,6 +79,7 @@ export type PetSource = {
       samplingStopped?: boolean;
       skipReason?: string;
     }>;
+    accessProofs?: AccessContext[];
     searchItems?: unknown[];
   }>;
   readSource: (url: string, signal: AbortSignal) => Promise<string>;
@@ -739,6 +741,7 @@ export async function searchPetPricing(
   snapshot.requestHash = hash(snapshot.requestText);
   const response = await source.findCandidates(lookupItems, signal);
   signal.throwIfAborted();
+  if (response.accessProofs) snapshot.accessProofs = response.accessProofs;
   snapshot.rawResponse = JSON.stringify(response);
   saveSearchAttempt(snapshot, response);
   const specialSkipReason = "官网无独立交易筛选的特殊宝宝，未计入参考合计";

@@ -1,3 +1,4 @@
+import type { AccessContext } from "../access";
 import { createHash } from "node:crypto";
 import type { DetailItem, SavedRoleRecord } from "../crawler/types";
 import type { ValuationResult } from "./valuation-types";
@@ -105,6 +106,7 @@ export type EquipmentPricingSnapshot = {
   rawResponse: string | null;
   requestText?: string;
   requestHash?: string;
+  accessProofs?: AccessContext[];
   searchItems?: unknown[];
   usage?: unknown;
   captureComplete: boolean;
@@ -134,6 +136,7 @@ export type EquipmentSource = {
       samplingStopped?: boolean;
       skipReason?: string;
     }>;
+    accessProofs?: AccessContext[];
     searchItems?: unknown[];
   }>;
   readSource: (url: string, signal: AbortSignal) => Promise<string>;
@@ -916,6 +919,7 @@ async function applyEquipmentSearchResponse(
   signal: AbortSignal,
   serverId: string,
 ) {
+  if (response.accessProofs) snapshot.accessProofs = response.accessProofs;
   snapshot.rawResponse = JSON.stringify(response);
   saveSearchAttempt(snapshot, response);
   // A local exclusion needs no market request and must never adopt returned candidates.

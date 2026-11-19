@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "scope": "Test-only physical takeover acceptance preparation. Pure records validate acceptance predicates; no Chrome was launched, native activity granted, business input posted, or physical action observed in this preparation.",
+  "sourceSha256": {
+    "scripts/native-physical-takeover-evidence.mjs": "d569c9c070d85a65813782f88ae9feba6f2340e26f1f770ce42721a67b9b29e5",
+    "scripts/native-physical-takeover-regression.mjs": "653346b4558af54d95d4070348f9692145fc4a6fe657da2e703b11ddbac635af",
+    "scripts/native-os-integration.mjs": "a4cc1eaa4db5d1a6cfb55dca70f11f342731beed372a97021a256bbfafb6e875",
+    "extension/cbg-access/main.js": "361a6b35a91d968ad281b1a1b64252edcb2d62bf8d119da6bf0aee818a4f3f9b",
+    "native/cbg-access/Input.m": "224348ba03a4c93bdc37e23a654a9243d2b64ff1839455d7950fb7d998469e15",
+    "native/cbg-access/host.mjs": "d8fc9471f4b7e11dc367e9ffa26200ecb2ea2b2ef16534e3a8a171bc779a0507",
+    "server/adapters/extension-native.ts": "e407714d4b21ded72ea1d4d54df3d1c96d5f0c3dc6a07eb9fe7ee5db90e97066"
+  },
+  "pureRegression": {
+    "command": "node --test scripts/native-physical-takeover-regression.mjs",
+    "node": "26.13.1",
+    "tests": 63,
+    "passed": 63,
+    "failed": 0,
+    "skipped": 0,
+    "exitCode": 0,
+    "rawLogSha256": "ef935a6544ddf9076a430639dee4679490b59ca28f70ab9f9c2c00121c5e3f3a",
+    "scope": "Synthetic protocol/time/DOM/operator fixtures only. Not physical proof."
+  },
+  "prepare": {
+    "artifactId": "cbg-installed-4PG7Xd",
+    "command": "node scripts/native-os-integration.mjs --prepare-only --scenario=physical-takeover --await-start --observe-helper-stdio --ax-preflight",
+    "exitCode": 0,
+    "outcome": "prepared-not-run",
+    "rawReportSha256": "2c94518e88f25d91ba7c8171b2ef57f81f12d064f32654f9e6991bf6a69a4f2b",
+    "rawPlanSha256": "03f431103cae04d498a64bb0396e01b57ff9e4ca79ce0949deca97861d4085ce",
+    "helperBinarySha256": "ece793eb4b1eb3c8da58b5e50dbb39574ebd3d0d975b60ee86954b40e5942223",
+    "installedMainSha256": "361a6b35a91d968ad281b1a1b64252edcb2d62bf8d119da6bf0aee818a4f3f9b",
+    "temporaryHostBeforeSha256": "2a01853cc8ec41b19a4b743b4f81e1e0b47e8c5e6301e7009ae79c49732587c2",
+    "temporaryHostAfterSha256": "3d4f7f97537b9bda07e26d23655d6f4dd31e9a40f4eb0d05f5d20f9f7f7fb792",
+    "observerSha256": "7a5cda9a205c6b1ce1234c21e17894170bf03c3a1d1ce0f8705aa082b9533235",
+    "chromeLaunched": false,
+    "nativeActivityGranted": false,
+    "osInputPosted": false,
+    "notPhysicalAcceptance": true
+  },
+  "deliveryCheck": {
+    "command": "vp check",
+    "exitCode": 0,
+    "errors": 0,
+    "warnings": 29,
+    "warningScope": "Existing install-regression warnings; no added suppression.",
+    "rawLogSha256": "050b88e5c801b9e45df2cb0bc46b9a202904527e8675c4e9398b39e75e0475a9"
+  },
+  "physicalAcceptance": {
+    "executed": false,
+    "passed": false,
+    "requires": "Fresh actual user intention, a real field120 action and first unmarked helper keydown, first trusted DOM Escape/27 within the visible bounded window, real revocation and a fresh actual post-action user reply.",
+    "knownMouseConfounder": "A first mouse event cannot count as the instructed Escape, even if the user later presses it.",
+    "fileSignalsAreNotInputProof": true,
+    "producerIdentityProven": false,
+    "strictCausationProven": false
+  },
+  "remaining": [
+    "Actual physical operation and post-action reply are pending.",
+    "Historical unexplained mouse-source attribution cannot be reconstructed from first-event records.",
+    "Current hardware inventory shows one built-in Retina display; physical second display unavailable.",
+    "Lock-screen test is deferred by the user; authenticated first official query remains manual."
+  ],
+  "currentDisplayInventory": {
+    "source": "system_profiler SPDisplaysDataType -json outside sandbox",
+    "rawSha256": "df33bbc53e1aaf7cce4389b17ce9f8b2c3e1e2411c5006ddc83470b961f6203a",
+    "displayCount": 1,
+    "displayType": "built-in Retina",
+    "scope": "Read-only current inventory; not multi-monitor/negative-coordinate/scaling acceptance."
+  }
+}

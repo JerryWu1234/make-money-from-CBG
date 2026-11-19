@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -84,6 +85,7 @@ test("并发1时查价失败立即停队，刷新后显式重试，按顺序完�
   try {
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== "http://cbg-stop.test") return route.abort();
       if (url.pathname === "/api/runtime/settings")
         return route.fulfill({ json: { saveScreenshots: false } });
@@ -139,8 +141,13 @@ test("并发1时查价失败立即停队，刷新后显式重试，按顺序完�
             case "/api/analysis/detail":
               body = store.detail(url.searchParams.get("taskId")!, profile);
               break;
-            default:
+            default: {
+              if (url.pathname === "/api/crawl/role-training-filter") {
+                await route.fulfill({ json: { minTotal: null } });
+                return;
+              }
               throw new Error("未模拟接口：" + url.pathname);
+            }
           }
           return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
         } catch (error) {

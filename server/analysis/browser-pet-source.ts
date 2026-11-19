@@ -1,3 +1,18 @@
+import { browserSettings } from "../browser-settings";
+import {
+  installQueryCallbackObservation,
+  activateQueryObservation,
+  clearQueryCallbackObservation,
+} from "../query-health/callback-observer";
+import { bindOfficialPage } from "../official-access";
+import {
+  beginPageQuery,
+  finishPageQuery,
+  failPendingPageQuery,
+  pageQueryProofs,
+  queryPageContext,
+  successfulQueryEvidence,
+} from "../query-health/runtime";
 import { createHash } from "node:crypto";
 import type { Page } from "playwright-core";
 import {
@@ -1561,6 +1576,7 @@ async function withPetStepEvidence<T>(
     return await read();
   } catch (error) {
     await captureBrowserStep(page, { flow: "analysis", stage, error }, signal);
+    failPendingPageQuery(page);
     throw error;
   }
 }
@@ -1581,7 +1597,10 @@ export function petSourceFromPages(
     if (!closing) {
       signal.removeEventListener("abort", abort);
       marketScope.close();
-      closing = Promise.allSettled([searchPage.close(), detailPages.close()]).then(() => {});
+      closing = clearQueryCallbackObservation(searchPage)
+        .catch(() => {})
+        .then(() => Promise.allSettled([searchPage.close(), detailPages.close()]))
+        .then(() => {});
     }
     return closing;
   };
@@ -1603,6 +1622,11 @@ export function petSourceFromPages(
     await pace(requestSignal, 600, 400);
     return detailPages.read(safe, requestSignal, (detailPage) =>
       withPetStepEvidence(detailPage, "宝宝候选读取失败", requestSignal, async () => {
+        await bindOfficialPage(detailPage, {
+          runId: "market-pet",
+          sourceKind: "market-pet-detail",
+          signal: requestSignal,
+        });
         await captureBrowserStep(
           detailPage,
           { flow: "analysis", stage: "宝宝候选详情打开", key: equipmentIdentity(safe) },
@@ -1905,39 +1929,7 @@ export function petSourceFromPages(
               );
             }
           for (const [url, mode] of refresh) failed.set(url, mode);
-          await searchPage.evaluate(() => {
-            const g = window as unknown as Record<string, any>;
-            const original = g.ajax_with_recommend;
-            if (typeof original !== "function") throw new Error("官网宝宝查询组件发生变化");
-            g.ajax_with_recommend = function (options: Record<string, any>, ...rest: unknown[]) {
-              const success = options.onSuccess,
-                failure = options.onFailure;
-              return original.call(
-                this,
-                {
-                  ...options,
-                  onSuccess(result: Record<string, any>) {
-                    g.__cbgPetResult = {
-                      page: Number(options.data?.page),
-                      ok: result.status === 0 && Array.isArray(result.msg),
-                      count: Array.isArray(result.msg) ? result.msg.length : -1,
-                      error: typeof result.msg === "string" ? result.msg.slice(0, 200) : "",
-                    };
-                    success?.(result);
-                  },
-                  onFailure(...values: unknown[]) {
-                    g.__cbgPetResult = {
-                      page: Number(options.data?.page),
-                      ok: false,
-                      error: "官网查询请求失败",
-                    };
-                    failure?.(...values);
-                  },
-                },
-                ...rest,
-              );
-            };
-          });
+          await installQueryCallbackObservation(searchPage, "Pet");
           // With no adopted quote, re-read the active first page from row zero.
           // Completed conditions stay completed; no stale row position is reused.
           // Adopted quotes and failed reads retain the full history guard.
@@ -2008,17 +2000,44 @@ export function petSourceFromPages(
             let inspected = [...seenRows].filter((key) => key.startsWith(modeIndex + ":")).length;
             let samplingComplete = false;
             const stageEnough = () => enoughSamples();
-            const loadPage = async (pageNumber: number, replay = false) =>
+            let healthProbe = false;
+            let healthReapply = false;
+            const loadPage = async (
+              pageNumber: number,
+              replay = false,
+            ): Promise<{
+              listing: {
+                rows: Array<{ url: string; name: string; type: string }>;
+                empty: boolean;
+                hasNext: boolean;
+              };
+              request: GlobalMarketRequest;
+            }> =>
               withPetStepEvidence(
                 searchPage,
                 `宝宝搜索结果失败-第${pageNumber}页`,
                 requestSignal,
                 async () => {
+                  const healthQuery = healthProbe
+                    ? undefined
+                    : beginPageQuery(searchPage, {
+                        category: act,
+                        server: serverId,
+                        serverAge: String(args.server_type || ""),
+                        conditions: { ...args },
+                        page: pageNumber,
+                        sort: "default",
+                      });
+                  await activateQueryObservation(
+                    searchPage,
+                    queryPageContext(searchPage)?.queryId || crypto.randomUUID(),
+                  );
                   await pace(requestSignal);
                   marketScope.begin(act, pageNumber);
                   let ui: PetUIEvidence | undefined;
                   if (pageNumber === 1) {
-                    ui = await fillPetSearchForm(searchPage, item, args, requestSignal);
+                    if (!healthProbe || healthReapply)
+                      ui = await fillPetSearchForm(searchPage, item, args, requestSignal);
                     await searchPage.evaluate(() => {
                       const g = window as Window & { __cbgPetResult?: unknown };
                       g.__cbgPetResult = null;
@@ -2138,6 +2157,11 @@ export function petSourceFromPages(
                       return canonical.href;
                     };
                     const result = (window as unknown as Record<string, any>).__cbgPetResult;
+                    if (
+                      result?.queryToken !==
+                      (window as unknown as Record<string, any>).__cbgQueryObserver?.token
+                    )
+                      throw new Error("旧查询回调不能用于当前查询");
                     if (!result?.ok) throw new Error(result?.error || "官网宝宝查询未成功");
                     const root = document.querySelector<HTMLElement>("#search_result");
                     if (!root?.checkVisibility()) throw new Error("宝宝列表尚未加载");
@@ -2163,6 +2187,38 @@ export function petSourceFromPages(
                     );
                     return { rows, empty, hasNext };
                   }, pageNumber);
+                  if (healthProbe) return { listing, request };
+                  await finishPageQuery(
+                    searchPage,
+                    healthQuery,
+                    successfulQueryEvidence(listing.rows.length, listing.empty),
+                    async (identity) => {
+                      healthProbe = true;
+                      const original = args;
+                      healthReapply =
+                        JSON.stringify(identity.conditions) !== JSON.stringify(original);
+                      try {
+                        args = { ...identity.conditions };
+                        const checked = await loadPage(1, true);
+                        if (identity.page !== 1) {
+                          const wanted = await loadPage(identity.page, true);
+                          return successfulQueryEvidence(
+                            wanted.listing.rows.length,
+                            wanted.listing.empty,
+                          );
+                        }
+                        return successfulQueryEvidence(
+                          checked.listing.rows.length,
+                          checked.listing.empty,
+                        );
+                      } finally {
+                        args = original;
+                        healthProbe = false;
+                        healthReapply = false;
+                      }
+                    },
+                    next,
+                  );
                   const candidateServers: Record<string, number> = {};
                   for (const row of listing.rows) {
                     const server = equipmentIdentity(safeEquipmentUrl(row.url)).split(":")[0];
@@ -2477,13 +2533,23 @@ export function petSourceFromPages(
                 : ""),
           });
         }
-        return { queries, items: results, searchItems: records };
+        return {
+          queries,
+          items: results,
+          searchItems: records,
+          accessProofs: pageQueryProofs(searchPage),
+        };
       });
     },
   };
 }
 
 export async function createPetSource(signal: AbortSignal, serverId: string) {
+  if (browserSettings().accessAdapter === "extension-native")
+    return (await import("../adapters/native-market-source")).createNativePetSource(
+      signal,
+      serverId,
+    );
   assertMarketServerId(serverId);
   signal.throwIfAborted();
   let searchPage: Page | undefined;
@@ -2491,6 +2557,7 @@ export async function createPetSource(signal: AbortSignal, serverId: string) {
     const browser = await getBrowser(true);
     signal.throwIfAborted();
     searchPage = await createHiddenPage(browser);
+    await bindOfficialPage(searchPage, { runId: "market-pet", sourceKind: "market-pet", signal });
     signal.throwIfAborted();
     return petSourceFromPages(searchPage, signal, serverId);
   } catch (error) {

@@ -13,6 +13,19 @@ import { CrawlStore } from "./store";
 import type { Listing, RoleDetail } from "./types";
 
 // 只隔离日志落盘；定位、evaluate、超时和采集调度均使用真实实现。
+// This suite isolates browser transport/capture behavior; shared access integration has its own browser suite.
+vi.mock("../official-access", () => ({
+  bindOfficialPage: vi.fn(),
+  officialPageContext: vi.fn(),
+  markOfficialAuthenticated: vi.fn(),
+  onOfficialFirstDispatch: () => false,
+  withOfficialAction: (_page: unknown, _action: string, execute: () => Promise<unknown>) =>
+    execute(),
+  officialGovernor: () => ({
+    read: () => ({ state: "ready", policy: { newTaskQuota: 3, detailReadBudgetMs: 900000 } }),
+  }),
+}));
+
 vi.mock("../diagnostics", () => ({ diagnostics: { record: vi.fn() } }));
 vi.mock("../browser-evidence", () => ({
   captureBrowserStep: vi.fn().mockResolvedValue(undefined),
@@ -48,7 +61,7 @@ window.goto=function(number){
   QueryArgs.page=number;
   document.querySelector('#pager_bar').textContent='第 '+number+' 页 共 2 页';
   document.querySelector('#soldList').innerHTML=(number===1?rows.slice(0,1):rows.slice(1)).map(([s,eid,name])=>
-    '<a class="soldImg" href="https://xyq.cbg.163.com/equip?s='+s+'&eid='+eid+'" data_equip_name="'+name+'" data_price="100" data_selling_time="2026-10-25T02:29:50Z">'+name+'</a>'
+    '<a class="soldImg" href="https://xyq.cbg.163.com/equip?s='+s+'&eid='+eid+'" data_equip_name="'+name+'" data_price="100" data_selling_time="'+new Date().toISOString()+'">'+name+'</a>'
   ).join('');
 };
 document.querySelector('#soldList').addEventListener('mouseover',event=>{

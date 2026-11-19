@@ -157,7 +157,13 @@ async function fixture(page: Page, eligibleTotal: number, currentRun: AnalysisRu
           },
         });
       }
-      throw new Error("未模拟接口：" + url.pathname);
+      {
+        if (url.pathname === "/api/crawl/role-training-filter") {
+          await route.fulfill({ json: { minTotal: null } });
+          return;
+        }
+        throw new Error("未模拟接口：" + url.pathname);
+      }
     }
     const file = path.join(
       "dist",

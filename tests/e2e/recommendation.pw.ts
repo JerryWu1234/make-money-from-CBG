@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -156,6 +157,7 @@ test("推荐榜历史等价条件→查看不隐藏→确认隐藏→全部商�
     crawl.db.prepare("UPDATE analysis_runs SET status='completed' WHERE id=?").run(batch);
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== "http://cbg-recommendation.test") return route.abort();
       if (url.pathname === "/api/runtime/settings")
         return route.fulfill({ json: { saveScreenshots: false } });
@@ -186,7 +188,13 @@ test("推荐榜历史等价条件→查看不隐藏→确认隐藏→全部商�
           body = store.markRecommendationViewed(route.request().postDataJSON().key);
         else if (url.pathname === "/api/analysis/detail")
           body = store.detail(url.searchParams.get("taskId")!);
-        else throw new Error("未模拟接口：" + url.pathname);
+        else {
+          if (url.pathname === "/api/crawl/role-training-filter") {
+            await route.fulfill({ json: { minTotal: null } });
+            return;
+          }
+          throw new Error("未模拟接口：" + url.pathname);
+        }
         return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
       }
       const filename = path.join(

@@ -30,12 +30,30 @@ describe("登录跳转恢复", () => {
   it("点击触发页面跳转后，不重复提交角色", async () => {
     const evaluate = vi.fn().mockRejectedValue(new Error("Execution context was destroyed"));
     const element = { waitFor: vi.fn(), evaluate };
-    const page = { locator: () => ({ first: () => element }) } as unknown as Page;
+    const page = {
+      locator: () => ({ first: () => element }),
+      url: vi
+        .fn()
+        .mockReturnValueOnce("https://xyq.cbg.163.com/")
+        .mockReturnValue("https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py"),
+      waitForLoadState: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Page;
     await expect(clickInWorkPage(page, "#login_btn")).resolves.toBeUndefined();
+    expect(evaluate).toHaveBeenCalledOnce();
+  });
+  it("旧上下文错误但未确认新同源页面时保留未知，不重放点击", async () => {
+    const evaluate = vi.fn().mockRejectedValue(new Error("Execution context was destroyed"));
+    const page = {
+      locator: () => ({ first: () => ({ waitFor: vi.fn(), evaluate }) }),
+      url: () => "https://xyq.cbg.163.com/",
+      waitForLoadState: vi.fn().mockResolvedValue(undefined),
+    } as unknown as Page;
+    await expect(clickInWorkPage(page, "#login_btn")).rejects.toThrow("Execution context");
     expect(evaluate).toHaveBeenCalledOnce();
   });
   it("按钮未出现的超时保留为错误", async () => {
     const page = {
+      url: () => "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py",
       locator: () => ({
         first: () => ({
           waitFor: vi.fn().mockRejectedValue(new Error("Timeout 30000ms exceeded")),
@@ -79,6 +97,7 @@ describe("业务步骤截图", () => {
     };
     const page = {
       goto: vi.fn(),
+      url: () => "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py",
       locator: () => locator,
       evaluate,
       waitForFunction: vi.fn(),

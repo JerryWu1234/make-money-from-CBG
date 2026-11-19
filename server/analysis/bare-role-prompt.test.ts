@@ -70,6 +70,7 @@ describe("裸号专用 AI 请求", () => {
       );
       record.detail!.tabs.unshift(assetTab());
       const quote = "共有1套神器；第1套神器：十二水，总分：91，12/12。";
+      const sourceIndex = record.detail!.tabs.length;
       record.detail!.tabs.push({
         ...assetTab(),
         name: "道具/法宝",
@@ -79,7 +80,7 @@ describe("裸号专用 AI 请求", () => {
         tables: source === "table" ? [[[quote]]] : [],
       });
       const path =
-        "/detail/tabs/3/" +
+        `/detail/tabs/${sourceIndex}/` +
         (source === "text" ? "text" : source === "field" ? "fields/0/value" : "tables/0/0/0");
       const doc = buildProductDocument(record);
       const configured = profile();
@@ -124,17 +125,19 @@ describe("裸号专用 AI 请求", () => {
       (field) => field.name !== "坐骑总数",
     );
     const quote = "共有1只坐骑；第1只坐骑：成长：2.343，未进阶，主属性比例：未知。";
+    const sourceIndex = record.detail!.tabs.length;
     record.detail!.tabs.push({ ...assetTab(), name: "坐骑 / 第1只", text: quote, items: [] });
+    const path = `/detail/tabs/${sourceIndex}/text`;
     const doc = buildProductDocument(record),
       configured = profile();
     const prompt = valuationPrompt(doc, record, configured);
     expect(prompt).toContain(quote);
-    expect(prompt).toContain('"path":"/detail/tabs/2/text"');
+    expect(prompt).toContain(`"path":${JSON.stringify(path)}`);
     const facts = [
       { name: "坐骑总数", value: "1" },
       { name: "坐骑1成长", value: "2.343" },
       { name: "坐骑1进阶状态", value: "未进阶" },
-    ].map((fact) => ({ ...fact, path: "/detail/tabs/2/text", quote }));
+    ].map((fact) => ({ ...fact, path, quote }));
     expect(validateValuationFacts(facts, record)).toEqual(facts);
     const result = validateValuation(
       JSON.stringify({ decision: "BUY", reason: "核对坐骑成长", extracted_facts: facts }),

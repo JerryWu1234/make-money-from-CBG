@@ -1,3 +1,6 @@
+import { DatabaseSync } from "node:sqlite";
+import { AccessGovernor, type AccessContext } from "../access";
+import { CrawlAccessError } from "../crawler/types";
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import type { Page } from "playwright-core";
@@ -5,7 +8,19 @@ import { createMarketDetailReader, refreshMarketCandidates } from "./market-deta
 
 // Failure cases: missing/duplicate targets, denied/wrong/late/extra popups, cancellation,
 // cross-task page ownership, cleanup failure, and saved candidates beyond the page budget.
-const mocks = vi.hoisted(() => ({ click: vi.fn(), available: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  click: vi.fn(),
+  available: vi.fn(),
+  contexts: new WeakMap<object, unknown>(),
+  governor: undefined as unknown,
+}));
+vi.mock("../official-access", () => ({
+  officialPageContext: (page: object) => mocks.contexts.get(page),
+  officialGovernor: () => mocks.governor,
+  bindOfficialPage: async (page: object) => {
+    mocks.contexts.set(page, mocks.contexts.get(page) || { pageId: "popup" });
+  },
+}));
 vi.mock("../viewport", () => ({
   clickForInspection: mocks.click,
   ensureWorkViewport: async () => {},
@@ -172,4 +187,77 @@ it("re-finds saved candidates on their list page without opening URLs outside th
     ]),
   );
   expect(load.mock.calls).toEqual([[1], [2]]);
+});
+
+it.each(["market-equipment", "market-pet", "market-pet-gear"])(
+  "R1 %s first popup denial persists before detail reader begins",
+  async (sourceKind) => {
+    const db = new DatabaseSync(":memory:");
+    const gate = new AccessGovernor(db);
+    mocks.governor = gate;
+    const x = fixture();
+    const owner = gate.acquireOwner("market-test");
+    const context: AccessContext = {
+      ...owner,
+      stopEpoch: 0,
+      runId: "run",
+      queryId: "query",
+      pageId: "list",
+      pageGeneration: 1,
+      browserSessionEpoch: "session",
+      sourceKind,
+    };
+    gate.registerPage(context);
+    mocks.contexts.set(x.search, context);
+    mocks.click.mockImplementation(async () => {
+      x.search.emit("popup", x.popup);
+      const response = {
+        status: () => 429,
+        request: () => ({ isNavigationRequest: () => true }),
+        frame: () => ({ parentFrame: () => null, page: () => x.popup }),
+      };
+      x.popup.emit("response", response);
+      x.context.emit("response", response);
+    });
+    try {
+      await expect(
+        x.reader.read(url("a"), x.control.signal, async () => "must not adopt"),
+      ).rejects.toThrow("HTTP 429");
+      expect(gate.read().state).not.toBe("ready");
+      expect(gate.read().reasons.some((reason) => reason.code === "http_429")).toBe(true);
+      expect(
+        db.prepare("SELECT count(*) AS n FROM access_evidence WHERE reason='http_429'").get()?.n,
+      ).toBeGreaterThan(0);
+    } finally {
+      await x.reader.close();
+      db.close();
+    }
+  },
+);
+it("visible login on the first detail page persists a shared stop", async () => {
+  const db = new DatabaseSync(":memory:");
+  const gate = new AccessGovernor(db);
+  mocks.governor = gate;
+  const x = fixture();
+  const owner = gate.acquireOwner("visible-test");
+  mocks.contexts.set(x.search, {
+    ...owner,
+    stopEpoch: 0,
+    runId: "run",
+    queryId: "query",
+    pageId: "list",
+    pageGeneration: 1,
+    browserSessionEpoch: "session",
+    sourceKind: "market",
+  });
+  mocks.available.mockImplementation(async (page) => {
+    if (page === x.popup) throw new CrawlAccessError("login");
+  });
+  try {
+    await expect(x.reader.read(url("a"), x.control.signal, async () => "no")).rejects.toThrow();
+    expect(gate.read().reasons.some((reason) => reason.code === "login")).toBe(true);
+  } finally {
+    await x.reader.close();
+    db.close();
+  }
 });

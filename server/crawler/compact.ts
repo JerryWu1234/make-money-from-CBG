@@ -1,8 +1,9 @@
 import type { DetailItem, Listing, RoleDetail, TabSnapshot } from "./types";
 import { completeSchoolSkillsFromText } from "./school-skills";
 import { officialModelFromAttributes } from "./official-model";
+import { fieldEvidence } from "./field-evidence";
 
-export const CAPTURE_VERSION = 9;
+export const CAPTURE_VERSION = 10;
 export function cleanDescription(value: string) {
   return value
     .replace(/#r/g, "\n")
@@ -346,6 +347,8 @@ export function itemFromAttributes(attrs: Record<string, string>, index: number)
           {
             riderSkill: "坐骑技能",
             school_skill: "师门技能",
+            life_skill: "生活技能",
+            assist_skill: "辅助技能",
             cifu: "召唤兽技能",
             neidan: "内丹",
           } as Record<string, string>
@@ -482,9 +485,22 @@ export function compactListing(listing: Listing): Listing {
 export function compactDetail(detail: RoleDetail): RoleDetail {
   if (detail.formatVersion === 3) {
     const tabs = detail.tabs.map(completeSchoolSkillsFromText);
-    return tabs.some((tab, index) => tab !== detail.tabs[index]) ? { ...detail, tabs } : detail;
+    return tabs.some((tab, index) => tab !== detail.tabs[index])
+      ? {
+          ...detail,
+          tabs,
+          ...(detail.sourceEvidence
+            ? {
+                sourceEvidence: {
+                  ...detail.sourceEvidence,
+                  fields: fieldEvidence(tabs, detail.valuation),
+                },
+              }
+            : {}),
+        }
+      : detail;
   }
-  return {
+  const result: RoleDetail = {
     ...detail,
     formatVersion: 3,
     raw: {},
@@ -507,4 +523,10 @@ export function compactDetail(detail: RoleDetail): RoleDetail {
       });
     }),
   };
+  if (result.sourceEvidence)
+    result.sourceEvidence = {
+      ...result.sourceEvidence,
+      fields: fieldEvidence(result.tabs, result.valuation),
+    };
+  return result;
 }

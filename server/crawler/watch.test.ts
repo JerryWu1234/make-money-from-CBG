@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { CrawlStore } from "./store";
-import { crawl } from "./runner";
-import { watchCrawl } from "./watch";
+import { crawl as runCrawl, type CrawlOptions } from "./runner";
+import { watchCrawl as runWatchCrawl } from "./watch";
 import { CAPTURE_VERSION } from "./compact";
 import { collectCompleteCapture, IncompleteCaptureError } from "./capture-readiness";
 import {
@@ -17,6 +17,12 @@ import {
   type RoleDetail,
   type SavedRoleRecord,
 } from "./types";
+
+// Existing priority scenarios explicitly exercise the configurable high new-task quota.
+const watchCrawl: typeof runWatchCrawl = (source, store, signal, publish, options, ...rest) =>
+  runWatchCrawl(source, store, signal, publish, { newTaskQuota: 100, ...options }, ...rest);
+const crawl: typeof runCrawl = (source, store, signal, publish, options?: CrawlOptions) =>
+  runCrawl(source, store, signal, publish, { newTaskQuota: 100, ...options });
 
 // 失败方式：超出总并发、新号排队时先派老、空位未补满、抢占旧在途、详情阻挡头扫、同秒跨页漏采、
 // 水位早于 pending 落库、新号覆盖历史断点、旧失败阻挡新号、异常或暂停未等在途退出。
@@ -828,12 +834,12 @@ describe("持续发现新号和历史详情共享采集池", () => {
     expect(await outcome).toMatchObject({ message: "暂停" });
   });
 
-  it.each([undefined, 4, 6, 8, 10])(
-    "无上架排序时 %s 并发（默认6）新号排队优先，排队清空后老号补满空位",
+  it.each([3, 4, 6, 8, 10])(
+    "无上架排序时 %s 并发（默认1）新号排队优先，排队清空后老号补满空位",
     async (concurrency) => {
       vi.useFakeTimers();
       const db = memory(),
-        pool = concurrency ?? 6,
+        pool = concurrency ?? 1,
         fresh = Array.from({ length: pool + 2 }, (_, i) => item(i + 1)),
         old = Array.from({ length: pool }, (_, i) => item(i + 20));
       const src = source([fresh, old]);
@@ -1976,4 +1982,41 @@ describe("持续发现新号和历史详情共享采集池", () => {
       expect(db.headCheckpoint()).toBeUndefined();
     },
   );
+});
+
+it("单交互池连续三个新任务后旧任务取得下一次机会", async () => {
+  const db = memory(),
+    old = item(90),
+    fresh = [item(1), item(2), item(3), item(4), item(5)];
+  const src = source([fresh]);
+  src.prepare = vi.fn(async () => {
+    db.observe(old, "old");
+    return { page: 1, totalPages: 1, order: "selling_time DESC", items: fresh };
+  });
+  const active = holdDetails(src),
+    control = new AbortController();
+  const outcome = runWatchCrawl(src, db, control.signal, vi.fn(), {
+    concurrency: 1,
+    newTaskQuota: 3,
+    headIntervalMs: 60000,
+  }).catch((error) => error);
+  try {
+    await flush();
+    for (const row of fresh.slice(0, 3)) {
+      expect(active.has(row.key)).toBe(true);
+      active.get(row.key)!();
+      await flush();
+    }
+    expect(active.has(old.key)).toBe(true);
+    expect(
+      vi
+        .mocked(src.detail)
+        .mock.calls.slice(0, 4)
+        .map(([row]) => row.key),
+    ).toEqual([...fresh.slice(0, 3).map((row) => row.key), old.key]);
+  } finally {
+    control.abort(new Error("暂停"));
+    active.forEach((release) => release());
+    await outcome;
+  }
 });

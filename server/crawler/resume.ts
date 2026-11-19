@@ -73,6 +73,7 @@ export async function prepareCrawlPages(
         message: `正在核对上次入库锚点 ${index + 1}/${candidates.length} 是否仍上架…`,
       });
       try {
+        store.beginAvailabilityCheck(item.key);
         if (await source.onShelf(item)) {
           anchor = item;
           break;
@@ -80,7 +81,7 @@ export async function prepareCrawlPages(
       } catch (error) {
         signal.throwIfAborted();
         if (!(error instanceof ListingUnavailableError)) throw error;
-        store.markUnavailable(item.key, error.message);
+        if (!store.markUnavailable(item.key, error.message, error.accessContext)) throw error;
         publish({ current: item.name || item.eid, detailProgress: error.message });
       }
     }

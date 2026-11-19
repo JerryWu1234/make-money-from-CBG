@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -28,6 +29,9 @@ test("单一商品列表排除未完整记录，兼容旧任务链接并保留�
   store.db.prepare("UPDATE listings SET status='complete' WHERE key='broken-complete'").run();
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://cbg-ui.test") return route.abort();
     if (url.pathname === "/api/runtime/settings")
       return route.fulfill({ json: { saveScreenshots: false } });

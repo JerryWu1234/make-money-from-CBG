@@ -11,6 +11,18 @@ const temporary = () => {
   directories.push(directory);
   return path.join(directory, "browser-settings.json");
 };
+it.each(["future-native-v2", null, false])(
+  "未知已保存通路 %j 不能隐式回退到 Playwright",
+  (accessAdapter) => {
+    const file = temporary();
+    const original = JSON.stringify({ mode: "dedicated", accessAdapter });
+    writeFileSync(file, original);
+    const store = new BrowserSettingsStore(file);
+    expect(() => store.get()).toThrow("官网交互通路无法识别");
+    expect(() => store.get()).toThrow("官网交互通路无法识别");
+    expect(readFileSync(file, "utf8")).toBe(original);
+  },
+);
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();

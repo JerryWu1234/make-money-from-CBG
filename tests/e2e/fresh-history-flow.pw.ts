@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -224,6 +225,7 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
   });
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://cbg-flow.test") return route.abort();
     if (url.pathname === "/fixture-list")
       return route.fulfill({
@@ -340,8 +342,13 @@ test("新老双队列：持续发现→跨页去重→暂停重启→7/3分析�
           await analysisRunner!.resume(input.runId, false, input.concurrency);
           body = analysisStore!.run(batch);
           break;
-        default:
+        default: {
+          if (url.pathname === "/api/crawl/role-training-filter") {
+            await route.fulfill({ json: { minTotal: null } });
+            return;
+          }
           throw new Error("未模拟接口：" + url.pathname);
+        }
       }
       return route.fulfill({ json: body });
     }

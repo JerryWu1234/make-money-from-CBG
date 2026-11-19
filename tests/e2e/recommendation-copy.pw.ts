@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -83,6 +84,7 @@ test("推荐榜复制保留条目，确认后隐藏并持久保存，分页始�
     });
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== "http://cbg-recommendation.test") return route.abort();
       if (url.pathname === "/api/runtime/settings")
         return route.fulfill({ json: { saveScreenshots: false } });
@@ -129,7 +131,13 @@ test("推荐榜复制保留条目，确认后隐藏并持久保存，分页始�
           if (failViewSave) return route.fulfill({ status: 500, json: { error: "模拟保存失败" } });
           if (holdViewSave) await viewSaveWait;
           body = store.markRecommendationViewed(route.request().postDataJSON().key);
-        } else throw new Error("未模拟接口：" + url.pathname);
+        } else {
+          if (url.pathname === "/api/crawl/role-training-filter") {
+            await route.fulfill({ json: { minTotal: null } });
+            return;
+          }
+          throw new Error("未模拟接口：" + url.pathname);
+        }
         return route.fulfill({ json: body });
       }
       const filename = path.join(

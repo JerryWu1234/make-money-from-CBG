@@ -15,6 +15,7 @@ function setup() {
   const store = new CrawlStore(":memory:");
   stores.push(store);
   const record = analysisRecord("paused-partial");
+  record.listing.sellingTime = new Date().toISOString();
   record.listing.orderTime = record.listing.sellingTime;
   const partial = structuredClone(record.detail!);
   partial.equipmentCapture!.complete = false;

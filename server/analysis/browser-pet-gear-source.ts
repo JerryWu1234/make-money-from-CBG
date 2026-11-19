@@ -1,3 +1,13 @@
+import { browserSettings } from "../browser-settings";
+import { bindOfficialPage } from "../official-access";
+import {
+  beginPageQuery,
+  finishPageQuery,
+  failPendingPageQuery,
+  pageQueryProofs,
+  successfulQueryEvidence,
+  QueryHealthError,
+} from "../query-health/runtime";
 import type { Page } from "playwright-core";
 import { createMarketDetailReader, refreshMarketCandidates } from "./market-detail";
 import { createHiddenPage, getBrowser } from "../session";
@@ -108,6 +118,7 @@ export function petGearUIQuery(item: PetGearPricingItem, similar = false) {
 }
 
 export type PetGearSearchResult = {
+  accessProofs?: import("../access").AccessContext[];
   queries: string[];
   items: {
     key: string;
@@ -320,7 +331,13 @@ async function readPetGearRows(page: Page, pageNumber: number) {
       level: anchor.querySelector("img")?.getAttribute("data_equip_level") || "",
       server: anchor.querySelector("img")?.getAttribute("data_serverid") || "",
     }));
-    return { totalPages, rows };
+    return {
+      totalPages,
+      rows,
+      empty: /没有符合条件/.test(
+        document.querySelector<HTMLElement>("#query_result")?.innerText || "",
+      ),
+    };
   });
 }
 
@@ -486,6 +503,11 @@ export async function petGearSourceFromPage(
               details++;
               try {
                 await detailPages!.read(url, workSignal, async (detailPage) => {
+                  await bindOfficialPage(detailPage, {
+                    runId: "market-pet-gear",
+                    sourceKind: "market-pet-gear-detail",
+                    signal: workSignal,
+                  });
                   await captureBrowserStep(
                     detailPage,
                     { flow: "analysis", stage: "pet_gear.detail.opened", key: item.key },
@@ -591,7 +613,22 @@ export async function petGearSourceFromPage(
                 " / " +
                 JSON.stringify(applied.query);
               result.queries.push(queryText);
-              const loadPage = async (pageNumber: number, first: boolean, replay = false) => {
+              let healthProbe = false;
+              const loadPage = async (
+                pageNumber: number,
+                first: boolean,
+                replay = false,
+              ): Promise<Awaited<ReturnType<typeof readPetGearRows>>> => {
+                const healthQuery = healthProbe
+                  ? undefined
+                  : beginPageQuery(searchPage, {
+                      category: PET_GEAR_SEARCH_ACTION,
+                      server: serverId,
+                      serverAge: "",
+                      conditions: { ...applied.args },
+                      page: pageNumber,
+                      sort: "default",
+                    });
                 scopeAudit!.begin(PET_GEAR_SEARCH_ACTION, pageNumber);
                 if (first) await searchPage.locator("#btn_do_query").click();
                 else
@@ -638,6 +675,66 @@ export async function petGearSourceFromPage(
                   }
                   return filters;
                 });
+                assertEquipmentUIArguments(applied.args, submittedArgs);
+                if (healthProbe) return listing;
+                await finishPageQuery(
+                  searchPage,
+                  healthQuery,
+                  successfulQueryEvidence(listing.rows.length, listing.empty),
+                  async (identity) => {
+                    healthProbe = true;
+                    try {
+                      if (JSON.stringify(identity.conditions) === JSON.stringify(applied.args)) {
+                        const checked = await loadPage(identity.page, true, true);
+                        return successfulQueryEvidence(checked.rows.length, checked.empty);
+                      }
+                      // The saved baseline is replayed only through supported official controls.
+                      const form = await readPetGearSearchForm(searchPage);
+                      await searchPage.locator("#reset_all").click();
+                      await selectMarketServer(searchPage, serverId, workSignal);
+                      for (const [key, value] of Object.entries(identity.conditions)) {
+                        if (key === "serverid" || key === "level_max") continue;
+                        if (key === "level_min")
+                          await moveObservedLevelSlider(
+                            searchPage,
+                            "level_slider",
+                            Number(value),
+                            Number(identity.conditions.level_max),
+                          );
+                        else if (key === "equip_pos")
+                          await selectObservedMenu(searchPage, "EquipPosBox", String(value));
+                        else if (key === "xiangqian_stone_attr")
+                          await selectObservedMenu(
+                            searchPage,
+                            "xiangqian_stone_attr_panel",
+                            String(value),
+                          );
+                        else {
+                          const control = form.controls.find(
+                            (control) => control.id === key && control.visible,
+                          );
+                          if (!control) throw new Error("对照条件没有可核验的官网控件，已暂停");
+                          if (control.type === "checkbox")
+                            await searchPage.locator("#" + key).setChecked(String(value) === "1");
+                          else await searchPage.locator("#" + key).fill(String(value));
+                        }
+                      }
+                      const original = { ...applied.args };
+                      for (const key of Object.keys(applied.args)) delete applied.args[key];
+                      Object.assign(applied.args, identity.conditions);
+                      try {
+                        const checked = await loadPage(identity.page, true, true);
+                        return successfulQueryEvidence(checked.rows.length, checked.empty);
+                      } finally {
+                        for (const key of Object.keys(applied.args)) delete applied.args[key];
+                        Object.assign(applied.args, original);
+                      }
+                    } finally {
+                      healthProbe = false;
+                    }
+                  },
+                  next,
+                );
                 result.searchItems.push({
                   key: item.key,
                   searchUrl: PET_GEAR_SEARCH_URL,
@@ -781,6 +878,8 @@ export async function petGearSourceFromPage(
               workSignal,
             );
             workSignal.throwIfAborted();
+            failPendingPageQuery(searchPage);
+            if (error instanceof QueryHealthError) throw error;
             failed = !refreshSkipped;
             note = error instanceof Error ? error.message : String(error);
             if (
@@ -844,6 +943,7 @@ export async function petGearSourceFromPage(
             scopeEvidence: [...(item.scopeEvidence || []), ...scopeEvidence],
           });
         }
+        result.accessProofs = pageQueryProofs(searchPage);
         return result;
       },
       close,
@@ -865,11 +965,17 @@ export async function createPetGearSource(
   serverId: string,
   budgets: { maxPages?: number; maxDetails?: number } = {},
 ) {
+  if (browserSettings().accessAdapter === "extension-native")
+    return (await import("../adapters/native-market-source")).createNativePetGearSource(
+      signal,
+      serverId,
+    );
   assertMarketServerId(serverId);
   signal.throwIfAborted();
   const browser = await getBrowser(true);
   signal.throwIfAborted();
   const page = await createHiddenPage(browser);
+  await bindOfficialPage(page, { runId: "market-pet-gear", sourceKind: "market-pet-gear", signal });
   try {
     signal.throwIfAborted();
     return await petGearSourceFromPage(page, signal, serverId, budgets);

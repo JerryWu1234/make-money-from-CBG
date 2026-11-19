@@ -44,6 +44,24 @@ afterEach(() => {
 });
 
 describe("后台流程与状态查询", () => {
+  it("访问暂停保留原始原因码，不被登录步骤编号掩盖", async () => {
+    const { AccessGateError } = await import("./access");
+    const { openCbg, checkCbgStatus } = await import("./cbg");
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.runFixedWorkflow.mockImplementation(async (_page, publish) => {
+      publish({ workflowStep: "logging_in" });
+      throw new AccessGateError("site_paused", "官网访问仍受限制，请完成验证后重试");
+    });
+    try {
+      openCbg();
+      await vi.waitFor(async () =>
+        expect((await checkCbgStatus()).error?.code).toBe("site_paused"),
+      );
+      expect((await checkCbgStatus()).error?.message).toContain("仍受限制");
+    } finally {
+      log.mockRestore();
+    }
+  });
   it("扫码未完成时开始接口立即返回，轮询不阻塞、重复开始不再建窗口", async () => {
     const { openCbg, checkCbgStatus } = await import("./cbg");
     let finish!: (value: ReturnType<typeof disconnectedState>) => void;

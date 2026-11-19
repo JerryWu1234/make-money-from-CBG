@@ -5,6 +5,8 @@ import { compactListing } from "./compact";
 import { IncompleteCaptureError } from "./capture-readiness";
 import { browserConnectionFailure } from "../browser-connection";
 import { pageSignature, refreshRepeatedPage } from "./repeated-pages";
+import { roleTrainingDecision } from "./role-training-filter";
+import { diagnostics } from "../diagnostics";
 import {
   DEFAULT_HEAD_REFRESH,
   DEFAULT_LISTING_AGE_MINUTES,
@@ -57,14 +59,25 @@ export async function watchCrawl(
   publish: (state: Partial<CrawlStatus>) => void,
   options: CrawlOptions,
   order = ORDER,
-  seed: { saved: number; skipped?: number; failed: number; failedItems: Listing[] } = {
+  seed: {
+    saved: number;
+    skipped?: number;
+    failed: number;
+    failedItems: Listing[];
+    filteredTraining?: number;
+  } = {
     saved: 0,
     failed: 0,
     failedItems: [],
   },
 ) {
   const ordered = order === ORDER;
-  const concurrency = options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
+  const concurrency = Math.min(
+    options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY,
+    source.maxConcurrency ?? Infinity,
+  );
+  const minRoleTrainingTotal = options.minRoleTrainingTotal ?? null;
+  const filteredTrainingVersions = new Set<string>();
   const headRefresh = validateHeadRefreshSettings(options.headRefresh ?? DEFAULT_HEAD_REFRESH);
   const listingAgeMinutes = headRefresh.listingAgeMinutes ?? DEFAULT_LISTING_AGE_MINUTES;
   const recent = (item: Listing) => isRecentListing(item.sellingTime, listingAgeMinutes);
@@ -77,6 +90,7 @@ export async function watchCrawl(
   let failure: { error: unknown; preserveCompleted?: boolean } | undefined;
   let wake: (() => void) | undefined;
   let saved = seed.saved,
+    filteredTraining = seed.filteredTraining ?? 0,
     skipped = seed.skipped || 0,
     failed = seed.failed,
     historyIndex = 0,
@@ -115,6 +129,8 @@ export async function watchCrawl(
     const queues = queued();
     publish({
       concurrency,
+      minRoleTrainingTotal,
+      filteredTraining,
       captureStrategy: "new-first",
       newRunning: running.new,
       oldRunning: running.old,
@@ -213,7 +229,7 @@ export async function watchCrawl(
           return;
         }
         if (error instanceof ListingUnavailableError) {
-          store.markUnavailable(item.key, error.message);
+          if (!store.markUnavailable(item.key, error.message, error.accessContext)) throw error;
           failedVersions.delete(item.key);
           skipped++;
           publish({
@@ -236,13 +252,18 @@ export async function watchCrawl(
       }
     }
   };
+  const newTaskQuota = options.newTaskQuota ?? 3;
+  let consecutiveNew = 0;
+  let discoveryWaits = 0;
   const pump = () => {
     while (!failure && !signal.aborted && inFlight.size < concurrency) {
       const queues = queued();
       let lane: CrawlLane;
-      if (queues.new.length) lane = "new";
+      if (queues.old.length && (consecutiveNew >= newTaskQuota || !queues.new.length)) lane = "old";
+      else if (queues.new.length) lane = "new";
       else if (queues.old.length) lane = "old";
       else break;
+      consecutiveNew = lane === "new" ? consecutiveNew + 1 : 0;
       const item = queues[lane][0]!;
       running[lane]++;
       // 先登记在途，避免同步完成或下一次发现把同一条商品再次派发。
@@ -292,6 +313,25 @@ export async function watchCrawl(
           if (Date.now() >= nextHeadCheck) return;
         }
         if (stopAtAgeLimit(listed)) return;
+        const training = roleTrainingDecision(listed.attrs, minRoleTrainingTotal);
+        if (minRoleTrainingTotal !== null)
+          diagnostics.record("crawl.training_filter", {
+            key: listed.key,
+            minTotal: minRoleTrainingTotal,
+            ...training,
+          });
+        if (training.skip) {
+          const version = JSON.stringify([listed.key, listed.sellingTime]);
+          if (!filteredTrainingVersions.has(version)) {
+            filteredTrainingVersions.add(version);
+            filteredTraining++;
+          }
+          publish({
+            filteredTraining,
+            detailProgress: `四修总和 ${training.total} 低于下限 ${minRoleTrainingTotal}，本轮跳过`,
+          });
+          return;
+        }
         const item = await source.hover(listed);
         check();
         // 悬停期间若已有同一 URL 的任务登记，仍由原任务负责。
@@ -427,9 +467,11 @@ export async function watchCrawl(
         scheduleHeadCheck();
       } else if (historyDone) {
         await waitForWork();
-      } else if (historyPage > 1 && queued().new.length) {
+      } else if (historyPage > 1 && queued().new.length && discoveryWaits++ < newTaskQuota) {
+        // Bound history discovery starvation even with continuous new arrivals.
         await waitForWork(true);
       } else {
+        discoveryWaits = 0;
         const discovered = await retryDiscovery(async () => {
           if (!currentPage) {
             let page = await source.page(historyPage);
