@@ -72,7 +72,10 @@ export async function watchCrawl(
   },
 ) {
   const ordered = order === ORDER;
-  const concurrency = options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
+  const concurrency = Math.min(
+    options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY,
+    source.maxConcurrency ?? Infinity,
+  );
   const minRoleTrainingTotal = options.minRoleTrainingTotal ?? null;
   const filteredTrainingVersions = new Set<string>();
   const headRefresh = validateHeadRefreshSettings(options.headRefresh ?? DEFAULT_HEAD_REFRESH);

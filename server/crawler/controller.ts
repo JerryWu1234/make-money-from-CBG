@@ -2,8 +2,8 @@ import { withNativeWorkflow } from "../adapters/native-workflow";
 import { browserSettings } from "../browser-settings";
 import { officialGovernor, bindOfficialPage, officialPageContext } from "../official-access";
 import { randomUUID } from "node:crypto";
-import type { Browser, Page } from "playwright-core";
-import { getBrowser, getCbgPage, createHiddenPage } from "../session";
+import type { Page } from "playwright-core";
+import { getBrowser, getCbgPage } from "../session";
 import { checkCbgStatus } from "../cbg";
 import { crawl, validateCrawlOptions, type CrawlOptions } from "./runner";
 import { createPlaywrightCrawlAdapter } from "../adapters/playwright";
@@ -266,22 +266,9 @@ export async function startCrawl(
       guards.push(await watchCrawlAccess(target, control.signal, stop));
       control.signal.throwIfAborted();
     };
-    const createDetailPage = async () => {
+    const onOpenedDetail = async (detailPage: Page) => {
       control.signal.throwIfAborted();
-      let browser: Browser | undefined;
-      let detailPage: Page;
-      try {
-        // A validated collection session must not silently reconnect after a disconnect.
-        browser = await getBrowser(false);
-        detailPage = await createHiddenPage(browser);
-      } catch (error) {
-        control.signal.throwIfAborted();
-        if (!browser || !browser.isConnected())
-          throw (
-            browserConnectionFailure(error) || new BrowserConnectionError("disconnected", error)
-          );
-        throw error;
-      }
+      if (detailPage === page) return;
       detailPages.push(detailPage);
       watchWorkPage(detailPage, "detail");
       log("page.ready", { kind: "detail" });
@@ -293,18 +280,21 @@ export async function startCrawl(
         crawlLease,
       });
       await watchAccess(detailPage, "detail");
-      return detailPage;
     };
     try {
+      await getBrowser(false).catch((error: unknown) => {
+        throw browserConnectionFailure(error) || new BrowserConnectionError("disconnected", error);
+      });
       await watchAccess(page, "list");
-      const detailPage = await createDetailPage();
       const failureBudget = createCaptureFailureBudget();
       await db.withCrawlLease(owner, () =>
         crawl(
           createPlaywrightCrawlAdapter({
             listPage: page,
-            detailPage,
-            createDetailPage,
+            detailPage: page,
+            openFromList: true,
+            onOpenedDetail,
+            onFatal: (error) => control.abort(error),
             signal: control.signal,
             preferredOrder,
             savedRecord:

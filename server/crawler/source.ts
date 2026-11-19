@@ -28,8 +28,12 @@ import { captureBrowserStep } from "../browser-evidence";
 import { classifyBrowserFailure } from "../browser-connection";
 import { roleIdentityIssues } from "./role-identity";
 import { createDetailOpenQueue } from "./detail-open-queue";
+import { createListClickSource } from "./list-click-source";
 
 interface SourceOptions {
+  openFromList?: boolean;
+  onOpenedDetail?: (page: Page) => Promise<void>;
+  onFatal?: (error: unknown) => void;
   listPage: Page;
   detailPage: Page;
   createDetailPage?: () => Promise<Page>;
@@ -53,11 +57,13 @@ export async function collectRole(
     log,
     waitForDetailOpen,
     onAccessFailure,
+    alreadyOpened = false,
   }: Pick<
     SourceOptions,
     "signal" | "savedRecord" | "onDetailProgress" | "log" | "onAccessFailure"
   > & {
     waitForDetailOpen?: (signal: AbortSignal) => Promise<void>;
+    alreadyOpened?: boolean;
   },
 ) {
   signal.throwIfAborted();
@@ -113,7 +119,7 @@ export async function collectRole(
         await waitForDetailOpen?.(signal);
         signal.throwIfAborted();
         log("detail.open", { key: item.key, attempt });
-        const detail = await collectDetail(detailPage, item, signal, report);
+        const detail = await collectDetail(detailPage, item, signal, report, alreadyOpened);
         const issues = captureIssues(detail, true, true, item);
         if (issues.length)
           await saveCaptureFailure(
@@ -141,7 +147,7 @@ export async function collectRole(
           { key: item.key, attempt, stage, error: failure },
           log,
         );
-        if (!signal.aborted && isRetryableDetailNavigation(failure)) {
+        if (!alreadyOpened && !signal.aborted && isRetryableDetailNavigation(failure)) {
           // A timed-out goto can still be navigating. Commit an empty document before
           // retrying so its late response or scheduled reload cannot interrupt the next goto.
           const resetStarted = Date.now();
@@ -195,6 +201,9 @@ export async function collectRole(
 }
 
 export function createCrawlSource({
+  openFromList = false,
+  onOpenedDetail,
+  onFatal,
   listPage,
   detailPage,
   createDetailPage,
@@ -206,6 +215,19 @@ export function createCrawlSource({
   detailTimeoutMs = 180_000,
   onAccessFailure,
 }: SourceOptions): CrawlSource {
+  if (openFromList)
+    return createListClickSource({
+      listPage,
+      signal,
+      preferredOrder,
+      savedRecord,
+      onDetailProgress,
+      log,
+      detailTimeoutMs,
+      onAccessFailure,
+      onOpenedDetail,
+      onFatal,
+    });
   const available = [detailPage];
   const waitForDetailOpen = createDetailOpenQueue();
   const active = new Map<AbortController, () => Promise<void>>();

@@ -23,6 +23,7 @@ export async function clickForInspection(
   element: Locator,
   signal?: AbortSignal,
   sort?: { field: string; expectedOrder: string; observedOrder: string; attempt: number },
+  navigationConfirmed?: () => boolean | Promise<boolean>,
 ) {
   const page = element.page();
   const collectionSignal = collectionPageSignal(page);
@@ -110,6 +111,13 @@ export async function clickForInspection(
         const receipt = await observeInspectionInput(page, token, afterHover);
         try {
           await page.mouse.click(afterHover.x, afterHover.y);
+          check();
+          // A same-tab link destroys its old DOM receipt. Accept only the caller's
+          // observed target navigation; never resend the click to recreate a receipt.
+          if (await navigationConfirmed?.()) {
+            recordClick("navigation_completed");
+            return;
+          }
           let delivered = await receipt.read();
           if (!delivered?.clicked && delivered?.events.length === 0) {
             await new Promise((resolve) => setTimeout(resolve, 200));
@@ -139,6 +147,13 @@ export async function clickForInspection(
           });
           recordClick("compatibility_completed");
         } catch (error) {
+          if (navigationConfirmed) {
+            check();
+            if (await navigationConfirmed()) {
+              recordClick("navigation_completed");
+              return;
+            }
+          }
           recordClick("failed", error);
           throw error;
         } finally {

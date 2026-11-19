@@ -4,6 +4,7 @@ import { CrawlAccessError } from "./types";
 import { LoginRequiredDialogError } from "./login-dialog";
 
 const mocks = vi.hoisted(() => ({
+  sourceOptions: undefined as undefined | { onOpenedDetail: (page: unknown) => Promise<void> },
   createStore: vi.fn(),
   acquire: vi.fn(),
   release: vi.fn(),
@@ -44,7 +45,12 @@ vi.mock("../session", () => ({
   getBrowser: mocks.getBrowser,
   createHiddenPage: async () => mocks.detailPage,
 }));
-vi.mock("./source", () => ({ createCrawlSource: () => ({}) }));
+vi.mock("./source", () => ({
+  createCrawlSource: (options: NonNullable<typeof mocks.sourceOptions>) => {
+    mocks.sourceOptions = options;
+    return {};
+  },
+}));
 vi.mock("./access-guard", () => ({ watchCrawlAccess: mocks.watchLogin }));
 vi.mock("../analysis/controller", () => ({ appendCapturedAnalysis: mocks.enqueue }));
 vi.mock("../diagnostics", () => ({ diagnostics: { record: vi.fn() }, watchWorkPage: vi.fn() }));
@@ -77,6 +83,8 @@ it.each(["manual", "scheduled"] as const)("%s 启动将已保存的刷新配置�
   initial = controller;
   const result = await controller.startCrawl(origin);
   await result.activity!.completion;
+  expect(mocks.sourceOptions).toMatchObject({ openFromList: true, detailPage: mocks.listPage });
+  expect(mocks.detailPage.setDefaultTimeout).not.toHaveBeenCalled();
   expect(mocks.crawl.mock.calls[0][4]).toMatchObject({
     headRefresh: { intervalSeconds: 600, random: true, listingAgeMinutes: 3 },
   });
@@ -172,6 +180,7 @@ it.each([
 ] as const)("%s 页发现 %s 立即取消整轮并保留访问原因", async (kind, issue) => {
   let readingSignal: AbortSignal | undefined;
   mocks.crawl.mockImplementation(async (_source, _store, signal: AbortSignal, publish) => {
+    await mocks.sourceOptions!.onOpenedDetail(mocks.detailPage);
     readingSignal = signal;
     publish({ page: 3, saved: 5 });
     await new Promise<void>((_resolve, reject) => {
@@ -208,6 +217,7 @@ it.each([
 
 it("连续三件失败立即取消，保留失败原因和计数，不等待在途浏览器超时", async () => {
   mocks.crawl.mockImplementation(async (_source, _store, signal: AbortSignal, publish) => {
+    await mocks.sourceOptions!.onOpenedDetail(mocks.detailPage);
     publish({ page: 4, saved: 2, failed: 1 });
     expect(signal.aborted).toBe(false);
     publish({ failed: 2 });
@@ -295,6 +305,7 @@ it("开启原始工作页显示时，采集停止后保留详情页供人工核�
 
 it("模块重载保留采集进度、同一个在途任务和暂停控制器，不会重复启动", async () => {
   mocks.crawl.mockImplementation(async (_source, _store, signal: AbortSignal, publish) => {
+    await mocks.sourceOptions!.onOpenedDetail(mocks.detailPage);
     publish({ page: 8, totalPages: 100, message: "正在采集第8页" });
     await new Promise<void>((_resolve, reject) => {
       signal.addEventListener("abort", () => reject(signal.reason), { once: true });

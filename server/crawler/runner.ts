@@ -107,7 +107,10 @@ export async function crawl(
 ) {
   signal.throwIfAborted();
   validateCrawlOptions(options);
-  const concurrency = options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY;
+  const concurrency = Math.min(
+    options.concurrency ?? DEFAULT_CRAWL_CONCURRENCY,
+    source.maxConcurrency ?? Infinity,
+  );
   const minRoleTrainingTotal = options.minRoleTrainingTotal ?? null;
   options = { ...options, minRoleTrainingTotal };
   const filteredTrainingVersions = new Set<string>();

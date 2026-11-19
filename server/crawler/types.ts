@@ -84,6 +84,7 @@ export interface ListingPage {
   items: Listing[];
 }
 export interface CrawlSource {
+  maxConcurrency?: number;
   prepare: (order?: string) => Promise<ListingPage>;
   refresh?: (order?: string) => Promise<ListingPage>;
   page: (number: number, refresh?: boolean) => Promise<ListingPage>;

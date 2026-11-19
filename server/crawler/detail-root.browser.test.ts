@@ -50,66 +50,79 @@ function documentFixture(decoys = true) {
   <section id="actual-detail"><header>价格：￥1234</header><nav>${MAIN_TABS.map((name) => `<button onclick="show('${name}')">${name}</button>`).join("")}</nav><article id="actual-panel">${panels["人物/修炼"]}</article><div id="RoleEquipTipsBox" style="display:none"></div><textarea id="equip_desc_value" hidden>actual-encoded</textarea></section>`;
 }
 
-it("collects real valuation, role, skills, equipment and pets inside the retained scope while ignoring external decoys and duplicate IDs", async () => {
-  const page = await browser.newPage();
-  try {
-    await page.route("**/*", (route) =>
-      new URL(route.request().url()).pathname === "/equip"
-        ? route.fulfill({ contentType: "text/html", body: documentFixture() })
-        : route.fulfill({ body: "" }),
-    );
-    const detail = await collectDetail(page, listing, new AbortController().signal);
-    expect(detail.tabs.find((tab) => tab.name === "人物/修炼")?.text).toContain("实际人物");
-    expect(detail.tabs.find((tab) => tab.name === "技能")?.items?.map((item) => item.name)).toEqual(
-      skillNames,
-    );
-    expect(
-      detail.tabs.find((tab) => tab.name === "道具/法宝")?.items?.map((item) => item.name),
-    ).toEqual(["实际武器"]);
-    expect(detail.tabs.find((tab) => tab.name === "道具/法宝")?.items?.[0].description).toContain(
-      "伤害 +420",
-    );
-    expect(detail.petCapture?.complete).toBe(true);
-    expect(detail.tabs.find((tab) => tab.name === "召唤兽/孩子")?.pets?.[0]).toMatchObject({
-      name: "实际宝宝",
-      skills: [{ name: "实际宝宝技能", skillObservation: { section: "技能", state: "current" } }],
-      equipment: [{ name: "实际宝宝项圈" }],
-    });
-    expect(detail.valuation?.source).toMatchObject({
-      askingPrice: "1234",
-      serverId: "367",
-      eid: "root-role",
-      allSkills: { 230: 40, 237: 20 },
-    });
-    expect(detail.valuation?.fields).toEqual(
-      expect.arrayContaining([
-        { name: "坐骑1成长", value: "2.3", tab: "坐骑" },
-        { name: "现金", value: "5", tab: "道具/法宝" },
-      ]),
-    );
-    expect(detail.valuation?.issues).toEqual([]);
-    expect(detail.raw.encodedRoleData).toBe("actual-encoded");
-    expect(
-      await page.evaluate(() => ({
-        decoy: Reflect.get(window, "decoyClicks"),
-        mounts: Reflect.get(window, "actualMountClicks"),
-        children: Reflect.get(window, "actualChildClicks"),
-        sources: Reflect.get(window, "parserInputs"),
-        marked: document.querySelectorAll(
-          "[data-cbg-detail-root],[data-cbg-inspect-index],[data-cbg-pet-index],[data-cbg-pet-item],[data_cbg_skill_section]",
-        ).length,
-      })),
-    ).toEqual({
-      decoy: 0,
-      mounts: 1,
-      children: 1,
-      sources: ["actual-encoded", "actual-encoded"],
-      marked: 0,
-    });
-  } finally {
-    await page.close();
-  }
-}, 30000);
+it.each([false, true])(
+  "collects real valuation, role, skills, equipment and pets without external decoys (alreadyOpened=%s)",
+  async (alreadyOpened) => {
+    const page = await browser.newPage();
+    try {
+      await page.route("**/*", (route) =>
+        new URL(route.request().url()).pathname === "/equip"
+          ? route.fulfill({ contentType: "text/html", body: documentFixture() })
+          : route.fulfill({ body: "" }),
+      );
+      if (alreadyOpened) await page.goto(listing.url);
+      const navigate = vi.spyOn(page, "goto");
+      const detail = await collectDetail(
+        page,
+        listing,
+        new AbortController().signal,
+        undefined,
+        alreadyOpened,
+      );
+      if (alreadyOpened) expect(navigate).not.toHaveBeenCalled();
+      expect(detail.tabs.find((tab) => tab.name === "人物/修炼")?.text).toContain("实际人物");
+      expect(
+        detail.tabs.find((tab) => tab.name === "技能")?.items?.map((item) => item.name),
+      ).toEqual(skillNames);
+      expect(
+        detail.tabs.find((tab) => tab.name === "道具/法宝")?.items?.map((item) => item.name),
+      ).toEqual(["实际武器"]);
+      expect(detail.tabs.find((tab) => tab.name === "道具/法宝")?.items?.[0].description).toContain(
+        "伤害 +420",
+      );
+      expect(detail.petCapture?.complete).toBe(true);
+      expect(detail.tabs.find((tab) => tab.name === "召唤兽/孩子")?.pets?.[0]).toMatchObject({
+        name: "实际宝宝",
+        skills: [{ name: "实际宝宝技能", skillObservation: { section: "技能", state: "current" } }],
+        equipment: [{ name: "实际宝宝项圈" }],
+      });
+      expect(detail.valuation?.source).toMatchObject({
+        askingPrice: "1234",
+        serverId: "367",
+        eid: "root-role",
+        allSkills: { 230: 40, 237: 20 },
+      });
+      expect(detail.valuation?.fields).toEqual(
+        expect.arrayContaining([
+          { name: "坐骑1成长", value: "2.3", tab: "坐骑" },
+          { name: "现金", value: "5", tab: "道具/法宝" },
+        ]),
+      );
+      expect(detail.valuation?.issues).toEqual([]);
+      expect(detail.raw.encodedRoleData).toBe("actual-encoded");
+      expect(
+        await page.evaluate(() => ({
+          decoy: Reflect.get(window, "decoyClicks"),
+          mounts: Reflect.get(window, "actualMountClicks"),
+          children: Reflect.get(window, "actualChildClicks"),
+          sources: Reflect.get(window, "parserInputs"),
+          marked: document.querySelectorAll(
+            "[data-cbg-detail-root],[data-cbg-inspect-index],[data-cbg-pet-index],[data-cbg-pet-item],[data_cbg_skill_section]",
+          ).length,
+        })),
+      ).toEqual({
+        decoy: 0,
+        mounts: 1,
+        children: 1,
+        sources: ["actual-encoded", "actual-encoded"],
+        marked: 0,
+      });
+    } finally {
+      await page.close();
+    }
+  },
+  30000,
+);
 
 it.each(["div", "ul"])(
   "keeps a %s tab bar and its independent real panel inside one detail root",

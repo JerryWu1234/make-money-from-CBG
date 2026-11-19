@@ -650,11 +650,14 @@ async function openDetail(
   item: Listing,
   signal: AbortSignal,
   report: (message: string) => void,
+  alreadyOpened = false,
 ) {
   try {
     checkAborted(signal);
     report("正在打开商品详情页…");
-    const response = await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 45000 });
+    const response = alreadyOpened
+      ? null
+      : await page.goto(item.url, { waitUntil: "domcontentloaded", timeout: 45000 });
     await captureBrowserStep(
       page,
       { flow: "collection", stage: "角色详情打开", key: item.key },
@@ -815,8 +818,9 @@ export async function collectDetail(
   item: Listing,
   signal: AbortSignal,
   report: (message: string) => void = () => {},
+  alreadyOpened = false,
 ): Promise<RoleDetail> {
-  await openDetail(page, item, signal, report);
+  await openDetail(page, item, signal, report, alreadyOpened);
   const tabs: TabSnapshot[] = [];
   const equipmentIssues: string[] = [];
   let petCapture: RoleDetail["petCapture"];
