@@ -436,6 +436,7 @@ export async function prepareAnalysisClient(provider: AiProvider, selectedModel?
                 model,
                 outputSchema: schema,
                 ...(options?.bareRoleReview ? { bareRoleReview: true } : {}),
+                ...(options?.conditionReview ? { conditionReview: true } : {}),
               });
             } catch (error) {
               throw publicAiRequestError(error, publicError(error));

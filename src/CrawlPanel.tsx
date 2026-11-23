@@ -13,6 +13,18 @@ import { replaceSavedRecordKey, replaceSavedRecordsPage, savedRecordKey } from "
 type Status = CrawlStatus & {
   recent?: { key: string; name: string; price: string; status: string; error?: string }[];
 };
+const CONCURRENCY_KEY = "cbg-crawl-concurrency";
+const validConcurrency = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 2 && value % 2 === 0;
+function savedConcurrency() {
+  try {
+    const value = Number(localStorage.getItem(CONCURRENCY_KEY));
+    if (validConcurrency(value)) return String(value);
+  } catch {
+    /* Storage may be unavailable. */
+  }
+  return String(DEFAULT_CRAWL_CONCURRENCY);
+}
 export function CrawlPanel({
   ready,
   onRunning,
@@ -30,7 +42,16 @@ export function CrawlPanel({
   const [busy, setBusy] = useState(false);
   const [waitingForReady, setWaitingForReady] = useState(false);
   const pendingStart = useRef(false);
-  const [concurrency, setConcurrency] = useState(String(DEFAULT_CRAWL_CONCURRENCY));
+  const [concurrency, setConcurrency] = useState(savedConcurrency);
+  useEffect(() => {
+    const value = Number(concurrency);
+    if (!validConcurrency(value)) return;
+    try {
+      localStorage.setItem(CONCURRENCY_KEY, String(value));
+    } catch {
+      /* Keep the input usable when storage is unavailable. */
+    }
+  }, [concurrency]);
   const [analyzeEquipment, setAnalyzeEquipment] = useState<boolean | null>(null);
   const [savingMode, setSavingMode] = useState(false);
   const [scheduleBusy, setScheduleBusy] = useState(true);
@@ -98,6 +119,8 @@ export function CrawlPanel({
         if (!response.ok) throw new Error(data.error || "无法读取采集进度");
         if (!closed && version === clearedVersion.current) {
           setStatus(data);
+          if (data.running && validConcurrency(data.concurrency))
+            setConcurrency(String(data.concurrency));
           if (!data.running && data.totalSaved === 0 && !data.recent?.length) selectRecord(null);
           setTransportError("");
           onRunning(data.running);
@@ -119,7 +142,7 @@ export function CrawlPanel({
   const action = useCallback(
     async (command: "start" | "stop") => {
       const count = Number(concurrency);
-      if (command === "start" && (!Number.isSafeInteger(count) || count < 2 || count % 2 !== 0)) {
+      if (command === "start" && !validConcurrency(count)) {
         setError("并发数必须是正偶数（2、4、6…）");
         return;
       }

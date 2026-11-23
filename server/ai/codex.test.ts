@@ -678,6 +678,43 @@ describe("官方 Codex 登录与 SDK", () => {
     ).rejects.toThrow("完整完成事件");
   });
 
+  it.each([false, true])("逐条条件使用high且保留无工具结构化请求，裸号标记=%s", async (bare) => {
+    const { requestCodex } = await import("./codex");
+    const schema = { type: "object" };
+    const response = await requestCodex("逐条条件与证据", new AbortController().signal, {
+      model: "gpt-6-luna",
+      outputSchema: schema,
+      conditionReview: true,
+      ...(bare ? { bareRoleReview: true } : {}),
+    });
+    expect(mocks.startThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: "gpt-6-luna",
+        modelReasoningEffort: "high",
+        sandboxMode: "read-only",
+        approvalPolicy: "never",
+        webSearchMode: "disabled",
+      }),
+    );
+    expect(mocks.options.mock.calls[0][0].config.features).toMatchObject({
+      shell_tool: false,
+      unified_exec: false,
+      hooks: false,
+      multi_agent: false,
+      apps: false,
+    });
+    expect(mocks.runStreamed).toHaveBeenCalledWith("逐条条件与证据", {
+      signal: expect.any(AbortSignal),
+      outputSchema: schema,
+    });
+    expect(mocks.run).not.toHaveBeenCalled();
+    expect(response.usage).toMatchObject({
+      input_scope: "role-conditions",
+      reasoning_effort: "high",
+      completion_mode: "turn.completed",
+    });
+  });
+
   it("装备查价启用实时搜索并返回真实搜索事件，不把模型文本当查询记录", async () => {
     vi.stubEnv("OPENAI_API_KEY", "fixture-api-key");
     vi.stubEnv("CODEX_API_KEY", "fixture-codex-key");

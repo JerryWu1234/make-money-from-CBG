@@ -126,6 +126,50 @@ afterEach(async () => {
 });
 
 describe("Codex 无状态请求池", () => {
+  it("逐条条件提高到high且不开放工具，随后普通裸号核对仍为low", async () => {
+    const { pool, transport } = create();
+    const signal = new AbortController().signal;
+    const schema = { type: "object" };
+    const requests = [
+      { conditionReview: true },
+      { conditionReview: true, bareRoleReview: true },
+      { bareRoleReview: true },
+    ];
+    for (const [index, options] of requests.entries()) {
+      const lease = await pool.acquire(signal);
+      const pending = lease.run("当前商品", schema, signal, options);
+      const [id] = (await turns(transport, index + 1))[index]!;
+      transport.finish(id, "result");
+      const response = await pending;
+      const thread = transport.calls.filter((call) => call.method === "thread/start").at(-1)!;
+      const turn = transport.calls.filter((call) => call.method === "turn/start").at(-1)!;
+      expect(thread.params).toMatchObject({
+        ephemeral: true,
+        model: "gpt-6-luna",
+        sandbox: "read-only",
+        approvalPolicy: "never",
+        baseInstructions: expect.stringContaining("Do not use tools"),
+        config: {
+          web_search: "disabled",
+          features: {
+            shell_tool: false,
+            unified_exec: false,
+            hooks: false,
+            multi_agent: false,
+            apps: false,
+          },
+        },
+      });
+      const effort = options.conditionReview ? "high" : "low";
+      expect(turn.params).toMatchObject({ effort, outputSchema: schema });
+      expect(response.usage).toMatchObject({
+        input_scope: options.conditionReview ? "role-conditions" : "body",
+        reasoning_effort: effort,
+      });
+      await lease.release(true);
+    }
+  });
+
   it("10 路请求独立并发，保存后卸载；下一批全新会话且复用同一服务", async () => {
     const { pool, transport, createTransport } = create(10);
     const signal = new AbortController().signal;

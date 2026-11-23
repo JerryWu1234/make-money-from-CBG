@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   browserSessionSettings: vi.fn(),
   changeBrowserMode: vi.fn(),
   changeBrowserModes: vi.fn(),
+  getActiveBrowserMode: vi.fn(),
   getBrowser: vi.fn(),
   isBrowserWorkflowRunning: vi.fn(),
   resetBrowserWorkflow: vi.fn(),
@@ -68,6 +69,7 @@ beforeEach(async () => {
   mocks.isBrowserWorkflowRunning.mockReturnValue(false);
   mocks.isCrawling.mockReturnValue(false);
   mocks.isAnalyzing.mockReturnValue(false);
+  mocks.getActiveBrowserMode.mockReturnValue("dedicated");
   mocks.changeBrowserMode.mockImplementation(
     async (mode: "daily" | "dedicated", busy: () => boolean, reset: () => void) => {
       if (busy())
@@ -81,6 +83,47 @@ beforeEach(async () => {
 });
 
 describe("browser settings API", () => {
+  it.each([true, false])("只保存显示开关 %s，沿用当前模式并传递忙检查", async (showWorkPages) => {
+    const res = await invoke(request("/api/browser/settings/save", "POST", { showWorkPages }));
+    expect(res.statusCode).toBe(200);
+    expect(mocks.changeBrowserModes).toHaveBeenCalledExactlyOnceWith(
+      ["dedicated"],
+      expect.any(Function),
+      mocks.resetBrowserWorkflow,
+      showWorkPages,
+    );
+    expect(mocks.changeBrowserModes.mock.calls[0][1]()).toBe(false);
+    expect(mocks.getBrowser).not.toHaveBeenCalled();
+  });
+
+  it("同时保存运行方式与显示开关", async () => {
+    const res = await invoke(
+      request("/api/browser/settings/save", "POST", {
+        mode: "daily",
+        showWorkPages: true,
+      }),
+    );
+    expect(res.statusCode).toBe(200);
+    expect(mocks.changeBrowserModes).toHaveBeenCalledExactlyOnceWith(
+      ["daily"],
+      expect.any(Function),
+      mocks.resetBrowserWorkflow,
+      true,
+    );
+  });
+
+  it.each([null, 0, 1, "true", {}, []])("拒绝无效显示开关 %j", async (showWorkPages) => {
+    const res = await invoke(
+      request("/api/browser/settings/save", "POST", {
+        mode: "daily",
+        showWorkPages,
+      }),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(mocks.changeBrowserMode).not.toHaveBeenCalled();
+    expect(mocks.changeBrowserModes).not.toHaveBeenCalled();
+  });
+
   it("只读取模式与状态，不连接或启动浏览器", async () => {
     mocks.browserSessionSettings.mockReturnValue({ mode: "daily", connected: true, busy: false });
     const res = await invoke(request("/api/browser/settings"));

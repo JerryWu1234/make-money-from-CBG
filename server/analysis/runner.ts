@@ -11,7 +11,12 @@ import { AnalysisStore, type AnalysisTask } from "./store";
 import { analysisConcurrency, analysisLaneLimits, DEFAULT_ANALYSIS_CONCURRENCY } from "./types";
 import type { AnalysisLane } from "./types";
 import type { PricingSearchProgress } from "./equipment-pricing";
-import { valuationSchema, validateValuation, recalculateValuation } from "./valuation-contract";
+import {
+  valuationSchema,
+  valuationPrompt,
+  validateValuation,
+  recalculateValuation,
+} from "./valuation-contract";
 import type { AnalysisProfile, ValuationSettings } from "./valuation-types";
 import { CALCULATION_VERSION } from "./profile";
 import { validateSampleSelection } from "./sample-selection";
@@ -21,6 +26,7 @@ import { captureIssues } from "../crawler/capture-readiness";
 import { isCurrentRoleCapture } from "../crawler/role-identity";
 import { EXPIRED_MARKET_NOTICE } from "./market";
 import { assertServiceOpen } from "../service-lifecycle";
+import { ConditionResponseError, directConditionNodes } from "./direct-condition-review";
 
 export type AnalysisClient = {
   model: string;
@@ -351,6 +357,7 @@ export class AnalysisRunner {
   ) {
     const stop = controller.signal;
     const pending = new Set<Promise<void>>();
+    const pendingIds = new Set<string>();
     const running = { new: 0, old: 0 };
     const limits = analysisLaneLimits(concurrency);
     let nextSingleLane: AnalysisLane = "new";
@@ -370,8 +377,9 @@ export class AnalysisRunner {
         while (!stop.aborted && !providerPause.message && pending.size < concurrency) {
           const preferredLane =
             concurrency === 1 ? nextSingleLane : running.new < limits.newLimit ? "new" : "old";
-          const task = this.store.next(id, preferredLane);
+          const task = this.store.next(id, preferredLane, [...pendingIds]);
           if (!task) break;
+          pendingIds.add(task.id);
           running[task.lane]++;
           nextSingleLane = task.lane === "new" ? "old" : "new";
           const work = this.processTask(task, owner, client, controller, providerPause)
@@ -387,6 +395,7 @@ export class AnalysisRunner {
             })
             .finally(() => {
               running[task.lane]--;
+              pendingIds.delete(task.id);
               pending.delete(work);
             });
           pending.add(work);
@@ -447,6 +456,7 @@ export class AnalysisRunner {
       controller.abort();
     };
     const budget = { started: Date.now(), rounds: 0 };
+    let conditionRepairs = 0;
     while (!stop.aborted && this.store.owns(owner)) {
       if (this.store.skipUnavailableTask(task, owner)) return;
       if (
@@ -728,33 +738,55 @@ export class AnalysisRunner {
         });
         return;
       }
+      // Rebuild the transport format from frozen source/settings when resuming old tasks.
+      // Each attempt still archives its exact request; prior requests stay untouched.
+      const basePrompt = task.profile
+        ? valuationPrompt(
+            task.document,
+            task.record,
+            task.profile,
+            task.equipmentPricing,
+            task.petPricing,
+          )
+        : task.prompt;
       const prompt =
         task.profile &&
         task.lastError &&
         task.lastAttemptHadResponse &&
         !task.lastError.startsWith("已暂停") &&
         task.attempts > 0
-          ? task.prompt +
+          ? basePrompt +
             "\n\n上次输出校验未通过：" +
             task.lastError.slice(0, 1000) +
             "。请复核原文引用与本批次计价规则后修正 JSON，不得补造缺失资料。"
-          : task.prompt;
+          : basePrompt;
       const attempt = this.store.begin(task, owner, prompt);
       const signal = AbortSignal.any([stop, AbortSignal.timeout(300_000)]);
       let raw: string | undefined, usage: unknown;
       let session: AnalysisSession | undefined;
       let persisted = false;
       try {
-        if (Buffer.byteLength(prompt, "utf8") > 256 * 1024)
-          throw new Error("分析请求超过 256 KiB，已保留原文，请先核对请求长度后重试");
+        // Dense complete captures can exceed 256 KiB even after duplicate raw/HTML
+        // archives are omitted. Keep their evidence intact within this local bound.
+        if (Buffer.byteLength(prompt, "utf8") > 1024 * 1024)
+          throw new Error("分析请求超过 1 MiB，已保留原文，请先核对请求长度后重试");
         if (client.acquireSession) session = await client.acquireSession(signal);
+        const bareRoleReview =
+          !!task.profile && !task.profile.equipmentSearch && !task.profile.petSearch;
+        const conditionReview =
+          !!task.profile && directConditionNodes(task.profile.settings.conditions).length > 0;
         const response = await pricingUntilAborted(
           (session?.analyze ?? client.analyze)(
             prompt,
             task.profile ? valuationSchema(task.profile) : ANALYSIS_SCHEMA,
             signal,
-            ...(task.profile && !task.profile.equipmentSearch && !task.profile.petSearch
-              ? [{ bareRoleReview: true }]
+            ...(bareRoleReview || conditionReview
+              ? [
+                  {
+                    ...(bareRoleReview ? { bareRoleReview: true } : {}),
+                    ...(conditionReview ? { conditionReview: true } : {}),
+                  },
+                ]
               : []),
           ),
           signal,
@@ -772,6 +804,7 @@ export class AnalysisRunner {
               task.profile,
               task.equipmentPricing,
               task.petPricing,
+              { requireConditions: true },
             )
           : validateAnalysis(raw, task.document, task.record);
         this.store.finish(task, attempt, owner, { state: "completed", result, raw, usage });
@@ -790,6 +823,12 @@ export class AnalysisRunner {
           /401|403|429|unauth|authentication|api.?key|登录|quota|rate.?limit|限流|额度|余额|insufficient|账号已变化|model.*(?:not available|not found|unsupported)/i.test(
             message,
           );
+        const repairCondition =
+          !stop.aborted &&
+          !signal.aborted &&
+          error instanceof ConditionResponseError &&
+          !!raw &&
+          conditionRepairs < 1;
         this.store.finish(task, attempt, owner, {
           state: stop.aborted ? "interrupted" : "failed",
           error: message,
@@ -801,9 +840,19 @@ export class AnalysisRunner {
               : undefined,
           raw,
           usage,
-          requeue: stop.aborted || fatal,
+          requeue: stop.aborted || fatal || repairCondition,
         });
         persisted = true;
+        if (repairCondition) {
+          conditionRepairs++;
+          task = {
+            ...task,
+            lastError: message,
+            lastAttemptHadResponse: true,
+            attempts: task.attempts + 1,
+          };
+          continue;
+        }
         if (!stop.aborted && providerPause.message) {
           this.store.setRun(
             id,

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { codexHomeEnv } from "./codex-home";
 import { CODEX_HTTP_OVERRIDES, CODEX_HTTP_PROVIDER } from "./codex-provider";
+import type { AnalysisRequestOptions } from "./types";
 
 // Bare-role review is data validation, so it does not need Codex's coding instructions.
 const BARE_ROLE_INSTRUCTIONS =
@@ -19,7 +20,7 @@ export type CodexPoolTransport = {
 };
 /** A JSON-RPC error response confirms that the request was rejected by app-server. */
 export class CodexPoolRpcError extends Error {}
-type AnalysisOptions = { bareRoleReview?: boolean };
+type AnalysisOptions = AnalysisRequestOptions;
 type Response = { text: string; usage: unknown };
 type TurnEvents = { text?: string; usage?: unknown; status?: string; error?: string };
 type Slot = {
@@ -449,6 +450,12 @@ export class CodexPool {
     this.check();
     signal.throwIfAborted();
     const bare = options.bareRoleReview === true;
+    const structuredReview = bare || options.conditionReview === true;
+    const effort = options.conditionReview
+      ? "high"
+      : bare || this.model !== "gpt-6-luna"
+        ? "low"
+        : "max";
     const previous = slot.current;
     if (previous?.expected && previous.turns.get(previous.expected)?.status === "completed")
       throw new Error("分析结果尚未保存，请先释放当前请求");
@@ -505,13 +512,13 @@ export class CodexPool {
               ephemeral: true,
               model: this.model,
               modelProvider: CODEX_HTTP_PROVIDER,
-              ...(bare ? { baseInstructions: BARE_ROLE_INSTRUCTIONS } : {}),
+              ...(structuredReview ? { baseInstructions: BARE_ROLE_INSTRUCTIONS } : {}),
               cwd: slot.directory,
               sandbox: "read-only",
               approvalPolicy: "never",
               config: {
                 web_search: "disabled",
-                ...(bare
+                ...(structuredReview
                   ? {
                       features: {
                         shell_tool: false,
@@ -560,7 +567,7 @@ export class CodexPool {
           input: [{ type: "text", text: prompt }],
           cwd: slot.directory,
           outputSchema: schema,
-          effort: bare || this.model !== "gpt-6-luna" ? "low" : "max",
+          effort,
         }),
       );
       const id = object(started.turn).id;
@@ -578,11 +585,11 @@ export class CodexPool {
       if (typeof done.text !== "string") throw new Error("Codex 分析未返回完整结果，请重试");
       return {
         text: done.text.trim(),
-        usage: bare
+        usage: structuredReview
           ? {
               ...object(done.usage),
-              input_scope: "body",
-              reasoning_effort: "low",
+              input_scope: options.conditionReview ? "role-conditions" : "body",
+              reasoning_effort: effort,
               completion_mode: "turn.completed",
             }
           : (done.usage ?? null),

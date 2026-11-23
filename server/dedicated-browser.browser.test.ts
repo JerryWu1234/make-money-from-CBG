@@ -3,13 +3,59 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { expect, it, vi } from "vite-plus/test";
+import { beforeEach, expect, it, vi } from "vite-plus/test";
 import type { BrowserContext } from "playwright-core";
 import { openDedicatedBrowser } from "./dedicated-browser";
+import { BrowserSettingsStore } from "./browser-settings";
+
+const settings = vi.hoisted(() => vi.fn());
+vi.mock("./browser-settings", async (original) => ({
+  ...(await original<typeof import("./browser-settings")>()),
+  browserSettings: settings,
+}));
+beforeEach(() => settings.mockReturnValue({ mode: "dedicated", showWorkPages: false }));
 
 const origin = "http://dedicated-cbg.test";
 const cookieName = "dedicated-session-fixture";
 const storageName = "dedicated-session-marker";
+
+it("显示选择持久保存后在可见与隐藏 Chrome 间切换，登录资料仍保留", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cbg-work-preview-regression-"));
+  const store = new BrowserSettingsStore(path.join(root, "browser-settings.json"));
+  settings.mockImplementation(() => store.get());
+  let context: BrowserContext | undefined;
+  try {
+    for (const visible of [false, true, false]) {
+      store.save("dedicated", visible);
+      expect(
+        new BrowserSettingsStore(path.join(root, "browser-settings.json")).get().showWorkPages,
+      ).toBe(visible);
+      context = await openDedicatedBrowser(path.join(root, "profile"));
+      const cdp = await context.browser()!.newBrowserCDPSession();
+      const version = await cdp.send("Browser.getVersion");
+      expect(version.userAgent.includes("HeadlessChrome")).toBe(!visible);
+      await cdp.detach();
+      if (visible) {
+        expect(
+          (await context.cookies(origin)).find((cookie) => cookie.name === cookieName)?.value,
+        ).toBe("preview-login");
+      }
+      await context.addCookies([
+        {
+          name: cookieName,
+          value: "preview-login",
+          url: origin,
+          expires: Math.floor(Date.now() / 1000) + 3600,
+        },
+      ]);
+      await context.close();
+      context = undefined;
+    }
+  } finally {
+    await context?.close();
+    await rm(root, { recursive: true, force: true });
+  }
+}, 90_000);
 
 it("专用配置重开后保留持久 cookie 和 localStorage，其他配置保持隔离", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "cbg-dedicated-profile-regression-"));

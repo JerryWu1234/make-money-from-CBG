@@ -1841,7 +1841,32 @@ body:has(.analysis-page) #root {
 .analysis-price-condition input {
   width: 120px;
 }
+.analysis-price-percentage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .analysis-condition-summary {
   flex-basis: 100%;
   margin: 0;
+}
+
+.analysis-condition-evidence {
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.analysis-condition-evidence summary {
+  cursor: pointer;
+}
+.analysis-condition-evidence dl {
+  margin: 8px 0;
+}
+.analysis-condition-evidence dl > div {
+  margin: 8px 0;
+}
+.analysis-condition-evidence dt {
+  font-weight: 600;
+}
+.analysis-condition-evidence dd {
+  margin: 2px 0 0;
 }

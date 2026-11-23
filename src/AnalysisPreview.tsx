@@ -154,6 +154,7 @@ export function AnalysisPreview() {
   const hiddenRecommendations = data?.rankingPagination?.hiddenTotal || 0;
   const sameCalculation =
     !run?.calculationVersion || run.calculationVersion === data?.profile?.calculationVersion;
+  const sameProfile = !run?.profileHash || run.profileHash === data?.profile?.hash;
   const sameMarket = !run?.marketExpired;
   const selectedModel = selectedModels[provider];
   const effectiveModel = selectedModel || defaultModels[provider];
@@ -310,6 +311,7 @@ export function AnalysisPreview() {
       setResultsPage(1);
       if (
         sameCalculation &&
+        sameProfile &&
         sameMarket &&
         sameModel &&
         run?.provider === selected &&
@@ -327,7 +329,7 @@ export function AnalysisPreview() {
           model: selectedModels[selected] || undefined,
         });
     },
-    [run, mutate, sameCalculation, sameMarket, sameModel, selectedModels],
+    [run, mutate, sameCalculation, sameProfile, sameMarket, sameModel, selectedModels],
   );
   const changeProvider = (selected: AiProvider) => {
     setProvider(selected);
@@ -405,7 +407,7 @@ export function AnalysisPreview() {
         ? "按新模型开始分析"
         : run && !sameMarket
           ? "刷新行情并重新分析"
-          : run && !sameCalculation
+          : run && (!sameCalculation || !sameProfile)
             ? "按新规则开始分析"
             : run?.status === "paused"
               ? "继续分析"
@@ -543,7 +545,7 @@ export function AnalysisPreview() {
             )}
             {settingsNotice && (
               <p className="analysis-start-hint" role="status">
-                设置已保存。下次分析将更新受影响的商品，已有结果保留。
+                设置已保存。点击开始分析，查看每条条件的判断结果；已有有效估值会复用，历史结果保留。
               </p>
             )}
             {data?.profile && !data.profile.calculationCompatible && (
@@ -572,7 +574,7 @@ export function AnalysisPreview() {
                       ? "模型选择已更改，下次分析使用所选模型，已有结果保留。"
                       : run && !sameMarket
                         ? "本批次区服行情已过期。重新分析将刷新行情并使用新批次，已有结果保留。"
-                        : run && !sameCalculation
+                        : run && (!sameCalculation || !sameProfile)
                           ? "估值规则已更新，下次分析使用新规则，已有结果保留。"
                           : run?.status === "paused"
                             ? `${run.pauseNotice ? run.pauseNotice + "。" : "分析已暂停。"}已完成结果保留；继续时沿用原计价设置，并发数使用当前输入。`
@@ -730,7 +732,7 @@ export function AnalysisPreview() {
                 <div className="analysis-list-intro">
                   <span>查看详情和复制不会隐藏商品；点击“确认隐藏”后才移出默认榜单。</span>
                   <span>
-                    按本批次保存的入榜条件判断，且／或从上到下依次计算；未设置时默认挂牌价等于裸号估值。
+                    按当前保存的入榜规则和完整采集资料计算，且／或从上到下依次计算；未设置时默认价格不限制。
                   </span>
                   <span>条件满足才入榜；无法判断的商品可在全部商品查看依据。</span>
                   <span>差额 = 挂牌价 − 裸号估值</span>
@@ -794,8 +796,8 @@ export function AnalysisPreview() {
                           <p>
                             入榜依据：
                             {item.recommendation.basis === "default-price"
-                              ? "默认条件：挂牌价等于裸号估值"
-                              : "本批次入榜条件全部计算后满足"}
+                              ? "默认条件：价格不限制"
+                              : "当前入榜规则计算后满足"}
                           </p>
                         )}
                         <div className="analysis-rank-assets" aria-label="装备和宝宝简要信息">

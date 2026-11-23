@@ -56,6 +56,25 @@ function fixture() {
     .prepare("INSERT INTO analysis_market VALUES (1,?)")
     .run(JSON.stringify({ fetchedAt, servers: [server] }));
   const store = new AnalysisStore(crawl.db);
+  const initial = loadProfile(crawl.db);
+  crawl.db.prepare("INSERT INTO analysis_settings VALUES(1,?)").run(
+    JSON.stringify({
+      ...initial.settings,
+      settingsVersion: 2,
+      conditions: {
+        id: "G1",
+        operator: "and",
+        evaluation: "sequence",
+        children: [
+          {
+            id: "C1",
+            text: "",
+            price: { comparison: "eq", adjustment: "none", unit: "amount", value: 0 },
+          },
+        ],
+      },
+    }),
+  );
   const profile = loadProfile(crawl.db);
   const id = store.createRun("codex", "fixture-model", true, profile, true);
   crawl.db.prepare("UPDATE analysis_tasks SET status='completed',result_json=?,completed_at=?").run(
@@ -111,7 +130,7 @@ it("历史展示仍排除真实参数或资料变化的旧推荐", () => {
     const read = () => loadProfile(x.crawl.db, PROMPT_FILE, { allowExpiredMarket: true });
     expect(x.store.overview({ currentProfile: read() }).ranking).toHaveLength(1);
     x.crawl.db
-      .prepare("INSERT INTO analysis_settings VALUES(1,?)")
+      .prepare("INSERT OR REPLACE INTO analysis_settings VALUES(1,?)")
       .run(JSON.stringify({ ...x.profile.settings, budget: 100, settingsVersion: 2 }));
     expect(x.store.overview({ currentProfile: read() }).ranking).toHaveLength(0);
     x.crawl.db.prepare("DELETE FROM analysis_settings").run();

@@ -1,11 +1,30 @@
 import { beforeEach, expect, it, vi } from "vite-plus/test";
 import { openDedicatedBrowser } from "./dedicated-browser";
 
-const mocks = vi.hoisted(() => ({ launch: vi.fn(), record: vi.fn(), mkdir: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  launch: vi.fn(),
+  record: vi.fn(),
+  mkdir: vi.fn(),
+  browserSettings: vi.fn(),
+}));
 vi.mock("playwright-core", () => ({ chromium: { launchPersistentContext: mocks.launch } }));
 vi.mock("node:fs/promises", () => ({ mkdir: mocks.mkdir }));
 vi.mock("./diagnostics", () => ({ diagnostics: { record: mocks.record } }));
-beforeEach(() => vi.clearAllMocks());
+vi.mock("./browser-settings", () => ({ browserSettings: mocks.browserSettings }));
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.browserSettings.mockReturnValue({ mode: "dedicated", showWorkPages: false });
+});
+
+it.each([true, false])("按保存的显示开关启动专用 Chrome（显示=%s）", async (showWorkPages) => {
+  mocks.browserSettings.mockReturnValue({ mode: "dedicated", showWorkPages });
+  mocks.launch.mockResolvedValue({});
+  await openDedicatedBrowser("/temporary/profile");
+  expect(mocks.launch).toHaveBeenCalledWith(
+    "/temporary/profile",
+    expect.objectContaining({ headless: !showWorkPages }),
+  );
+});
 
 it("复现已启动进程后初始化超时：明确分类，保留原错误且不误报安装或目录占用", async () => {
   const original = Object.assign(

@@ -4,6 +4,7 @@ import { analysisRecord } from "../../tests/fixtures/analysis";
 import { CrawlStore } from "../crawler/store";
 import { AnalysisStore } from "./store";
 import * as recommendations from "./recommendation";
+import { createProfile, DEFAULT_SETTINGS } from "./profile";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -23,7 +24,23 @@ function fixture(count = 48) {
     expect(crawl.save(record.listing, record.detail!)).toBe(true);
   }
   const store = new AnalysisStore(crawl.db);
-  const runId = store.createRun("codex", "poll-fixture", true);
+  // These cache regressions explicitly exercise the historical equality filter.
+  const profile = createProfile("poll-fixture", {
+    ...DEFAULT_SETTINGS,
+    conditions: {
+      id: "G1",
+      operator: "and",
+      evaluation: "sequence",
+      children: [
+        {
+          id: "C1",
+          text: "",
+          price: { comparison: "eq", adjustment: "none", unit: "amount", value: 0 },
+        },
+      ],
+    },
+  });
+  const runId = store.createRun("codex", "poll-fixture", true, profile);
   crawl.db
     .prepare("UPDATE analysis_tasks SET status='completed',result_json=?")
     .run(JSON.stringify({ valuation: { bare_role_value: 100, decision: "PASS" } }));

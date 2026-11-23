@@ -7,13 +7,13 @@ import {
   calculateValuation,
   compareListingPrice,
 } from "../../server/analysis/valuation-calculator";
-import { createProfile } from "../../server/analysis/profile";
+import { createProfile, DEFAULT_SETTINGS } from "../../server/analysis/profile";
 import { analysisRecord, analysisResponse } from "../fixtures/analysis";
 import type { SavedRoleRecord } from "../../server/crawler/types";
 
-// Default equality, viewed history, asset summaries, mobile layout, and stale-result exclusion.
+// Saved legacy equality, viewed history, asset summaries, mobile layout, and stale-result exclusion.
 // All records are simulated; SQLite and UI are real.
-test("推荐榜默认等价条件→查看不隐藏→确认隐藏→全部商品与详情→刷新→过期结果移出", async ({
+test("推荐榜历史等价条件→查看不隐藏→确认隐藏→全部商品与详情→刷新→过期结果移出", async ({
   page,
 }, testInfo) => {
   const database = testInfo.outputPath("recommendation.sqlite");
@@ -109,7 +109,22 @@ test("推荐榜默认等价条件→查看不隐藏→确认隐藏→全部商�
       crawl.observe(r.listing);
       expect(crawl.save(r.listing, r.detail!)).toBe(true);
     }
-    const batch = store.createRun("codex", "fixture-model", true);
+    const legacyProfile = createProfile("fixture", {
+      ...DEFAULT_SETTINGS,
+      conditions: {
+        id: "G1",
+        operator: "and",
+        evaluation: "sequence",
+        children: [
+          {
+            id: "C1",
+            text: "",
+            price: { comparison: "eq", adjustment: "none", unit: "amount", value: 0 },
+          },
+        ],
+      },
+    });
+    const batch = store.createRun("codex", "fixture-model", true, legacyProfile);
     for (const [key, bare] of Object.entries({
       gem: 2000,
       pet: 1000,
@@ -199,14 +214,14 @@ test("推荐榜默认等价条件→查看不隐藏→确认隐藏→全部商�
     await expect(ranking).not.toContainText("角色bare-discount");
     await expect(ranking).toContainText("角色bare-equal");
     await expect(ranking).not.toContainText("角色bare-over");
-    await expect(ranking).toContainText("未设置时默认挂牌价等于裸号估值");
+    await expect(ranking).toContainText("未设置时默认价格不限制");
     await expect(ranking.getByRole("region", { name: "人工复核" })).toHaveCount(0);
     await expect(ranking).not.toContainText("角色manual");
     await expect(ranking.getByRole("article").filter({ hasText: "角色manual" })).toHaveCount(0);
     const gearCard = ranking.getByRole("article").filter({ hasText: "角色gem" });
     const petCard = ranking.getByRole("article").filter({ hasText: "角色pet" });
     const bareCard = ranking.getByRole("article").filter({ hasText: "角色bare-equal" });
-    await expect(bareCard).toContainText("默认条件：挂牌价等于裸号估值");
+    await expect(bareCard).toContainText("当前入榜规则计算后满足");
     await expect(bareCard).toContainText("裸号预估价 ¥1,000.00");
     await bareCard.scrollIntoViewIfNeeded();
     await page.screenshot({
@@ -299,7 +314,7 @@ test("推荐榜默认等价条件→查看不隐藏→确认隐藏→全部商�
           inventoryDisplay:
             "Observed gear/pets only; wild and level-zero pets separately labelled; future skills excluded; desktop and 390px mobile verified",
           eligible: ["gem", "pet", "wide", "bare-equal"],
-          defaultCondition: "挂牌价等于裸号估值（按分比较）",
+          savedLegacyCondition: "挂牌价等于裸号估值（按分比较）",
           excluded: ["wild", "far", "bare-discount", "bare-over", "manual"],
           aboveLimitExcluded: !store
             .overview({ showViewed: true })
