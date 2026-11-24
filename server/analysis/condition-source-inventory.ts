@@ -26,7 +26,7 @@ export function conditionSourceInventory(record: SavedRoleRecord) {
     jewelry: ConditionInventoryItem[] = [],
     petEquipment: ConditionInventoryItem[] = [],
     pets: ConditionInventoryItem[] = [],
-    unclassified: ConditionInventoryItem[] = [];
+    unclassified: ConditionCharacterEquipment[] = [];
   const normalized = equipmentInventory(record);
   const normalizedItems = new Map(normalized.items.map((item) => [item.key, item]));
   const petCapture = petInventory(record);
@@ -72,12 +72,32 @@ export function conditionSourceInventory(record: SavedRoleRecord) {
     }
     for (const key of ["锻炼等级", "宝石等级"]) {
       const raw = item.attributes?.[key];
-      if (raw !== undefined)
+      if (raw !== undefined && raw.trim())
         observations.push({
           path: `${path}/attributes/${escapeSegment(key)}`,
           quote: raw,
           value: /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : null,
         });
+    }
+    const complete =
+      record.detail?.captureMode !== "body" &&
+      record.detail?.equipmentCapture?.complete === true &&
+      !record.detail.equipmentCapture.issues?.length;
+    const instanceText = [item.description, item.tooltip].filter(Boolean).join("\n");
+    if (!observations.length && complete && !/锻炼等级|宝石等级|镶嵌宝石/.test(instanceText)) {
+      // Per the user's convention, a fully read equipment tooltip without gems is 0.
+      // A name/type alone is insufficient: retain unknown when detail was not read.
+      for (const key of ["description", "tooltip"] as const) {
+        const raw = item[key];
+        if (
+          raw &&
+          (/等级\s*[:：]?\s*\d+/.test(raw) || /^\d+$/.test(item.attributes?.等级?.trim() || "")) &&
+          /耐久|伤害|防御|命中|灵力|敏捷|气血|魔法/.test(raw)
+        ) {
+          observations.push({ path: `${path}/${key}`, quote: raw.trim().slice(0, 1000), value: 0 });
+          break;
+        }
+      }
     }
     const values = [...new Set(observations.map((entry) => entry.value))];
     const gemLevel = values.length === 1 && values[0] !== null ? values[0] : null;
@@ -179,7 +199,7 @@ export function conditionSourceInventory(record: SavedRoleRecord) {
             raw,
           );
         } else if (known || raw.kind === "equipment" || /锻炼等级|镶嵌宝石/.test(description))
-          add(unclassified, { ...result, category: "装备类别待核实" }, raw);
+          add(unclassified, { ...result, category: "装备类别待核实", ...gemFacts(raw, path) }, raw);
       }
     if (tab.name === "召唤兽/孩子")
       for (const [pi, pet] of (tab.pets || []).entries()) {
@@ -202,22 +222,53 @@ export function conditionSourceInventory(record: SavedRoleRecord) {
       }
   }
   const fullCapture = !!record.detail && record.detail.captureMode !== "body";
+  const genericEquipment = unclassified.filter(
+    (item) =>
+      item.gemEvidence.length > 0 &&
+      item.classificationEvidence.some(
+        (evidence) =>
+          (evidence.path.endsWith("/attributes/装备条件") ||
+            evidence.path.endsWith("/officialModel/description")) &&
+          /(?:【装备条件】\s*)?等级\s*[:：]?\s*\d+/.test(evidence.quote),
+      ),
+  );
   const equipmentCaptureComplete = fullCapture && normalized.captureComplete;
+  const petCaptureComplete = fullCapture && petCapture.captureComplete;
+  const knownCount =
+    equipment.length + jewelry.length + petEquipment.length + pets.length + genericEquipment.length;
   const missingItems = [
     ...equipment
       .filter((item) => item.gemLevel === null)
       .map(({ name, path }) => ({ name, path, reason: "宝石段数未读取或有冲突" })),
-    ...unclassified.map(({ name, path }) => ({ name, path, reason: "装备类别待核实" })),
+    ...unclassified
+      .filter((item) => item.gemLevel !== 0)
+      .map(({ name, path }) => ({ name, path, reason: "装备类别待核实" })),
   ];
   const knownSum = equipment.reduce((sum, item) => sum + (item.gemLevel ?? 0), 0);
   return {
     equipmentCaptureComplete,
-    petCaptureComplete: fullCapture && petCapture.captureComplete,
+    petCaptureComplete,
     equipment,
     jewelry,
     petEquipment,
     pets,
     unclassified,
+    countSummary: {
+      equipment: equipment.length,
+      jewelry: jewelry.length,
+      petEquipment: petEquipment.length,
+      pets: pets.length,
+      genericEquipment: genericEquipment.length,
+      genericEquipmentPaths: genericEquipment.map((item) => item.path),
+      knownTotal: knownCount,
+      total:
+        equipmentCaptureComplete &&
+        petCaptureComplete &&
+        unclassified.length === genericEquipment.length &&
+        !issues.length
+          ? knownCount
+          : null,
+    },
     gemSummary: {
       knownSum,
       total: equipmentCaptureComplete && !missingItems.length && !issues.length ? knownSum : null,

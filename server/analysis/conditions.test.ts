@@ -34,7 +34,7 @@ const rule = (text: string, expression: RuleExpression): CompiledConditionRule =
 });
 
 describe("价格条件百分比", () => {
-  function percentage(comparison: "lt" | "gt", value: number) {
+  function percentage(comparison: "lt" | "gt" | "lte", value: number) {
     const tree = defaultConditions();
     tree.children = [
       {
@@ -50,6 +50,52 @@ describe("价格条件百分比", () => {
     ];
     return tree;
   }
+
+  it.each([
+    [20, 0.01, "met", "1200.00"],
+    [20, 999, "met", "1200.00"],
+    [20, 1000, "met", "1200.00"],
+    [20, 1100, "met", "1200.00"],
+    [20, 1200, "met", "1200.00"],
+    [20, 1200.01, "unmet", "1200.00"],
+    [10, 1100, "met", "1100.00"],
+    [10, 1100.01, "unmet", "1100.00"],
+    [0, 999, "met", "1000.00"],
+    [0, 1000, "met", "1000.00"],
+    [0, 1000.01, "unmet", "1000.00"],
+    [2.5, 1025, "met", "1025.00"],
+    [2.5, 1025.01, "unmet", "1025.00"],
+    [150, 2500, "met", "2500.00"],
+  ] as const)("上涨%s%%仅设挂牌上限，挂牌%s => %s", (value, asking, status, target) => {
+    const tree = normalizeConditions(percentage("lte", value))!;
+    const review = evaluateConditions(tree, [], { asking, bare: 1000 });
+    const result = review.results.find((r) => r.id === "C1")!;
+    expect(result.status).toBe(status);
+    expect(result.reason).toContain(`上涨后上限${target}元`);
+    expect(result.reason).toContain("低于原估值也通过");
+    expect(review.results.at(-1)?.status).toBe(status);
+  });
+
+  it("上涨上限保留分币舍入和缺价格的处理，旧大于模式仍按原意计算", () => {
+    const tree = percentage("lte", 10);
+    expect(evaluateConditions(tree, [], { asking: 5881.32, bare: 5346.65 }).results[0].status).toBe(
+      "met",
+    );
+    expect(evaluateConditions(tree, [], { asking: 5881.33, bare: 5346.65 }).results[0].status).toBe(
+      "unmet",
+    );
+    expect(evaluateConditions(tree, [], { asking: 1000, bare: null }).results[0].status).toBe(
+      "unknown",
+    );
+    expect(
+      evaluateConditions(percentage("gt", 20), [], { asking: 1200, bare: 1000 }).results[0].status,
+    ).toBe("unmet");
+    expect(
+      priceConditionLabel(
+        (tree.children[0] as { price: Parameters<typeof priceConditionLabel>[0] }).price,
+      ),
+    ).toBe("挂牌价不超过裸号估值上涨10%后的价格");
+  });
 
   it.each([
     ["lt", 10, 899.99, "met", "900.00"],

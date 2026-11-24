@@ -357,6 +357,7 @@ export class AnalysisRunner {
   ) {
     const stop = controller.signal;
     const pending = new Set<Promise<void>>();
+    const pendingIds = new Set<string>();
     const running = { new: 0, old: 0 };
     const limits = analysisLaneLimits(concurrency);
     let nextSingleLane: AnalysisLane = "new";
@@ -376,8 +377,9 @@ export class AnalysisRunner {
         while (!stop.aborted && !providerPause.message && pending.size < concurrency) {
           const preferredLane =
             concurrency === 1 ? nextSingleLane : running.new < limits.newLimit ? "new" : "old";
-          const task = this.store.next(id, preferredLane);
+          const task = this.store.next(id, preferredLane, [...pendingIds]);
           if (!task) break;
+          pendingIds.add(task.id);
           running[task.lane]++;
           nextSingleLane = task.lane === "new" ? "old" : "new";
           const work = this.processTask(task, owner, client, controller, providerPause)
@@ -393,6 +395,7 @@ export class AnalysisRunner {
             })
             .finally(() => {
               running[task.lane]--;
+              pendingIds.delete(task.id);
               pending.delete(work);
             });
           pending.add(work);
@@ -763,8 +766,10 @@ export class AnalysisRunner {
       let session: AnalysisSession | undefined;
       let persisted = false;
       try {
-        if (Buffer.byteLength(prompt, "utf8") > 256 * 1024)
-          throw new Error("分析请求超过 256 KiB，已保留原文，请先核对请求长度后重试");
+        // Dense complete captures can exceed 256 KiB even after duplicate raw/HTML
+        // archives are omitted. Keep their evidence intact within this local bound.
+        if (Buffer.byteLength(prompt, "utf8") > 1024 * 1024)
+          throw new Error("分析请求超过 1 MiB，已保留原文，请先核对请求长度后重试");
         if (client.acquireSession) session = await client.acquireSession(signal);
         const bareRoleReview =
           !!task.profile && !task.profile.equipmentSearch && !task.profile.petSearch;

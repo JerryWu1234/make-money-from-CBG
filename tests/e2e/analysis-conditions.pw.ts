@@ -80,6 +80,9 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
         expect(prompt).toContain("条件证据列表摘要");
         const expected = calculateValuation(record, profile);
         expect(expected.bare_role_value).toBeGreaterThan(0);
+        // This listing is below the original estimate, so a markup ceiling must
+        // still pass it rather than adding a lower-bound requirement.
+        expect(Number(record.listing.price)).toBeLessThan(expected.bare_role_value!);
         const conditionResults = [];
         for (const node of profile.settings.conditions?.children || []) {
           if ("children" in node || node.price) continue;
@@ -231,6 +234,44 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
       settings.getByText("未自定义时，默认：价格不限制。", { exact: true }),
     ).toBeVisible();
     await expect(settings.getByRole("button", { name: "增加条件组", exact: true })).toHaveCount(0);
+    await settings.getByRole("button", { name: "关闭分析设置", exact: true }).click();
+    profile = saveProfile(
+      crawl.db,
+      {
+        template,
+        settings: {
+          ...profile.settings,
+          conditions: {
+            id: "G1",
+            operator: "and",
+            evaluation: "sequence",
+            children: [
+              {
+                id: "C1",
+                text: "",
+                price: { comparison: "gt", adjustment: "plus", unit: "percent", value: 20 },
+              },
+            ],
+          },
+        },
+        baseHash: profile.hash,
+        baseConfigurationHash: profile.configurationHash,
+      },
+      promptFile,
+    );
+    await page.getByRole("button", { name: "分析设置", exact: true }).click();
+    await expect(settings.getByLabel("C1价格比较", { exact: true })).toHaveValue("legacy");
+    await expect(settings.getByLabel("C1价格百分比", { exact: true })).toHaveCount(0);
+    expect(loadProfile(crawl.db, promptFile).settings.conditions?.children[0]).toMatchObject({
+      price: { comparison: "gt", adjustment: "plus", unit: "percent", value: 20 },
+    });
+    await settings.getByLabel("C1价格比较", { exact: true }).selectOption("lte");
+    await settings.getByLabel("C1价格百分比", { exact: true }).fill("20");
+    await settings.getByRole("button", { name: "保存设置", exact: true }).click();
+    await expect(settings).not.toBeVisible();
+    await page.getByRole("button", { name: "分析设置", exact: true }).click();
+    await expect(settings.getByLabel("C1价格比较", { exact: true })).toHaveValue("lte");
+    await expect(settings.getByLabel("C1价格百分比", { exact: true })).toHaveValue("20");
     await settings.getByLabel("C1条件类型", { exact: true }).selectOption("text");
     await settings.getByRole("button", { name: "保存设置", exact: true }).click();
     await expect(settings.getByRole("alert")).toContainText("C1 条件须填写");
@@ -249,21 +290,20 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await settings.getByLabel("C3条件", { exact: true }).fill("人物等级至少120级");
     await settings.getByRole("button", { name: "添加条件", exact: true }).click();
     await settings.getByLabel("C4条件类型", { exact: true }).selectOption("price");
-    await settings.getByLabel("C4价格比较", { exact: true }).selectOption("lt");
-    await settings.getByLabel("C4价格百分比", { exact: true }).fill("10");
-    await expect(settings.getByText(/裸号估值 × 90%/)).toBeVisible();
-    await settings.getByLabel("C4价格比较", { exact: true }).selectOption("gt");
-    await expect(settings.getByLabel("C4价格百分比", { exact: true })).toHaveValue("10");
-    await expect(settings.getByText(/裸号估值 × 110%/)).toBeVisible();
+    await settings.getByLabel("C4价格比较", { exact: true }).selectOption("lte");
+    await settings.getByLabel("C4价格百分比", { exact: true }).fill("20");
+    await expect(settings.getByText(/挂牌价 ≤ 裸号估值 × 120%/)).toBeVisible();
+    await expect(settings.getByText(/低于原估值也.*通过/).first()).toBeVisible();
     await settings.getByLabel("C4价格比较", { exact: true }).selectOption("none");
     await expect(settings.getByLabel("C4价格百分比", { exact: true })).toHaveCount(0);
-    await settings.getByLabel("C4价格比较", { exact: true }).selectOption("lt");
-    await settings.getByLabel("C4价格百分比", { exact: true }).fill("10");
+    await settings.getByLabel("C4价格比较", { exact: true }).selectOption("lte");
+    await expect(settings.getByLabel("C4价格百分比", { exact: true })).toHaveValue("0");
+    await settings.getByLabel("C4价格百分比", { exact: true }).fill("20");
     await expect(settings.getByLabel("C4价格比较", { exact: true }).locator("option")).toHaveCount(
-      3,
+      2,
     );
     await expect(settings.getByLabel("C4估值调整", { exact: true })).toHaveCount(0);
-    await expect(settings.getByText(/裸号估值 × 90%/)).toBeVisible();
+    await expect(settings.getByText(/挂牌价 ≤ 裸号估值 × 120%/)).toBeVisible();
     await expect(settings.getByRole("button", { name: "解析文字条件", exact: true })).toHaveCount(
       0,
     );
@@ -313,7 +353,8 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await expect(settings).not.toBeVisible();
     expect(loadProfile(crawl.db, promptFile).settings.sumAdvancedMounts).toBe(false);
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
-    await expect(settings.getByLabel("C4价格百分比", { exact: true })).toHaveValue("10");
+    await expect(settings.getByLabel("C4价格百分比", { exact: true })).toHaveValue("20");
+    await expect(settings.getByLabel("C4价格比较", { exact: true })).toHaveValue("lte");
     await settings.locator(".analysis-price-condition").scrollIntoViewIfNeeded();
     await settings.locator(".analysis-price-condition").screenshot({
       path: testInfo.outputPath("price-percentage-desktop.png"),
@@ -347,7 +388,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
         (node) => node.id === "C4",
       ),
     ).toMatchObject({
-      price: { comparison: "lt", adjustment: "minus", unit: "percent", value: 10 },
+      price: { comparison: "lte", adjustment: "plus", unit: "percent", value: 20 },
     });
     expect(calls).toBe(0);
     await page
@@ -365,7 +406,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await expect(page.getByLabel("条件匹配")).toContainText("条件 1 速度大于800：满足");
     await expect(page.getByLabel("条件匹配")).toContainText("850");
     await expect(page.getByLabel("条件匹配")).toContainText("最终结果（从上到下计算）：不满足");
-    await expect(page.getByLabel("条件匹配")).toContainText("条件 4 挂牌价比裸号估值低10%：满足");
+    await expect(page.getByLabel("条件匹配")).toContainText(/条件 4 .*不超过.*20%.*满足/);
     expect(store.overview().ranking).toHaveLength(0);
     await page.screenshot({
       path: testInfo.outputPath("A3-condition-results.png"),
@@ -377,8 +418,12 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
     await page.getByRole("button", { name: "查看分析", exact: true }).first().click();
     await expect(page.getByLabel("条件匹配")).toContainText("条件 3 人物等级至少120级：不满足");
     await expect(page.getByLabel("条件匹配")).toContainText("109");
+    await expect(page.getByLabel("条件匹配")).toContainText(/条件 4 .*不超过.*20%.*满足/);
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "分析设置", exact: true }).click();
+    crawl.db
+      .prepare("UPDATE analysis_runs SET status='paused' WHERE id=?")
+      .run(store.overview().run!.id);
     await settings.getByLabel("C1条件", { exact: true }).fill("速度大于900");
     await settings.getByRole("button", { name: "保存设置", exact: true }).click();
     expect(calls).toBe(1);
