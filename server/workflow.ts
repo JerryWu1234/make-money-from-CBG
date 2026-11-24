@@ -1,3 +1,6 @@
+import { pendingPageQuery } from "./query-health/runtime";
+import { beginRoleListQuery, readListings } from "./crawler/page";
+import { withOfficialAction } from "./official-access";
 import type { Page } from "playwright-core";
 import { CBG_HOME_URL, CBG_CROSS_SERVER_URL } from "./config";
 import { buildPageState, readPageSnapshot, type PageSnapshot } from "./page-state";
@@ -33,15 +36,20 @@ export async function clickInWorkPage(page: Page, selector: string): Promise<voi
   const element = page.locator(selector).first();
   await element.waitFor({ state: "visible", timeout: 30000 });
   // DOM 点击触发网站原有逻辑；不等待 click 自带的导航超时，不激活后台窗口。
-  try {
-    await element.evaluate((node) => {
-      if (node instanceof HTMLAnchorElement) node.target = "_self";
-      (node as HTMLElement).click();
-    });
-  } catch (error) {
-    // 点击已经触发导航时，不重放点击，交给目标页面的确认步骤。
-    if (!isNavigationTransition(error)) throw error;
-  }
+  await withOfficialAction(page, "workflow.click", async () => {
+    const before = page.url();
+    try {
+      await element.evaluate((node) => {
+        if (node instanceof HTMLAnchorElement) node.target = "_self";
+        (node as HTMLElement).click();
+      });
+    } catch (error) {
+      if (!isNavigationTransition(error)) throw error;
+      await page.waitForLoadState("domcontentloaded", { timeout: 10000 });
+      if (page.url() === before || new URL(page.url()).origin !== new URL(CBG_HOME_URL).origin)
+        throw error;
+    }
+  });
 }
 
 export async function selectServerAge(
@@ -57,10 +65,15 @@ export async function selectServerAge(
   const option = page.locator(`${panel} li`).filter({ hasText: labels["3"] }).first();
   if (panel === "#server_type" && !(await option.isVisible())) {
     const expand = page.locator("#btn_advance_search_fold");
-    if (await expand.isVisible()) await expand.evaluate((el) => (el as HTMLElement).click());
+    if (await expand.isVisible())
+      await withOfficialAction(page, "workflow.expand-search", () =>
+        expand.evaluate((el) => (el as HTMLElement).click()),
+      );
     const title = page.locator('.js_form_title[data-title="转服搜索"]');
     if (!(await option.isVisible()) && (await title.isVisible()))
-      await title.evaluate((el) => (el as HTMLElement).click());
+      await withOfficialAction(page, "workflow.expand-server-age", () =>
+        title.evaluate((el) => (el as HTMLElement).click()),
+      );
   }
   await option.waitFor({ state: "visible", timeout: 30000 });
   // 保留已选标签，只点击缺少的标签，沿用网站自身的多选逻辑。
@@ -68,7 +81,9 @@ export async function selectServerAge(
     const choice = page.locator(`${panel} li`).filter({ hasText: labels[value] }).first();
     await choice.waitFor({ state: "visible", timeout: 30000 });
     if (!(await choice.evaluate((el) => el.classList.contains("on"))))
-      await choice.evaluate((el) => (el as HTMLElement).click());
+      await withOfficialAction(page, "workflow.select-server-age", () =>
+        choice.evaluate((el) => (el as HTMLElement).click()),
+      );
   }
   await page.waitForFunction(
     (panelSelector) => {
@@ -194,14 +209,18 @@ export async function completeLogin(
         .filter({ hasText: /^我知道了$/ })
         .first();
       if (await button.isVisible()) {
-        await button.evaluate((el) => (el as HTMLElement).click());
+        await withOfficialAction(page, "workflow.dismiss-login-dialog", () =>
+          button.evaluate((el) => (el as HTMLElement).click()),
+        );
         await captureBrowserStep(page, { flow: "query", stage: "登录提示关闭完成" });
       }
     } else if (snapshot.hasRoles && !snapshot.hasQr) {
       if (!submittedAt) {
         const role = page.locator('li[id^="role_el_"]:visible').first();
         const image = role.locator("img").first();
-        await ((await image.count()) ? image : role).evaluate((el) => (el as HTMLElement).click());
+        await withOfficialAction(page, "workflow.select-login-role", async () =>
+          ((await image.count()) ? image : role).evaluate((el) => (el as HTMLElement).click()),
+        );
         submittedAt = Date.now();
         await clickInWorkPage(page, "#login_btn");
         await captureBrowserStep(page, { flow: "query", stage: "登录角色提交完成" });
@@ -272,6 +291,7 @@ async function executeFixedWorkflow(page: Page, publish: Publish): Promise<OpenC
   });
   await captureBrowserStep(page, { flow: "query", stage: "角色搜索条件准备完成" });
   stage("role_list", "正在加载全部服龄的角色列表…");
+  beginRoleListQuery(page, 1, { initial: true, sort: "" });
   await clickInWorkPage(page, "#btn_do_query");
   await page.waitForFunction(
     (serverTypes) => {
@@ -294,6 +314,7 @@ async function executeFixedWorkflow(page: Page, publish: Publish): Promise<OpenC
     ROLE_SERVER_TYPES,
     { timeout: 45000, polling: 250 },
   );
+  if (pendingPageQuery(page)) await readListings(page);
   const roleList = await readRoleList(page);
   const auth = buildPageState(await readStableSnapshot(page));
   if (!auth.isLoggedIn) throw new Error("网站登录状态已失效，请重新扫码后继续。");

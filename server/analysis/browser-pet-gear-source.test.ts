@@ -1,3 +1,7 @@
+vi.mock("../official-access", () => ({
+  bindOfficialPage: async () => {},
+  withOfficialAction: async (_page: unknown, _action: unknown, fn: () => Promise<unknown>) => fn(),
+}));
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   createPetGearSource,

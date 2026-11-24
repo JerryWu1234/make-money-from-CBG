@@ -4,6 +4,7 @@ import { CrawlAccessError } from "./types";
 import { LoginRequiredDialogError } from "./login-dialog";
 
 const mocks = vi.hoisted(() => ({
+  sourceOptions: undefined as undefined | { onOpenedDetail: (page: unknown) => Promise<void> },
   createStore: vi.fn(),
   acquire: vi.fn(),
   release: vi.fn(),
@@ -12,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   enqueue: vi.fn(),
   getBrowser: vi.fn(),
   headRefresh: vi.fn(),
+  roleTraining: vi.fn(),
   watchLogin: vi.fn(),
   disposeLogin: vi.fn(),
   listPage: { close: vi.fn() },
@@ -22,6 +24,9 @@ vi.mock("./store", () => ({
     constructor() {
       mocks.createStore();
     }
+    setProgressContext = vi.fn();
+    withCrawlLease = (_owner: string, work: () => unknown) => work();
+    crawlLease = (owner: string) => ({ owner, fence: 1 });
     count = () => 42;
     checkpoint = () => undefined;
     pageReviews = () => [];
@@ -33,16 +38,28 @@ vi.mock("./store", () => ({
 }));
 vi.mock("./runner", () => ({ crawl: mocks.crawl, validateCrawlOptions: vi.fn() }));
 vi.mock("./head-refresh-settings", () => ({ headRefreshSettings: mocks.headRefresh }));
+vi.mock("./role-training-settings", () => ({ roleTrainingSettings: mocks.roleTraining }));
 vi.mock("../cbg", () => ({ checkCbgStatus: mocks.current }));
 vi.mock("../session", () => ({
   getCbgPage: () => mocks.listPage,
   getBrowser: mocks.getBrowser,
   createHiddenPage: async () => mocks.detailPage,
 }));
-vi.mock("./source", () => ({ createCrawlSource: () => ({}) }));
+vi.mock("./source", () => ({
+  createCrawlSource: (options: NonNullable<typeof mocks.sourceOptions>) => {
+    mocks.sourceOptions = options;
+    return {};
+  },
+}));
 vi.mock("./access-guard", () => ({ watchCrawlAccess: mocks.watchLogin }));
 vi.mock("../analysis/controller", () => ({ appendCapturedAnalysis: mocks.enqueue }));
 vi.mock("../diagnostics", () => ({ diagnostics: { record: vi.fn() }, watchWorkPage: vi.fn() }));
+
+vi.mock("../official-access", () => ({
+  officialGovernor: () => ({ read: () => ({ state: "ready", policy: { newTaskQuota: 3 } }) }),
+  bindOfficialPage: vi.fn(),
+  officialPageContext: vi.fn(),
+}));
 
 const key = Symbol.for("cbg.crawl-runtime.v1");
 let initial: typeof import("./controller") | undefined;
@@ -53,6 +70,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.acquire.mockReturnValue(true);
   mocks.headRefresh.mockReturnValue({ intervalSeconds: 600, random: true, listingAgeMinutes: 3 });
+  mocks.roleTraining.mockReturnValue({ minTotal: null });
   mocks.current.mockResolvedValue({ isLoggedIn: true, running: false, workflowStep: "completed" });
   mocks.getBrowser.mockResolvedValue({ isConnected: () => true });
   mocks.watchLogin.mockResolvedValue(mocks.disposeLogin);
@@ -65,9 +83,34 @@ it.each(["manual", "scheduled"] as const)("%s 启动将已保存的刷新配置�
   initial = controller;
   const result = await controller.startCrawl(origin);
   await result.activity!.completion;
+  expect(mocks.sourceOptions).toMatchObject({ openFromList: true, detailPage: mocks.listPage });
+  expect(mocks.detailPage.setDefaultTimeout).not.toHaveBeenCalled();
   expect(mocks.crawl.mock.calls[0][4]).toMatchObject({
     headRefresh: { intervalSeconds: 600, random: true, listingAgeMinutes: 3 },
   });
+});
+
+it("四修阈值在启动前冻结，下一轮读取新设置，显式null不被默认覆盖", async () => {
+  mocks.roleTraining.mockReturnValue({ minTotal: 80 });
+  mocks.current.mockImplementation(async () => {
+    mocks.roleTraining.mockReturnValue({ minTotal: 90 });
+    return { isLoggedIn: true, running: false, workflowStep: "completed" };
+  });
+  mocks.crawl.mockResolvedValue(undefined);
+  const controller = await import("./controller");
+  initial = controller;
+  const first = await controller.startCrawl();
+  await first.activity!.completion;
+  const second = await controller.startCrawl();
+  await second.activity!.completion;
+  const explicit = await controller.startCrawl("manual", undefined, { minRoleTrainingTotal: null });
+  await explicit.activity!.completion;
+  expect(mocks.crawl.mock.calls.map((call) => call[4].minRoleTrainingTotal)).toEqual([
+    80,
+    90,
+    null,
+  ]);
+  expect(mocks.roleTraining).toHaveBeenCalledTimes(2);
 });
 
 it("重新开始使用当前分钟范围，不沿用上一轮的计划或实际刷新时间", async () => {
@@ -137,6 +180,7 @@ it.each([
 ] as const)("%s 页发现 %s 立即取消整轮并保留访问原因", async (kind, issue) => {
   let readingSignal: AbortSignal | undefined;
   mocks.crawl.mockImplementation(async (_source, _store, signal: AbortSignal, publish) => {
+    await mocks.sourceOptions!.onOpenedDetail(mocks.detailPage);
     readingSignal = signal;
     publish({ page: 3, saved: 5 });
     await new Promise<void>((_resolve, reject) => {
@@ -156,7 +200,7 @@ it.each([
   const reason = issue === "login" ? new LoginRequiredDialogError() : new CrawlAccessError(issue);
   call[2](reason);
   expect(readingSignal?.aborted).toBe(true);
-  expect(mocks.listPage.close).toHaveBeenCalledOnce();
+  expect(mocks.listPage.close).not.toHaveBeenCalled();
   expect(mocks.detailPage.close).toHaveBeenCalled();
   await expect(started.activity!.completion).resolves.toMatchObject({
     phase: "paused",
@@ -173,6 +217,7 @@ it.each([
 
 it("连续三件失败立即取消，保留失败原因和计数，不等待在途浏览器超时", async () => {
   mocks.crawl.mockImplementation(async (_source, _store, signal: AbortSignal, publish) => {
+    await mocks.sourceOptions!.onOpenedDetail(mocks.detailPage);
     publish({ page: 4, saved: 2, failed: 1 });
     expect(signal.aborted).toBe(false);
     publish({ failed: 2 });
@@ -193,7 +238,7 @@ it("连续三件失败立即取消，保留失败原因和计数，不等待在�
     message: expect.stringContaining("连续 3 件采集失败"),
     error: undefined,
   });
-  expect(mocks.listPage.close).toHaveBeenCalledOnce();
+  expect(mocks.listPage.close).not.toHaveBeenCalled();
   expect(mocks.detailPage.close).toHaveBeenCalled();
   expect(mocks.release).toHaveBeenCalledOnce();
 });
@@ -260,6 +305,7 @@ it("开启原始工作页显示时，采集停止后保留详情页供人工核�
 
 it("模块重载保留采集进度、同一个在途任务和暂停控制器，不会重复启动", async () => {
   mocks.crawl.mockImplementation(async (_source, _store, signal: AbortSignal, publish) => {
+    await mocks.sourceOptions!.onOpenedDetail(mocks.detailPage);
     publish({ page: 8, totalPages: 100, message: "正在采集第8页" });
     await new Promise<void>((_resolve, reject) => {
       signal.addEventListener("abort", () => reject(signal.reason), { once: true });

@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -132,6 +133,7 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
   try {
     await page.context().route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== "http://cbg-valuation.test") return route.abort();
       if (url.pathname === "/api/runtime/settings")
         return route.fulfill({ json: { saveScreenshots: false } });
@@ -251,8 +253,13 @@ test("估值页面：纯挂牌差价、装备搜索依据、缺项与历史购�
               : detail;
             break;
           }
-          default:
+          default: {
+            if (url.pathname === "/api/crawl/role-training-filter") {
+              await route.fulfill({ json: { minTotal: null } });
+              return;
+            }
             throw new Error("未模拟估值接口：" + url.pathname);
+          }
         }
         return route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
       }

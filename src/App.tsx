@@ -3,7 +3,7 @@ import type { OpenCbgResult, WorkflowStep } from "../server/types";
 import { normalizeBrowserState } from "./browser-state";
 import "./style.css";
 import { CrawlPanel } from "./CrawlPanel";
-import { BrowserSettings, type BrowserMode } from "./BrowserSettings";
+import { BrowserSettings, type BrowserMode, type AccessAdapter } from "./BrowserSettings";
 import { BrowserLogin } from "./BrowserLogin";
 
 const FLOW: [WorkflowStep, string][] = [
@@ -29,6 +29,7 @@ export function App() {
   const [crawling, setCrawling] = useState(false);
   const [starting, setStarting] = useState(false);
   const [browserMode, setBrowserMode] = useState<BrowserMode>("dedicated");
+  const [accessAdapter, setAccessAdapter] = useState<AccessAdapter>("playwright");
   const [browserSettingsBusy, setBrowserSettingsBusy] = useState(true);
   const browserSettingsBusyRef = useRef(true);
   const active = useRef<AbortController | null>(null);
@@ -128,6 +129,7 @@ export function App() {
     };
   }, [request]);
 
+  const nativeMode = accessAdapter === "extension-native";
   const step = result?.workflowStep || "idle";
   const running = result?.running === true;
   const querying = running;
@@ -151,67 +153,83 @@ export function App() {
       <div className="card">
         <header className="card-header">
           <div className="badge">
-            {browserMode === "dedicated"
-              ? "项目专用浏览器 · 保存登录状态"
-              : "在本页完成 · 复用日常浏览器登录状态"}
+            {nativeMode
+              ? "扩展自动读取 · macOS 输入"
+              : browserMode === "dedicated"
+                ? "项目专用浏览器 · 保存登录状态"
+                : "在本页完成 · 复用日常浏览器登录状态"}
           </div>
-          <h1 className="title">藏宝阁角色查询</h1>
+          <h1 className="title">{nativeMode ? "藏宝阁角色采集" : "藏宝阁角色查询"}</h1>
           <p className="subtitle">
-            扫码登录后，自动进入跨服购买，同时选择1年以内服、1到3年服、3年以上服，再加载角色列表。
+            {nativeMode
+              ? "扩展会自动连接藏宝阁官网。首次在官网完成登录和角色搜索，出现商品列表后即可开始采集。"
+              : "扫码登录后，自动进入跨服购买，同时选择1年以内服、1到3年服、3年以上服，再加载角色列表。"}
           </p>
         </header>
         <div className="workspace-query-layout">
           <div className="workspace-query-main">
-            <section className="workflow-stepper" aria-label="角色查询流程">
-              {FLOW.map(([key, label]) => {
-                const done = completed || stepIndex > ORDER.indexOf(key);
-                const selected =
-                  key === step ||
-                  (key === "logging_in" && step === "connecting") ||
-                  (key === "role_list" && step === "role_search");
-                return (
-                  <div
-                    key={key}
-                    className={`step-item ${done ? "step-completed" : selected ? "step-active" : "step-pending"}`}
-                  >
-                    <div className="step-badge">
-                      {done ? "✓" : FLOW.findIndex(([value]) => value === key) + 1}
+            {!nativeMode && (
+              <section className="workflow-stepper" aria-label="角色查询流程">
+                {FLOW.map(([key, label]) => {
+                  const done = completed || stepIndex > ORDER.indexOf(key);
+                  const selected =
+                    key === step ||
+                    (key === "logging_in" && step === "connecting") ||
+                    (key === "role_list" && step === "role_search");
+                  return (
+                    <div
+                      key={key}
+                      className={`step-item ${done ? "step-completed" : selected ? "step-active" : "step-pending"}`}
+                    >
+                      <div className="step-badge">
+                        {done ? "✓" : FLOW.findIndex(([value]) => value === key) + 1}
+                      </div>
+                      <div className="step-info">
+                        <span className="step-title">{label}</span>
+                        <span className="step-desc">
+                          {done ? "已完成" : selected ? "进行中" : "等待"}
+                        </span>
+                      </div>
                     </div>
-                    <div className="step-info">
-                      <span className="step-title">{label}</span>
-                      <span className="step-desc">
-                        {done ? "已完成" : selected ? "进行中" : "等待"}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </section>
-            <button
-              id="open-cbg-btn"
-              className="btn-primary"
-              disabled={browserSettingsBusy || starting || querying || crawling}
-              onClick={() => void request(true)}
-            >
-              {starting
-                ? "正在开始…"
-                : querying
-                  ? "流程进行中"
-                  : step === "error"
-                    ? "重新尝试"
-                    : completed
-                      ? "重新查询角色列表"
-                      : "开始查询角色"}
-            </button>
+                  );
+                })}
+              </section>
+            )}
+            {(!nativeMode || transportError || result?.error) && (
+              <button
+                id="open-cbg-btn"
+                className="btn-primary"
+                disabled={browserSettingsBusy || starting || querying || crawling}
+                onClick={() => void request(!nativeMode)}
+              >
+                {nativeMode
+                  ? "重新检查连接"
+                  : starting
+                    ? "正在开始…"
+                    : querying
+                      ? "流程进行中"
+                      : step === "error"
+                        ? "重新尝试"
+                        : completed
+                          ? "重新查询角色列表"
+                          : "开始查询角色"}
+              </button>
+            )}
             <p className="status-note">
-              {result?.workPagesVisible
-                ? "已开启操作过程显示，可在 Chrome 窗口实时查看查询、采集和网页查价过程。"
-                : browserMode === "dedicated"
-                  ? "查询在项目专用浏览器中运行，本页显示二维码、进度与查询结果。"
-                  : "藏宝阁在隐藏工作页中运行，本页显示二维码、进度与查询结果。"}
-              {browserMode === "dedicated"
-                ? "使用项目专用浏览器保存登录；首次使用或登录过期时仍需扫码。"
-                : "连接日常 Chrome 时，如有调试授权提示请允许；连接断开后重新连接可能再次提示。"}{" "}
+              {nativeMode ? (
+                "无需点击扩展或开始查询。保持官网角色列表打开，扩展会自动读取；点击下方采集按钮才启动任务。"
+              ) : (
+                <>
+                  {result?.workPagesVisible
+                    ? "已开启操作过程显示，可在 Chrome 窗口实时查看查询、采集和网页查价过程。"
+                    : browserMode === "dedicated"
+                      ? "查询在项目专用浏览器中运行，本页显示二维码、进度与查询结果。"
+                      : "藏宝阁在隐藏工作页中运行，本页显示二维码、进度与查询结果。"}
+                  {browserMode === "dedicated"
+                    ? "使用项目专用浏览器保存登录；首次使用或登录过期时仍需扫码。"
+                    : "连接日常 Chrome 时，如有调试授权提示请允许；连接断开后重新连接可能再次提示。"}
+                </>
+              )}{" "}
               <a href="/api/logs/export" download="cbg-run-log.json">
                 下载运行日志
               </a>
@@ -266,6 +284,7 @@ export function App() {
               active={starting || running || crawling}
               onBusy={setSettingsBusy}
               onMode={setBrowserMode}
+              onAdapter={setAccessAdapter}
               onSaved={browserModeSaved}
             />
           </aside>

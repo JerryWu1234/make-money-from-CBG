@@ -12,6 +12,19 @@ import { crawl } from "./runner";
 import { CAPTURE_VERSION } from "./compact";
 import type { SavedRoleRecord } from "./types";
 
+// This suite isolates browser transport/capture behavior; shared access integration has its own browser suite.
+vi.mock("../official-access", () => ({
+  bindOfficialPage: vi.fn(),
+  officialPageContext: vi.fn(),
+  markOfficialAuthenticated: vi.fn(),
+  onOfficialFirstDispatch: () => false,
+  withOfficialAction: (_page: unknown, _action: string, execute: () => Promise<unknown>) =>
+    execute(),
+  officialGovernor: () => ({
+    read: () => ({ state: "ready", policy: { newTaskQuota: 3, detailReadBudgetMs: 900000 } }),
+  }),
+}));
+
 vi.mock("../diagnostics", () => ({ diagnostics: { record: vi.fn() } }));
 vi.mock("../browser-evidence", () => ({
   captureBrowserStep: vi.fn(),
@@ -22,7 +35,7 @@ vi.mock("../browser-evidence", () => ({
 // Only a temporary profile and an offline fixture are used. Run outside the macOS sandbox.
 const key = "583:202605281800113-583-ZLDRYSFTFKJK";
 const html = `<!doctype html><meta charset="utf-8"><style>a{display:block;margin:40px;width:400px;height:80px;background:#ddf}</style>
-<div id="soldList"><a class="soldImg" href="https://xyq.cbg.163.com/equip?s=583&eid=202605281800113-583-ZLDRYSFTFKJK" data_equip_name="88088059" data_price="100" onmouseover="window.inspected=event.isTrusted">模拟商品88088059</a></div>
+<div id="soldList"><a class="soldImg" href="https://xyq.cbg.163.com/equip?s=583&eid=202605281800113-583-ZLDRYSFTFKJK" data_equip_name="88088059" data_price="100" data_selling_time="${new Date().toISOString()}" onmouseover="window.inspected=event.isTrusted">模拟商品88088059</a></div>
 <div id="pager_bar">第1页 共1页</div>
 <script>
 window.QueryArgs={server_type:'1,2,3',page:1,order_by:'expire_time DESC'};

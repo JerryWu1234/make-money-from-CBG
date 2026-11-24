@@ -132,3 +132,17 @@ describe("durable diagnostic logs", () => {
     });
   });
 });
+
+it("LOG-01 页面频繁提示和错误摘要不会泄漏完整指纹", () => {
+  expect(
+    cleanDiagnostic({
+      fp: "secret-fp",
+      fingerprint: "secret-device",
+      message: "访问过于频繁 fp=secret-fp",
+      error: new Error("fingerprint: secret-device"),
+    }),
+  ).toEqual({
+    message: "[private line omitted]",
+    error: { name: "Error", message: "[private line omitted]" },
+  });
+});

@@ -1160,6 +1160,54 @@ body {
 .head-refresh-settings h3 {
   margin: 0 0 12px;
 }
+.access-settings p {
+  line-height: 1.6;
+  margin: 10px 0;
+}
+.access-settings ul {
+  padding-left: 22px;
+}
+.access-settings summary {
+  cursor: pointer;
+  margin: 14px 0;
+}
+.access-settings form,
+.access-recovery {
+  display: grid;
+  gap: 12px;
+}
+.access-policy-field {
+  display: grid;
+  gap: 6px;
+}
+.access-policy-field input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  background: var(--card-bg);
+  color: var(--text-primary);
+  font: inherit;
+}
+.access-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.5;
+}
+.access-checkbox input {
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.access-settings .btn-secondary {
+  min-height: 40px;
+  white-space: normal;
+}
+.access-recovery {
+  margin-top: 12px;
+}
 .head-refresh-fields {
   display: flex;
   align-items: flex-end;

@@ -7,18 +7,22 @@ import { validateSampleSelection } from "./analysis/sample-selection";
 import { analysisConcurrency } from "./analysis/types";
 import type { SavedListingScope } from "./crawler/types";
 import { HeadRefreshSettingsError } from "./crawler/head-refresh";
+import { AccessGateError } from "./access";
 import {
   browserControl,
   browserBusyError,
   isBrowserMode,
+  isAccessAdapter,
   isBrowserModes,
 } from "./browser-settings";
 
 const getRoutes = new Set([
+  "/api/access/status",
   "/api/browser/status",
   "/api/browser/settings",
   "/api/crawl/status",
   "/api/crawl/settings",
+  "/api/crawl/role-training-filter",
   "/api/crawl/head-refresh",
   "/api/crawl/detail",
   "/api/crawl/records",
@@ -36,10 +40,16 @@ const getRoutes = new Set([
   "/api/analysis/settings",
 ]);
 const postRoutes = new Set([
+  "/api/access/policy",
+  "/api/access/recover",
+  "/api/access/resume",
+  "/api/access/open",
+  "/api/access/stop",
   "/api/browser/open",
   "/api/browser/settings/save",
   "/api/crawl/start",
   "/api/crawl/settings/save",
+  "/api/crawl/role-training-filter/save",
   "/api/crawl/head-refresh/save",
   "/api/crawl/backfill",
   "/api/crawl/stop",
@@ -75,6 +85,9 @@ const controlRoutes = new Set([
 ]);
 const browserUseRoutes = new Set([
   ...controlRoutes,
+  "/api/access/open",
+  "/api/access/recover",
+  "/api/access/resume",
   "/api/analysis/equipment/check",
   "/api/analysis/pet/check",
   "/api/analysis/pet-gear/check",
@@ -99,6 +112,129 @@ async function verifyRequestBody(request: IncomingMessage, limit = 4096) {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
     throw new Error("请求格式错误");
   return parsed;
+}
+
+async function resumeAccessForUser(mode: "resume" | "open" | "capture", revision?: unknown) {
+  const crawler = await import("./crawler/controller");
+  const access = await import("./official-access");
+  const governor = access.officialGovernor(crawler.crawlDatabase());
+  const state = governor.read();
+  if (revision !== undefined && (!Number.isSafeInteger(revision) || Number(revision) < 0))
+    throw new AccessGateError("stale_revision", "访问状态版本无效，请重新尝试", state);
+  if (revision !== undefined && revision !== state.revision)
+    throw new AccessGateError("stale_revision", "访问状态已变化，请重新尝试", state);
+  const { browserSettings } = await import("./browser-settings");
+  const nativeMode = browserSettings().accessAdapter === "extension-native";
+  const native = nativeMode ? await import("./native-access") : undefined;
+  const nativeStatus = native?.nativeAccessStatus();
+  if (nativeMode && (!nativeStatus?.connected || !nativeStatus.pageId)) {
+    if (mode === "open") {
+      await native!.nativeAccess();
+      return governor.read();
+    }
+    if (mode === "capture")
+      throw new AccessGateError(
+        "native_binding_pending",
+        "正在等待官网角色列表自动连接，请在藏宝阁完成角色搜索后重试",
+        state,
+      );
+  }
+  const nativeNeedsResume =
+    nativeStatus?.connected && nativeStatus.pageId && nativeStatus.stopped && !nativeStatus.idle;
+  if (!nativeMode && state.state === "ready" && mode !== "resume" && !nativeNeedsResume)
+    return state;
+  const analysis = await import("./analysis/controller");
+  const browser = await import("./cbg");
+  if (
+    crawler.isCrawling() ||
+    analysis.isAnalyzing() ||
+    browser.isBrowserWorkflowRunning() ||
+    browserControl.pending > 1
+  )
+    throw new AccessGateError(
+      "inflight_action",
+      "仍有正在运行的任务，请先暂停或等待结束后重试",
+      state,
+    );
+  let focusReceipt: { id: string } | undefined;
+  if (nativeMode) {
+    const adapter = await native!.nativeAccess();
+    focusReceipt = await adapter.focusBoundPage();
+    const latest = governor.read();
+    adapter.assertFocusedPage(focusReceipt);
+    if (latest.revision !== state.revision || latest.stopEpoch !== state.stopEpoch)
+      throw new AccessGateError("stale_revision", "切回官网期间访问状态已变化，请重新尝试", latest);
+  }
+  if (state.state === "ready" && mode !== "resume" && !nativeNeedsResume) return state;
+  try {
+    if (nativeMode) {
+      const prepared = governor.prepareUserResume(
+        revision === undefined ? state.revision : Number(revision),
+      );
+      const adapter = await native!.nativeAccess();
+      let activated = false;
+      try {
+        const ticket = await adapter.prepareManualRecovery(focusReceipt);
+        const result = governor.resumeForUser(prepared.revision, prepared.stopEpoch);
+        activated = true;
+        adapter.completeManualRecovery(ticket);
+        return result;
+      } catch (error) {
+        try {
+          if (activated)
+            governor.reportRisk({
+              reason: "native_recovery_activation_failed",
+              evidence: { message: error instanceof Error ? error.message : "activation_failed" },
+            });
+        } finally {
+          await adapter.abortManualRecovery("用户继续未完成，保持原生停止状态").catch(() => {});
+        }
+        throw error;
+      }
+    }
+    return governor.resumeForUser(revision === undefined ? state.revision : Number(revision));
+  } catch (error) {
+    if (
+      !(error instanceof AccessGateError) ||
+      error.code !== "user_recovery_required" ||
+      mode === "resume"
+    )
+      throw error;
+    const pageReasons = new Set([
+      "unknown_inflight",
+      "manual_stop",
+      "login",
+      "verification",
+      "http_403",
+      "http_429",
+      "frequency",
+      "busy",
+      ...(nativeMode ? ["native_recovery_activation_failed", "native-activity-stopped"] : []),
+    ]);
+    if (state.reasons.some((reason) => !pageReasons.has(reason.code)))
+      throw new AccessGateError(
+        "user_recovery_required",
+        `当前暂停原因不能仅凭登录页面解除：${state.reasons.map((reason) => reason.code).join("、")}`,
+        state,
+      );
+    if (
+      mode === "capture" ||
+      (nativeMode && state.reasons.some((reason) => reason.code === "native-activity-stopped"))
+    )
+      return access.recoverOfficialAccess(
+        state.revision,
+        state.reasons.map((reason) => reason.code),
+        ...(nativeMode ? [focusReceipt] : []),
+      );
+    await access.openOfficialRecovery(state.revision);
+    throw new AccessGateError(
+      "user_recovery_required",
+      nativeMode
+        ? "请在已绑定的官网页面完成登录或验证后重新尝试；原生输入仍保持停止"
+        : "已打开官网固定页面，请完成登录或验证后重新尝试；访问限制尚未解除",
+      governor.read(),
+    );
+  }
 }
 
 export async function apiMiddleware(req: IncomingMessage, res: ServerResponse, next: () => void) {
@@ -179,8 +315,48 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
           )
         : {};
     if (browserUseRoutes.has(pathname) && browserControl.changing) throw browserBusyError();
+    if (pathname.startsWith("/api/access/")) {
+      const { crawlDatabase } = await import("./crawler/controller");
+      const access = await import("./official-access");
+      const governor = access.officialGovernor(crawlDatabase());
+      const input = body as Record<string, unknown>;
+      let result;
+      if (pathname === "/api/access/policy") {
+        const { parseAccessPolicy } = await import("./access");
+        if (!Number.isSafeInteger(input.revision)) throw new Error("访问状态版本无效");
+        result = governor.updatePolicy(parseAccessPolicy(input.policy), Number(input.revision));
+      } else if (pathname === "/api/access/open") {
+        if (!Number.isSafeInteger(input.revision)) throw new Error("访问状态版本无效");
+        result = await access.openOfficialRecovery(Number(input.revision));
+      } else if (pathname === "/api/access/recover") {
+        if (
+          !Number.isSafeInteger(input.revision) ||
+          !Array.isArray(input.acknowledgedReasons) ||
+          input.acknowledgedReasons.some((reason) => typeof reason !== "string")
+        )
+          throw new Error("请核对当前版本的全部暂停原因");
+        result = await access.recoverOfficialAccess(
+          Number(input.revision),
+          input.acknowledgedReasons as string[],
+        );
+      } else if (pathname === "/api/access/resume") {
+        if (!Number.isSafeInteger(input.revision) || Number(input.revision) < 0)
+          throw new AccessGateError(
+            "stale_revision",
+            "访问状态版本无效，请重新尝试",
+            governor.read(),
+          );
+        result = await resumeAccessForUser("resume", input.revision);
+      } else if (pathname === "/api/access/stop") {
+        result = governor.reportRisk({ reason: "manual_stop", state: "needs_action" });
+      } else result = governor.read();
+      res.end(JSON.stringify(result));
+      return;
+    }
     if (pathname === "/api/browser/settings" || pathname === "/api/browser/settings/save") {
-      const { mode, modes, showWorkPages } = body as Record<string, unknown>;
+      const { mode, modes, showWorkPages, accessAdapter } = body as Record<string, unknown>;
+      if (accessAdapter !== undefined && !isAccessAdapter(accessAdapter))
+        throw new Error("官网交互通路无效");
       if (
         pathname.endsWith("/save") &&
         showWorkPages !== undefined &&
@@ -193,7 +369,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
       if (
         pathname.endsWith("/save") &&
         !(modes === undefined
-          ? isBrowserMode(mode) || (mode === undefined && typeof showWorkPages === "boolean")
+          ? isBrowserMode(mode) ||
+            (mode === undefined &&
+              (typeof showWorkPages === "boolean" || isAccessAdapter(accessAdapter)))
           : isBrowserModes(modes))
       ) {
         res.statusCode = 400;
@@ -211,12 +389,16 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
         workflow.isBrowserWorkflowRunning() ||
         capture.isCrawling() ||
         analysis.isAnalyzing();
-      if (pathname.endsWith("/save") && typeof showWorkPages === "boolean")
+      if (
+        pathname.endsWith("/save") &&
+        (typeof showWorkPages === "boolean" || accessAdapter !== undefined)
+      )
         await session.changeBrowserModes(
           (modes ?? [mode ?? session.getActiveBrowserMode()]) as ("daily" | "dedicated")[],
           busy,
           workflow.resetBrowserWorkflow,
-          showWorkPages,
+          showWorkPages as boolean | undefined,
+          accessAdapter as "playwright" | "extension-native" | undefined,
         );
       else if (pathname.endsWith("/save") && modes !== undefined)
         await session.changeBrowserModes(
@@ -236,6 +418,23 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
           busy: busy() || session.browserSessionSettings().busy,
         }),
       );
+      return;
+    }
+    if (
+      pathname === "/api/crawl/role-training-filter" ||
+      pathname === "/api/crawl/role-training-filter/save"
+    ) {
+      const settings = await import("./crawler/role-training-settings");
+      try {
+        const result = pathname.endsWith("/save")
+          ? settings.saveRoleTrainingSettings((body as Record<string, unknown>).minTotal)
+          : settings.roleTrainingSettings();
+        res.end(JSON.stringify(result));
+      } catch (error) {
+        if (!(error instanceof settings.RoleTrainingSettingsError)) throw error;
+        res.statusCode = 400;
+        res.end(JSON.stringify({ error: error.message }));
+      }
       return;
     }
     if (pathname === "/api/runtime/settings" || pathname === "/api/runtime/settings/save") {
@@ -537,10 +736,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
               concurrency !== undefined &&
               (typeof concurrency !== "number" ||
                 !Number.isSafeInteger(concurrency) ||
-                concurrency < 2 ||
-                concurrency % 2 !== 0)
+                concurrency < 1 ||
+                concurrency > 32)
             )
-              throw new Error("并发数必须是正偶数（2、4、6…）");
+              throw new Error("并发数必须是1至32之间的整数");
             if (
               keys !== undefined &&
               (!Array.isArray(keys) ||
@@ -560,6 +759,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
                 keys[0] !== keys[0].trim())
             )
               throw new Error("刷新采集仅支持明确指定一个已保存商品");
+            if (!crawler.isCrawling()) await resumeAccessForUser("capture");
             const attempt = await crawler.startCrawl("manual", undefined, {
               backfillOnly: pathname === "/api/crawl/backfill",
               keys: keys as string[] | undefined,
@@ -613,6 +813,13 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
       res.end(JSON.stringify({ error: "请先暂停采集，再重新打开角色查询" }));
       return;
     }
+    if (pathname === "/api/browser/open") await resumeAccessForUser("open");
+    const { browserSettings } = await import("./browser-settings");
+    if (browserSettings().accessAdapter === "extension-native") {
+      const { nativeBrowserState } = await import("./native-access");
+      res.end(JSON.stringify(await nativeBrowserState(pathname === "/api/browser/open")));
+      return;
+    }
     const browser = await import("./browser");
     const result =
       pathname === "/api/browser/status" ? await browser.checkCbgStatus() : browser.openCbg();
@@ -621,14 +828,25 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, next: () => 
     diagnostics.record("api.error", { route: pathname, error });
     if (res.destroyed) return;
     res.statusCode =
-      error instanceof ScheduleConfigError
-        ? 400
-        : error instanceof Error && error.name === "SchoolFormulaConfirmationError"
+      error instanceof AccessGateError
+        ? 409
+        : error instanceof ScheduleConfigError
           ? 400
-          : error instanceof Error &&
-              ["LogStorageTokenError", "BrowserSessionBusyError"].includes(error.name)
-            ? 409
-            : 500;
-    res.end(JSON.stringify({ error: error instanceof Error ? error.message : "请求失败" }));
+          : error instanceof Error && error.name === "SchoolFormulaConfirmationError"
+            ? 400
+            : error instanceof Error &&
+                ["LogStorageTokenError", "BrowserSessionBusyError"].includes(error.name)
+              ? 409
+              : 500;
+    const retryNotBefore = error instanceof AccessGateError ? error.state?.retryNotBefore : null;
+    const remaining = retryNotBefore
+      ? Math.max(0, Math.ceil((retryNotBefore - Date.now()) / 1000))
+      : 0;
+    res.end(
+      JSON.stringify({
+        error: `${error instanceof Error ? error.message : "请求失败"}${remaining ? `（冷却剩余约 ${remaining} 秒）` : ""}`,
+        ...(error instanceof AccessGateError ? { code: error.code, access: error.state } : {}),
+      }),
+    );
   }
 }

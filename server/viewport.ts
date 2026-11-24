@@ -1,3 +1,4 @@
+import { officialPageContext, officialPageSignal, withOfficialAction } from "./official-access";
 import type { Locator, Page } from "playwright-core";
 import { collectionPageSignal } from "./crawler/login-dialog";
 import { diagnostics, workPageDiagnostic } from "./diagnostics";
@@ -22,6 +23,7 @@ export async function clickForInspection(
   element: Locator,
   signal?: AbortSignal,
   sort?: { field: string; expectedOrder: string; observedOrder: string; attempt: number },
+  navigationConfirmed?: () => boolean | Promise<boolean>,
 ) {
   const page = element.page();
   const collectionSignal = collectionPageSignal(page);
@@ -30,109 +32,137 @@ export async function clickForInspection(
     collectionSignal?.throwIfAborted();
   };
   // Keep page loading and data reads outside this shared click queue.
-  const click = inspectionClickTail.then(async () => {
-    check();
-    await ensureWorkViewport(page);
-    check();
-    const token = `${Date.now()}:${Math.random()}`;
-    const point = (mark: boolean) =>
-      element.evaluateAll(
-        (elements, { token, mark }) => {
-          if (elements.length !== 1) return null;
-          const el = elements[0];
-          const marker = Symbol.for("cbg.inspection-click-target");
-          if (
-            !el.isConnected ||
-            !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
-            el.closest(':disabled, [aria-disabled="true"], [inert]')
-          )
-            return null;
-          if (mark) {
-            Reflect.set(el, marker, token);
-            el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
-          } else if (Reflect.get(el, marker) !== token) return null;
-          const rect = el.getBoundingClientRect();
-          const left = Math.max(0, rect.left),
-            right = Math.min(window.innerWidth, rect.right),
-            top = Math.max(0, rect.top),
-            bottom = Math.min(window.innerHeight, rect.bottom);
-          if (right <= left || bottom <= top) return null;
-          const x = (left + right) / 2,
-            y = (top + bottom) / 2;
-          if (!el.contains(document.elementFromPoint(x, y))) return null;
-          return { x, y, left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-        },
-        { token, mark },
-      );
-    const changed = () =>
-      Object.assign(new Error("待读取标签或分页目标不可点击或已变化，未执行点击"), {
-        name: "IncompleteDetailError",
-      });
-    const before = await point(true);
-    if (!before) throw changed();
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    check();
-    const stable = await point(false);
-    check();
-    if (!stable || JSON.stringify(before) !== JSON.stringify(stable)) throw changed();
-    await page.mouse.move(stable.x, stable.y);
-    check();
-    const afterHover = await point(false);
-    if (!afterHover || JSON.stringify(stable) !== JSON.stringify(afterHover)) throw changed();
-    check();
-    // A command error or partial delivery has an unknown outcome: never replay it.
-    const recordClick = (phase: string, error?: unknown) => {
-      if (sort)
-        diagnostics.record("list.sort_click", {
-          ...workPageDiagnostic(page),
-          ...sort,
-          clickId: token,
-          method: "page.mouse.click",
-          phase,
-          x: afterHover.x,
-          y: afterHover.y,
-          error,
-        });
-    };
-    recordClick("dispatching");
-    const receipt = await observeInspectionInput(page, token, afterHover);
-    try {
-      await page.mouse.click(afterHover.x, afterHover.y);
-      let delivered = await receipt.read();
-      if (!delivered?.clicked && delivered?.events.length === 0) {
-        await new Promise((resolve) => setTimeout(resolve, 200));
+  const click = inspectionClickTail.then(() =>
+    withOfficialAction(
+      page,
+      "inspection.click",
+      async () => {
         check();
-        delivered = await receipt.read();
-      }
-      if (delivered?.clicked) {
-        recordClick("completed");
-        return;
-      }
-      if (!delivered || delivered.events.length) throw inputDeliveryError();
-      check();
-      // Reuse the same login/verification/rate-limit checks as collection. Import
-      // lazily because page.ts itself uses this click helper.
-      const { assertAvailable } = await import("./crawler/page");
-      await assertAvailable(page);
-      check();
-      const current = await point(false);
-      check();
-      if (!current || JSON.stringify(current) !== JSON.stringify(afterHover))
-        throw inputDeliveryError();
-      if (!(await receipt.recover())) throw inputDeliveryError();
-      diagnostics.record("browser.click_compatibility", {
-        ...workPageDiagnostic(page),
-        method: "HTMLElement.click",
-        reason: "no_mouse_events",
-      });
-      recordClick("compatibility_completed");
-    } catch (error) {
-      recordClick("failed", error);
-      throw error;
-    } finally {
-      await receipt.dispose();
-    }
-  });
+        await ensureWorkViewport(page);
+        check();
+        const token = `${Date.now()}:${Math.random()}`;
+        const point = (mark: boolean) =>
+          element.evaluateAll(
+            (elements, { token, mark }) => {
+              if (elements.length !== 1) return null;
+              const el = elements[0];
+              const marker = Symbol.for("cbg.inspection-click-target");
+              if (
+                !el.isConnected ||
+                !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
+                el.closest(':disabled, [aria-disabled="true"], [inert]')
+              )
+                return null;
+              if (mark) {
+                Reflect.set(el, marker, token);
+                el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+              } else if (Reflect.get(el, marker) !== token) return null;
+              const rect = el.getBoundingClientRect();
+              const left = Math.max(0, rect.left),
+                right = Math.min(window.innerWidth, rect.right),
+                top = Math.max(0, rect.top),
+                bottom = Math.min(window.innerHeight, rect.bottom);
+              if (right <= left || bottom <= top) return null;
+              const x = (left + right) / 2,
+                y = (top + bottom) / 2;
+              if (!el.contains(document.elementFromPoint(x, y))) return null;
+              return {
+                x,
+                y,
+                left: rect.left,
+                top: rect.top,
+                width: rect.width,
+                height: rect.height,
+              };
+            },
+            { token, mark },
+          );
+        const changed = () =>
+          Object.assign(new Error("待读取标签或分页目标不可点击或已变化，未执行点击"), {
+            name: "IncompleteDetailError",
+          });
+        const before = await point(true);
+        if (!before) throw changed();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        check();
+        const stable = await point(false);
+        check();
+        if (!stable || JSON.stringify(before) !== JSON.stringify(stable)) throw changed();
+        await page.mouse.move(stable.x, stable.y);
+        check();
+        const afterHover = await point(false);
+        if (!afterHover || JSON.stringify(stable) !== JSON.stringify(afterHover)) throw changed();
+        check();
+        // A command error or partial delivery has an unknown outcome: never replay it.
+        const recordClick = (phase: string, error?: unknown) => {
+          if (sort)
+            diagnostics.record("list.sort_click", {
+              ...workPageDiagnostic(page),
+              ...sort,
+              clickId: token,
+              method: "page.mouse.click",
+              phase,
+              x: afterHover.x,
+              y: afterHover.y,
+              error,
+            });
+        };
+        recordClick("dispatching");
+        const receipt = await observeInspectionInput(page, token, afterHover);
+        try {
+          await page.mouse.click(afterHover.x, afterHover.y);
+          check();
+          // A same-tab link destroys its old DOM receipt. Accept only the caller's
+          // observed target navigation; never resend the click to recreate a receipt.
+          if (await navigationConfirmed?.()) {
+            recordClick("navigation_completed");
+            return;
+          }
+          let delivered = await receipt.read();
+          if (!delivered?.clicked && delivered?.events.length === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            check();
+            delivered = await receipt.read();
+          }
+          if (delivered?.clicked) {
+            recordClick("completed");
+            return;
+          }
+          if (!delivered || delivered.events.length) throw inputDeliveryError();
+          check();
+          // Reuse the same login/verification/rate-limit checks as collection. Import
+          // lazily because page.ts itself uses this click helper.
+          const { assertAvailable } = await import("./crawler/page");
+          await assertAvailable(page);
+          check();
+          const current = await point(false);
+          check();
+          if (!current || JSON.stringify(current) !== JSON.stringify(afterHover))
+            throw inputDeliveryError();
+          if (!(await receipt.recover())) throw inputDeliveryError();
+          diagnostics.record("browser.click_compatibility", {
+            ...workPageDiagnostic(page),
+            method: "HTMLElement.click",
+            reason: "no_mouse_events",
+          });
+          recordClick("compatibility_completed");
+        } catch (error) {
+          if (navigationConfirmed) {
+            check();
+            if (await navigationConfirmed()) {
+              recordClick("navigation_completed");
+              return;
+            }
+          }
+          recordClick("failed", error);
+          throw error;
+        } finally {
+          await receipt.dispose();
+        }
+      },
+      signal,
+    ),
+  );
   inspectionClickTail = click.then(
     () => {},
     () => {},
@@ -148,28 +178,94 @@ export async function hoverForInspection(
   signal?.throwIfAborted();
   await ensureWorkViewport(page);
   signal?.throwIfAborted();
+  if (officialPageContext(page)) {
+    const officialSignal = officialPageSignal(page);
+    const check = () => {
+      signal?.throwIfAborted();
+      officialSignal?.throwIfAborted();
+    };
+    // Resolve in the current DOM without Locator.hover's single-node handle path.
+    // A move error has an unknown outcome and must propagate without a retry.
+    await withOfficialAction(page, "inspection.hover", async () => {
+      check();
+      await prepareHoverTips(page);
+      check();
+      const token = `${Date.now()}:${Math.random()}`;
+      const point = (mark: boolean) =>
+        element.evaluateAll(
+          (elements, { token, mark }) => {
+            if (elements.length !== 1) return null;
+            const el = elements[0];
+            const marker = Symbol.for("cbg.inspection-hover-target");
+            if (
+              !el.isConnected ||
+              !el.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
+              el.closest(':disabled, [aria-disabled="true"], [inert]')
+            )
+              return null;
+            if (mark) {
+              Reflect.set(el, marker, token);
+              el.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+            } else if (Reflect.get(el, marker) !== token) return null;
+            const rect = el.getBoundingClientRect();
+            const left = Math.max(0, rect.left),
+              right = Math.min(window.innerWidth, rect.right),
+              top = Math.max(0, rect.top),
+              bottom = Math.min(window.innerHeight, rect.bottom);
+            if (right <= left || bottom <= top) return null;
+            const x = (left + right) / 2,
+              y = (top + bottom) / 2;
+            if (!el.contains(document.elementFromPoint(x, y))) return null;
+            // A fresh mouseout is required even when inspecting the same coordinates.
+            const reset = [
+              { x: 1, y: 1 },
+              { x: innerWidth - 1, y: 1 },
+              { x: 1, y: innerHeight - 1 },
+              { x: innerWidth - 1, y: innerHeight - 1 },
+            ].find(({ x, y }) => !el.contains(document.elementFromPoint(x, y)));
+            if (!reset) return null;
+            return {
+              x,
+              y,
+              left: rect.left,
+              top: rect.top,
+              width: rect.width,
+              height: rect.height,
+              reset,
+            };
+          },
+          { token, mark },
+        );
+      const changed = () =>
+        Object.assign(new Error("待悬停目标不可见、被遮挡或已变化，未确认悬停"), {
+          name: "IncompleteDetailError",
+        });
+      const before = await point(true);
+      check();
+      if (!before) throw changed();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      check();
+      const stable = await point(false);
+      check();
+      if (!stable || JSON.stringify(before) !== JSON.stringify(stable)) throw changed();
+      await page.mouse.move(stable.reset.x, stable.reset.y);
+      check();
+      const afterReset = await point(false);
+      check();
+      if (!afterReset || JSON.stringify(stable) !== JSON.stringify(afterReset)) throw changed();
+      await page.mouse.move(stable.x, stable.y);
+      check();
+      const after = await point(false);
+      check();
+      if (!after || JSON.stringify(stable) !== JSON.stringify(after)) throw changed();
+    });
+    return;
+  }
   // 移出上一个图标，触发网站自己的 mouseout；仅让提示框不拦截后续鼠标。
   // 不隐藏提示内容，不对验证码、登录框或其他遮罩使用 force。
   await page.mouse.move(1, 1);
   signal?.throwIfAborted();
-  await page.evaluate(() => {
-    const boxes = new Set<Element>(document.querySelectorAll('[role="tooltip"], [id$="TipsBox"]'));
-    for (const el of document.querySelectorAll("[data_tip_box], [data-tip-box]")) {
-      const id = el.getAttribute("data_tip_box") || el.getAttribute("data-tip-box");
-      const box = id && document.getElementById(id);
-      if (box) boxes.add(box);
-    }
-    for (const box of boxes) {
-      box.setAttribute("data-cbg-hover-tip", "true");
-    }
-    if (!document.getElementById("cbg-hover-style")) {
-      const style = document.createElement("style");
-      style.id = "cbg-hover-style";
-      style.textContent =
-        '[data-cbg-hover-tip], [data-cbg-hover-tip] *, [id$="TipsBox"], [id$="TipsBox"] * { pointer-events: none !important; }';
-      document.head.appendChild(style);
-    }
-  });
+  await prepareHoverTips(page);
   // Locator.evaluate 会先把节点从隔离上下文转换到主上下文，额外等待
   // DOM.resolveNode；受控复现中，节点已可见仍会卡在这一步。
   // evaluateAll 在主上下文按当前定位器求值，不传回单个元素句柄。
@@ -284,4 +380,25 @@ export async function hoverForInspection(
     signal?.throwIfAborted();
     await element.hover({ timeout: 5000 });
   }
+}
+
+async function prepareHoverTips(page: Page) {
+  await page.evaluate(() => {
+    const boxes = new Set<Element>(document.querySelectorAll('[role="tooltip"], [id$="TipsBox"]'));
+    for (const el of document.querySelectorAll("[data_tip_box], [data-tip-box]")) {
+      const id = el.getAttribute("data_tip_box") || el.getAttribute("data-tip-box");
+      const box = id && document.getElementById(id);
+      if (box) boxes.add(box);
+    }
+    for (const box of boxes) {
+      box.setAttribute("data-cbg-hover-tip", "true");
+    }
+    if (!document.getElementById("cbg-hover-style")) {
+      const style = document.createElement("style");
+      style.id = "cbg-hover-style";
+      style.textContent =
+        '[data-cbg-hover-tip], [data-cbg-hover-tip] *, [id$="TipsBox"], [id$="TipsBox"] * { pointer-events: none !important; }';
+      document.head.appendChild(style);
+    }
+  });
 }

@@ -31,6 +31,8 @@ for (const mode of ["success", "business-error", "timeout"] as const) {
     try {
       await page.route("**/*", async (route) => {
         const url = new URL(route.request().url());
+        if (url.pathname === "/api/crawl/role-training-filter")
+          return route.fulfill({ json: { minTotal: null } });
         // No real website, local service, production database or user Chrome profile.
         if (url.origin !== "http://crawl-evidence.test") return route.abort();
         if (url.pathname === "/cgi-bin/recommend.py") {

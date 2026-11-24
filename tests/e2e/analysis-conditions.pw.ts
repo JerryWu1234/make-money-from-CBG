@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -134,6 +135,7 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
   try {
     await page.route("**/*", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
       if (url.origin !== "http://conditions.test") return route.abort();
       if (!url.pathname.startsWith("/api/")) {
         const file = path.join(
@@ -212,8 +214,13 @@ test("条件保存失败恢复、分析、刷新与历史快照（模拟AI）", 
         case "/api/analysis/detail":
           body = store.detail(url.searchParams.get("taskId")!, profile);
           break;
-        default:
+        default: {
+          if (url.pathname === "/api/crawl/role-training-filter") {
+            await route.fulfill({ json: { minTotal: null } });
+            return;
+          }
           throw new Error(`未模拟接口：${url.pathname}`);
+        }
       }
       return route.fulfill({ json: body });
     });

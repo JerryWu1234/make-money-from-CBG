@@ -1,3 +1,4 @@
+import { AccessGovernor, type AccessContext } from "../access";
 import { defaultConditions } from "./conditions";
 import {
   DIRECT_CONDITION_VERSION,
@@ -216,6 +217,39 @@ export class AnalysisStore {
       readers: number;
     }
   >();
+  private pricingContexts = new Map<string, AccessContext | (() => AccessContext | undefined)>();
+  private pricingGovernor?: AccessGovernor;
+  setProgressContext(
+    owner: string,
+    context: AccessContext | (() => AccessContext | undefined) | undefined,
+  ) {
+    if (context) this.pricingContexts.set(owner, context);
+    else this.pricingContexts.delete(owner);
+  }
+  private pricingGate() {
+    if (
+      !this.db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='access_schema'")
+        .get()
+    )
+      return undefined;
+    return (this.pricingGovernor ??= new AccessGovernor(this.db));
+  }
+  private assertPricingProgress(
+    gate: AccessGovernor | undefined,
+    snapshot: EquipmentPricingSnapshot,
+    owner: string,
+  ) {
+    if (!gate) return;
+    const configured = this.pricingContexts.get(owner);
+    const context = typeof configured === "function" ? configured() : configured;
+    const proofs = [...(snapshot.accessProofs || []), ...(context ? [context] : [])];
+    if (!proofs.length) {
+      if (snapshot.queries.length) throw new Error("缺少本次市场查询核验，不能推进查价进度");
+      return; // Pure local exclusions and offline calculations need no official query.
+    }
+    for (const proof of proofs) gate.assertProgress(proof);
+  }
   constructor(
     readonly db: DatabaseSync,
     options: { readOnly?: boolean } = {},
@@ -787,9 +821,7 @@ export class AnalysisStore {
               asking: replayed.valuation!.asking_price,
               bare: replayed.valuation!.bare_role_value ?? null,
             };
-            // Revalidating an old raw response does not make its archived review
-            // current. Preserve the review's version boundary so changed semantics
-            // are queued, rather than checkpointing a result the UI rejects.
+            // Replaying an old response must not make its archived review current.
             replayed.valuation!.condition_review = evaluateDirectConditions(
               tree,
               record,
@@ -1398,8 +1430,10 @@ export class AnalysisStore {
       snapshot,
       task.petPricing,
     );
+    const gate = this.pricingGate();
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      this.assertPricingProgress(gate, snapshot, owner);
       if (!this.owns(owner)) throw new Error("分析锁已失效");
       if (
         this.db
@@ -1462,8 +1496,17 @@ export class AnalysisStore {
       task.equipmentPricing,
       snapshot,
     );
+    const gate = this.pricingGate();
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const { gearPricing: _gear, ...parent } = snapshot;
+      const { gearPricing: _oldGear, ...oldParent } = task.petPricing || {};
+      if (!isDeepStrictEqual(parent, oldParent)) this.assertPricingProgress(gate, snapshot, owner);
+      if (
+        snapshot.gearPricing &&
+        !isDeepStrictEqual(snapshot.gearPricing, task.petPricing?.gearPricing)
+      )
+        this.assertPricingProgress(gate, snapshot.gearPricing, owner);
       if (!this.owns(owner)) throw new Error("分析锁已失效");
       if (
         this.db

@@ -19,6 +19,16 @@ const mocks = vi.hoisted(() => ({
   checkEquipment: vi.fn(),
   disableScanSchedule: vi.fn(),
   record: vi.fn(),
+  crawlDatabase: vi.fn(),
+  openOfficialRecovery: vi.fn(),
+  recoverOfficialAccess: vi.fn(),
+  accessRead: vi.fn(),
+  resumeForUser: vi.fn(),
+}));
+vi.mock("./official-access", () => ({
+  officialGovernor: () => ({ read: mocks.accessRead, resumeForUser: mocks.resumeForUser }),
+  openOfficialRecovery: mocks.openOfficialRecovery,
+  recoverOfficialAccess: mocks.recoverOfficialAccess,
 }));
 vi.mock("./session", () => mocks);
 vi.mock("./cbg", () => mocks);
@@ -68,6 +78,7 @@ beforeEach(async () => {
   });
   mocks.isBrowserWorkflowRunning.mockReturnValue(false);
   mocks.isCrawling.mockReturnValue(false);
+  mocks.accessRead.mockReturnValue({ state: "ready", revision: 0 });
   mocks.isAnalyzing.mockReturnValue(false);
   mocks.getActiveBrowserMode.mockReturnValue("dedicated");
   mocks.changeBrowserMode.mockImplementation(
@@ -83,6 +94,43 @@ beforeEach(async () => {
 });
 
 describe("browser settings API", () => {
+  it.each(["open", "recover"])("模式切换期间访问恢复 %s 不会打开或恢复旧通路", async (action) => {
+    const { browserControl } = await import("./browser-settings");
+    browserControl.changing = true;
+    const res = await invoke(
+      request(`/api/access/${action}`, "POST", { revision: 1, acknowledgedReasons: ["login"] }),
+    );
+    expect(res.statusCode).toBe(409);
+    expect(mocks.openOfficialRecovery).not.toHaveBeenCalled();
+    expect(mocks.recoverOfficialAccess).not.toHaveBeenCalled();
+    expect(browserControl.pending).toBe(0);
+  });
+  it.each(["open", "recover"])("访问恢复 %s 在业务promise结束前阻止切换", async (action) => {
+    const { browserControl } = await import("./browser-settings");
+    let finish!: (value: unknown) => void;
+    const work = new Promise((resolve) => {
+      finish = resolve;
+    });
+    (action === "open" ? mocks.openOfficialRecovery : mocks.recoverOfficialAccess).mockReturnValue(
+      work,
+    );
+    mocks.changeBrowserModes.mockImplementation(async (_modes, busy) => {
+      if (busy())
+        throw Object.assign(new Error("等待浏览器任务结束"), { name: "BrowserSessionBusyError" });
+    });
+    const recovering = invoke(
+      request(`/api/access/${action}`, "POST", { revision: 1, acknowledgedReasons: ["login"] }),
+    );
+    await vi.waitFor(() => expect(browserControl.pending).toBe(1));
+    const blocked = await invoke(request("/api/browser/settings/save", "POST", { mode: "daily" }));
+    expect(blocked.statusCode).toBe(409);
+    finish({ state: "ready" });
+    await recovering;
+    expect(browserControl.pending).toBe(0);
+    expect(
+      (await invoke(request("/api/browser/settings/save", "POST", { mode: "daily" }))).statusCode,
+    ).toBe(200);
+  });
   it.each([true, false])("只保存显示开关 %s，沿用当前模式并传递忙检查", async (showWorkPages) => {
     const res = await invoke(request("/api/browser/settings/save", "POST", { showWorkPages }));
     expect(res.statusCode).toBe(200);
@@ -91,6 +139,7 @@ describe("browser settings API", () => {
       expect.any(Function),
       mocks.resetBrowserWorkflow,
       showWorkPages,
+      undefined,
     );
     expect(mocks.changeBrowserModes.mock.calls[0][1]()).toBe(false);
     expect(mocks.getBrowser).not.toHaveBeenCalled();
@@ -109,6 +158,7 @@ describe("browser settings API", () => {
       expect.any(Function),
       mocks.resetBrowserWorkflow,
       true,
+      undefined,
     );
   });
 

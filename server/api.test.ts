@@ -28,6 +28,12 @@ const mocks = vi.hoisted(() => ({
   savedRecords: vi.fn(),
   markRecommendationViewed: vi.fn(),
   aiProvider: vi.fn(),
+  crawlDatabase: vi.fn(),
+  accessRead: vi.fn(),
+  resumeForUser: vi.fn(),
+}));
+vi.mock("./official-access", () => ({
+  officialGovernor: () => ({ read: mocks.accessRead, resumeForUser: mocks.resumeForUser }),
 }));
 vi.mock("./crawler/controller", () => mocks);
 vi.mock("./crawler/schedule", () => mocks);
@@ -72,6 +78,7 @@ beforeEach(() => {
     return mocks;
   });
   mocks.isCrawling.mockReturnValue(false);
+  mocks.accessRead.mockReturnValue({ state: "ready", revision: 0 });
   mocks.isAnalyzing.mockReturnValue(false);
   mocks.aiProvider.mockReturnValue("codex");
   mocks.scanScheduleStatus.mockReturnValue({ mode: "disabled" });
@@ -634,20 +641,17 @@ describe("采集接口与定时计划", () => {
     });
     expect(res.statusCode).toBe(200);
   });
-  it.each([0, -1, 1, 3, 5, 1.5, "3", null])(
-    "拒绝无效并发数 %j，不启动采集",
-    async (concurrency) => {
-      const { apiMiddleware } = await import("./api");
-      const res = response();
-      await apiMiddleware(request("/api/crawl/start", { concurrency }), res, vi.fn());
-      expect(res.statusCode).toBe(500);
-      expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({
-        error: "并发数必须是正偶数（2、4、6…）",
-      });
-      expect(mocks.startCrawl).not.toHaveBeenCalled();
-      expect(mocks.disableScanSchedule).not.toHaveBeenCalled();
-    },
-  );
+  it.each([0, -1, 33, 1.5, "3", null])("拒绝无效并发数 %j，不启动采集", async (concurrency) => {
+    const { apiMiddleware } = await import("./api");
+    const res = response();
+    await apiMiddleware(request("/api/crawl/start", { concurrency }), res, vi.fn());
+    expect(res.statusCode).toBe(500);
+    expect(JSON.parse(res.end.mock.calls[0][0])).toEqual({
+      error: "并发数必须是1至32之间的整数",
+    });
+    expect(mocks.startCrawl).not.toHaveBeenCalled();
+    expect(mocks.disableScanSchedule).not.toHaveBeenCalled();
+  });
   it("仅明确单商品补采可请求完整刷新", async () => {
     const { apiMiddleware } = await import("./api");
     const key = "33:target";

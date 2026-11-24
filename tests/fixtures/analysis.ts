@@ -1,10 +1,38 @@
-import type { SavedRoleRecord } from "../../server/crawler/types";
+import { createHash } from "node:crypto";
+import type { Listing, RoleDetail, SavedRoleRecord } from "../../server/crawler/types";
 import type { Dimension, ProductAnalysis } from "../../server/analysis/types";
 import { buildProductDocument } from "../../server/analysis/product-document";
 import { roleRecord } from "./saved-role";
 import type { EquipmentPricingSnapshot } from "../../server/analysis/equipment-pricing";
 import type { PetPricingSnapshot } from "../../server/analysis/pet-pricing";
 import { CAPTURE_VERSION } from "../../server/crawler/compact";
+import { fieldEvidence } from "../../server/crawler/field-evidence";
+
+/** Binds synthetic fixture fields to the exact fixture body; never an official-site observation. */
+export function fixtureFieldEvidence(
+  detail: RoleDetail,
+  listing: Pick<Listing, "serverId" | "eid">,
+): NonNullable<RoleDetail["sourceEvidence"]> {
+  const revision = createHash("sha256")
+    .update(
+      JSON.stringify({
+        ...listing,
+        captureVersion: detail.captureVersion,
+        tabs: detail.tabs,
+        raw: detail.raw,
+        valuation: detail.valuation,
+      }),
+    )
+    .digest("hex");
+  return {
+    version: 1,
+    ...listing,
+    initialRevision: revision,
+    finalRevision: revision,
+    stable: true,
+    fields: fieldEvidence(detail.tabs, detail.valuation),
+  };
+}
 
 /** Synthetic evidence for UI tests. No browser or search request is sent to this URL. */
 export function equipmentPricingFixture(incomplete = false): EquipmentPricingSnapshot {
@@ -124,7 +152,7 @@ export function equipmentPricingFixture(incomplete = false): EquipmentPricingSna
 
 export function analysisRecord(key = "a"): SavedRoleRecord {
   const record = roleRecord(key, true);
-  return {
+  const result = {
     ...record,
     status: "complete",
     listing: {
@@ -139,6 +167,17 @@ export function analysisRecord(key = "a"): SavedRoleRecord {
       url: record.listing.url,
       formatVersion: 3,
       captureVersion: CAPTURE_VERSION,
+      valuation: {
+        version: 1,
+        fields: [],
+        issues: [],
+        source: {
+          serverId: record.listing.serverId,
+          eid: record.listing.eid,
+          holyLevel: 0,
+          assets: { iCash: 0, iSaving: 0, iLearnCash: 0, xianyu: 0 },
+        },
+      },
       equipmentCapture: {
         version: 1,
         collectedAt: record.detail!.collectedAt,
@@ -153,6 +192,18 @@ export function analysisRecord(key = "a"): SavedRoleRecord {
       },
     },
   } as SavedRoleRecord;
+  const detail = result.detail!;
+  const assetContent: Record<string, string> = {
+    坐骑: "无坐骑",
+    "锦衣/外观": "无锦衣\n无祥瑞",
+    玩家之家: "无房屋\n无庭院",
+  };
+  detail.tabs = detail.tabs.map((tab) => ({
+    ...tab,
+    contentText: assetContent[tab.name] ?? tab.text,
+  }));
+  detail.sourceEvidence = fixtureFieldEvidence(detail, result.listing);
+  return result;
 }
 /** Synthetic pet quote, kept separate from real search evidence. */
 export function petPricingFixture(): PetPricingSnapshot {
@@ -252,7 +303,9 @@ export function valuationRecord(key = "a"): SavedRoleRecord {
         { index: 8, kind: "skill", category: "技能", name: "神速", level: "0" },
       ],
     },
+    ...record.detail!.tabs.filter((tab) => ["坐骑", "锦衣/外观", "玩家之家"].includes(tab.name)),
   ];
+  record.detail!.sourceEvidence = fixtureFieldEvidence(record.detail!, record.listing);
   return record;
 }
 export function analysisResponse(

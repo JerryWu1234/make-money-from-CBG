@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 import { chromium, type Browser, type Page } from "playwright-core";
 import { readDetailRevision } from "./detail-read-state";
+import { retainDetailRoot } from "./detail-root";
 import type { Listing } from "./types";
 
 const listing = { serverId: "367", eid: "stable-role" } as Listing;
@@ -17,10 +18,11 @@ async function fixture() {
   await page.route("**/*", (route) =>
     route.fulfill({
       contentType: "text/html; charset=utf-8",
-      body: `<!doctype html><div data-cbg-detail-root>价格：￥100</div><textarea id="equip_desc_value">stable-public-role</textarea><script>window.EquipInfo={server_id:"367",eid:"stable-role"};window.decode_desc=function(value){return value};window.RoleInfoParser=class {parse(value){return value}};window.CBG_GAME_CONFIG={equip_info:{},version:1};</script>`,
+      body: `<!doctype html><section id="detail-fixture"><p id="role-price">价格：￥100</p><textarea id="equip_desc_value">stable-public-role</textarea></section><script>window.EquipInfo={server_id:"367",eid:"stable-role"};window.decode_desc=function(value){return value};window.RoleInfoParser=class {parse(value){return value}};window.CBG_GAME_CONFIG={equip_info:{},version:1};</script>`,
     }),
   );
   await page.goto("http://127.0.0.1:48180/revision-fixture");
+  await retainDetailRoot(page, page.locator("#detail-fixture"));
   return page;
 }
 describe("商品资料版本只跟踪实际来源", () => {
@@ -58,8 +60,7 @@ describe("商品资料版本只跟踪实际来源", () => {
             document.querySelector<HTMLTextAreaElement>("#equip_desc_value")!.value =
               "changed-source";
           if (kind === "price")
-            document.querySelector<HTMLElement>("[data-cbg-detail-root]")!.innerText =
-              "价格：￥200";
+            document.querySelector<HTMLElement>("#role-price")!.innerText = "价格：￥200";
           if (kind === "identity") globals.EquipInfo.eid = "other-role";
           if (kind === "parser")
             globals.RoleInfoParser = class {

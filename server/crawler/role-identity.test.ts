@@ -1,6 +1,10 @@
 import { expect, it, vi } from "vite-plus/test";
 import { gunzipSync } from "node:zlib";
-import { analysisRecord, valuationRecord } from "../../tests/fixtures/analysis";
+import {
+  analysisRecord,
+  fixtureFieldEvidence,
+  valuationRecord,
+} from "../../tests/fixtures/analysis";
 import { AnalysisStore } from "../analysis/store";
 import { AnalysisRunner } from "../analysis/runner";
 import { createProfile } from "../analysis/profile";
@@ -18,13 +22,14 @@ function currentRecord(key = "identity-fixture") {
     version: 1,
     fields: [],
     issues: [],
-    source: { serverId: record.listing.serverId, eid: record.listing.eid },
+    source: { ...detail.valuation!.source },
   };
   detail.tabs = detail.tabs.map((tab) =>
     tab.name === "技能"
       ? valuationRecord(key).detail!.tabs.find((entry) => entry.name === "技能")!
       : tab,
   );
+  detail.sourceEvidence = fixtureFieldEvidence(detail, record.listing);
   return record;
 }
 
