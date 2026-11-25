@@ -821,7 +821,9 @@ export class AnalysisStore {
               asking: replayed.valuation!.asking_price,
               bare: replayed.valuation!.bare_role_value ?? null,
             };
-            // Replaying an old response must not make its archived review current.
+            // Replaying an old response does not make its archived review current.
+            // Preserve the review's version boundary so changed semantics are queued,
+            // rather than checkpointing a result the UI rejects.
             replayed.valuation!.condition_review = evaluateDirectConditions(
               tree,
               record,
