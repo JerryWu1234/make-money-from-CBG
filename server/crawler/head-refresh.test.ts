@@ -112,3 +112,35 @@ it("配置损坏时用默认值且保留原文件；保存失败不更改内存�
   expect(store.get()).toEqual({ intervalSeconds: 300, random: false, listingAgeMinutes: 10 });
   expect(readdirSync(path.dirname(file))).toEqual(["settings.json"]);
 });
+
+it("版本2随机上下限保留旧语义，拒绝冲突和未知版本", () => {
+  const settings = validateHeadRefreshSettings({
+    schemaVersion: 2,
+    intervalSeconds: 60,
+    minIntervalSeconds: 20,
+    maxIntervalSeconds: 60,
+    random: true,
+  });
+  expect(headRefreshDelayMs(settings, () => 0)).toBe(20000);
+  expect(headRefreshDelayMs(settings, () => 1)).toBe(60000);
+  const file = temporaryFile();
+  new HeadRefreshSettingsStore(file).save(settings);
+  expect(new HeadRefreshSettingsStore(file).get()).toEqual(settings);
+  expect(() => validateHeadRefreshSettings({ ...settings, schemaVersion: 3 })).toThrow("版本");
+  expect(() => validateHeadRefreshSettings({ ...settings, intervalSeconds: 30 })).toThrow("冲突");
+  expect(() => validateHeadRefreshSettings({ ...settings, minIntervalSeconds: 70 })).toThrow(
+    "上下限",
+  );
+  expect(() => validateHeadRefreshSettings({ ...settings, schemaVersion: undefined })).toThrow(
+    "版本2",
+  );
+});
+
+it("未知配置版本反复读取均拒绝，不能在首次错误后缓存默认策略", () => {
+  const file = temporaryFile();
+  writeFileSync(file, JSON.stringify({ schemaVersion: 99, intervalSeconds: 60, random: false }));
+  const store = new HeadRefreshSettingsStore(file);
+  expect(() => store.get()).toThrow("版本");
+  expect(() => store.get()).toThrow("版本");
+  expect(JSON.parse(readFileSync(file, "utf8")).schemaVersion).toBe(99);
+});

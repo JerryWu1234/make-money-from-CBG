@@ -1,6 +1,6 @@
 import { gunzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { analysisRecord } from "../../tests/fixtures/analysis";
+import { analysisRecord, fixtureFieldEvidence } from "../../tests/fixtures/analysis";
 import { schoolPrice } from "../analysis/valuation-calculator";
 import { captureIssues, collectCompleteCapture } from "./capture-readiness";
 import { CAPTURE_VERSION, compactDetail } from "./compact";
@@ -53,6 +53,8 @@ function source(skills = fiveSkills): Record<string, unknown> {
   return {
     serverId: "367",
     eid: "item-sparse-school",
+    holyLevel: 0,
+    assets: { iCash: 0, iSaving: 0, iLearnCash: 0, xianyu: 0 },
     allSkills: { ...Object.fromEntries(skills.map(({ id, level }) => [id, level])), 212: 36 },
     schoolSkills: structuredClone(skills),
   };
@@ -68,6 +70,7 @@ function record(): SavedRoleRecord {
   detail.valuation = { version: 1, fields: [], issues: [], source: source() };
   detail.equipmentCapture!.emptyProof = "explicit-text";
   detail.tabs = detail.tabs.map((tab) => (tab.name === "技能" ? schoolTab() : tab));
+  detail.sourceEvidence = fixtureFieldEvidence(detail, saved.listing);
   return saved;
 }
 

@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "scope": "isolated-installed-read-only",
+  "outcome": "passed-read-only-scope",
+  "extensionVersion": "1.1.1",
+  "largeListingProjection": {
+    "sourceCharacters": 903161,
+    "expectedRows": 15,
+    "observedRows": 15,
+    "noToolbarAction": true
+  },
+  "assertions": [
+    {
+      "name": "production helper build and no-input self-test",
+      "status": "passed"
+    },
+    {
+      "name": "real unpacked extension installation",
+      "status": "passed"
+    },
+    {
+      "name": "real MV3 service worker",
+      "status": "passed"
+    },
+    {
+      "name": "automatic MAIN and ISOLATED content-script installation",
+      "status": "passed"
+    },
+    {
+      "name": "automatic domain binding and observer snapshot without toolbar action",
+      "status": "passed"
+    },
+    {
+      "name": "temporary-profile Native host registration",
+      "status": "passed"
+    },
+    {
+      "name": "new real host process after native port termination",
+      "status": "passed"
+    },
+    {
+      "name": "explicit focus through real Native host remains read-only",
+      "status": "passed"
+    },
+    {
+      "name": "real helper permission/startup outcome",
+      "status": "observed-ready-without-input"
+    },
+    {
+      "name": "OS business input",
+      "status": "not-run"
+    }
+  ],
+  "businessInput": "not-run",
+  "liveWebsite": "connected and list observed before final update; final installed version not yet reloaded by user",
+  "checks": {
+    "pure": {
+      "files": 9,
+      "passed": 200
+    },
+    "compatibility": {
+      "files": 2,
+      "passed": 57
+    },
+    "browserObserver": {
+      "files": 1,
+      "passed": 39
+    },
+    "settingsUI": {
+      "passed": 16
+    },
+    "check": {
+      "errors": 0,
+      "existingWarnings": 29
+    },
+    "build": "passed"
+  },
+  "sources": {
+    "extension/cbg-access/main.js": "836b3de46348f0e7e8fa9cc2e750fcf5cb825373f3b63799c6a0ccbd65421d17",
+    "extension/cbg-access/isolated.js": "54fce8c79bcd6eec5bb0bc4c1d6ce9ae5e66e090b4e3963d6eb9d3fa9a01f3f8",
+    "extension/cbg-access/service-worker.js": "f5c12ab4b5fd6e3530744d6911233ca3ed15dd0d38cda239fadf1131b49b762d",
+    "native/cbg-access/host.mjs": "aa473729dfdc9fc3c6f27d99def3b46066abb3785736fe818b4d4fc602d1561f",
+    "server/adapters/extension-native.ts": "0de99efd511aec6d824aa22b76fbf49eef94e22f60d166003da3206e2d3d1f19",
+    "server/official-access.ts": "eb99cde60471b507ccad102418a0b68676bf73fa6743559b8de7f50d5e98a500",
+    "server/api.ts": "ddb19cf47063755a18c90e3ebd95639d9261086e6da2b9876b54ae2611460781"
+  }
+}

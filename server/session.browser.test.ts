@@ -18,6 +18,19 @@ const mocks = vi.hoisted(() => ({
   record: vi.fn(),
   browserControl: { changing: false, pending: 0 },
 }));
+// This suite isolates browser transport/capture behavior; shared access integration has its own browser suite.
+vi.mock("./official-access", () => ({
+  bindOfficialPage: vi.fn(),
+  officialPageContext: vi.fn(),
+  markOfficialAuthenticated: vi.fn(),
+  onOfficialFirstDispatch: () => false,
+  withOfficialAction: (_page: unknown, _action: string, execute: () => Promise<unknown>) =>
+    execute(),
+  officialGovernor: () => ({
+    read: () => ({ state: "ready", policy: { newTaskQuota: 3, detailReadBudgetMs: 900000 } }),
+  }),
+}));
+
 vi.mock("./browser-settings", async (original) => ({
   ...(await original<typeof import("./browser-settings")>()),
   browserSettings: mocks.browserSettings,

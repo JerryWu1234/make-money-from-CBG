@@ -1,0 +1,257 @@
+{
+  "schemaVersion": 1,
+  "scope": "Actual installed Chrome / Native Messaging / production helper attempts, synthetic offline page only. No OS business input was sent.",
+  "outcome": "blocked-before-activity-or-business-input",
+  "attempts": [
+    {
+      "artifactName": "cbg-installed-wu1PLJ",
+      "rawResultSha256": "28c9ed4304ec616100cacdb55c430de00fb3010f72fe3aa9c8c7f469a856b854",
+      "outcome": "failed-or-blocked",
+      "failureMessage": "Timed out waiting for actual native evidence",
+      "realWindowViewport": null,
+      "runtimeStatusAtFailure": null,
+      "permissionStatus": [],
+      "activityRequestCount": 0,
+      "commandProofCount": 0,
+      "postedInputCount": 0,
+      "permitsCount": 0,
+      "commandsCount": 0,
+      "cleanup": {
+        "observedFixedHelperPids": [],
+        "processes": [],
+        "remainingAssertions": []
+      },
+      "installedScriptHashes": {
+        "main.js": "e4f5de510da9caed23918b3cfcb7f416a1e6a1ccc2bd94cf505215811ee21d9c",
+        "isolated.js": "56752a100e3a8dfa6aa1623e7e13dc18fc926dbcb006d6b8fe34d98673f340a8",
+        "service-worker.js": "cb7d279d53738195c2208782932c79a478564aacc2adc85198f5dc8e3b7f5409",
+        "market-config.js": "a2c11c2bee12fdc7957cdd91f5bfab42dd1be11b10a09093f80734e559a0dedf",
+        "market-rules.js": "c22b78f92e96cbb8ab3a792a39798229a7a600bfb60b039f0474ea7e2309b03e",
+        "pet-product-observation.js": "ef3ad8d17c06ca14dbda510e6a3c2fe24197f48c80c4aa1d77928838658691cc"
+      },
+      "hostSourceSha256": "e8a5a49515c8b0ba091e10758c34a831f286dc29da8eca71ac8d3fb0e993c9b9",
+      "normalHelperBinarySha256": "f35b9478a1ddf0c35bf7b452e41326e47279941f12e61248423ada4681441cea"
+    },
+    {
+      "artifactName": "cbg-installed-xVQDJq",
+      "rawResultSha256": "88e7dd45b1bb0f5d963a5726b4f2eace5b7b5cae4cf49f5b585a899d90b59ecd",
+      "outcome": "failed-or-blocked",
+      "failureMessage": "Timed out waiting for actual native evidence",
+      "realWindowViewport": null,
+      "runtimeStatusAtFailure": {
+        "adapter": "extension-native",
+        "listening": true,
+        "connected": true,
+        "stopped": true,
+        "idle": false,
+        "pageId": null,
+        "reason": "server-stop",
+        "unknownActions": 0
+      },
+      "permissionStatus": [],
+      "activityRequestCount": 0,
+      "commandProofCount": 0,
+      "postedInputCount": 0,
+      "permitsCount": 0,
+      "commandsCount": 0,
+      "cleanup": {
+        "observedFixedHelperPids": [],
+        "processes": [],
+        "remainingAssertions": []
+      },
+      "installedScriptHashes": {
+        "main.js": "e4f5de510da9caed23918b3cfcb7f416a1e6a1ccc2bd94cf505215811ee21d9c",
+        "isolated.js": "56752a100e3a8dfa6aa1623e7e13dc18fc926dbcb006d6b8fe34d98673f340a8",
+        "service-worker.js": "cb7d279d53738195c2208782932c79a478564aacc2adc85198f5dc8e3b7f5409",
+        "market-config.js": "a2c11c2bee12fdc7957cdd91f5bfab42dd1be11b10a09093f80734e559a0dedf",
+        "market-rules.js": "c22b78f92e96cbb8ab3a792a39798229a7a600bfb60b039f0474ea7e2309b03e",
+        "pet-product-observation.js": "ef3ad8d17c06ca14dbda510e6a3c2fe24197f48c80c4aa1d77928838658691cc"
+      },
+      "hostSourceSha256": "e8a5a49515c8b0ba091e10758c34a831f286dc29da8eca71ac8d3fb0e993c9b9",
+      "normalHelperBinarySha256": "f35b9478a1ddf0c35bf7b452e41326e47279941f12e61248423ada4681441cea"
+    },
+    {
+      "artifactName": "cbg-installed-4ZSBau",
+      "rawResultSha256": "1a2c044824d399c2975406760596463472868c584721ee421f99d7dc878ad70d",
+      "outcome": "failed-or-blocked",
+      "failureMessage": "accessibility\n\nfalse !== true\n",
+      "realWindowViewport": {
+        "width": 1200,
+        "height": 665,
+        "dpr": 2,
+        "scale": 1,
+        "outerWidth": 1200,
+        "outerHeight": 752,
+        "screenX": 216,
+        "screenY": 52
+      },
+      "runtimeStatusAtFailure": {
+        "adapter": "extension-native",
+        "listening": true,
+        "connected": true,
+        "stopped": false,
+        "idle": false,
+        "pageId": "99e69be1-55d3-47a2-b349-ab34b00c62d0",
+        "reason": null,
+        "unknownActions": 0
+      },
+      "permissionStatus": [
+        {
+          "direction": "host-to-runtime",
+          "message": {
+            "kind": "input-result",
+            "actionId": "49e3fdbd-56a5-41db-ad56-5335ee21113f",
+            "activity": {
+              "assertionId": 0,
+              "awake": false,
+              "expired": false,
+              "lease": {}
+            },
+            "ok": true,
+            "permissions": {
+              "accessibility": false,
+              "displayAvailable": true,
+              "frontmostChrome": true,
+              "inputMonitorActive": true,
+              "inputMonitoring": true,
+              "locked": false,
+              "screenRecording": false
+            }
+          }
+        }
+      ],
+      "activityRequestCount": 0,
+      "commandProofCount": 0,
+      "postedInputCount": 0,
+      "permitsCount": 0,
+      "commandsCount": 0,
+      "cleanup": {
+        "observedFixedHelperPids": [],
+        "processes": [],
+        "remainingAssertions": []
+      },
+      "installedScriptHashes": {
+        "main.js": "e4f5de510da9caed23918b3cfcb7f416a1e6a1ccc2bd94cf505215811ee21d9c",
+        "isolated.js": "d46286d86390c2186a18f700b3e5617ed1ca951182b30c65212c5f9926697117",
+        "service-worker.js": "cb7d279d53738195c2208782932c79a478564aacc2adc85198f5dc8e3b7f5409",
+        "market-config.js": "a2c11c2bee12fdc7957cdd91f5bfab42dd1be11b10a09093f80734e559a0dedf",
+        "market-rules.js": "c22b78f92e96cbb8ab3a792a39798229a7a600bfb60b039f0474ea7e2309b03e",
+        "pet-product-observation.js": "ef3ad8d17c06ca14dbda510e6a3c2fe24197f48c80c4aa1d77928838658691cc"
+      },
+      "hostSourceSha256": "e8a5a49515c8b0ba091e10758c34a831f286dc29da8eca71ac8d3fb0e993c9b9",
+      "normalHelperBinarySha256": "f35b9478a1ddf0c35bf7b452e41326e47279941f12e61248423ada4681441cea"
+    },
+    {
+      "artifactName": "cbg-installed-iKDjPi",
+      "rawResultSha256": "1684b33af28029a8c4ddf7498a90a1fe4651fa0c88a69c90b3433d406fbb48c2",
+      "outcome": "failed-or-blocked",
+      "failureMessage": "accessibility\n\nfalse !== true\n",
+      "realWindowViewport": {
+        "width": 1200,
+        "height": 665,
+        "dpr": 2,
+        "scale": 1,
+        "outerWidth": 1200,
+        "outerHeight": 752,
+        "screenX": 216,
+        "screenY": 52
+      },
+      "runtimeStatusAtFailure": {
+        "adapter": "extension-native",
+        "listening": true,
+        "connected": true,
+        "stopped": false,
+        "idle": false,
+        "pageId": "538378cb-cbe4-4903-ad08-4e35390644ee",
+        "reason": null,
+        "unknownActions": 0
+      },
+      "permissionStatus": [
+        {
+          "direction": "host-to-runtime",
+          "message": {
+            "kind": "input-result",
+            "actionId": "62978bc4-af7a-45f6-96c1-b05b961694b6",
+            "activity": {
+              "assertionId": 0,
+              "awake": false,
+              "expired": false,
+              "lease": {}
+            },
+            "ok": true,
+            "permissions": {
+              "accessibility": false,
+              "displayAvailable": true,
+              "frontmostChrome": true,
+              "inputMonitorActive": true,
+              "inputMonitoring": true,
+              "locked": false,
+              "screenRecording": false
+            }
+          }
+        }
+      ],
+      "activityRequestCount": 0,
+      "commandProofCount": 0,
+      "postedInputCount": 0,
+      "permitsCount": 0,
+      "commandsCount": 0,
+      "cleanup": {
+        "observedFixedHelperPids": [],
+        "processes": [],
+        "remainingAssertions": []
+      },
+      "installedScriptHashes": {
+        "main.js": "e4f5de510da9caed23918b3cfcb7f416a1e6a1ccc2bd94cf505215811ee21d9c",
+        "isolated.js": "d46286d86390c2186a18f700b3e5617ed1ca951182b30c65212c5f9926697117",
+        "service-worker.js": "cb7d279d53738195c2208782932c79a478564aacc2adc85198f5dc8e3b7f5409",
+        "market-config.js": "a2c11c2bee12fdc7957cdd91f5bfab42dd1be11b10a09093f80734e559a0dedf",
+        "market-rules.js": "c22b78f92e96cbb8ab3a792a39798229a7a600bfb60b039f0474ea7e2309b03e",
+        "pet-product-observation.js": "ef3ad8d17c06ca14dbda510e6a3c2fe24197f48c80c4aa1d77928838658691cc"
+      },
+      "hostSourceSha256": "e8a5a49515c8b0ba091e10758c34a831f286dc29da8eca71ac8d3fb0e993c9b9",
+      "normalHelperBinarySha256": "f35b9478a1ddf0c35bf7b452e41326e47279941f12e61248423ada4681441cea",
+      "tccAttribution": {
+        "localTimeRange": ["2026-11-15 23:38:48", "2026-11-15 23:38:54"],
+        "requestingHelperPid": 40912,
+        "hostPid": 40911,
+        "responsiblePid": 40909,
+        "responsibleExecutable": "node",
+        "managedRuntimeVersion": "26.13.1",
+        "services": [
+          {
+            "messageId": "40912.1",
+            "service": "kTCCServiceListenEvent",
+            "authValue": 2,
+            "authReason": 4
+          },
+          {
+            "messageId": "40912.2",
+            "service": "kTCCServiceAccessibility",
+            "authValue": 0,
+            "authReason": 4
+          },
+          {
+            "messageId": "40912.3",
+            "service": "kTCCServiceAccessibility",
+            "authValue": 0,
+            "authReason": 4
+          }
+        ],
+        "rawAttributionSha256": "77b999d351d9ce0e3ce2e7806cf6d5cecd2933dbb32d5d59c3011c3bcb95733e",
+        "note": "Same responsible executable identity, new processes after user reported enabling Accessibility. Actual AXIsProcessTrusted remained false; permission was not assumed from the user response."
+      }
+    }
+  ],
+  "notRun": [
+    "real AX target execution",
+    "real IOPM activity lifetime",
+    "lease expiry",
+    "disconnect during active input",
+    "active-input host restart",
+    "physical user takeover",
+    "lock screen (user deferred this round)",
+    "physical second display / display disconnect / cross-display scaling",
+    "authenticated official-site query"
+  ]
+}

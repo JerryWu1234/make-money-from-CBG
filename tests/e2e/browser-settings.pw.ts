@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Page } from "@playwright/test";
@@ -16,9 +17,11 @@ async function mount(
   page: Page,
   options: {
     mode?: BrowserMode;
+    accessAdapter?: "playwright" | "extension-native";
     showWorkPages?: boolean;
     modes?: BrowserMode[];
     ready?: boolean;
+    checkpoint?: boolean;
     busy?: boolean;
     queryRunning?: boolean;
     crawlRunning?: boolean;
@@ -27,9 +30,11 @@ async function mount(
 ) {
   const state = {
     mode: options.mode ?? ("dedicated" as BrowserMode),
+    accessAdapter: options.accessAdapter ?? "playwright",
     showWorkPages: options.showWorkPages ?? false,
     modes: options.modes ?? [options.mode ?? "dedicated"],
     ready: options.ready ?? false,
+    checkpoint: options.checkpoint ?? true,
     busy: options.busy ?? false,
     queryRunning: options.queryRunning ?? false,
     crawlRunning: options.crawlRunning ?? false,
@@ -39,6 +44,7 @@ async function mount(
     saveError: "",
     settingsReads: 0,
     statusReads: 0,
+    statusFailures: 0,
     opens: 0,
     captureStarts: 0,
     saves: [] as BrowserMode[][],
@@ -58,6 +64,7 @@ async function mount(
   };
   const settings = () => ({
     mode: state.mode,
+    accessAdapter: state.accessAdapter,
     showWorkPages: state.showWorkPages,
     modes: state.modes,
     connected: state.ready,
@@ -65,6 +72,9 @@ async function mount(
   });
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     // Built assets and all API responses are fixtures; never reach 5173 or daily Chrome.
     if (url.origin !== "http://browser-settings.test") return route.abort();
     if (url.pathname.startsWith("/api/")) {
@@ -89,12 +99,17 @@ async function mount(
           state.modes = modes;
           state.mode = modes[0];
           state.showWorkPages = input.showWorkPages;
+          state.accessAdapter = input.accessAdapter ?? state.accessAdapter;
           state.ready = false;
           body = settings();
           break;
         }
         case "/api/browser/status": {
           state.statusReads++;
+          if (state.statusFailures > 0) {
+            state.statusFailures--;
+            return route.fulfill({ status: 500, json: { error: "模拟扩展状态读取失败" } });
+          }
           if (state.staleStatusGate) {
             const gate = state.staleStatusGate;
             state.staleStatusGate = undefined;
@@ -121,13 +136,15 @@ async function mount(
         case "/api/crawl/status":
           body = {
             ...crawlStatus(state.crawlRunning, true),
-            checkpoint: {
-              key: "fixture:saved",
-              time: "2026-10-24T00:00:00Z",
-              order: "expire_time DESC",
-              page: 1,
-              savedAt: "2026-10-24T00:00:00Z",
-            },
+            checkpoint: state.checkpoint
+              ? {
+                  key: "fixture:saved",
+                  time: "2026-10-24T00:00:00Z",
+                  order: "expire_time DESC",
+                  page: 1,
+                  savedAt: "2026-10-24T00:00:00Z",
+                }
+              : undefined,
           };
           break;
         case "/api/crawl/start":
@@ -388,3 +405,59 @@ for (const mode of ["dedicated", "daily"] as const) {
     expect(state.saves).toEqual([]);
   });
 }
+
+test("扩展模式自动等待官网列表，不要求开始查询或工具栏点击，也不展示CDP设置", async ({ page }) => {
+  const state = await mount(page, {
+    mode: "daily",
+    accessAdapter: "extension-native",
+    ready: false,
+    checkpoint: false,
+  });
+  await expect(page.getByRole("heading", { name: "藏宝阁角色采集", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "角色查询流程" })).toHaveCount(0);
+  await expect(page.locator("#open-cbg-btn")).toHaveCount(0);
+  await expect(page.getByRole("checkbox", { name: /使用日常 Chrome/ })).toHaveCount(0);
+  await expect(page.getByText("无需点击扩展或开始查询。", { exact: false })).toBeVisible();
+  expect(state.opens).toBe(0);
+  expect(state.captureStarts).toBe(0);
+  state.ready = true;
+  await expect(page.getByRole("button", { name: "开始采集详情", exact: true })).toBeEnabled();
+  expect(state.opens).toBe(0);
+  expect(state.captureStarts).toBe(0);
+});
+
+test("切到扩展通路后旧浏览器就绪状态失效，等待自动观察而不启动查询", async ({ page }) => {
+  const state = await mount(page, { mode: "daily", ready: true, checkpoint: false });
+  const capture = page.getByRole("button", { name: "开始采集详情", exact: true });
+  await expect(capture).toBeEnabled();
+  await page
+    .getByRole("combobox", { name: "官网交互通路", exact: true })
+    .selectOption("extension-native");
+  await expect(page.getByRole("heading", { name: "藏宝阁角色采集", exact: true })).toBeVisible();
+  await expect(capture).toBeDisabled();
+  await expect(page.locator("#open-cbg-btn")).toHaveCount(0);
+  expect(state.opens).toBe(0);
+  expect(state.captureStarts).toBe(0);
+  state.ready = true;
+  await expect(capture).toBeEnabled();
+  expect(state.opens).toBe(0);
+  expect(state.captureStarts).toBe(0);
+});
+
+test("扩展连接检查只读取状态，不发起恢复或业务查询", async ({ page }) => {
+  const state = await mount(page, {
+    mode: "daily",
+    accessAdapter: "extension-native",
+    ready: false,
+    checkpoint: false,
+  });
+  state.statusFailures = 5;
+  const check = page.getByRole("button", { name: "重新检查连接", exact: true });
+  await expect(check).toBeVisible();
+  const before = state.statusReads;
+  state.statusFailures = 0;
+  await check.click();
+  await expect.poll(() => state.statusReads).toBeGreaterThan(before);
+  expect(state.opens).toBe(0);
+  expect(state.captureStarts).toBe(0);
+});

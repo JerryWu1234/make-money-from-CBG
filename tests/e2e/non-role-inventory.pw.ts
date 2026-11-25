@@ -84,6 +84,8 @@ test("四类归档失败物品→完整读取7标签→入库重开→仅武器�
   };
   await page.context().route("**/*", (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
     if (url.origin !== origin || url.pathname !== "/equip") return route.abort();
     return route.fulfill({ contentType: "text/html", body: html(url.searchParams.get("eid")!) });
   });

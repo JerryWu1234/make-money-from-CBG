@@ -57,6 +57,7 @@ describe("师门技能原文与图标校核", () => {
       level: "164",
       kind: "skill",
       category: "师门技能",
+      readSources: { name: "visible-text", level: "visible-text", category: "visible-text" },
     });
     expect(result.tabs[0].items!.slice(0, 7)).toEqual(original.tabs[0].items);
     expect(result.tabs[0].text).toBe(original.tabs[0].text);

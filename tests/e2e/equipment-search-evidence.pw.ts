@@ -34,6 +34,8 @@ test("截图超时后实际Chrome重新截图，保留全页、账号遮盖和�
   });
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
     if (url.origin !== "http://evidence.test") return route.abort();
     if (url.pathname === "/slow.woff2") {
       fontRequested();

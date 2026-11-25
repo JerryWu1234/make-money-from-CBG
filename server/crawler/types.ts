@@ -1,4 +1,4 @@
-export const DEFAULT_CRAWL_CONCURRENCY = 6;
+export const DEFAULT_CRAWL_CONCURRENCY = 1;
 export type CrawlLane = "new" | "old";
 export interface HeadCheckpoint {
   time: string;
@@ -37,6 +37,7 @@ export class ListingDisappearedError extends ListingChangedError {
 }
 /** Only official detail evidence can make a listing permanently unavailable. */
 export class ListingUnavailableError extends Error {
+  accessContext?: import("../access").AccessContext;
   constructor(evidence: string) {
     super(`官网商品已不存在，无法补齐，已跳过且不再重试：${evidence}`);
     this.name = "ListingUnavailableError";
@@ -83,6 +84,7 @@ export interface ListingPage {
   items: Listing[];
 }
 export interface CrawlSource {
+  maxConcurrency?: number;
   prepare: (order?: string) => Promise<ListingPage>;
   refresh?: (order?: string) => Promise<ListingPage>;
   page: (number: number, refresh?: boolean) => Promise<ListingPage>;
@@ -92,6 +94,8 @@ export interface CrawlSource {
   cancelDetails?: (reason: Error) => Promise<void>;
 }
 export interface TabSnapshot {
+  /** Visible detail content with navigation, headers and transient tooltips excluded. */
+  contentText?: string;
   collectedAt?: string;
   itemsCollectedAt?: string;
   name: string;
@@ -120,6 +124,10 @@ export interface PetSnapshot {
   innerSkills: DetailItem[];
 }
 export interface DetailItem {
+  readSources?: Record<
+    string,
+    "element-attributes" | "tooltip" | "official-role-parser" | "visible-text"
+  >;
   /** Metadata returned for this exact model by the official page, never inferred from a name. */
   officialModel?: { modelId: string; name?: string; description?: string; category?: string };
   nameSource?: "element" | "official-model" | "tooltip";
@@ -165,6 +173,30 @@ export interface ValuationCapture {
   source: Record<string, unknown>;
 }
 export interface RoleDetail {
+  sourceEvidence?: {
+    version: 1;
+    serverId: string;
+    eid: string;
+    initialRevision: string | null;
+    finalRevision: string | null;
+    stable: boolean;
+    fields: Array<{
+      path: string;
+      source:
+        | "visible-field"
+        | "visible-text"
+        | "visible-table"
+        | "element-attributes"
+        | "tooltip"
+        | "official-role-parser"
+        | "official-container"
+        | "official-model"
+        | "official-slot"
+        | "description";
+      state: "observed" | "explicit-empty" | "unknown";
+    }>;
+  };
+  accessContext?: import("../access").AccessContext;
   /** Legacy body-only captures require full recapture before reuse. */
   captureMode?: "body" | "all";
   valuation?: ValuationCapture;
@@ -209,6 +241,8 @@ export interface PageReview {
   detectedAt: string;
 }
 export interface CrawlStatus {
+  minRoleTrainingTotal?: number | null;
+  filteredTraining?: number;
   headRefresh?: import("./head-refresh").HeadRefreshSettings;
   headRefreshDelayMs?: number;
   concurrency?: number;

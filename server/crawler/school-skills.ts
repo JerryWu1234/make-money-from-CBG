@@ -112,7 +112,16 @@ export function completeSchoolSkillsFromText(tab: TabSnapshot): TabSnapshot {
   const missing: DetailItem[] = [...levels].flatMap(([name, level]) =>
     observed.has(name)
       ? []
-      : [{ index: index++, name, level, kind: "skill", category: "师门技能" }],
+      : [
+          {
+            index: index++,
+            name,
+            level,
+            kind: "skill",
+            category: "师门技能",
+            readSources: { name: "visible-text", level: "visible-text", category: "visible-text" },
+          },
+        ],
   );
   return { ...tab, items: [...tab.items, ...missing] };
 }

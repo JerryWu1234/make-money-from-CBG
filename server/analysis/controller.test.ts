@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { CrawlStore } from "../crawler/store";
-import { analysisRecord, valuationRecord } from "../../tests/fixtures/analysis";
+import {
+  analysisRecord,
+  fixtureFieldEvidence,
+  valuationRecord,
+} from "../../tests/fixtures/analysis";
 import { createProfile } from "./profile";
 import { CAPTURE_VERSION } from "../crawler/compact";
 import { equipmentPricingPlan } from "./equipment-pricing";
@@ -161,7 +165,7 @@ function captureFixture() {
     version: 1,
     fields: [],
     issues: [],
-    source: { serverId: "367", eid: "item-a" },
+    source: { ...record.detail!.valuation!.source },
   };
   record.detail!.equipmentCapture = {
     version: 1,
@@ -210,6 +214,7 @@ function captureFixture() {
       searchComplete: true,
     }),
   });
+  record.detail!.sourceEvidence = fixtureFieldEvidence(record.detail!, record.listing);
   return { record, analyze };
 }
 it.each([false, true])(
@@ -398,13 +403,21 @@ it("试分析默认一件只写回所选商品的已证实分类", async () => {
     description: "等级60\n法术伤害13\n固定伤害7",
   };
   record.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items = [gear];
+  record.detail!.sourceEvidence = fixtureFieldEvidence(record.detail!, record.listing);
   crawl.save(record.listing, record.detail!);
   const other = structuredClone(record);
-  other.listing = { ...other.listing, key: "b", eid: "item-b" };
+  other.listing = {
+    ...other.listing,
+    key: "b",
+    eid: "item-b",
+    url: "https://xyq.cbg.163.com/equip?s=367&eid=item-b",
+  };
+  other.detail!.url = other.listing.url;
   other.detail!.valuation!.source.eid = "item-b";
   other.detail!.tabs.find((tab) => tab.name === "道具/法宝")!.items = [
     { ...gear, location: "store_equip_tips2" },
   ];
+  other.detail!.sourceEvidence = fixtureFieldEvidence(other.detail!, other.listing);
   crawl.observe(other.listing);
   expect(crawl.save(other.listing, other.detail!)).toBe(true);
   const before = crawl.db.prepare("SELECT detail_json FROM listings WHERE key='b'").get()!;

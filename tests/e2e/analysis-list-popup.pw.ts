@@ -64,6 +64,8 @@ test("三类查价并发点击列表→新页核验→关闭→保存并重读�
   const details: string[] = [];
   await context.route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
     if (url.origin !== "https://xyq.cbg.163.com") return route.abort();
     if (url.pathname === "/cgi-bin/recommend.py") return route.fulfill({ json: {} });
     if (url.pathname === "/equip") {

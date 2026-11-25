@@ -10,6 +10,7 @@ import { openWorkTransport } from "./work-transport";
 import { screenshotsEnabled } from "./runtime-settings";
 
 vi.mock("./runtime-settings", () => ({ screenshotsEnabled: vi.fn(() => true) }));
+vi.mock("./official-access", () => ({ bindOfficialPage: vi.fn() }));
 beforeEach(() => vi.mocked(screenshotsEnabled).mockReturnValue(true));
 
 let browser: Browser;

@@ -93,6 +93,7 @@ export async function searchPetGearPricing(
       const result = await source.findCandidates(pending, signal);
       signal.throwIfAborted();
       snapshot.queries = [...new Set([...snapshot.queries, ...result.queries])];
+      if (result.accessProofs) snapshot.accessProofs = result.accessProofs;
       snapshot.searchItems = [...(snapshot.searchItems || []), ...(result.searchItems || [])];
       for (const item of snapshot.items) {
         const found = result.items.find((value) => value.key === item.key);

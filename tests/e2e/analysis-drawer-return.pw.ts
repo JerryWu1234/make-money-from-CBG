@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
@@ -53,6 +54,7 @@ test("分析记录第二页→调用记录→当前采集资料→三种关闭�
   const closedBy: string[] = [];
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://analysis-drawer.test") return route.abort();
     if (url.pathname.startsWith("/api/")) {
       let body: unknown;
@@ -95,8 +97,13 @@ test("分析记录第二页→调用记录→当前采集资料→三种关闭�
           body = crawl.detail(key);
           break;
         }
-        default:
+        default: {
+          if (url.pathname === "/api/crawl/role-training-filter") {
+            await route.fulfill({ json: { minTotal: null } });
+            return;
+          }
           throw new Error("未模拟接口：" + url.pathname);
+        }
       }
       return route.fulfill({ json: body });
     }

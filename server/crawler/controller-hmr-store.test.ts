@@ -1,6 +1,7 @@
 import { afterEach, expect, it, vi } from "vite-plus/test";
 import { analysisRecord } from "../../tests/fixtures/analysis";
 import { CrawlStore } from "./store";
+import { officialGovernor } from "../official-access";
 
 vi.mock("./runner", () => ({ crawl: vi.fn(), validateCrawlOptions: vi.fn() }));
 vi.mock("../cbg", () => ({ checkCbgStatus: vi.fn() }));
@@ -69,7 +70,25 @@ it("模块重载升级旧采集存储时保留连接、采集控制器、在途�
     expect(controller.crawlDatabase()).toBe(db);
     expect(controller.crawlActivity()).toBe(activeRun);
     expect(store.acquire("another-crawl")).toBe(false);
-    store.deferPageReview("expire_time DESC", 41, "1:old");
+    const gate = officialGovernor(db),
+      owner = gate.acquireOwner("hmr-test");
+    const context = {
+      ...owner,
+      runId: "active-crawl",
+      queryId: "hmr-list",
+      pageId: "list",
+      pageGeneration: 1,
+      browserSessionEpoch: "session",
+      stopEpoch: 0,
+      sourceKind: "crawl-list",
+      crawlLease: store.crawlLease("active-crawl"),
+    };
+    gate.registerPage(context);
+    gate.registerQuery(context, { accepted: true });
+    store.setProgressContext(context);
+    store.withCrawlLease("active-crawl", () =>
+      store.deferPageReview("expire_time DESC", 41, "1:old"),
+    );
     expect(controller.crawlStatus().pageReviews).toEqual([
       expect.objectContaining({ order: "expire_time DESC", page: 41 }),
     ]);

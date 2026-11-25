@@ -6,6 +6,7 @@ import { SavedRoleList, displayTime } from "./SavedRoleList";
 import { ScanSchedulePanel } from "./ScanSchedulePanel";
 import { RunRecordSettings } from "./RunRecordSettings";
 import { SqliteDataCleanup } from "./SqliteDataCleanup";
+import { RoleTrainingFilter } from "./RoleTrainingFilter";
 import { HeadRefreshSettings } from "./HeadRefreshSettings";
 import { DEFAULT_LISTING_AGE_MINUTES, describeHeadRefresh } from "../server/crawler/head-refresh";
 import { replaceSavedRecordKey, replaceSavedRecordsPage, savedRecordKey } from "./saved-view-state";
@@ -15,7 +16,7 @@ type Status = CrawlStatus & {
 };
 const CONCURRENCY_KEY = "cbg-crawl-concurrency";
 const validConcurrency = (value: unknown): value is number =>
-  typeof value === "number" && Number.isSafeInteger(value) && value >= 2 && value % 2 === 0;
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= 32;
 function savedConcurrency() {
   try {
     const value = Number(localStorage.getItem(CONCURRENCY_KEY));
@@ -143,7 +144,7 @@ export function CrawlPanel({
     async (command: "start" | "stop") => {
       const count = Number(concurrency);
       if (command === "start" && !validConcurrency(count)) {
-        setError("并发数必须是正偶数（2、4、6…）");
+        setError("并发数必须是1至32之间的整数");
         return;
       }
       setBusy(true);
@@ -205,8 +206,9 @@ export function CrawlPanel({
             并发抓取数
             <input
               type="number"
-              min="2"
-              step="2"
+              min="1"
+              max="32"
+              step="1"
               value={concurrency}
               disabled={busy || waitingForReady || !!status?.running}
               onChange={(event) => setConcurrency(event.target.value)}
@@ -239,6 +241,7 @@ export function CrawlPanel({
           </div>
         </div>
         <HeadRefreshSettings />
+        <RoleTrainingFilter />
         {waitingForReady && (
           <p role="status" className="status-note">
             正在恢复 Chrome 连接和角色列表；如需授权或扫码，请按页面提示完成，之后自动继续采集。
@@ -305,7 +308,8 @@ export function CrawlPanel({
             )}
             <p>
               第 {status.page} / {status.totalPages} 页 · 本轮保存 {status.saved} · 跳过{" "}
-              {status.skipped} · 本轮待重试 {status.failed || 0} · 库内完整商品 {status.totalSaved}
+              {status.skipped} · 四修不足跳过 {status.filteredTraining ?? 0} · 本轮待重试{" "}
+              {status.failed || 0} · 库内完整商品 {status.totalSaved}
             </p>
             {status.phase === "retrying" && !!status.retryTotal && (
               <p>

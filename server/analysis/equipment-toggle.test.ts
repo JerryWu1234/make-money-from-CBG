@@ -5,7 +5,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { CrawlStore } from "../crawler/store";
 import { CAPTURE_VERSION } from "../crawler/compact";
 import { captureIssues } from "../crawler/capture-readiness";
-import { valuationRecord } from "../../tests/fixtures/analysis";
+import { fixtureFieldEvidence, valuationRecord } from "../../tests/fixtures/analysis";
 import { AnalysisStore } from "./store";
 import { AnalysisRunner } from "./runner";
 import { createProfile, DEFAULT_SETTINGS, loadProfile, saveProfile, PROMPT_FILE } from "./profile";
@@ -23,7 +23,7 @@ function fullRecord() {
     version: 1,
     fields: [],
     issues: [],
-    source: { serverId: "367", eid: "item-a" },
+    source: { ...record.detail!.valuation!.source },
   };
   record.detail!.equipmentCapture = {
     version: 1,
@@ -43,6 +43,7 @@ function fullRecord() {
         elements: [],
         tooltips: [],
       });
+  record.detail!.sourceEvidence = fixtureFieldEvidence(record.detail!, record.listing);
   return record;
 }
 

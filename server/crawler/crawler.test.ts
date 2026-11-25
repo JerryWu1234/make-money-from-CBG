@@ -185,47 +185,52 @@ describe("并发采集", () => {
       expect.objectContaining({ skipped: 1, failed: 0, saved: 0 }),
     );
   });
-  it.each([1, 3, 5, 0, -2, 2.5, Number.MAX_SAFE_INTEGER + 1])(
+  it.each([33, 0, -2, 2.5, Number.MAX_SAFE_INTEGER + 1])(
     "并发配置 %s 在读取列表前拒绝，不能绕过页面限制",
     async (concurrency) => {
       const db = memory(),
         src = source([[item(1)]]);
       src.prepare = vi.fn(src.prepare);
       src.detail = vi.fn(src.detail);
-      expect(() => validateCrawlOptions({ concurrency })).toThrow("正偶数");
-      await expect(crawl(src, db, signal(), vi.fn(), { concurrency })).rejects.toThrow("正偶数");
+      expect(() => validateCrawlOptions({ concurrency })).toThrow("1至32");
+      await expect(crawl(src, db, signal(), vi.fn(), { concurrency })).rejects.toThrow("1至32");
       expect(src.prepare).not.toHaveBeenCalled();
       expect(src.detail).not.toHaveBeenCalled();
     },
   );
-  it.each([undefined, 2, 4, 6])("并发配置 %s 限制在途数量且不重复采集", async (concurrency) => {
-    const db = memory();
-    const rows = Array.from({ length: 11 }, (_, index) => item(index + 1));
-    const src = source([rows]);
-    const releases: Array<() => void> = [];
-    let active = 0,
-      maximum = 0;
-    src.detail = vi.fn(async (row) => {
-      active++;
-      maximum = Math.max(maximum, active);
-      await new Promise<void>((resolve) => releases.push(resolve));
-      active--;
-      return detail(row);
-    });
-    const task = crawl(src, db, signal(), vi.fn(), { concurrency });
-    const limit = concurrency ?? 6;
-    await vi.waitFor(() => expect(releases).toHaveLength(limit));
-    expect(db.retryItems()).toHaveLength(rows.length);
-    while (db.count() < rows.length) {
-      releases.splice(0).forEach((release) => release());
-      await vi.waitFor(() => expect(releases.length > 0 || db.count() === rows.length).toBe(true));
-    }
-    await task;
-    expect(maximum).toBe(limit);
-    expect(src.detail).toHaveBeenCalledTimes(rows.length);
-    expect(db.checkpoint()?.key).toBe(rows.at(-1)!.key);
-    expect(db.backfillComplete()).toBe(true);
-  });
+  it.each([undefined, 1, 2, 3, 4, 6])(
+    "并发配置 %s 限制在途数量且不重复采集",
+    async (concurrency) => {
+      const db = memory();
+      const rows = Array.from({ length: 11 }, (_, index) => item(index + 1));
+      const src = source([rows]);
+      const releases: Array<() => void> = [];
+      let active = 0,
+        maximum = 0;
+      src.detail = vi.fn(async (row) => {
+        active++;
+        maximum = Math.max(maximum, active);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        active--;
+        return detail(row);
+      });
+      const task = crawl(src, db, signal(), vi.fn(), { concurrency });
+      const limit = concurrency ?? 1;
+      await vi.waitFor(() => expect(releases).toHaveLength(limit));
+      expect(db.retryItems()).toHaveLength(rows.length);
+      while (db.count() < rows.length) {
+        releases.splice(0).forEach((release) => release());
+        await vi.waitFor(() =>
+          expect(releases.length > 0 || db.count() === rows.length).toBe(true),
+        );
+      }
+      await task;
+      expect(maximum).toBe(limit);
+      expect(src.detail).toHaveBeenCalledTimes(rows.length);
+      expect(db.checkpoint()?.key).toBe(rows.at(-1)!.key);
+      expect(db.backfillComplete()).toBe(true);
+    },
+  );
 
   it("后面的角色先完成，前面的结果仍保存且断点不倒退", async () => {
     const db = memory(),
@@ -236,7 +241,7 @@ describe("并发采集", () => {
       await new Promise<void>((resolve) => releases.set(row.key, resolve));
       return detail(row);
     });
-    const task = crawl(src, db, signal(), vi.fn());
+    const task = crawl(src, db, signal(), vi.fn(), { concurrency: 3 });
     await vi.waitFor(() => expect(releases.size).toBe(3));
     for (const row of [...rows].reverse()) {
       releases.get(row.key)!();
@@ -294,7 +299,9 @@ describe("并发采集", () => {
       );
       return detail(row);
     });
-    const outcome = crawl(src, db, control.signal, vi.fn()).catch((error: unknown) => error);
+    const outcome = crawl(src, db, control.signal, vi.fn(), { concurrency: 4 }).catch(
+      (error: unknown) => error,
+    );
     await vi.waitFor(() => expect(src.detail).toHaveBeenCalledTimes(4));
     control.abort(new Error("用户暂停采集"));
     expect(await outcome).toMatchObject({ message: "用户暂停采集" });
@@ -392,7 +399,7 @@ describe("按商品刷新完整资料", () => {
       beforePending = db.detail(pending.key);
     const beforeCheckpoint = db.checkpoint();
     const fresh = refreshDetail(target, "666.00");
-    fresh.collectedAt = "2026-10-07T07:00:00.000Z";
+    fresh.collectedAt = new Date(Date.now() + 1000).toISOString();
     const collector = source([]);
     collector.prepare = vi.fn();
     collector.detail = vi.fn(async () => fresh);

@@ -1,3 +1,4 @@
+import { accessState } from "../fixtures/access-state";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { expect, test, type Page, type Route } from "@playwright/test";
@@ -22,6 +23,9 @@ async function mount(page: Page, runtime: (route: Route, pathname: string) => Pr
   // All APIs and assets are intercepted. No request reaches the running project.
   await page.context().route("**/*", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname === "/api/crawl/role-training-filter")
+      return route.fulfill({ json: { minTotal: null } });
+    if (url.pathname === "/api/access/status") return route.fulfill({ json: accessState });
     if (url.origin !== "http://cbg-run-records.test") return route.abort();
     if (url.pathname.startsWith("/api/runtime/") || url.pathname.startsWith("/api/logs/"))
       return runtime(route, url.pathname);
