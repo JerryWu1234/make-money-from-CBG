@@ -12,12 +12,19 @@ const captured = vi.hoisted(() => ({
   snapshot: vi.fn(async (): Promise<any> => {
     throw new Error("not bound");
   }),
-  status: { stopped: true, recoveringStopEpoch: undefined as number | undefined, connected: false },
+  status: {
+    stopped: true,
+    recoveringStopEpoch: undefined as number | undefined,
+    connected: false,
+    reason: undefined as string | undefined,
+  },
   stop: vi.fn(async () => {
     captured.status.stopped = true;
     captured.status.recoveringStopEpoch = undefined;
   }),
 }));
+const nativePage = vi.hoisted(() => ({ open: vi.fn(async () => {}) }));
+vi.mock("./native-cbg-page", () => ({ openNativeCbgPage: nativePage.open }));
 vi.mock("./adapters/extension-native", () => ({
   ExtensionNativeRuntime: class {
     constructor(options: unknown) {
@@ -42,9 +49,15 @@ afterEach(async () => {
   for (const db of dbs.splice(0)) db.close();
   vi.useRealTimers();
   captured.stop.mockClear();
-  captured.status = { stopped: true, recoveringStopEpoch: undefined, connected: false };
+  captured.status = {
+    stopped: true,
+    recoveringStopEpoch: undefined,
+    connected: false,
+    reason: undefined,
+  };
   captured.database = undefined;
   captured.start.mockClear();
+  nativePage.open.mockClear();
   captured.snapshot.mockReset().mockRejectedValue(new Error("not bound"));
 });
 
@@ -150,11 +163,29 @@ it("native status polling starts only the local listener without requiring a sta
   expect(result).toMatchObject({ connected: false, running: false, isLoggedIn: false });
   expect(result.message).toContain("自动连接");
   expect(captured.stop).not.toHaveBeenCalled();
+  expect(nativePage.open).not.toHaveBeenCalled();
   expect(db.prepare("SELECT count(*) AS count FROM access_permits").get()?.count).toBe(0);
 });
-it.each([true, false])(
-  "a valid observed role list (visible=%s) enables the ordinary collection entry while preserving a stopped access gate",
-  async (visible) => {
+it("an explicit native open starts the listener and opens the CBG home page without starting a search or collection", async () => {
+  const db = new DatabaseSync(":memory:");
+  dbs.push(db);
+  captured.database = db;
+
+  const result = await nativeBrowserState(true);
+
+  expect(captured.start).toHaveBeenCalledOnce();
+  expect(nativePage.open).toHaveBeenCalledOnce();
+  expect(result).toMatchObject({ connected: false, running: false, isLoggedIn: false });
+  expect(captured.stop).not.toHaveBeenCalled();
+  expect(db.prepare("SELECT count(*) AS count FROM access_permits").get()?.count).toBe(0);
+});
+it.each([
+  { visible: true, listingCommitted: true, workflowStep: "completed" },
+  { visible: false, listingCommitted: true, workflowStep: "completed" },
+  { visible: true, listingCommitted: false, workflowStep: "idle" },
+])(
+  "only a committed role list enables collection (%o) while preserving a stopped access gate",
+  async ({ visible, listingCommitted, workflowStep }) => {
     const db = new DatabaseSync(":memory:");
     dbs.push(db);
     await nativeAccess(db);
@@ -164,6 +195,7 @@ it.each([true, false])(
     captured.snapshot.mockResolvedValue({
       listing: { items: [{}] },
       visible,
+      listingCommitted,
       authenticated: true,
       access: "normal",
       loading: false,
@@ -173,7 +205,7 @@ it.each([true, false])(
     expect(await nativeBrowserState()).toMatchObject({
       connected: true,
       isLoggedIn: true,
-      workflowStep: "completed",
+      workflowStep,
       running: false,
     });
     expect(gate.read()).toMatchObject({
@@ -185,7 +217,7 @@ it.each([true, false])(
     expect(db.prepare("SELECT count(*) AS count FROM access_permits").get()?.count).toBe(0);
   },
 );
-it("a connected search form is described as awaiting a website query, not as an install or raw server-stop error", async () => {
+it("a logged-in CBG home page reports login while waiting for a manual full-server search", async () => {
   const db = new DatabaseSync(":memory:");
   dbs.push(db);
   await nativeAccess(db);
@@ -197,9 +229,26 @@ it("a connected search form is described as awaiting a website query, not as an 
     url: "https://xyq.cbg.163.com/cgi-bin/xyq_overall_search.py?act=show_search_role_form",
   });
   const result = await nativeBrowserState();
-  expect(result.isLoggedIn).toBe(false);
-  expect(result.message).toContain("请先在官网搜索角色");
+  expect(result).toMatchObject({
+    isLoggedIn: true,
+    loginStatus: "logged_in",
+    workflowStep: "idle",
+  });
+  expect(result.message).toContain("全服搜索");
   expect(result.message).not.toContain("server-stop");
+});
+
+it("reports that a page navigation is waiting for extension rebinding", async () => {
+  const db = new DatabaseSync(":memory:");
+  dbs.push(db);
+  await nativeAccess(db);
+  captured.status.connected = true;
+  captured.status.reason = "unexpected-navigation-rebind-required";
+
+  const result = await nativeBrowserState();
+
+  expect(result.workflowStep).toBe("idle");
+  expect(result.message).toContain("等待重新绑定");
 });
 
 it("a disconnected native host cannot expose a cached role list as ready", async () => {

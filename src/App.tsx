@@ -35,6 +35,7 @@ export function App() {
   const active = useRef<AbortController | null>(null);
   const sequence = useRef(0);
   const startingRef = useRef(false);
+  const nativeOpenRequested = useRef(false);
   const setSettingsBusy = useCallback((busy: boolean) => {
     browserSettingsBusyRef.current = busy;
     setBrowserSettingsBusy(busy);
@@ -136,6 +137,16 @@ export function App() {
   const completed = step === "completed" && !transportError;
   const stepIndex = ORDER.indexOf(step);
 
+  useEffect(() => {
+    if (!nativeMode) {
+      nativeOpenRequested.current = false;
+      return;
+    }
+    if (browserSettingsBusy || running || crawling || nativeOpenRequested.current) return;
+    nativeOpenRequested.current = true;
+    void request(true);
+  }, [nativeMode, browserSettingsBusy, running, crawling, request]);
+
   return (
     <main className="container container-results">
       <header className="workspace-topbar">
@@ -162,7 +173,7 @@ export function App() {
           <h1 className="title">{nativeMode ? "藏宝阁角色采集" : "藏宝阁角色查询"}</h1>
           <p className="subtitle">
             {nativeMode
-              ? "扩展会自动连接藏宝阁官网。首次在官网完成登录和角色搜索，出现商品列表后即可开始采集。"
+              ? "切换后只打开藏宝阁首页并连接扩展。需要登录时在官网完成，登录状态会显示在此页；然后请手动点击“全服搜索”。角色列表就绪后，“开始采集详情”才会亮起。"
               : "扫码登录后，自动进入跨服购买，同时选择1年以内服、1到3年服、3年以上服，再加载角色列表。"}
           </p>
         </header>
@@ -200,10 +211,10 @@ export function App() {
                 id="open-cbg-btn"
                 className="btn-primary"
                 disabled={browserSettingsBusy || starting || querying || crawling}
-                onClick={() => void request(!nativeMode)}
+                onClick={() => void request(true)}
               >
                 {nativeMode
-                  ? "重新检查连接"
+                  ? "重新打开藏宝阁首页"
                   : starting
                     ? "正在开始…"
                     : querying
@@ -217,7 +228,7 @@ export function App() {
             )}
             <p className="status-note">
               {nativeMode ? (
-                "无需点击扩展或开始查询。保持官网角色列表打开，扩展会自动读取；点击下方采集按钮才启动任务。"
+                "扩展会绑定当前藏宝阁页面并回显连接、登录状态。登录后请手动点击“全服搜索”；角色列表就绪后采集按钮才可用。"
               ) : (
                 <>
                   {result?.workPagesVisible
@@ -253,7 +264,15 @@ export function App() {
                         ? "角色列表已就绪"
                         : running
                           ? "正在处理"
-                          : "准备就绪"}
+                          : nativeMode && result.needLogin
+                            ? "等待藏宝阁登录"
+                            : nativeMode && result.isLoggedIn
+                              ? "已登录，等待手动全服搜索"
+                              : nativeMode && result.connected
+                                ? "扩展已连接，等待页面状态确认"
+                                : nativeMode
+                                  ? "等待扩展连接"
+                                  : "准备就绪"}
                   </strong>
                   {result.isLoggedIn && !transportError && (
                     <span className="login-pill pill-logged">已登录</span>
