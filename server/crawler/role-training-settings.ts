@@ -16,7 +16,7 @@ export class RoleTrainingSettingsStore {
   constructor(private readonly file: string) {}
   get(): RoleTrainingSettings {
     if (!this.settings) {
-      let minTotal: number | null = null;
+      let minTotal: number | null = 21;
       try {
         const value: unknown = JSON.parse(readFileSync(this.file, "utf8"));
         if (!value || typeof value !== "object" || Array.isArray(value) || !("minTotal" in value))

@@ -160,7 +160,7 @@ export function BrowserSettings({
         <legend>浏览器运行方式</legend>
         <p className="status-note">
           {settings?.accessAdapter === "extension-native"
-            ? "扩展自动读取藏宝阁官网；在官网完成首次登录和角色搜索后，商品列表会自动连接，无需点击扩展。"
+            ? "切换到此通路只打开藏宝阁首页并连接扩展。登录状态会显示在助手页面；随后手动点击“全服搜索”，列表就绪后采集按钮才可用。"
             : "默认使用项目专用浏览器保存登录。重启服务复用本机登录，无需日常 Chrome 调试授权；登录过期仍需扫码。"}
         </p>
         <div className="browser-mode-options">
@@ -226,7 +226,7 @@ export function BrowserSettings({
             : active || settings?.busy
               ? "查询、采集或分析正在运行，请先暂停任务再修改浏览器设置。"
               : settings?.accessAdapter === "extension-native"
-                ? "只连接 https://xyq.cbg.163.com/。采集任务由采集页控制；主动点击扩展可暂停读取，再点可继续。"
+                ? "只连接藏宝阁官网。扩展自动绑定当前官网页面并回显登录状态；全服搜索由你手动点击，只有点击采集按钮才启动采集。主动点击扩展可暂停读取，再点可继续。"
                 : `${settings?.showWorkPages ? "已开启操作过程显示。" : "操作过程默认隐藏。"}切换后重新开始查询，已有浏览器登录资料会保留。`}
       </p>
       {error && (

@@ -7,6 +7,7 @@ import type { AccessContext, OwnerFence } from "./access";
 import type { DatabaseSync } from "node:sqlite";
 import type { OpenCbgResult } from "./types";
 import { nativeWorkflowScope } from "./adapters/native-workflow";
+import { openNativeCbgPage } from "./native-cbg-page";
 
 const key = Symbol.for("cbg.native-access.v1");
 type Runtime = {
@@ -104,8 +105,10 @@ export async function closeNativeAccess() {
 }
 export async function nativeBrowserState(start = false): Promise<OpenCbgResult> {
   // Selecting the native adapter and polling its status must be sufficient to
-  // open the local listener; it does not resume or dispatch an input workflow.
+  // open the local listener. An explicit open request also opens the official
+  // home page, but never starts a search, collection, or input workflow.
   const adapter = start || !cache.adapter ? await nativeAccess() : cache.adapter;
+  if (start) await openNativeCbgPage();
   const status = adapter?.status();
   let snapshot;
   try {
@@ -113,19 +116,19 @@ export async function nativeBrowserState(start = false): Promise<OpenCbgResult> 
   } catch {
     /* Missing or stale observation is explicit. */
   }
-  const ready =
+  const loggedIn =
     status?.connected === true &&
-    !!snapshot?.listing &&
-    snapshot.access === "normal" &&
-    snapshot.authenticated === true &&
-    !snapshot.loading;
+    snapshot?.access === "normal" &&
+    snapshot?.authenticated === true &&
+    !snapshot?.loading;
+  const ready = loggedIn && !!snapshot?.listing && snapshot?.listingCommitted === true;
   return {
     connected: status?.connected === true,
     title: snapshot?.title ?? "扩展与 macOS 输入",
     url: snapshot?.url ?? "",
     serverName: "",
-    isLoggedIn: ready,
-    loginStatus: ready ? "logged_in" : snapshot?.access === "login" ? "logged_out" : "unknown",
+    isLoggedIn: loggedIn,
+    loginStatus: loggedIn ? "logged_in" : snapshot?.access === "login" ? "logged_out" : "unknown",
     needLogin: snapshot?.access === "login",
     running: false,
     workflowStep: ready ? "completed" : "idle",
@@ -133,14 +136,22 @@ export async function nativeBrowserState(start = false): Promise<OpenCbgResult> 
       ? status?.stopped
         ? "已自动识别角色列表，开始采集时将核验当前访问状态"
         : "扩展已自动连接角色列表，可开始采集"
-      : snapshot?.access === "login"
-        ? "官网尚未登录，请在藏宝阁完成登录；角色列表将自动识别"
-        : snapshot?.loading
-          ? "扩展已连接，正在读取官网页面和角色列表…"
-          : snapshot && !snapshot.listing
-            ? "扩展已自动连接官网，请先在官网搜索角色；商品列表出现后将自动识别"
-            : status?.connected
-              ? "宿主已连接，正在等待官网页面自动绑定；请保持藏宝阁页面打开"
-              : "正在等待 CBG 扩展自动连接；请启用扩展并打开藏宝阁官网",
+      : loggedIn
+        ? snapshot?.listing && !snapshot.listingCommitted
+          ? "已读到角色列表，正在核验列表加载结果；核验完成后采集按钮会变为可用"
+          : "藏宝阁已登录。请在官网手动完成全服搜索；角色列表加载并核验后，采集按钮会变为可用"
+        : status?.stopped && status.reason === "unexpected-navigation-rebind-required"
+          ? "藏宝阁页面刚发生跳转，扩展正在等待重新绑定；请将藏宝阁标签切到前台并保持打开"
+          : snapshot?.access === "login"
+            ? "藏宝阁需要登录，请在官网完成登录；登录状态会显示在此页面"
+            : snapshot?.loading
+              ? "扩展已连接，正在读取官网页面和角色列表…"
+              : snapshot && snapshot.authenticated !== true
+                ? "扩展已连接藏宝阁页面，但当前页面没有可确认的登录信号；登录状态尚未回显"
+                : snapshot && !snapshot.listing
+                  ? "扩展已连接藏宝阁页面，但还没有识别到角色列表；请在官网手动完成全服搜索"
+                  : status?.connected
+                    ? "宿主已连接，正在等待官网页面自动绑定；请保持藏宝阁页面打开"
+                    : "正在等待 CBG 扩展自动连接；请启用扩展并打开藏宝阁官网",
   };
 }

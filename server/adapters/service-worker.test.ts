@@ -453,6 +453,26 @@ describe("MV3 trust boundary and durable outbox", () => {
         ),
     ).toBe(false);
   });
+  it("rebinds the same official tab after an unexpected navigation even when it is inactive", async () => {
+    const f = fixture();
+    await f.bind();
+    f.handlers.updated(1, { status: "loading" });
+    await settle();
+    expect(f.saved().pendingRebind).toMatchObject({ tabId: 1, windowId: 1 });
+    f.tabValues.set(1, {
+      active: false,
+      url: "https://xyq.cbg.163.com/web/",
+    });
+
+    f.handlers.updated(1, { status: "complete" });
+    await settle();
+
+    expect(f.saved().bound).toMatchObject({ tabId: 1, url: "https://xyq.cbg.163.com/web/" });
+    expect(f.saved().stopped).toBe(false);
+    expect(f.saved().pendingRebind).toBeUndefined();
+    expect(f.sent.some((message: any) => message.payload?.bound === true)).toBe(true);
+    expect(f.focusCalls).toEqual([]);
+  });
   it("an old stop waiting for persistence cannot stop an observation installed by a newer resume", async () => {
     const f = fixture();
     await f.bind();
@@ -672,6 +692,94 @@ describe("automatic domain-limited observation", () => {
     f.handlers.alarm();
     await settleAutomatic();
     expect(f.tabMessages.filter((m) => m.kind === "bind")).toHaveLength(1);
+  });
+  it("keeps read-only auto-binding available while Chrome is not the foreground app", async () => {
+    const f = fixture(undefined, [automaticRoleTab()]);
+    f.setFocused(false);
+
+    await settleAutomatic();
+
+    expect(f.saved().bound).toMatchObject({ tabId: 1, url: automaticRoleTab().url });
+    expect(f.tabMessages.filter((message) => message.kind === "bind")).toHaveLength(1);
+    expect(f.sent.some((message) => message.kind === "command-proof")).toBe(false);
+  });
+  it("restarts an offset read-only backlog in a clean epoch before binding", async () => {
+    const oldEpoch = "legacy-epoch";
+    const outbox = Array.from({ length: 128 }, (_, index) => ({
+      version: 1,
+      connectionEpoch: oldEpoch,
+      messageId: `legacy-${index}`,
+      sequence: index + 438,
+      kind: index % 2 ? "snapshot" : "status",
+      payload: {},
+    }));
+    const f = fixture(
+      {
+        version: 1,
+        connectionEpoch: oldEpoch,
+        nextSequence: 566,
+        outbox,
+        bound: null,
+        stopped: true,
+        autoPaused: false,
+      },
+      [automaticRoleTab()],
+    );
+
+    await settleAutomatic();
+
+    expect(f.saved()).toMatchObject({ storageRevision: 2, nextSequence: 2, stopped: false });
+    expect(f.saved().connectionEpoch).not.toBe(oldEpoch);
+    expect(f.saved().outbox[0]).toMatchObject({ kind: "status", sequence: 1 });
+    expect(f.saved().bound).toMatchObject({ tabId: 1 });
+    expect(f.sent[0]).toMatchObject({
+      connectionEpoch: f.saved().connectionEpoch,
+      kind: "status",
+      sequence: 1,
+    });
+  });
+  it("automatically observes a newly opened official tab without requiring an action plan", async () => {
+    const tab = automaticRoleTab(2, "https://xyq.cbg.163.com/web/equip/list");
+    const f = fixture(undefined, []);
+    await settleAutomatic();
+    f.selectAutomatic(tab);
+    f.tabValues.set(2, { url: tab.url, windowId: tab.windowId, active: true });
+
+    f.handlers.created({ ...tab, openerTabId: 1 });
+    await settleAutomatic();
+
+    expect(f.saved().bound).toMatchObject({ tabId: 2, url: tab.url });
+    expect(f.tabMessages.filter((message) => message.kind === "bind")).toHaveLength(1);
+    expect(f.sent.some((message) => message.kind === "command-proof")).toBe(false);
+  });
+  it("never clears an offset backlog containing proof or result messages", async () => {
+    const oldEpoch = "legacy-critical-epoch";
+    const critical = {
+      version: 1,
+      connectionEpoch: oldEpoch,
+      messageId: "legacy-proof",
+      sequence: 438,
+      kind: "proof",
+      payload: { actionId: "pending" },
+    };
+    const f = fixture({
+      version: 1,
+      connectionEpoch: oldEpoch,
+      nextSequence: 439,
+      outbox: [critical],
+      bound: null,
+      stopped: true,
+      autoPaused: false,
+    });
+
+    await settleAutomatic();
+
+    expect(f.saved()).toMatchObject({
+      storageRevision: 2,
+      connectionEpoch: oldEpoch,
+      nextSequence: 439,
+      outbox: [critical],
+    });
   });
   it.each([
     "http://xyq.cbg.163.com/",

@@ -1,5 +1,6 @@
 const HOST = "com.cbg.access_bridge";
 const ORIGIN = "https://xyq.cbg.163.com";
+const STORAGE_REVISION = 2;
 let port,
   flushing = false,
   inFlightAt = 0,
@@ -19,9 +20,43 @@ const serial = (fn) => {
 async function state() {
   return (statePromise ??= (async () => {
     const saved = (await chrome.storage.local.get("bridge")).bridge;
-    if (saved) return saved;
+    if (saved) {
+      const outbox = Array.isArray(saved.outbox) ? saved.outbox : [];
+      const startsAfterGap = Number.isSafeInteger(outbox[0]?.sequence) && outbox[0].sequence > 1;
+      const onlyDiscardable = outbox.every((message) =>
+        ["status", "snapshot"].includes(message.kind),
+      );
+      if (saved.storageRevision !== STORAGE_REVISION && startsAfterGap && onlyDiscardable) {
+        // A prior worker can persist read-only messages before this server has
+        // committed any receipt for that epoch. Those messages begin after 1,
+        // so BridgeStore correctly rejects them as a sequence gap. Replace only
+        // this disposable status/snapshot backlog with a clean read-only epoch;
+        // never discard proof/result messages or an explicit user pause.
+        const next = {
+          version: 1,
+          storageRevision: STORAGE_REVISION,
+          connectionEpoch: crypto.randomUUID(),
+          nextSequence: 1,
+          outbox: [],
+          bound: null,
+          stopped: true,
+          autoPaused: saved.autoPaused === true,
+          controlRevision:
+            (Number.isSafeInteger(saved.controlRevision) ? saved.controlRevision : 0) + 1,
+        };
+        await chrome.storage.local.set({ bridge: next });
+        return next;
+      }
+      if (saved.storageRevision !== STORAGE_REVISION) {
+        const next = { ...saved, storageRevision: STORAGE_REVISION };
+        await chrome.storage.local.set({ bridge: next });
+        return next;
+      }
+      return saved;
+    }
     const next = {
       version: 1,
+      storageRevision: STORAGE_REVISION,
       connectionEpoch: crypto.randomUUID(),
       nextSequence: 1,
       outbox: [],
@@ -534,6 +569,7 @@ async function bindTab(tab, selection) {
         .catch(() => {});
     return;
   }
+  delete value.pendingRebind;
   value.bound = {
     tabId: tab.id,
     windowId: tab.windowId,
@@ -578,9 +614,9 @@ async function reconcileAutomaticBinding(selection) {
   )
     return;
   if (!eligibleTab(tab)) return;
-  const window = await chrome.windows.get(tab.windowId);
+  // Binding only enables bounded, read-only snapshots. Actual input commands
+  // independently require the official tab and its Chrome window to be focused.
   if (
-    !window.focused ||
     value.autoPaused ||
     selection !== automaticSelection ||
     (value.controlRevision || 0) !== revision
@@ -760,12 +796,57 @@ async function finishedNavigation(tabId) {
     .sendMessage(tab.id, { kind: "capture", observerToken: bound.observerToken })
     .catch(() => {});
 }
+async function rebindAfterNavigation(tabId) {
+  let value = await state();
+  const pending = value.pendingRebind;
+  if (
+    !pending ||
+    pending.tabId !== tabId ||
+    value.autoPaused ||
+    userFocusPending ||
+    value.navigation
+  )
+    return;
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  value = await state();
+  if (value.pendingRebind !== pending || value.autoPaused || userFocusPending || value.navigation)
+    return;
+  if (!tab) {
+    delete value.pendingRebind;
+    await save(value);
+    return;
+  }
+  if (!eligibleTab(tab)) return;
+  const [active] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  value = await state();
+  if (value.pendingRebind !== pending || value.autoPaused || userFocusPending || value.navigation)
+    return;
+  if (active && active.id !== tabId && eligibleTab(active)) {
+    await bindTab(active);
+    return;
+  }
+  if (value.bound && value.bound.tabId !== tabId) {
+    delete value.pendingRebind;
+    await save(value);
+    return;
+  }
+  // Page observation is read-only and may resume in a background CBG tab.
+  // Input commands still independently require the official tab and window
+  // to be foregrounded before they can receive authority.
+  await bindTab(tab);
+}
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   void (async () => {
     const value = await state();
     if (info.status === "loading" && value.bound?.tabId === tabId && !value.navigation) {
       const bound = value.bound,
         revision = (value.controlRevision = (value.controlRevision || 0) + 1);
+      value.pendingRebind = {
+        tabId,
+        windowId: bound.windowId,
+        bindingEpoch: bound.bindingEpoch,
+        createdAt: Date.now(),
+      };
       value.stopped = true;
       value.observing = false;
       value.bound = null;
@@ -783,6 +864,7 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
     }
     if (info.status === "complete") {
       await finishedNavigation(tabId);
+      await rebindAfterNavigation(tabId);
       await scheduleAutomaticBinding();
     } else if (info.url && info.status !== "loading") await scheduleAutomaticBinding();
   })();
@@ -801,12 +883,18 @@ chrome.tabs.onCreated.addListener((tab) => {
       )
         return;
       await finishedNavigation(tab.id);
+      return;
     }
+    if (eligibleTab(tab)) await scheduleAutomaticBinding();
   })();
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   void (async () => {
     const value = await state();
+    if (value.pendingRebind?.tabId === tabId) {
+      delete value.pendingRebind;
+      await save(value);
+    }
     if (value.bound?.tabId !== tabId) return;
     if (
       value.navigation?.plan.target.kind === "return-to-list" &&

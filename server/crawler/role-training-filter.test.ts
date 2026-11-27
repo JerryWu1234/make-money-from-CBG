@@ -64,7 +64,7 @@ function file() {
 it("空值禁用、0有效、原子保存并跨实例读取；快照互不修改", () => {
   const name = file(),
     store = new RoleTrainingSettingsStore(name);
-  expect(store.get()).toEqual({ minTotal: null });
+  expect(store.get()).toEqual({ minTotal: 21 });
   expect(readdirSync(path.dirname(name))).toEqual([]);
   store.save(0);
   expect(new RoleTrainingSettingsStore(name).get()).toEqual({ minTotal: 0 });
